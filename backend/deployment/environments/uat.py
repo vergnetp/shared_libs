@@ -3,7 +3,7 @@ from ..config import DeploymentConfig, ContainerRuntime
 uat_config = DeploymentConfig(
     api_servers=["staging-api1.company.com", "staging-api2.company.com"],
     worker_servers=["staging-worker1.company.com"],
-    container_registry="staging-registry.company.com",
+    registry_url="staging-registry.company.com",
     container_runtime=ContainerRuntime.DOCKER,
     
     config_injection={

@@ -16,7 +16,7 @@ prod_config = DeploymentConfig(
     ],
     
     # Container settings
-    container_registry="prod-registry.company.com",
+    registry_url="prod-registry.company.com",
     container_runtime=ContainerRuntime.KUBERNETES,
     build_context=".",
     

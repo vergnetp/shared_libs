@@ -1,27 +1,16 @@
 import sys, os
 import asyncio
+from typing import Dict
 
-sys.path.insert(0, str("C:\\Users\\Phil\\Desktop\\Projects\\shared-libs\\python"))
-
-from .environments import prod_config, uat_config, dev_config
+from .config import DeploymentConfig
 from .deploy import deploy
+from .environments import dev_config, uat_config, prod_config
 
 
-async def main():
-    """Deploy to production."""
-    
-
-
-    global config
-    
-    config = None
+async def main(configs: Dict[str, DeploymentConfig]={'dev': dev_config, 'uat': uat_config, 'prod': prod_config}):
+ 
     env = input(f"Which environment do you want to deploy? [dev/uat/prod]: ").strip().lower()
-    if env == 'dev':
-        config = dev_config
-    if env == 'uat':
-        config = uat_config
-    if env == 'prod':
-        config = prod_config
+    config = configs.get(env, None)
 
     if not config:
         print(f"No config available for {env}, aborting")
@@ -55,7 +44,7 @@ async def main():
     # Show what will be deployed
     print(f"   API servers: {len(config.api_servers)}")
     print(f"   Worker servers: {len(config.worker_servers)}")
-    print(f"   Registry: {config.container_registry}")
+    print(f"   Registry: {config.registry_url}")
     print(f"   Runtime: {config.container_runtime.value}")
     print(f"   SSL: {'Enabled' if config.ssl_enabled else 'Disabled'}")    
    
@@ -85,6 +74,7 @@ async def main():
     return 0
 
 if __name__ == "__main__":
+    
     try:
         exit_code = asyncio.run(main())
         sys.exit(exit_code)

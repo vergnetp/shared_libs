@@ -2,9 +2,9 @@ import time, os
 from typing import Dict, Any, List
 
 from .config import DeploymentConfig, ConfigurationResolver
-from .types import ContainerBuildSpec,  ContainerRuntimeSpec
-from .containers.factory import ContainerRuntimeFactory
-from .containers.interface import ContainerImage
+from .ecosystem import ContainerBuildSpec,  ContainerRuntimeSpec
+from .containers.factory import ContainerRuntimeFactory, ContainerImageBuilder
+from .containers.interface import ContainerImage, ContainerRunner
 from .. import log as logger  
 
 async def deploy(
@@ -177,8 +177,8 @@ async def _deploy_app_service(
     service: str,
     version: str,
     resolved_args: Dict[str, str],
-    image_builder,
-    container_runner,
+    image_builder: ContainerImageBuilder,
+    container_runner: ContainerRunner,
     dry_run: bool,
     log
 ) -> Dict[str, Any]:
@@ -237,8 +237,8 @@ async def _deploy_app_service(
 
 async def _deploy_nginx_service(
     config: DeploymentConfig,
-    image_builder,
-    container_runner,
+    image_builder: ContainerImageBuilder,
+    container_runner: ContainerRunner,
     dry_run: bool,
     log
 ) -> Dict[str, Any]:
@@ -279,7 +279,7 @@ async def _deploy_nginx_service(
                 return {"success": False, "error": "Failed to build nginx image"}
         else:
             # Use official nginx image            
-            nginx_image = ContainerImage(name="nginx", tag="alpine", registry="docker.io")
+            nginx_image = ContainerImage(name="nginx", tag="alpine", registry_url="docker.io")
         
         # Create runtime spec
         nginx_spec = ContainerRuntimeFactory.create_nginx_spec(config, api_instances, nginx_config_path)
@@ -299,7 +299,7 @@ async def _deploy_nginx_service(
     except Exception as e:
         return {"success": False, "error": str(e)}
 
-def _create_service_runtime_spec(config: DeploymentConfig, service: str, container_image) -> ContainerRuntimeSpec:
+def _create_service_runtime_spec(config: DeploymentConfig, service: str, container_image: ContainerImage) -> ContainerRuntimeSpec:
     """Create runtime specification for application services."""
     
     # Default ports for services

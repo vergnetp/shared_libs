@@ -3,7 +3,7 @@ from ..config import DeploymentConfig, ContainerRuntime
 dev_config = DeploymentConfig(
     api_servers=["localhost"],
     worker_servers=["localhost"],
-    container_registry=None,  # No registry for local dev
+    registry_url=None,  # No registry for local dev
     container_runtime=ContainerRuntime.DOCKER,
     
     config_injection={

@@ -15,21 +15,21 @@ class ContainerImage:
         self,
         name: str,
         tag: str,
-        registry: Optional[str] = None,
+        registry_url: Optional[str] = None,
         build_context: str = ".",
         container_file: str = "Containerfile"
     ):
         self.name = name
         self.tag = tag
-        self.registry = registry
+        self.registry_url = registry_url
         self.build_context = build_context
         self.container_file = container_file
     
     @property
     def full_name(self) -> str:
         """Get fully qualified image name."""
-        if self.registry:
-            return f"{self.registry}/{self.name}:{self.tag}"
+        if self.registry_url:
+            return f"{self.registry_url}/{self.name}:{self.tag}"
         return f"{self.name}:{self.tag}"
     
     def __str__(self):

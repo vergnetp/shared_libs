@@ -2,7 +2,8 @@ import os
 from typing import List, Optional, Dict, Any
 
 from ...config.base_config import BaseConfig
-from ..types import ContainerRuntime, ContainerImage
+from ..ecosystem import ContainerRuntime, ContainerImage
+from  ..registry import RegistryAuthenticator
 
 class DeploymentConfig(BaseConfig):
     """
@@ -13,7 +14,8 @@ class DeploymentConfig(BaseConfig):
         self,
         api_servers: List[str] = None,
         worker_servers: List[str] = None,
-        container_registry: Optional[str] = None, 
+        registry_url: Optional[str] = None, 
+        registry_authenticator: Optional[RegistryAuthenticator] = None,
         deployment_strategy: str = "rolling",
         
         # Container configuration (runtime-agnostic)
@@ -53,10 +55,17 @@ class DeploymentConfig(BaseConfig):
                 Defaults to ["localhost"]. Workers typically handle background tasks.
                 Example: ["worker1.company.com", "worker2.company.com"]
                 
-            container_registry (str, optional): Container registry URL for pushing/pulling images.
+            registry_url (str, optional): Container registry URL for pushing/pulling images.
                 If None, images are only built locally. Supports Docker Hub, AWS ECR, etc.
                 Example: "registry.company.com" or "123456789012.dkr.ecr.us-east-1.amazonaws.com"
-                
+
+            registry_authenticator (RegistryAuthenticator, optional): A class that offer an authenticate method to eanbling subsequent push/pull to/from the above registry.
+                If None, authentication is bypassed.
+                Example: DockerRegistryAuthenticator(
+                            username=os.environ.get("REGISTRY_USERNAME"),
+                            password=os.environ.get("REGISTRY_PASSWORD")
+                        )
+
             deployment_strategy (str, optional): Strategy for rolling out updates.
                 Defaults to "rolling". Options: "rolling", "blue_green", "canary".
                 
@@ -141,7 +150,8 @@ class DeploymentConfig(BaseConfig):
         """
         self._api_servers = api_servers or ["localhost"]
         self._worker_servers = worker_servers or ["localhost"]
-        self._container_registry = container_registry
+        self._registry_url = registry_url
+        self._registry_authenticator = registry_authenticator
         self._deployment_strategy = deployment_strategy
         
         # Default container files (could be Dockerfile, Containerfile, etc.)
@@ -183,10 +193,15 @@ class DeploymentConfig(BaseConfig):
         return self._sensitive_configs
         
     @property
-    def container_registry(self) -> Optional[str]:
+    def registry_url(self) -> Optional[str]:
         """Get container registry URL."""
-        return self._container_registry
-    
+        return self._registry_url
+
+    @property
+    def registry_authenticator(self) -> Optional[RegistryAuthenticator]:
+        """Get container registry authenticator."""
+        return self._registry_authenticator
+        
     @property
     def container_runtime(self) -> ContainerRuntime:
         """Get selected container runtime."""
@@ -283,7 +298,7 @@ class DeploymentConfig(BaseConfig):
         
         if template:
             name_with_tag = template.format(
-                registry=self._container_registry or "",
+                registry=self._registry_url or "",
                 service=service_type,
                 version=version
             ).strip("/")
@@ -294,20 +309,20 @@ class DeploymentConfig(BaseConfig):
             else:
                 name_part, tag = name_with_tag, version
                 
-            if "/" in name_part and self._container_registry:
+            if "/" in name_part and self._registry_url:
                 registry, name = name_part.split("/", 1)
             else:
-                registry, name = self._container_registry, name_part
+                registry, name = self._registry_url, name_part
         else:
             # Default naming
-            registry = self._container_registry
+            registry = self._registry_url
             name = service_type
             tag = version
         
         return ContainerImage(
             name=name,
             tag=tag,
-            registry=registry,
+            registry_url=registry,
             build_context=self._build_context,
             container_file=self.get_container_file_path(service_type)
         )
@@ -355,7 +370,8 @@ class DeploymentConfig(BaseConfig):
         return {
             'api_servers': self._api_servers,
             'worker_servers': self._worker_servers,
-            'container_registry': self._container_registry,
+            'registry_url': self._registry_url,
+            'registry_authenticator': self._registry_authenticator,
             'deployment_strategy': self._deployment_strategy,
             'container_files': self._container_files,
             'build_context': self._build_context,
@@ -378,7 +394,8 @@ class DeploymentConfig(BaseConfig):
         return cls(
             api_servers=data.get('api_servers'),
             worker_servers=data.get('worker_servers'),
-            container_registry=data.get('container_registry'),
+            registry_url=data.get('registry_url'),
+            registry_authenticator=data.get('registry_authenticator'),
             deployment_strategy=data.get('deployment_strategy', 'rolling'),
             container_files=data.get('container_files'),
             build_context=data.get('build_context', '.'),
@@ -392,14 +409,17 @@ class DeploymentConfig(BaseConfig):
     
     @classmethod
     def from_environment(cls) -> 'DeploymentConfig':
-        """Create configuration from environment variables."""
+        """
+        Create configuration from environment variables.
+        Notes: very imcomplete
+        """
         api_servers_str = os.getenv('DEPLOY_API_SERVERS', 'localhost')
         worker_servers_str = os.getenv('DEPLOY_WORKER_SERVERS', 'localhost')
         
         return cls(
             api_servers=api_servers_str.split(','),
             worker_servers=worker_servers_str.split(','),
-            container_registry=os.getenv('DEPLOY_DOCKER_REGISTRY'),
+            registry_url=os.getenv('DEPLOY_DOCKER_REGISTRY'),
             deployment_strategy=os.getenv('DEPLOY_STRATEGY', 'rolling'),
             container_runtime=ContainerRuntime(os.getenv('DEPLOY_RUNTIME', 'docker'))
         )

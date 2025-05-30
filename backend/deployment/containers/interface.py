@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any
 
-from ..types import ContainerRuntimeSpec, ContainerBuildSpec, ContainerImage
+from ..ecosystem import ContainerRuntimeSpec, ContainerBuildSpec, ContainerImage
 
 class ContainerImageBuilder(ABC):
     """Abstract interface for building container images."""
@@ -38,3 +38,5 @@ class ContainerRunner(ABC):
     async def get_container_status(self, container_id: str) -> Dict[str, Any]:
         """Get status of a container."""
         pass
+
+

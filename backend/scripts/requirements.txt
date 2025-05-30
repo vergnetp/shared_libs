@@ -19,3 +19,5 @@ aioredis
 fastapi
 aiohttp
 jinja2
+python-digitalocean 
+paramiko

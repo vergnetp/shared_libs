@@ -2,7 +2,7 @@ import asyncio
 from typing import Dict, Any, List
 
 from ..config import DeploymentConfig, ConfigurationResolver
-from ..types import ContainerBuildSpec, ContainerImage, ContainerRuntimeSpec
+from ..ecosystem import ContainerBuildSpec, ContainerImage, ContainerRuntimeSpec
 from .interface import ContainerRunner, ContainerImageBuilder
 
 class KubernetesImageBuilder(ContainerImageBuilder):
@@ -140,3 +140,4 @@ spec:
             }
         else:
             return {"status": "unknown"}
+        

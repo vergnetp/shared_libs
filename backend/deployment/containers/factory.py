@@ -1,7 +1,7 @@
 from typing import List
 
 from ..config import DeploymentConfig
-from ..types import ContainerRuntime, ContainerImage, ContainerRuntimeSpec
+from ..ecosystem import ContainerRuntime, ContainerImage, ContainerRuntimeSpec
 from .interface import ContainerRunner, ContainerImageBuilder
 from .docker import DockerImageBuilder, DockerRunner
 from .kubernetes import KubernetesImageBuilder, KubernetesRunner
@@ -44,7 +44,7 @@ class ContainerRuntimeFactory:
             nginx_image = ContainerImage(
                 name="nginx",
                 tag="alpine",
-                registry="docker.io"
+                registry_url="docker.io"
             )
         
         # Set up volumes
@@ -75,3 +75,6 @@ class ContainerRuntimeFactory:
                 "NGINX_PORT": "80"
             }
         )
+    
+
+    
