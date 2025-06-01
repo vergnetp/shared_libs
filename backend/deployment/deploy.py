@@ -213,7 +213,7 @@ async def _deploy_app_service(
             return {"success": False, "error": "Build failed"}
         
         # Push to registry if configured
-        if config.container_registry:
+        if config.registry_url:
             push_success = await image_builder.push_image(container_image, log)
             if not push_success:
                 log.warning(f"Failed to push {service} image to registry")

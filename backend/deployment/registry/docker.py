@@ -48,7 +48,9 @@ class DockerRegistryAuthenticator(RegistryAuthenticator):
         except Exception as e:
             logger.error(f"Error during Docker registry authentication: {e}")
             return False
-        
+
+    def get_remote_login_command(self, registry_url: str) -> str:
+        return f"docker login {registry_url} -u {self.username} -p {self.password}"       
 
 class AWSECRAuthenticator(RegistryAuthenticator):
     def __init__(self, region: str = 'us-east-1'):

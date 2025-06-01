@@ -11,6 +11,8 @@ import digitalocean
 from typing import List, Dict, Optional, Any
 from pathlib import Path
 
+from utils import ip
+
 
 class DigitalOceanManager:
     """
@@ -27,18 +29,8 @@ class DigitalOceanManager:
     
     def _get_authorized_ips(self) -> List[str]:
         """Get list of authorized IPs for SSH access"""
-        authorized = []
-        
-        # Administrator IPs
-        admin_ip = os.getenv("ADMIN_IP")
-        office_ip = os.getenv("OFFICE_IP")
-        
-        if admin_ip:
-            authorized.append(admin_ip)
-        if office_ip:
-            authorized.append(office_ip)
-        
-        return authorized
+        return ip.get_authorized_ips()
+       
     
     def add_droplet_ips_to_authorized(self, droplet_ips: List[str]):
         """Add droplet IPs to authorized list for inter-droplet communication"""
