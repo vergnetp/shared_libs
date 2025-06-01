@@ -14,9 +14,9 @@ from typing import Dict, List, Set, Optional, Any
 from dataclasses import dataclass
 from pathlib import Path
 
-from infrastructure_state import InfrastructureState
-from snapshot_manager import SnapshotManager
-from load_balancer_manager import LoadBalancerManager
+from .infrastructure_state import InfrastructureState
+from .managers.snapshot_manager import SnapshotManager
+from .managers.load_balancer_manager import LoadBalancerManager
 
 
 @dataclass

@@ -7,8 +7,8 @@ environment, and hash-based resource allocation.
 
 import hashlib
 from typing import Dict, List, Any
-from infrastructure_state import InfrastructureState
-from secret_manager import DockerSecretManager
+from .infrastructure_state import InfrastructureState
+from .managers.secret_manager import DockerSecretManager
 
 
 class EnvironmentGenerator:

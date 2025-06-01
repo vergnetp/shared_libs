@@ -15,15 +15,15 @@ from typing import Dict, List, Any, Optional
 from datetime import datetime
 
 # Import all our modules
-from infrastructure_state import InfrastructureState
-from digitalocean_manager import DigitalOceanManager
-from ssh_key_manager import SSHKeyManager
-from secret_manager import SecretManager, DockerSecretManager
-from environment_generator import EnvironmentGenerator
-from deployment_manager import DeploymentManager
-from load_balancer_manager import LoadBalancerManager
-from snapshot_manager import SnapshotManager
-from distributed_health import DistributedHealthMonitor
+from .infrastructure_state import InfrastructureState
+from .managers.digitalocean_manager import DigitalOceanManager
+from .managers.ssh_key_manager import SSHKeyManager
+from .managers.secret_manager import SecretManager, DockerSecretManager
+from .environment_generator import EnvironmentGenerator
+from .managers.deployment_manager import DeploymentManager
+from .managers.load_balancer_manager import LoadBalancerManager
+from .managers.snapshot_manager import SnapshotManager
+from .distributed_health import DistributedHealthMonitor
 
 
 class InfrastructureOrchestrator:

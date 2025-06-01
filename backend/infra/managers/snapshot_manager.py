@@ -11,8 +11,8 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
 from pathlib import Path
 
-from digitalocean_manager import DigitalOceanManager
-from infrastructure_state import InfrastructureState
+from .digitalocean_manager import DigitalOceanManager
+from ..infrastructure_state import InfrastructureState
 
 
 class SnapshotMetadata:

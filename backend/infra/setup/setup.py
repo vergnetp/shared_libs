@@ -14,8 +14,8 @@ from pathlib import Path
 # Add current directory to path so we can import our modules
 sys.path.insert(0, str(Path(__file__).parent))
 
-from config_loader import ConfigManager
-from orchestrator import InfrastructureOrchestrator
+from .config_loader import ConfigManager
+from ..orchestrator import InfrastructureOrchestrator
 
 
 def print_banner():
@@ -91,17 +91,21 @@ def setup_directories():
     """Create necessary directories"""
     print("📁 Setting up directories...")
     
+    # Base directory is one level up from setup/
+    base_dir = Path(__file__).parent.parent
+    
     directories = [
         'config',
-        'templates',
+        'templates', 
         'templates/email-templates',
         'logs',
         'backups'
     ]
     
     for directory in directories:
-        Path(directory).mkdir(parents=True, exist_ok=True)
-        print(f"   ✓ Created {directory}")
+        dir_path = base_dir / directory
+        dir_path.mkdir(parents=True, exist_ok=True)
+        print(f"   ✓ Created {dir_path}")
     
     return True
 
@@ -239,7 +243,9 @@ def print_configuration_summary():
 
 def create_env_file_example():
     """Create example .env file"""
-    env_file = Path('.env.example')
+    # Create .env.example in the parent directory
+    base_dir = Path(__file__).parent.parent
+    env_file = base_dir / '.env.example'
     
     if env_file.exists():
         return

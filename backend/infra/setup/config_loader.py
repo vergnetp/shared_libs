@@ -17,8 +17,9 @@ class ConfigManager:
     """
     
     def __init__(self, config_dir: str = "config", templates_dir: str = "templates"):
-        self.config_dir = Path(config_dir)
-        self.templates_dir = Path(templates_dir)
+        base_dir = Path(__file__).parent.parent
+        self.config_dir = base_dir / config_dir
+        self.templates_dir = base_dir / templates_dir
         
         # Ensure directories exist
         self.config_dir.mkdir(parents=True, exist_ok=True)
