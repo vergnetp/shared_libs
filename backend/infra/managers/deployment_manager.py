@@ -183,6 +183,9 @@ class DeploymentManager:
             platform=platform,
             secret_manager=environment_generator.container_secret_manager.secret_manager
         )
+        
+        # Will be set by orchestrator
+        self.snapshot_manager = None
 
     def _get_build_command(self, platform: str) -> str:
         """Get the container build command for the platform"""
@@ -205,11 +208,11 @@ class DeploymentManager:
     def _get_platform_deployer(self, platform: str):
         """Factory pattern for different deployment platforms"""
         if platform == "docker":
-            return DockerDeployer(self.ssh_manager)
+            return DockerDeployer(self.ssh_manager, self.state)
         elif platform == "kubernetes":
-            return KubernetesDeployer(self.ssh_manager)
+            return KubernetesDeployer(self.ssh_manager, self.state, self.env_generator.container_secret_manager.secret_manager)
         elif platform == "podman":
-            return PodmanDeployer(self.ssh_manager)
+            return PodmanDeployer(self.ssh_manager, self.state, self.env_generator.container_secret_manager.secret_manager)
         else:
             raise ValueError(f"Unsupported platform: {platform}")
     
@@ -479,28 +482,81 @@ class DeploymentManager:
     
     def deploy_to_prod(self, project: str, use_uat_tag: bool = True, 
                       specific_tag: str = None) -> Dict[str, Any]:
-        """Deploy project to production environment"""
-        
-        if not self.deployment_manager:
-            return {'success': False, 'error': 'Deployment manager not initialized'}
+        """Deploy project to production environment using UAT tags"""
         
         print(f"🚀 Deploying {project} to production")
         
-        try:
-            result = self.deployment_manager.deploy_to_prod(project, use_uat_tag)
+        project_config = self.config['projects'].get(project)
+        if not project_config:
+            raise ValueError(f"Project {project} not found in deployment config")
+        
+        # Determine which tag to use
+        tag_to_use = specific_tag
+        
+        if not tag_to_use and use_uat_tag:
+            # Clone repo to get latest UAT tag
+            repo_url = self._get_project_git_url(project)
+            temp_dir = self.git_manager.clone_repository(repo_url, f"{project}-tag-check", "main")
             
-            if result['status'] == 'success':
-                # Update load balancer after deployment
-                lb_result = self.load_balancer_manager.deploy_nginx_config()
-                result['load_balancer_update'] = lb_result
+            # Get latest UAT tag
+            tag_to_use = self.version_manager.get_latest_uat_tag(temp_dir)
             
-            return result
+            if not tag_to_use:
+                return {
+                    "status": "failed",
+                    "error": "No UAT tags found. Deploy to UAT first."
+                }
             
-        except Exception as e:
+            print(f"Using UAT tag for production: {tag_to_use}")
+        
+        if not tag_to_use:
             return {
-                'success': False,
-                'error': str(e)
+                "status": "failed", 
+                "error": "No tag specified for production deployment"
             }
+        
+        # Clone at specific tag
+        repo_url = self._get_project_git_url(project)
+        project_dir = self.git_manager.work_dir / f"{project}-prod"
+        
+        # Remove existing directory
+        if project_dir.exists():
+            shutil.rmtree(project_dir)
+        
+        # Clone at specific tag
+        try:
+            result = subprocess.run([
+                'git', 'clone', '-b', tag_to_use, '--depth', '1',
+                repo_url, str(project_dir)
+            ], capture_output=True, text=True, check=True)
+            
+            print(f"Cloned {project} at tag {tag_to_use}")
+            
+        except subprocess.CalledProcessError as e:
+            return {
+                "status": "failed",
+                "error": f"Failed to clone at tag {tag_to_use}: {e.stderr}"
+            }
+        
+        # Resolve shared-libs for production deployment
+        self._resolve_shared_libs(project_dir)
+        
+        # Deploy to production environment (reuse UAT images for faster deployment)
+        deployment_result = self.deploy_environment(
+            project=project,
+            environment="prod", 
+            project_dir=project_dir,
+            reuse_uat_images=True
+        )
+        
+        return {
+            "status": "success" if deployment_result['success'] else "failed",
+            "environment": "prod",
+            "tag_used": tag_to_use,
+            "project_path": str(project_dir),
+            "deployment_result": deployment_result,
+            "reused_uat_images": True
+        }
     
     def deploy_environment(self, project: str, environment: str, 
                           project_dir: Path, reuse_uat_images: bool = False) -> Dict[str, Any]:
@@ -562,6 +618,9 @@ class DeploymentManager:
             project, environment, service_type, service_config, image_name
         )
         
+        # Add service_config to context for deployers
+        template_context['service_config'] = service_config
+        
         # Get target droplets from infrastructure state
         project_key = f"{project}-{environment}"
         state_service_config = self.state.get_project_services(project_key).get(service_type, {})
@@ -582,7 +641,7 @@ class DeploymentManager:
         
         # Create post-deployment snapshot if successful
         if deployment_result.get('success', False):
-            self._create_post_deployment_snapshots(target_droplets, project, environment, service_type)
+            self._create_post_deployment_snapshots(target_droplets, project, environment, service_type, project_dir)
         
         return deployment_result
     
@@ -623,21 +682,33 @@ class DeploymentManager:
             raise RuntimeError(f"{self.build_command} build timed out for {image_name}")
     
     def _create_post_deployment_snapshots(self, droplets: List[str], project: str, 
-                                        environment: str, service_type: str):
+                                        environment: str, service_type: str, project_dir: Path):
         """Create snapshots after successful deployment"""
         
-        timestamp = datetime.now().strftime('%Y%m%d-%H%M')
+        if not self.snapshot_manager:
+            print("Warning: Snapshot manager not available")
+            return
+        
+        # Get current commit hash for tagging
+        git_commit = self.git_manager.get_current_commit(project_dir)
         
         for droplet_name in droplets:
-            snapshot_name = f"{droplet_name}-deploy-{project}-{environment}-{timestamp}"
-            
             try:
-                # This would integrate with DigitalOcean API
-                print(f"Creating post-deployment snapshot: {snapshot_name}")
-                # TODO: Integrate with DigitalOceanManager for actual snapshot creation
+                print(f"Creating post-deployment snapshot for {droplet_name}")
                 
+                snapshot_id = self.snapshot_manager.create_deployment_snapshot(
+                    droplet_name=droplet_name,
+                    service_deployed=f"{project}-{environment}-{service_type}",
+                    git_commit=git_commit
+                )
+                
+                if snapshot_id:
+                    print(f"✅ Created snapshot {snapshot_id} for {droplet_name}")
+                else:
+                    print(f"⚠️  Failed to create snapshot for {droplet_name}")
+                    
             except Exception as e:
-                print(f"Warning: Failed to create snapshot {snapshot_name}: {e}")
+                print(f"Warning: Failed to create snapshot for {droplet_name}: {e}")
 
 
 class DockerDeployer:
@@ -645,8 +716,9 @@ class DockerDeployer:
     Docker-based deployment using Docker Compose
     """
     
-    def __init__(self, ssh_manager: SSHKeyManager):
+    def __init__(self, ssh_manager: SSHKeyManager, infrastructure_state: InfrastructureState):
         self.ssh_manager = ssh_manager
+        self.infrastructure_state = infrastructure_state
     
     def deploy(self, template_context: Dict[str, Any], target_droplets: List[str], 
               service_config: Dict[str, Any]) -> Dict[str, Any]:
@@ -790,17 +862,132 @@ class KubernetesDeployer:
     Kubernetes-based deployment
     """
     
-    def __init__(self, ssh_manager: SSHKeyManager):
+    def __init__(self, ssh_manager: SSHKeyManager, infrastructure_state: InfrastructureState, secret_manager):
         self.ssh_manager = ssh_manager
+        self.infrastructure_state = infrastructure_state
+        self.secret_manager = secret_manager
     
     def deploy(self, template_context: Dict[str, Any], target_droplets: List[str], 
               service_config: Dict[str, Any]) -> Dict[str, Any]:
         """Deploy service using Kubernetes"""
-        # TODO: Implement Kubernetes deployment
-        return {
-            'success': False,
-            'error': 'Kubernetes deployment not yet implemented'
-        }
+        
+        from ..platform import PlatformManager
+        
+        try:
+            # Initialize platform manager for Kubernetes
+            platform_manager = PlatformManager(
+                platform='kubernetes',
+                secret_manager=self.secret_manager
+            )
+            
+            # Create secrets first
+            secrets_dict = self._collect_secrets(template_context)
+            if secrets_dict:
+                created_secrets = platform_manager.create_secrets(
+                    template_context['project'],
+                    template_context['environment'],
+                    secrets_dict
+                )
+                print(f"Created Kubernetes secrets: {created_secrets}")
+            
+            # Generate Kubernetes manifests
+            k8s_config = platform_manager.generate_deployment_config(template_context)
+            
+            # Apply to cluster (assumes kubectl access from master droplet)
+            master_droplet = self._get_master_droplet()
+            if not master_droplet:
+                return {'success': False, 'error': 'No master droplet found for Kubernetes deployment'}
+            
+            result = self._deploy_k8s_to_cluster(master_droplet['ip'], k8s_config, template_context)
+            
+            return {
+                'success': result['success'],
+                'platform': 'kubernetes',
+                'namespace': f"{template_context['project']}-{template_context['environment']}",
+                'deployment_result': result
+            }
+            
+        except Exception as e:
+            return {
+                'success': False,
+                'platform': 'kubernetes',
+                'error': str(e)
+            }
+    
+    def _deploy_k8s_to_cluster(self, master_ip: str, k8s_config: str, context: Dict[str, Any]) -> Dict[str, Any]:
+        """Deploy Kubernetes configuration to cluster"""
+        
+        service_name = context['service_name']
+        
+        try:
+            # Create temporary manifest file
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+                f.write(k8s_config)
+                temp_manifest_path = f.name
+            
+            # Copy manifest to master droplet
+            remote_path = f"/opt/app/{service_name}-k8s.yaml"
+            
+            if not self.ssh_manager.copy_file_to_server(master_ip, temp_manifest_path, remote_path):
+                return {'success': False, 'error': 'Failed to copy Kubernetes manifest'}
+            
+            # Apply manifest using kubectl
+            success, stdout, stderr = self.ssh_manager.execute_remote_command(
+                master_ip,
+                f"kubectl apply -f {remote_path}",
+                timeout=300
+            )
+            
+            # Cleanup temp file
+            os.unlink(temp_manifest_path)
+            
+            if success:
+                # Wait for deployment to be ready
+                namespace = f"{context['project']}-{context['environment']}"
+                ready_success, ready_output, ready_error = self.ssh_manager.execute_remote_command(
+                    master_ip,
+                    f"kubectl wait --for=condition=available --timeout=300s deployment/{service_name} -n {namespace}",
+                    timeout=320
+                )
+                
+                return {
+                    'success': ready_success,
+                    'output': stdout,
+                    'ready_output': ready_output if ready_success else ready_error
+                }
+            else:
+                return {
+                    'success': False,
+                    'error': stderr
+                }
+                
+        except Exception as e:
+            return {
+                'success': False,
+                'error': str(e)
+            }
+    
+    def _collect_secrets(self, context: Dict[str, Any]) -> Dict[str, str]:
+        """Collect secrets for the service"""
+        
+        secrets_dict = {}
+        service_config = context.get('service_config', {})
+        required_secrets = service_config.get('secrets', [])
+        
+        for secret_key in required_secrets:
+            secret_value = self.secret_manager.find_secret_value(
+                secret_key, 
+                context['project'], 
+                context['environment']
+            )
+            if secret_value:
+                secrets_dict[secret_key] = secret_value
+        
+        return secrets_dict
+    
+    def _get_master_droplet(self) -> Optional[Dict[str, Any]]:
+        """Get master droplet configuration"""
+        return self.infrastructure_state.get_master_droplet()
 
 
 class PodmanDeployer:
@@ -808,14 +995,170 @@ class PodmanDeployer:
     Podman-based deployment
     """
     
-    def __init__(self, ssh_manager: SSHKeyManager):
+    def __init__(self, ssh_manager: SSHKeyManager, infrastructure_state: InfrastructureState, secret_manager):
         self.ssh_manager = ssh_manager
+        self.infrastructure_state = infrastructure_state
+        self.secret_manager = secret_manager
     
     def deploy(self, template_context: Dict[str, Any], target_droplets: List[str], 
               service_config: Dict[str, Any]) -> Dict[str, Any]:
         """Deploy service using Podman"""
-        # TODO: Implement Podman deployment
+        
+        deployment_results = {}
+        overall_success = True
+        
+        for droplet_name in target_droplets:
+            try:
+                droplet_ip = self._get_droplet_ip(droplet_name)
+                result = self._deploy_podman_to_droplet(droplet_ip, template_context, service_config)
+                deployment_results[droplet_name] = result
+                
+                if not result.get('success', False):
+                    overall_success = False
+                    
+            except Exception as e:
+                deployment_results[droplet_name] = {
+                    'success': False,
+                    'error': str(e)
+                }
+                overall_success = False
+        
         return {
-            'success': False,
-            'error': 'Podman deployment not yet implemented'
+            'success': overall_success,
+            'platform': 'podman',
+            'droplets': deployment_results
         }
+    
+    def _deploy_podman_to_droplet(self, droplet_ip: str, context: Dict[str, Any], 
+                                 service_config: Dict[str, Any]) -> Dict[str, Any]:
+        """Deploy to droplet using Podman"""
+        
+        service_name = context['service_name']
+        image_name = context['image_name']
+        
+        try:
+            # Create environment file for secrets
+            env_content = self._generate_env_file(context, service_config)
+            env_file_path = f"/opt/app/{service_name}.env"
+            
+            # Upload environment file
+            with tempfile.NamedTemporaryFile(mode='w', delete=False) as f:
+                f.write(env_content)
+                temp_env_path = f.name
+            
+            if not self.ssh_manager.copy_file_to_server(droplet_ip, temp_env_path, env_file_path):
+                return {'success': False, 'error': 'Failed to copy environment file'}
+            
+            os.unlink(temp_env_path)
+            
+            # Build Podman run command
+            podman_cmd = self._build_podman_command(context, service_config, env_file_path)
+            
+            # Stop existing container if running
+            self.ssh_manager.execute_remote_command(
+                droplet_ip,
+                f"podman stop {service_name} 2>/dev/null || true",
+                timeout=30
+            )
+            
+            self.ssh_manager.execute_remote_command(
+                droplet_ip,
+                f"podman rm {service_name} 2>/dev/null || true",
+                timeout=30
+            )
+            
+            # Run new container
+            success, stdout, stderr = self.ssh_manager.execute_remote_command(
+                droplet_ip,
+                podman_cmd,
+                timeout=300
+            )
+            
+            if success:
+                return {
+                    'success': True,
+                    'output': stdout,
+                    'container_name': service_name
+                }
+            else:
+                return {
+                    'success': False,
+                    'error': stderr
+                }
+                
+        except Exception as e:
+            return {
+                'success': False,
+                'error': str(e)
+            }
+    
+    def _generate_env_file(self, context: Dict[str, Any], service_config: Dict[str, Any]) -> str:
+        """Generate environment file content for Podman"""
+        
+        env_lines = []
+        
+        # Standard environment variables
+        env_vars = [
+            'DB_USER', 'DB_NAME', 'DB_HOST', 'DB_PORT',
+            'REDIS_HOST', 'REDIS_PORT',
+            'VAULT_HOST', 'VAULT_PORT',
+            'OPENSEARCH_HOST', 'OPENSEARCH_PORT', 'OPENSEARCH_INDEX',
+            'SERVICE_NAME', 'ENVIRONMENT', 'PROJECT', 'RESOURCE_HASH'
+        ]
+        
+        for var in env_vars:
+            if var in context:
+                env_lines.append(f"{var}={context[var]}")
+        
+        # Add SERVICE_PORT for web services
+        if not context.get('is_worker') and 'SERVICE_PORT' in context:
+            env_lines.append(f"SERVICE_PORT={context['SERVICE_PORT']}")
+        
+        # Add secrets (these would be resolved from secret manager)
+        required_secrets = service_config.get('secrets', [])
+        for secret_key in required_secrets:
+            secret_value = self.secret_manager.find_secret_value(
+                secret_key,
+                context['project'],
+                context['environment']
+            )
+            if secret_value:
+                env_lines.append(f"{secret_key.upper()}={secret_value}")
+        
+        return '\n'.join(env_lines)
+    
+    def _build_podman_command(self, context: Dict[str, Any], service_config: Dict[str, Any], 
+                             env_file_path: str) -> str:
+        """Build Podman run command"""
+        
+        service_name = context['service_name']
+        image_name = context['image_name']
+        
+        cmd_parts = [
+            'podman', 'run', '-d',
+            '--name', service_name,
+            '--env-file', env_file_path,
+            '--restart', 'unless-stopped'
+        ]
+        
+        # Add ports for web services
+        if not context.get('is_worker') and 'SERVICE_PORT' in context:
+            port = context['SERVICE_PORT']
+            cmd_parts.extend(['-p', f'{port}:{port}'])
+        
+        # Add command if specified
+        if context.get('command'):
+            cmd_parts.extend(['--entrypoint', '""'])  # Override entrypoint
+            cmd_parts.append(image_name)
+            cmd_parts.extend(context['command'].split())
+        else:
+            cmd_parts.append(image_name)
+        
+        return ' '.join(cmd_parts)
+    
+    def _get_droplet_ip(self, droplet_name: str) -> str:
+        """Get droplet IP from infrastructure state"""
+        droplet = self.infrastructure_state.get_droplet(droplet_name)
+        if droplet:
+            return droplet['ip']
+        raise ValueError(f"Droplet {droplet_name} not found in infrastructure state")
