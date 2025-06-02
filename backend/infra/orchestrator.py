@@ -18,7 +18,7 @@ from datetime import datetime
 from .infrastructure_state import InfrastructureState
 from .managers.digitalocean_manager import DigitalOceanManager
 from .managers.ssh_key_manager import SSHKeyManager
-from .managers.secret_manager import SecretManager, DockerSecretManager
+from .managers.secret_manager import SecretManager, ContainerSecretManager
 from .environment_generator import EnvironmentGenerator
 from .managers.deployment_manager import DeploymentManager
 from .managers.load_balancer_manager import LoadBalancerManager
@@ -47,10 +47,10 @@ class InfrastructureOrchestrator:
         
         # Initialize secret management
         self.secret_manager = SecretManager(use_vault=False)  # Start with OS env vars
-        self.docker_secret_manager = DockerSecretManager(self.secret_manager)
+        self.container_secret_manager = ContainerSecretManager(self.secret_manager)
         
         # Initialize other managers
-        self.env_generator = EnvironmentGenerator(self.state, self.docker_secret_manager)
+        self.env_generator = EnvironmentGenerator(self.state, self.container_secret_manager)
         self.load_balancer_manager = LoadBalancerManager(self.state, self.ssh_manager)
         self.snapshot_manager = SnapshotManager(self.do_manager, self.state)
         

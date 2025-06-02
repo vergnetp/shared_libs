@@ -175,8 +175,28 @@ class DeploymentManager:
         
         # Get platform deployer
         platform = deployment_config.get('deployment_platform', 'docker')
+        environment_generator.container_secret_manager.set_platform(platform)
         self.deployer = self._get_platform_deployer(platform)
-    
+        self.build_command = self._get_build_command(platform)
+
+    def _get_build_command(self, platform: str) -> str:
+        """Get the container build command for the platform"""
+        platform_commands = {
+            'docker': 'docker',
+            'podman': 'podman', 
+            'kubernetes': 'docker',  # K8s typically uses docker daemon or buildah
+        }
+        
+        command = platform_commands.get(platform, 'docker')
+        
+        # Verify command exists
+        try:
+            subprocess.run([command, '--version'], capture_output=True, check=True)
+            return command
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            # Fallback to docker if platform command not available
+            return 'docker'
+           
     def _get_platform_deployer(self, platform: str):
         """Factory pattern for different deployment platforms"""
         if platform == "docker":
@@ -563,9 +583,9 @@ class DeploymentManager:
     
     def _build_service_image(self, project: str, service_type: str, 
                            service_config: Dict[str, Any], project_dir: Path) -> str:
-        """Build Docker image for service"""
+        """Build container image for service"""
         
-        dockerfile_path = service_config.get('dockerfile_path', 'Dockerfile')
+        containerfile_path = service_config.get('containerfile_path', 'Dockerfile')
         build_context = service_config.get('build_context', '.')
         
         # Generate image name with timestamp
@@ -573,18 +593,18 @@ class DeploymentManager:
         image_name = f"{project}-{service_type}:{timestamp}"
         
         build_path = project_dir / build_context
-        full_dockerfile_path = project_dir / dockerfile_path
+        full_containerfile_path = project_dir / containerfile_path
         
-        if not full_dockerfile_path.exists():
-            raise FileNotFoundError(f"Dockerfile not found: {full_dockerfile_path}")
+        if not full_containerfile_path.exists():
+            raise FileNotFoundError(f"containerfile not found: {full_containerfile_path}")
         
         try:
-            print(f"Building image {image_name} from {build_path}")
+            print(f"Building image {image_name} using {self.build_command}")
             
             result = subprocess.run([
-                'docker', 'build',
+                self.build_command, 'build', 
                 '-t', image_name,
-                '-f', str(full_dockerfile_path),
+                '-f', str(full_containerfile_path),
                 str(build_path)
             ], capture_output=True, text=True, timeout=600)  # 10 minute timeout
             
@@ -592,10 +612,10 @@ class DeploymentManager:
                 print(f"Successfully built image: {image_name}")
                 return image_name
             else:
-                raise RuntimeError(f"Docker build failed: {result.stderr}")
+                raise RuntimeError(f"{self.build_command} build failed: {result.stderr}")
                 
         except subprocess.TimeoutExpired:
-            raise RuntimeError(f"Docker build timed out for {image_name}")
+            raise RuntimeError(f"{self.build_command} build timed out for {image_name}")
     
     def _create_post_deployment_snapshots(self, droplets: List[str], project: str, 
                                         environment: str, service_type: str):

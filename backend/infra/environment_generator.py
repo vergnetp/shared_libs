@@ -8,7 +8,7 @@ environment, and hash-based resource allocation.
 import hashlib
 from typing import Dict, List, Any
 from .infrastructure_state import InfrastructureState
-from .managers.secret_manager import DockerSecretManager
+from .managers.secret_manager import ContainerSecretManager
 
 
 class EnvironmentGenerator:
@@ -16,19 +16,19 @@ class EnvironmentGenerator:
     Generates dynamic environment variables for service deployment
     """
     
-    def __init__(self, infrastructure_state: InfrastructureState, docker_secret_manager: DockerSecretManager):
+    def __init__(self, infrastructure_state: InfrastructureState, container_secret_manager: ContainerSecretManager):
         self.state = infrastructure_state
-        self.docker_secret_manager = docker_secret_manager
+        self.container_secret_manager = container_secret_manager
         
     def generate_dynamic_environment(self, project: str, environment: str, 
                                    service_type: str, service_config: Dict[str, Any]) -> Dict[str, str]:
-        """Generate dynamic environment variables using hashes and Docker secrets"""
+        """Generate dynamic environment variables using hashes and Container secrets"""
         
         # Generate hash for deterministic resource naming
         resource_hash = self.state.generate_resource_hash(project, environment)
         
-        # Create Docker secrets for sensitive data
-        self.docker_secret_manager.create_docker_secrets(project, environment, service_config)
+        # Create Container secrets for sensitive data
+        self.container_secret_manager.create_container_secrets(project, environment, service_config)
         
         # Get droplet/infrastructure info
         assigned_droplets = service_config.get("assigned_droplets", [])
@@ -178,7 +178,7 @@ class EnvironmentGenerator:
         required_secrets = service_config.get('secrets', [])
         
         for secret_key in required_secrets:
-            secret_value = self.docker_secret_manager.secret_manager.find_secret_value(
+            secret_value = self.container_secret_manager.secret_manager.find_secret_value(
                 secret_key, project, environment
             )
             if secret_value:
@@ -197,7 +197,7 @@ class EnvironmentGenerator:
         
         # Check required secrets
         required_secrets = service_config.get('secrets', [])
-        missing_secrets = self.docker_secret_manager.secret_manager.get_missing_secrets(
+        missing_secrets = self.container_secret_manager.secret_manager.get_missing_secrets(
             project, environment, required_secrets
         )
         

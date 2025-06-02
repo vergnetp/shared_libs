@@ -77,25 +77,25 @@ class ConfigManager:
                     },
                     "services": {
                         "backend": {
-                            "dockerfile_path": "backend/Dockerfile",
+                            "containerfile_path": "backend/Dockerfile",
                             "build_context": "backend/",
                             "secrets": ["db_password", "redis_password", "stripe_key", "openai_api_key", "jwt_secret"]
                         },
                         "frontend": {
-                            "dockerfile_path": "frontend/Dockerfile",
+                            "containerfile_path": "frontend/Dockerfile",
                             "build_context": "frontend/",
                             "secrets": ["stripe_publishable_key", "google_oauth_client_id"]
                         },
                         "worker_email": {
                             "type": "worker",
-                            "dockerfile_path": "workers/Dockerfile",
+                            "containerfile_path": "workers/Dockerfile",
                             "build_context": "workers/",
                             "command": "python email_processor.py",
                             "secrets": ["db_password", "redis_password", "sendgrid_api_key"]
                         },
                         "scheduler": {
                             "type": "worker",
-                            "dockerfile_path": "scheduler/Dockerfile",
+                            "containerfile_path": "scheduler/Dockerfile",
                             "build_context": "scheduler/",
                             "command": "python cron_scheduler.py",
                             "secrets": ["db_password", "redis_password"]
@@ -107,12 +107,12 @@ class ConfigManager:
                     "includes_services": ["opensearch", "vault"],
                     "services": {
                         "backend": {
-                            "dockerfile_path": "Dockerfile",
+                            "containerfile_path": "Dockerfile",
                             "build_context": "./",
                             "secrets": ["db_password", "openai_api_key", "sendgrid_api_key"]
                         },
                         "frontend": {
-                            "dockerfile_path": "frontend/Dockerfile",
+                            "containerfile_path": "frontend/Dockerfile",
                             "build_context": "frontend/",
                             "secrets": ["stripe_publishable_key"]
                         }
