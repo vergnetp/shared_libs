@@ -17,6 +17,7 @@ class ConfigManager:
     """
     
     def __init__(self, config_dir: str = "config", templates_dir: str = "templates"):
+        # Go up one level from setup/ directory to create configs in the right place
         base_dir = Path(__file__).parent.parent
         self.config_dir = base_dir / config_dir
         self.templates_dir = base_dir / templates_dir
@@ -24,6 +25,106 @@ class ConfigManager:
         # Ensure directories exist
         self.config_dir.mkdir(parents=True, exist_ok=True)
         self.templates_dir.mkdir(parents=True, exist_ok=True)
+
+    def _create_deployment_config(self) -> Dict[str, Any]:
+        """Create deployment_config.json"""
+        
+        config_file = self.config_dir / "deployment_config.json"
+        
+        if config_file.exists():
+            return {'status': 'exists', 'file': str(config_file)}
+        
+        deployment_config = {
+            "deployment_platform": "docker",
+            "auto_commit_before_deploy": True,
+            "git_config": {
+                "base_url": "https://github.com/yourorg",
+                "url_pattern": "{base_url}/{project}.git",
+                "default_branch": "main"
+            },
+            "global_services": {
+                "nginx": {
+                    "type": "global_infrastructure",
+                    "ports": [80, 443],
+                    "config_template": "templates/nginx.conf"
+                }
+            },
+            "project_services": {
+                "opensearch": {
+                    "image": "opensearchproject/opensearch:2.8.0",
+                    "type": "project_service",
+                    "environment": {
+                        "discovery.type": "single-node",
+                        "OPENSEARCH_JAVA_OPTS": "-Xms512m -Xmx512m"
+                    },
+                    "secrets": ["opensearch_admin_password"]
+                },
+                "vault": {
+                    "image": "vault:1.13.3",
+                    "type": "project_service",
+                    "config_template": "templates/vault-config.hcl",
+                    "secrets": ["vault_root_token", "vault_unseal_key"]
+                }
+            },
+            "projects": {
+                "hostomatic": {
+                    # No git_repo needed - derived from git_config.url_pattern
+                    "includes_services": ["opensearch", "vault"],
+                    "versioning": {
+                        "auto_tag_uat": True,
+                        "tag_format": "v{version}-uat-{timestamp}",
+                        "prod_uses_uat_tags": True
+                    },
+                    "services": {
+                        "backend": {
+                            "dockerfile_path": "backend/Dockerfile",
+                            "build_context": "backend/",
+                            "secrets": ["db_password", "redis_password", "stripe_key", "openai_api_key", "jwt_secret"]
+                        },
+                        "frontend": {
+                            "dockerfile_path": "frontend/Dockerfile",
+                            "build_context": "frontend/",
+                            "secrets": ["stripe_publishable_key", "google_oauth_client_id"]
+                        },
+                        "worker_email": {
+                            "type": "worker",
+                            "dockerfile_path": "workers/Dockerfile",
+                            "build_context": "workers/",
+                            "command": "python email_processor.py",
+                            "secrets": ["db_password", "redis_password", "sendgrid_api_key"]
+                        },
+                        "scheduler": {
+                            "type": "worker",
+                            "dockerfile_path": "scheduler/Dockerfile",
+                            "build_context": "scheduler/",
+                            "command": "python cron_scheduler.py",
+                            "secrets": ["db_password", "redis_password"]
+                        }
+                    }
+                },
+                "digitalpixo": {
+                    # No git_repo needed - derived from git_config.url_pattern
+                    "includes_services": ["opensearch", "vault"],
+                    "services": {
+                        "backend": {
+                            "dockerfile_path": "Dockerfile",
+                            "build_context": "./",
+                            "secrets": ["db_password", "openai_api_key", "sendgrid_api_key"]
+                        },
+                        "frontend": {
+                            "dockerfile_path": "frontend/Dockerfile",
+                            "build_context": "frontend/",
+                            "secrets": ["stripe_publishable_key"]
+                        }
+                    }
+                }
+            }
+        }
+        
+        with open(config_file, 'w') as f:
+            json.dump(deployment_config, f, indent=2)
+        
+        return {'status': 'created', 'file': str(config_file)}
         
     def initialize_all_configs(self) -> Dict[str, Any]:
         """Initialize all configuration files with defaults"""
@@ -59,101 +160,7 @@ class ConfigManager:
             writer.writerows(projects_data)
         
         return {'status': 'created', 'file': str(csv_file)}
-    
-    def _create_deployment_config(self) -> Dict[str, Any]:
-        """Create deployment_config.json"""
-        
-        config_file = self.config_dir / "deployment_config.json"
-        
-        if config_file.exists():
-            return {'status': 'exists', 'file': str(config_file)}
-        
-        deployment_config = {
-            "deployment_platform": "docker",
-            "global_services": {
-                "nginx": {
-                    "type": "global_infrastructure",
-                    "ports": [80, 443],
-                    "config_template": "templates/nginx.conf"
-                }
-            },
-            "project_services": {
-                "opensearch": {
-                    "image": "opensearchproject/opensearch:2.8.0",
-                    "type": "project_service",
-                    "environment": {
-                        "discovery.type": "single-node",
-                        "OPENSEARCH_JAVA_OPTS": "-Xms512m -Xmx512m"
-                    },
-                    "secrets": ["opensearch_admin_password"]
-                },
-                "vault": {
-                    "image": "vault:1.13.3",
-                    "type": "project_service",
-                    "config_template": "templates/vault-config.hcl",
-                    "secrets": ["vault_root_token", "vault_unseal_key"]
-                }
-            },
-            "projects": {
-                "hostomatic": {
-                    "git_repo": "https://github.com/yourorg/hostomatic.git",
-                    "includes_services": ["opensearch", "vault"],
-                    "versioning": {
-                        "auto_tag_uat": True,
-                        "tag_format": "v{version}-uat-{timestamp}",
-                        "prod_uses_uat_tags": True
-                    },
-                    "services": {
-                        "backend": {
-                            "dockerfile_path": "backend/Dockerfile",
-                            "build_context": "backend/",
-                            "secrets": ["db_password", "redis_password", "stripe_key", "openai_api_key", "jwt_secret"]
-                        },
-                        "frontend": {
-                            "dockerfile_path": "frontend/Dockerfile",
-                            "build_context": "frontend/",
-                            "secrets": ["stripe_publishable_key", "google_oauth_client_id"]
-                        },
-                        "worker_email": {
-                            "type": "worker",
-                            "dockerfile_path": "workers/Dockerfile",
-                            "build_context": "workers/",
-                            "command": "python email_processor.py",
-                            "secrets": ["db_password", "redis_password", "sendgrid_api_key"]
-                        },
-                        "scheduler": {
-                            "type": "worker",
-                            "dockerfile_path": "scheduler/Dockerfile",
-                            "build_context": "scheduler/",
-                            "command": "python cron_scheduler.py",
-                            "secrets": ["db_password", "redis_password"]
-                        }
-                    }
-                },
-                "digitalpixo": {
-                    "git_repo": "https://github.com/yourorg/digitalpixo.git",
-                    "includes_services": ["opensearch", "vault"],
-                    "services": {
-                        "backend": {
-                            "dockerfile_path": "Dockerfile",
-                            "build_context": "./",
-                            "secrets": ["db_password", "openai_api_key", "sendgrid_api_key"]
-                        },
-                        "frontend": {
-                            "dockerfile_path": "frontend/Dockerfile",
-                            "build_context": "frontend/",
-                            "secrets": ["stripe_publishable_key"]
-                        }
-                    }
-                }
-            }
-        }
-        
-        with open(config_file, 'w') as f:
-            json.dump(deployment_config, f, indent=2)
-        
-        return {'status': 'created', 'file': str(config_file)}
-    
+
     def _create_email_config(self) -> Dict[str, Any]:
         """Create email_config.json"""
         

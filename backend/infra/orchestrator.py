@@ -920,6 +920,10 @@ def main():
     parser.add_argument('--recover', metavar='DROPLET', help='Emergency recovery of failed droplet')
     parser.add_argument('--cleanup', action='store_true', help='Clean up old resources')
     parser.add_argument('--update-ip', metavar='NEW_IP', help='Update administrator IP')
+    parser.add_argument('--reproduce', metavar='TAG', help='Reproduce deployment from tag')
+    parser.add_argument('--local', action='store_true', help='Use local codebase instead of git clone')
+    parser.add_argument('--project-path', metavar='PATH', help='Path to local project directory')
+    parser.add_argument('--reproduce-dir', metavar='DIR', help='Directory for reproduced code')
     parser.add_argument('--force', action='store_true', help='Force recreate resources')
     parser.add_argument('--dry-run', action='store_true', help='Dry run (show what would be done)')
     
@@ -941,7 +945,11 @@ def main():
         print(json.dumps(result, indent=2))
     
     elif args.deploy_uat:
-        result = orchestrator.deploy_to_uat(args.deploy_uat)
+        result = orchestrator.deploy_to_uat(
+            args.deploy_uat, 
+            use_local=args.local,
+            local_project_path=args.project_path
+        )
         print(json.dumps(result, indent=2))
     
     elif args.deploy_prod:
@@ -968,9 +976,15 @@ def main():
         result = orchestrator.update_administrator_ip(args.update_ip)
         print(json.dumps(result, indent=2))
     
+    elif args.reproduce:
+        result = orchestrator.deployment_manager.reproduce_deployment(
+            args.reproduce, 
+            args.reproduce_dir
+        )
+        print(json.dumps(result, indent=2))
+    
     else:
         parser.print_help()
-
 
 if __name__ == '__main__':
     main()

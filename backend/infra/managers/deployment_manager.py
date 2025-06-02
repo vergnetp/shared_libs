@@ -14,9 +14,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 
-from ..infrastructure_state import InfrastructureState
-from ..environment_generator import EnvironmentGenerator
-from .ssh_key_manager import SSHKeyManager
+from infrastructure_state import InfrastructureState
+from environment_generator import EnvironmentGenerator
+from ssh_key_manager import SSHKeyManager
 
 
 class GitManager:
@@ -188,108 +188,294 @@ class DeploymentManager:
         else:
             raise ValueError(f"Unsupported platform: {platform}")
     
-    def deploy_to_uat(self, project: str, branch: str = "main") -> Dict[str, Any]:
-        """Deploy to UAT and create version tag"""
+    def _get_project_git_url(self, project: str) -> str:
+        """Generate Git URL from project name using configured pattern"""
+        git_config = self.config.get('git_config', {})
+        base_url = git_config.get('base_url', 'https://github.com/yourorg')
+        url_pattern = git_config.get('url_pattern', '{base_url}/{project}.git')
         
-        print(f"Starting UAT deployment for {project} from branch {branch}")
+        return url_pattern.format(base_url=base_url, project=project)
+    
+    def _get_shared_libs_repo(self) -> str:
+        """Get shared-libs repository URL"""
+        return self._get_project_git_url("shared-libs")
+    
+    def _should_auto_commit(self) -> bool:
+        """Check if we should auto-commit before deployment"""
+        return self.config.get('auto_commit_before_deploy', True)
+    
+    def _get_current_commit_hash(self, repo_dir: Path) -> str:
+        """Get current commit hash of a repository"""
+        result = subprocess.run(['git', 'rev-parse', 'HEAD'], 
+                              cwd=repo_dir, capture_output=True, text=True, check=True)
+        return result.stdout.strip()
+    
+    def _commit_and_tag_local_changes(self, project_dir: Path, project: str):
+        """Commit changes in both project and shared-libs, then create unified deployment tags"""
         
-        # Get project configuration
-        project_config = self.config['projects'].get(project)
-        if not project_config:
-            raise ValueError(f"Project {project} not found in deployment config")
+        try:
+            timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+            unified_tag = f"deploy-uat-{timestamp}"
+            
+            # 1. Handle shared-libs first
+            shared_libs_link = project_dir / "shared-libs"
+            shared_libs_committed = False
+            shared_libs_hash = None
+            
+            if shared_libs_link.is_symlink():
+                shared_libs_dir = shared_libs_link.resolve()
+                print(f"Found shared-libs at: {shared_libs_dir}")
+                
+                # Check for uncommitted changes in shared-libs
+                result = subprocess.run(['git', 'status', '--porcelain'], 
+                                      cwd=shared_libs_dir, capture_output=True, text=True)
+                
+                if result.stdout.strip():
+                    print("Committing shared-libs changes...")
+                    subprocess.run(['git', 'add', '-A'], cwd=shared_libs_dir, check=True)
+                    subprocess.run(['git', 'commit', '-m', f'Pre-deployment commit {timestamp}'], 
+                                 cwd=shared_libs_dir, check=True)
+                    subprocess.run(['git', 'push', 'origin', 'main'], cwd=shared_libs_dir, check=True)
+                    shared_libs_committed = True
+                    print(f"✓ Committed and pushed shared-libs changes")
+                
+                # Get current commit hash (whether we committed or not)
+                shared_libs_hash = self._get_current_commit_hash(shared_libs_dir)
+                
+                # Create unified tag on shared-libs
+                tag_message = f'UAT deployment {timestamp} for {project}'
+                subprocess.run(['git', 'tag', '-a', unified_tag, '-m', tag_message], 
+                             cwd=shared_libs_dir, check=True)
+                subprocess.run(['git', 'push', 'origin', unified_tag], cwd=shared_libs_dir, check=True)
+                print(f"✓ Tagged shared-libs with: {unified_tag}")
+            
+            # 2. Handle project code
+            result = subprocess.run(['git', 'status', '--porcelain'], 
+                                  cwd=project_dir, capture_output=True, text=True)
+            
+            project_committed = False
+            if result.stdout.strip():
+                print(f"Committing {project} changes...")
+                subprocess.run(['git', 'add', '-A'], cwd=project_dir, check=True)
+                
+                commit_msg = f'Pre-deployment commit {timestamp}'
+                if shared_libs_committed:
+                    commit_msg += f' (shared-libs: {shared_libs_hash[:8]})'
+                
+                subprocess.run(['git', 'commit', '-m', commit_msg], 
+                             cwd=project_dir, check=True)
+                subprocess.run(['git', 'push', 'origin', 'main'], cwd=project_dir, check=True)
+                project_committed = True
+                print(f"✓ Committed and pushed {project} changes")
+            
+            # 3. Create unified tag on project
+            project_hash = self._get_current_commit_hash(project_dir)
+            tag_message = f'UAT deployment {timestamp}'
+            if shared_libs_hash:
+                tag_message += f' (shared-libs: {shared_libs_hash[:8]})'
+            
+            subprocess.run(['git', 'tag', '-a', unified_tag, '-m', tag_message], 
+                         cwd=project_dir, check=True)
+            subprocess.run(['git', 'push', 'origin', unified_tag], cwd=project_dir, check=True)
+            
+            print(f"✓ Tagged {project} with: {unified_tag}")
+            print(f"📦 Deployment tagged: {unified_tag}")
+            print(f"   - Project commit: {project_hash[:8]}")
+            if shared_libs_hash:
+                print(f"   - Shared-libs commit: {shared_libs_hash[:8]}")
+            
+            return {
+                'unified_tag': unified_tag,
+                'project_hash': project_hash,
+                'shared_libs_hash': shared_libs_hash,
+                'shared_libs_committed': shared_libs_committed,
+                'project_committed': project_committed,
+                'timestamp': timestamp
+            }
+            
+        except subprocess.CalledProcessError as e:
+            print(f"Error during commit/tag: {e}")
+            raise RuntimeError(f"Failed to commit and tag: {e}")
+    
+    def reproduce_deployment(self, tag_name: str, target_dir: str = None) -> Dict[str, Any]:
+        """Reproduce exact deployment state from unified tag"""
         
-        # Clone repository
-        repo_url = project_config['git_repo']
-        project_dir = self.git_manager.clone_repository(repo_url, project, branch)
+        if not target_dir:
+            target_dir = f"./reproduced-{tag_name}"
         
-        # Deploy to UAT environment
+        target_path = Path(target_dir)
+        target_path.mkdir(parents=True, exist_ok=True)
+        
+        print(f"🔍 Reproducing deployment: {tag_name}")
+        
+        try:
+            # 1. Clone shared-libs at specific tag
+            shared_libs_repo = self._get_shared_libs_repo()
+            shared_libs_dir = target_path / "shared-libs"
+            
+            subprocess.run([
+                'git', 'clone', '-b', tag_name, '--depth', '1',
+                shared_libs_repo, str(shared_libs_dir)
+            ], check=True)
+            print(f"✓ Cloned shared-libs at tag {tag_name}")
+            
+            # 2. Clone all projects that might use this tag
+            reproduced_projects = []
+            for project_name in self.config['projects'].keys():
+                try:
+                    project_repo = self._get_project_git_url(project_name)
+                    project_dir = target_path / project_name
+                    
+                    subprocess.run([
+                        'git', 'clone', '-b', tag_name, '--depth', '1',
+                        project_repo, str(project_dir)
+                    ], check=True, capture_output=True)
+                    
+                    # Create symlink to shared-libs for local development
+                    project_shared_libs = project_dir / "shared-libs"
+                    if project_shared_libs.is_symlink():
+                        project_shared_libs.unlink()
+                    elif project_shared_libs.exists():
+                        shutil.rmtree(project_shared_libs)
+                    
+                    # Create relative symlink
+                    project_shared_libs.symlink_to("../shared-libs")
+                    
+                    reproduced_projects.append(project_name)
+                    print(f"✓ Cloned {project_name} at tag {tag_name}")
+                    
+                except subprocess.CalledProcessError:
+                    # Project doesn't have this tag - skip
+                    continue
+            
+            print(f"🎯 Reproduction complete in: {target_path}")
+            print(f"📋 Reproduced projects: {', '.join(reproduced_projects)}")
+            
+            return {
+                'success': True,
+                'target_dir': str(target_path),
+                'tag_name': tag_name,
+                'reproduced_projects': reproduced_projects,
+                'shared_libs_available': True
+            }
+            
+        except Exception as e:
+            return {
+                'success': False,
+                'error': str(e),
+                'target_dir': str(target_path)
+            }
+    
+    def deploy_to_uat(self, project: str, branch: str = "main", use_local: bool = False, 
+                      local_project_path: str = None) -> Dict[str, Any]:
+        """Deploy project to UAT environment"""
+        
+        print(f"🚀 Deploying {project} to UAT")
+        
+        if use_local:
+            # Use local codebase (already tested)
+            if not local_project_path:
+                local_project_path = f"../{project}"  # Assume projects are siblings
+            
+            project_dir = Path(local_project_path).resolve()
+            if not project_dir.exists():
+                raise ValueError(f"Local project path not found: {project_dir}")
+            
+            print(f"Using local codebase: {project_dir}")
+            
+            # Commit both shared-libs and project changes
+            commit_info = None
+            if self._should_auto_commit():
+                commit_info = self._commit_and_tag_local_changes(project_dir, project)
+        else:
+            # Traditional git clone approach
+            project_config = self.config['projects'].get(project)
+            if not project_config:
+                raise ValueError(f"Project {project} not found in deployment config")
+            
+            repo_url = self._get_project_git_url(project)
+            project_dir = self.git_manager.clone_repository(repo_url, project, branch)
+            
+            # Still need to resolve shared-libs for git-cloned projects
+            self._resolve_shared_libs(project_dir)
+        
+        # Deploy using the project directory (local or cloned)
         deployment_result = self.deploy_environment(
             project=project,
             environment="uat",
             project_dir=project_dir
         )
         
-        if deployment_result['success']:
-            # Create version tag after successful UAT deployment
-            try:
-                version_tag = self.version_manager.create_uat_version_tag(project_dir, project)
-                
-                return {
-                    "status": "success",
-                    "environment": "uat",
-                    "version_tag": version_tag,
-                    "git_commit": self.git_manager.get_current_commit(project_dir),
-                    "ready_for_prod": True,
-                    "deployment_result": deployment_result
-                }
-            except Exception as e:
-                print(f"Warning: UAT deployment succeeded but tagging failed: {e}")
-                return {
-                    "status": "success_no_tag",
-                    "environment": "uat",
-                    "version_tag": None,
-                    "git_commit": self.git_manager.get_current_commit(project_dir),
-                    "ready_for_prod": False,
-                    "deployment_result": deployment_result,
-                    "tag_error": str(e)
-                }
-        else:
-            return {
-                "status": "failed",
-                "environment": "uat",
-                "deployment_result": deployment_result
-            }
+        result = {
+            "status": "success" if deployment_result['success'] else "failed",
+            "environment": "uat",
+            "source": "local" if use_local else "git",
+            "project_path": str(project_dir),
+            "deployment_result": deployment_result
+        }
+        
+        # Add commit info if we auto-committed
+        if commit_info:
+            result['commit_info'] = commit_info
+        
+        return result
+    
+    def _resolve_shared_libs(self, project_dir: Path) -> bool:
+        """Replace symlinks with actual shared-libs for deployment"""
+        
+        shared_libs_link = project_dir / "shared-libs"
+        
+        # Check if project uses shared-libs (symlink or reference)
+        if shared_libs_link.is_symlink() or self._dockerfile_references_shared_libs(project_dir):
+            print(f"Resolving shared-libs for {project_dir.name}")
+            
+            # Remove symlink if it exists
+            if shared_libs_link.is_symlink():
+                shared_libs_link.unlink()
+            
+            # Clone fresh copy of shared-libs
+            shared_libs_repo = self._get_shared_libs_repo()
+            temp_shared_libs = self.git_manager.clone_repository(
+                shared_libs_repo, f"shared-libs-{project_dir.name}", "main"
+            )
+            
+            # Copy into project
+            shutil.copytree(temp_shared_libs, shared_libs_link)
+            print(f"✓ Copied shared-libs to {shared_libs_link}")
+            
+        return True
+    
+    def _dockerfile_references_shared_libs(self, project_dir: Path) -> bool:
+        """Check if any Dockerfile references shared-libs"""
+        for dockerfile in project_dir.glob("**/Dockerfile"):
+            if "shared-libs" in dockerfile.read_text():
+                return True
+        return False
     
     def deploy_to_prod(self, project: str, use_uat_tag: bool = True, 
                       specific_tag: str = None) -> Dict[str, Any]:
-        """Deploy to prod using UAT-tested version tag"""
+        """Deploy project to production environment"""
         
-        print(f"Starting production deployment for {project}")
+        if not self.deployment_manager:
+            return {'success': False, 'error': 'Deployment manager not initialized'}
         
-        # Get project configuration
-        project_config = self.config['projects'].get(project)
-        if not project_config:
-            raise ValueError(f"Project {project} not found in deployment config")
+        print(f"🚀 Deploying {project} to production")
         
-        # Determine which version to deploy
-        if specific_tag:
-            git_ref = specific_tag
-        elif use_uat_tag:
-            # Clone to get latest UAT tag
-            repo_url = project_config['git_repo']
-            temp_dir = self.git_manager.clone_repository(repo_url, f"{project}_temp", "main")
+        try:
+            result = self.deployment_manager.deploy_to_prod(project, use_uat_tag)
             
-            latest_uat_tag = self.version_manager.get_latest_uat_tag(temp_dir)
-            if not latest_uat_tag:
-                return {
-                    "status": "failed",
-                    "error": "No UAT tag found for production deployment"
-                }
-            git_ref = latest_uat_tag
-        else:
-            git_ref = "main"
-        
-        print(f"Deploying {project} to production using {git_ref}")
-        
-        # Clone repository at specific tag/branch
-        repo_url = project_config['git_repo']
-        project_dir = self.git_manager.clone_repository(repo_url, f"{project}_prod", git_ref)
-        
-        # Deploy to production environment
-        deployment_result = self.deploy_environment(
-            project=project,
-            environment="prod",
-            project_dir=project_dir,
-            reuse_uat_images=use_uat_tag
-        )
-        
-        return {
-            "status": "success" if deployment_result['success'] else "failed",
-            "environment": "prod",
-            "git_ref": git_ref,
-            "git_commit": self.git_manager.get_current_commit(project_dir),
-            "deployment_result": deployment_result
-        }
+            if result['status'] == 'success':
+                # Update load balancer after deployment
+                lb_result = self.load_balancer_manager.deploy_nginx_config()
+                result['load_balancer_update'] = lb_result
+            
+            return result
+            
+        except Exception as e:
+            return {
+                'success': False,
+                'error': str(e)
+            }
     
     def deploy_environment(self, project: str, environment: str, 
                           project_dir: Path, reuse_uat_images: bool = False) -> Dict[str, Any]:
