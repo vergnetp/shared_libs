@@ -14,9 +14,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 
-from infrastructure_state import InfrastructureState
-from environment_generator import EnvironmentGenerator
-from ssh_key_manager import SSHKeyManager
+from ..infrastructure_state import InfrastructureState
+from ..environment_generator import EnvironmentGenerator
+from ..managers.ssh_key_manager import SSHKeyManager
+from ..platform import PlatformManager
 
 
 class GitManager:
@@ -178,6 +179,10 @@ class DeploymentManager:
         environment_generator.container_secret_manager.set_platform(platform)
         self.deployer = self._get_platform_deployer(platform)
         self.build_command = self._get_build_command(platform)
+        self.platform_manager = PlatformManager(
+            platform=platform,
+            secret_manager=environment_generator.container_secret_manager.secret_manager
+        )
 
     def _get_build_command(self, platform: str) -> str:
         """Get the container build command for the platform"""
@@ -774,9 +779,10 @@ services:
     
     def _get_droplet_ip(self, droplet_name: str) -> str:
         """Get droplet IP from infrastructure state"""
-        # This would be injected or accessed through infrastructure state
-        # For now, placeholder implementation
-        return "placeholder_ip"
+        droplet = self.infrastructure_state.get_droplet(droplet_name)
+        if droplet:
+            return droplet['ip']
+        raise ValueError(f"Droplet {droplet_name} not found in infrastructure state")
 
 
 class KubernetesDeployer:

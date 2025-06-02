@@ -24,7 +24,7 @@ from .managers.deployment_manager import DeploymentManager
 from .managers.load_balancer_manager import LoadBalancerManager
 from .managers.snapshot_manager import SnapshotManager
 from .distributed_health import DistributedHealthMonitor
-
+from ..emailing import Emailer, EmailConfig
 
 class InfrastructureOrchestrator:
     """
@@ -58,7 +58,14 @@ class InfrastructureOrchestrator:
         self.deployment_manager = None
         
         # Email integration (placeholder - integrate with your emailer)
-        self.emailer = None  # TODO: Initialize with your emailer module
+        email_config_path = self.config_dir / "email_config.json"
+        if email_config_path.exists():            
+            with open(email_config_path, 'r') as f:
+                email_config_data = json.load(f)
+            email_config = EmailConfig(**email_config_data)
+            self.emailer = Emailer(email_config)
+        else:
+            self.emailer = None
         
     def initialize_system(self) -> Dict[str, Any]:
         """Initialize the entire orchestration system"""
