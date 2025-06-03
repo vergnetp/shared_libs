@@ -1,14 +1,15 @@
 """
 Distributed Health Monitoring
 
-Implements peer-to-peer health monitoring with consensus-based failure detection,
-automated recovery, and heartbeat email notifications.
+Simplified health monitoring with timeout-based failure detection and
+deterministic leader election for recovery coordination.
 """
 
 import asyncio
 import json
 import aiohttp
 import time
+import socket
 from datetime import datetime, timedelta
 from typing import Dict, List, Set, Optional, Any
 from dataclasses import dataclass
@@ -38,25 +39,10 @@ class HealthCheckResult:
         }
 
 
-@dataclass
-class FailureConsensus:
-    """Tracks failure consensus among peers"""
-    failed_target: str
-    reporting_peers: Set[str]
-    first_reported: datetime
-    consensus_reached: bool
-    
-    def add_peer_report(self, peer: str):
-        self.reporting_peers.add(peer)
-    
-    def check_consensus(self, total_peers: int, required_majority: float = 0.5) -> bool:
-        self.consensus_reached = len(self.reporting_peers) >= (total_peers * required_majority)
-        return self.consensus_reached
-
-
 class DistributedHealthMonitor:
     """
-    Distributed health monitoring daemon that runs on each droplet
+    Simplified distributed health monitoring with timeout-based failure detection
+    and deterministic leader election for recovery coordination.
     """
     
     def __init__(self, droplet_name: str, infrastructure_state: InfrastructureState,
@@ -70,27 +56,25 @@ class DistributedHealthMonitor:
         
         # Health monitoring state
         self.health_results = {}  # target -> HealthCheckResult
-        self.failure_consensus = {}  # target -> FailureConsensus
+        self.failure_start_times = {}  # target -> datetime when failure first detected
         self.last_heartbeat_sent = datetime.now() - timedelta(hours=1)
-        self.peer_health_reports = {}  # peer -> {target -> health_status}
         
         # Configuration
-        self.check_interval = 30  # seconds
-        self.health_timeout = 10  # seconds
-        self.consensus_timeout = 300  # 5 minutes to reach consensus
-        self.heartbeat_interval = 15  # minutes
+        self.check_interval = 30  # seconds between health checks
+        self.health_timeout = 10  # seconds for individual health check
+        self.failure_timeout_minutes = 5  # minutes before triggering recovery
+        self.heartbeat_interval = 15  # minutes between heartbeat emails
         
         # Recovery coordination
         self.recovery_operations = set()  # Track ongoing recovery operations
         
     async def start_monitoring(self):
         """Start the distributed health monitoring daemon"""
-        print(f"Starting distributed health monitoring on {self.droplet_name}")
+        print(f"Starting simplified health monitoring on {self.droplet_name}")
         
         # Start all monitoring tasks
         tasks = [
             asyncio.create_task(self._health_check_loop()),
-            asyncio.create_task(self._consensus_check_loop()),
             asyncio.create_task(self._heartbeat_loop()),
             asyncio.create_task(self._cleanup_loop())
         ]
@@ -139,7 +123,7 @@ class DistributedHealthMonitor:
                     await self._process_health_result(result)
     
     async def _check_target_health(self, target_droplet: str) -> HealthCheckResult:
-        """Check health of a specific target droplet"""
+        """Check health of a specific target droplet using basic connectivity tests"""
         
         target_config = self.state.get_droplet(target_droplet)
         if not target_config:
@@ -154,155 +138,132 @@ class DistributedHealthMonitor:
         target_ip = target_config['ip']
         start_time = time.time()
         
-        # Health check endpoints to try
-        health_endpoints = [
-            f"http://{target_ip}:8080/health",  # Health check port
-            f"http://{target_ip}/health",       # Default nginx health
+        # Basic connectivity tests (in order of importance)
+        connectivity_tests = [
+            ('SSH', target_ip, 22),     # SSH = server is alive
+            ('HTTP', target_ip, 80),    # HTTP = nginx is running  
+            ('HTTPS', target_ip, 443),  # HTTPS = SSL services running
         ]
         
-        # Try each endpoint
-        for endpoint in health_endpoints:
+        # Try each connectivity test
+        for test_name, ip, port in connectivity_tests:
             try:
-                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=self.health_timeout)) as session:
-                    async with session.get(endpoint) as response:
-                        response_time = (time.time() - start_time) * 1000
-                        
-                        if response.status == 200:
-                            return HealthCheckResult(
-                                target=target_droplet,
-                                healthy=True,
-                                response_time_ms=response_time,
-                                error=None,
-                                timestamp=datetime.now()
-                            )
-                        else:
-                            continue  # Try next endpoint
-                            
+                if await self._test_tcp_connectivity(ip, port):
+                    response_time = (time.time() - start_time) * 1000
+                    return HealthCheckResult(
+                        target=target_droplet,
+                        healthy=True,
+                        response_time_ms=response_time,
+                        error=None,
+                        timestamp=datetime.now()
+                    )
             except Exception as e:
-                continue  # Try next endpoint
+                continue  # Try next test
         
-        # All endpoints failed
+        # All connectivity tests failed
         response_time = (time.time() - start_time) * 1000
         return HealthCheckResult(
             target=target_droplet,
             healthy=False,
             response_time_ms=response_time,
-            error="All health endpoints failed",
+            error="All connectivity tests failed (SSH:22, HTTP:80, HTTPS:443)",
             timestamp=datetime.now()
         )
     
+    async def _test_tcp_connectivity(self, host: str, port: int) -> bool:
+        """Test if we can connect to a TCP port"""
+        try:
+            future = asyncio.get_event_loop().run_in_executor(
+                None, self._test_tcp_connection, host, port
+            )
+            return await asyncio.wait_for(future, timeout=3.0)
+        except asyncio.TimeoutError:
+            return False
+        except Exception:
+            return False
+    
     async def _process_health_result(self, result: HealthCheckResult):
-        """Process a health check result and trigger consensus if needed"""
+        """Process health check result and trigger recovery if needed"""
         
         # Store result
         self.health_results[result.target] = result
         
-        # If target is unhealthy, start consensus process
         if not result.healthy:
-            await self._report_failure_to_peers(result.target, result.error)
+            # Track when failure started
+            if result.target not in self.failure_start_times:
+                self.failure_start_times[result.target] = datetime.now()
+                print(f"⚠️  Detected failure for {result.target}: {result.error}")
             
-            # Check if we need to start consensus tracking
-            if result.target not in self.failure_consensus:
-                self.failure_consensus[result.target] = FailureConsensus(
-                    failed_target=result.target,
-                    reporting_peers={self.droplet_name},
-                    first_reported=datetime.now(),
-                    consensus_reached=False
-                )
-        else:
-            # Target is healthy, remove from failure tracking
-            if result.target in self.failure_consensus:
-                del self.failure_consensus[result.target]
-    
-    async def _report_failure_to_peers(self, failed_target: str, error: str):
-        """Report failure to peer droplets for consensus"""
-        
-        # Get all droplets to notify
-        all_droplets = self.state.get_all_droplets()
-        peer_droplets = [name for name in all_droplets.keys() if name != self.droplet_name]
-        
-        failure_report = {
-            'reporter': self.droplet_name,
-            'failed_target': failed_target,
-            'error': error,
-            'timestamp': datetime.now().isoformat()
-        }
-        
-        # Send failure report to each peer
-        for peer in peer_droplets:
-            try:
-                await self._send_failure_report_to_peer(peer, failure_report)
-            except Exception as e:
-                print(f"Failed to send failure report to {peer}: {e}")
-    
-    async def _send_failure_report_to_peer(self, peer_droplet: str, report: Dict[str, Any]):
-        """Send failure report to a specific peer"""
-        
-        peer_config = self.state.get_droplet(peer_droplet)
-        if not peer_config:
-            return
-        
-        peer_ip = peer_config['ip']
-        endpoint = f"http://{peer_ip}:8080/health/failure-report"
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(endpoint, json=report, timeout=aiohttp.ClientTimeout(total=5)) as response:
-                    if response.status == 200:
-                        print(f"Failure report sent to {peer_droplet}")
-        except Exception as e:
-            print(f"Failed to send failure report to {peer_droplet}: {e}")
-    
-    async def _consensus_check_loop(self):
-        """Check for failure consensus and trigger recovery"""
-        while True:
-            try:
-                await self._check_failure_consensus()
-                await asyncio.sleep(30)  # Check consensus every 30 seconds
-            except Exception as e:
-                print(f"Error in consensus check loop: {e}")
-                await asyncio.sleep(30)
-    
-    async def _check_failure_consensus(self):
-        """Check if consensus has been reached for any failures"""
-        
-        total_droplets = len(self.state.get_all_droplets())
-        
-        for target, consensus in list(self.failure_consensus.items()):
-            if consensus.check_consensus(total_droplets):
-                print(f"Consensus reached for failed target: {target}")
-                await self._handle_consensus_failure(target, consensus)
+            # Check if failure has persisted long enough to trigger recovery
+            failure_duration = datetime.now() - self.failure_start_times[result.target]
+            
+            if failure_duration >= timedelta(minutes=self.failure_timeout_minutes):
+                print(f"🚨 {result.target} has been down for {failure_duration}, checking recovery leadership...")
                 
-                # Remove from tracking after handling
-                del self.failure_consensus[target]
-            elif datetime.now() - consensus.first_reported > timedelta(seconds=self.consensus_timeout):
-                # Consensus timeout reached, remove from tracking
-                print(f"Consensus timeout for {target}, removing from tracking")
-                del self.failure_consensus[target]
-    
-    async def _handle_consensus_failure(self, failed_target: str, consensus: FailureConsensus):
-        """Handle a target that has reached failure consensus"""
-        
-        # Determine recovery leader (droplet with lowest IP to avoid conflicts)
-        all_healthy_droplets = [
-            name for name, droplet in self.state.get_all_droplets().items()
-            if name != failed_target and name not in [c.failed_target for c in self.failure_consensus.values()]
-        ]
-        
-        if not all_healthy_droplets:
-            print("No healthy droplets available for recovery coordination")
-            return
-        
-        # Sort by IP to get deterministic leader
-        healthy_ips = [(name, self.state.get_droplet(name)['ip']) for name in all_healthy_droplets]
-        healthy_ips.sort(key=lambda x: x[1])
-        recovery_leader = healthy_ips[0][0]
-        
-        if recovery_leader == self.droplet_name:
-            print(f"Acting as recovery leader for failed target: {failed_target}")
-            await self._coordinate_recovery(failed_target)
+                # Check if we should be the recovery leader
+                if await self._am_i_recovery_leader_for(result.target):
+                    print(f"🏆 I am the recovery leader for {result.target}")
+                    await self._coordinate_recovery(result.target)
+                else:
+                    print(f"⏳ Another server is the recovery leader for {result.target}")
         else:
-            print(f"Recovery will be coordinated by {recovery_leader} for {failed_target}")
+            # Target is healthy, clear failure tracking
+            if result.target in self.failure_start_times:
+                print(f"✅ {result.target} is healthy again")
+                del self.failure_start_times[result.target]
+    
+    async def _am_i_recovery_leader_for(self, failed_target: str) -> bool:
+        """Deterministically determine if this server should lead recovery"""
+        
+        # Get all droplets except the failed one
+        all_droplets = self.state.get_all_droplets()
+        candidate_leaders = []
+        
+        for name, config in all_droplets.items():
+            if name != failed_target:
+                # Quick reachability check for other servers
+                if name == self.droplet_name:
+                    # We're always reachable to ourselves
+                    candidate_leaders.append((name, config['ip']))
+                elif await self._is_server_reachable(config['ip']):
+                    candidate_leaders.append((name, config['ip']))
+        
+        if not candidate_leaders:
+            print("🚨 No healthy servers found for recovery leadership!")
+            return False
+        
+        # Sort by IP address for deterministic ordering (lowest IP wins)
+        candidate_leaders.sort(key=lambda x: x[1])
+        
+        recovery_leader = candidate_leaders[0][0]
+        
+        print(f"🗳️  Recovery leader election: {recovery_leader} (from candidates: {[name for name, _ in candidate_leaders]})")
+        
+        return recovery_leader == self.droplet_name
+    
+    async def _is_server_reachable(self, server_ip: str) -> bool:
+        """Quick check if server is reachable"""
+        try:
+            # Test SSH port connectivity (non-blocking)
+            future = asyncio.get_event_loop().run_in_executor(
+                None, self._test_tcp_connection, server_ip, 22
+            )
+            return await asyncio.wait_for(future, timeout=3.0)
+        except asyncio.TimeoutError:
+            return False
+        except Exception:
+            return False
+    
+    def _test_tcp_connection(self, host: str, port: int) -> bool:
+        """Test TCP connection (blocking, run in executor)"""
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(2)
+            result = sock.connect_ex((host, port))
+            sock.close()
+            return result == 0
+        except Exception:
+            return False
     
     async def _coordinate_recovery(self, failed_target: str):
         """Coordinate recovery of a failed target"""
@@ -314,7 +275,7 @@ class DistributedHealthMonitor:
         self.recovery_operations.add(failed_target)
         
         try:
-            print(f"Starting recovery coordination for {failed_target}")
+            print(f"🔄 Starting recovery coordination for {failed_target}")
             
             # 1. Remove from load balancer immediately
             await self._remove_from_load_balancer(failed_target)
@@ -328,6 +289,10 @@ class DistributedHealthMonitor:
                 
                 # 4. Send recovery notification
                 await self._send_recovery_notification(failed_target, recovery_result)
+                
+                # 5. Clear failure tracking
+                if failed_target in self.failure_start_times:
+                    del self.failure_start_times[failed_target]
             else:
                 # 5. Send failure notification
                 await self._send_recovery_failure_notification(failed_target, recovery_result)
@@ -342,9 +307,6 @@ class DistributedHealthMonitor:
         """Remove failed target from load balancer"""
         
         try:
-            # Update infrastructure state to mark droplet as failed
-            # This will automatically regenerate nginx config without the failed droplet
-            
             # Get services running on failed droplet
             services_on_droplet = self.state.get_services_on_droplet(failed_target)
             
@@ -512,9 +474,9 @@ class DistributedHealthMonitor:
                 </div>
                 """
             
-            # Send email using your emailer
+            # Send email using emailer (recipients will come from config)
             self.emailer.send_email(
-                subject=subject,                
+                subject=subject,
                 html=html_content
             )
             
@@ -589,7 +551,7 @@ class DistributedHealthMonitor:
             """
             
             self.emailer.send_email(
-                subject=subject,               
+                subject=subject,
                 html=html_content
             )
             
@@ -621,7 +583,7 @@ class DistributedHealthMonitor:
             """
             
             self.emailer.send_email(
-                subject=subject,               
+                subject=subject,
                 html=html_content
             )
             
@@ -641,7 +603,7 @@ class DistributedHealthMonitor:
                 await asyncio.sleep(3600)
     
     async def _cleanup_old_data(self):
-        """Clean up old health check results and consensus data"""
+        """Clean up old health check results"""
         
         cutoff_time = datetime.now() - timedelta(hours=24)
         
@@ -654,17 +616,18 @@ class DistributedHealthMonitor:
         for target in old_results:
             del self.health_results[target]
         
-        # Clean up old consensus data
-        old_consensus = [
-            target for target, consensus in self.failure_consensus.items()
-            if consensus.first_reported < cutoff_time
+        # Clean up old failure tracking for healthy targets
+        healthy_targets = [
+            target for target, result in self.health_results.items()
+            if result.healthy
         ]
         
-        for target in old_consensus:
-            del self.failure_consensus[target]
+        for target in healthy_targets:
+            if target in self.failure_start_times:
+                del self.failure_start_times[target]
         
-        if old_results or old_consensus:
-            print(f"Cleaned up {len(old_results)} old health results and {len(old_consensus)} old consensus data")
+        if old_results:
+            print(f"Cleaned up {len(old_results)} old health results")
     
     def get_monitoring_status(self) -> Dict[str, Any]:
         """Get current monitoring status"""
@@ -673,10 +636,13 @@ class DistributedHealthMonitor:
             'droplet_name': self.droplet_name,
             'monitoring_targets': len(self.health_results),
             'healthy_targets': sum(1 for r in self.health_results.values() if r.healthy),
-            'active_failures': len(self.failure_consensus),
+            'active_failures': len(self.failure_start_times),
             'recovery_operations': len(self.recovery_operations),
             'last_heartbeat': self.last_heartbeat_sent.isoformat(),
             'health_results': {
                 target: result.to_dict() for target, result in self.health_results.items()
+            },
+            'failure_tracking': {
+                target: start_time.isoformat() for target, start_time in self.failure_start_times.items()
             }
         }
