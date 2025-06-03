@@ -175,23 +175,12 @@ class ConfigManager:
             "reply_to": "admin@yourdomain.com",
             "default_subject_prefix": "[Infrastructure] ",
             "max_file_size_mb": 25,
-            "recipients": {
-                "admin": "admin@yourdomain.com",
-                "alerts": "alerts@yourdomain.com"
-            },
-            "smtp_settings": {
-                "host": "smtp.gmail.com",
-                "port": 587,
-                "use_tls": True,
-                "username": "alerts@yourdomain.com",
-                "password": "GMAIL_APP_PASSWORD"
-            },
-            "notification_settings": {
-                "heartbeat_emails": True,
-                "recovery_notifications": True,
-                "deployment_notifications": True,
-                "error_notifications": True
-            }
+            "default_recipients": ["admin@yourdomain.com"],
+            "smtp_host": "smtp.gmail.com",
+            "smtp_port": 465,
+            "smtp_user": "alerts@yourdomain.com",
+            "smtp_password": "GMAIL_APP_PASSWORD",
+            "use_ssl": True
         }
         
         with open(config_file, 'w') as f:

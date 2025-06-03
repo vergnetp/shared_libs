@@ -514,8 +514,7 @@ class DistributedHealthMonitor:
             
             # Send email using your emailer
             self.emailer.send_email(
-                subject=subject,
-                recipients=["admin@yourdomain.com"],  # Configure this
+                subject=subject,                
                 html=html_content
             )
             
@@ -590,8 +589,7 @@ class DistributedHealthMonitor:
             """
             
             self.emailer.send_email(
-                subject=subject,
-                recipients=["admin@yourdomain.com"],
+                subject=subject,               
                 html=html_content
             )
             
@@ -623,8 +621,7 @@ class DistributedHealthMonitor:
             """
             
             self.emailer.send_email(
-                subject=subject,
-                recipients=["admin@yourdomain.com"],
+                subject=subject,               
                 html=html_content
             )
             

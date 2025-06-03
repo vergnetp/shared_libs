@@ -82,7 +82,7 @@ class Emailer:
     
         Args:
             subject (str): Subject of the email.
-            recipients (List[str]): List of recipient email addresses.
+            recipients (List[str]): List of recipient email addresses. If None, uses default_recipients from config.
             text (Optional[str]): Plain text version of the email content.
             html (Optional[str]): HTML version of the email content.
             attached_file (Optional[str | bytes]): File path or bytes to attach.
@@ -97,6 +97,13 @@ class Emailer:
         Returns:
             Dict[str, Any]: Email sending status and details.
         """
+        # Use default recipients if none provided
+        if recipients is None:
+            recipients = self.config.default_recipients
+            
+        if not recipients:
+            raise ValueError("No recipients provided and no default_recipients configured in email config")
+        
         # Process attachment if provided
         attachments = None
         if attached_file:

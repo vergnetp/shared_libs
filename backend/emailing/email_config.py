@@ -16,6 +16,7 @@ class EmailConfig:
         reply_to: Optional[str] = None,
         default_subject_prefix: str = "",
         max_file_size_mb: int = 25,
+        default_recipients: Optional[List[str]] = None,
         **provider_settings
     ):
         """
@@ -27,6 +28,7 @@ class EmailConfig:
             reply_to: Default reply-to address
             default_subject_prefix: Prefix added to all email subjects 
             max_file_size_mb: Maximum attachment size in MB
+            default_recipients: Default list of email recipients
             **provider_settings: Provider-specific configuration options
         """
         self.provider = provider
@@ -34,6 +36,7 @@ class EmailConfig:
         self.reply_to = reply_to
         self.default_subject_prefix = default_subject_prefix
         self.max_file_size_mb = max_file_size_mb
+        self.default_recipients = default_recipients or []
         
         # Provider-specific settings
         self.provider_settings = provider_settings
@@ -95,6 +98,7 @@ class EmailConfig:
             "reply_to": self.reply_to,
             "default_subject_prefix": self.default_subject_prefix,
             "max_file_size_mb": self.max_file_size_mb,
+            "default_recipients": self.default_recipients,
         }
         
         # Add provider settings
