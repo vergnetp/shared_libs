@@ -17,6 +17,7 @@ The Infrastructure Module provides a complete solution for managing cloud infras
 - **Load Balancing**: Dynamic nginx configuration with upstream management
 - **Secret Management**: Secure handling of environment variables and secrets
 - **Platform Agnostic**: Support for Docker, Kubernetes, and Podman deployments
+- **Email Notifications**: Comprehensive email system with SMTP support and automatic compression
 
 ## 🎯 How It Works: JSON Specification → Infrastructure
 
@@ -66,11 +67,13 @@ The Infrastructure Module provides a complete solution for managing cloud infras
     "hostomatic-web2": {"ip": "192.168.1.12", "role": "web", "project": "hostomatic"}
   },
   "projects": {
-    "hostomatic-prod": {
-      "backend": {"port": 8001, "assigned_droplets": ["hostomatic-web1", "hostomatic-web2"]},
-      "frontend": {"port": 9001, "assigned_droplets": ["hostomatic-web1", "hostomatic-web2"]},
-      "worker_email": {"type": "worker", "assigned_droplets": ["hostomatic-web1"]},
-      "scheduler": {"type": "worker", "assigned_droplets": ["hostomatic-web1"]}
+    "hostomatic": {
+      "prod": {
+        "backend": {"port": 8001, "assigned_droplets": ["hostomatic-web1", "hostomatic-web2"]},
+        "frontend": {"port": 9001, "assigned_droplets": ["hostomatic-web1", "hostomatic-web2"]},
+        "worker_email": {"type": "worker", "assigned_droplets": ["hostomatic-web1"]},
+        "scheduler": {"type": "worker", "assigned_droplets": ["hostomatic-web1"]}
+      }
     }
   }
 }
@@ -109,6 +112,9 @@ export ADMIN_IP="203.0.113.100/32"
 # Project secrets (including worker secrets)
 export HOSTOMATIC_PROD_DB_PASSWORD="secure_database_password"
 export HOSTOMATIC_PROD_SENDGRID_API_KEY="SG.your_sendgrid_key_for_workers"
+
+# Email configuration
+export GMAIL_APP_PASSWORD="your_gmail_app_password"
 ```
 
 ### Step 4: Configure Your Infrastructure
@@ -145,6 +151,11 @@ Edit `config/infrastructure.json`:
 Edit `config/deployment_config.json`:
 ```json
 {
+  "deployment_platform": "docker",
+  "git_config": {
+    "base_url": "https://github.com/yourorg",
+    "url_pattern": "{base_url}/{project}.git"
+  },
   "projects": {
     "hostomatic": {
       "services": {
@@ -205,7 +216,7 @@ python orchestrator.py --init
 python orchestrator.py --orchestrate
 
 # Force recreate all resources
-python orchestrator.py --orchestrate --force
+python orchestrator.py --orchestrate --force --yes
 
 # Get infrastructure status
 python orchestrator.py --status
@@ -233,6 +244,9 @@ python orchestrator.py --deploy-uat hostomatic --local --project-path ../hostoma
 
 # Deploy to production (uses latest UAT tag, includes workers)
 python orchestrator.py --deploy-prod hostomatic
+
+# Deploy with image rebuilding instead of promotion
+python orchestrator.py --deploy-prod hostomatic --rebuild-images
 ```
 
 ### Health Monitoring
@@ -243,6 +257,22 @@ python orchestrator.py --monitor master &
 # Start monitoring on web servers  
 python orchestrator.py --monitor hostomatic-web1 &
 python orchestrator.py --monitor hostomatic-web2 &
+```
+
+### Recovery and Maintenance
+```bash
+# Emergency recovery
+python orchestrator.py --recover failed-droplet-name
+
+# Cleanup old resources
+python orchestrator.py --cleanup --dry-run
+python orchestrator.py --cleanup
+
+# Update administrator IP
+python orchestrator.py --update-ip 203.0.113.100/32
+
+# Reproduce deployment from tag
+python orchestrator.py --reproduce v1.0.0-uat-20250603-1200 --reproduce-dir ./reproduced
 ```
 
 ## 🔧 Configuration Files Reference
@@ -260,16 +290,25 @@ Single source of truth for your infrastructure:
     }
   },
   "projects": {
-    "hostomatic-prod": {
-      "backend": {
-        "type": "web",
-        "port": 8001,
-        "assigned_droplets": ["hostomatic-web1", "hostomatic-web2"]
-      },
-      "worker_email": {
-        "type": "worker",
-        "assigned_droplets": ["hostomatic-web1"]
+    "hostomatic": {
+      "prod": {
+        "backend": {
+          "type": "web",
+          "port": 8001,
+          "assigned_droplets": ["hostomatic-web1", "hostomatic-web2"]
+        },
+        "worker_email": {
+          "type": "worker",
+          "assigned_droplets": ["hostomatic-web1"]
+        }
       }
+    }
+  },
+  "health_monitoring": {
+    "heartbeat_config": {
+      "primary_sender": "master",
+      "backup_senders": [],
+      "interval_minutes": 15
     }
   },
   "infrastructure_spec": {
@@ -295,11 +334,23 @@ Single source of truth for your infrastructure:
 ```json
 {
   "deployment_platform": "docker",
+  "auto_commit_before_deploy": true,
+  "git_config": {
+    "base_url": "https://github.com/yourorg",
+    "url_pattern": "{base_url}/{project}.git",
+    "default_branch": "main"
+  },
   "projects": {
     "hostomatic": {
+      "versioning": {
+        "auto_tag_uat": true,
+        "tag_format": "v{version}-uat-{timestamp}",
+        "prod_uses_uat_tags": true
+      },
       "services": {
         "backend": {
           "containerfile_path": "backend/Dockerfile",
+          "build_context": "backend/",
           "secrets": ["db_password", "stripe_key"]
         },
         "worker_email": {
@@ -307,16 +358,27 @@ Single source of truth for your infrastructure:
           "containerfile_path": "workers/Dockerfile",
           "command": "python email_processor.py",
           "secrets": ["db_password", "sendgrid_api_key"]
-        },
-        "scheduler": {
-          "type": "worker",
-          "containerfile_path": "scheduler/Dockerfile",
-          "command": "python cron_scheduler.py",
-          "secrets": ["db_password", "redis_password"]
         }
       }
     }
   }
+}
+```
+
+### email_config.json
+```json
+{
+  "provider": "smtp",
+  "from_address": "alerts@yourdomain.com",
+  "reply_to": "admin@yourdomain.com",
+  "default_subject_prefix": "[Infrastructure] ",
+  "max_file_size_mb": 25,
+  "default_recipients": ["admin@yourdomain.com"],
+  "smtp_host": "smtp.gmail.com",
+  "smtp_port": 465,
+  "smtp_user": "alerts@yourdomain.com",
+  "smtp_password": "GMAIL_APP_PASSWORD",
+  "use_ssl": true
 }
 ```
 
@@ -390,6 +452,44 @@ Single source of truth for your infrastructure:
 8. Health Monitoring (includes worker processes)
 ```
 
+## 📧 Email System
+
+The system includes a comprehensive email notification system with the following features:
+
+### Email Features
+- **Multi-Provider Support**: SMTP (including Gmail) with extensible adapter pattern
+- **Rich Content**: Both HTML and plain text email support
+- **Attachments**: File attachment support with automatic compression
+- **Template System**: Email templates for heartbeat, recovery notifications
+- **Security**: Safe attachment handling with size limits and compression
+
+### Email Usage
+```python
+from backend.emailing import Emailer, EmailConfig
+
+# Configure email
+config = EmailConfig(
+    provider="smtp",
+    from_address="alerts@yourdomain.com",
+    smtp_host="smtp.gmail.com",
+    smtp_port=465,
+    smtp_user="alerts@yourdomain.com",
+    smtp_password="your_app_password",
+    use_ssl=True,
+    default_recipients=["admin@yourdomain.com"]
+)
+
+# Send notification
+emailer = Emailer(config)
+emailer.send_email(
+    subject="Infrastructure Alert",
+    recipients=["admin@yourdomain.com"],
+    html="<h1>Alert</h1><p>System status update</p>",
+    attached_file="report.pdf",
+    compress=True
+)
+```
+
 ## 🔍 Monitoring Workers
 
 ### Worker Health Checks
@@ -449,6 +549,21 @@ python orchestrator.py --status | grep worker
 
 ## 📚 Advanced Usage
 
+### Platform Support
+
+The system supports multiple container platforms:
+
+- **Docker**: Default platform using Docker Compose
+- **Kubernetes**: YAML manifests with namespace isolation
+- **Podman**: Alternative container runtime
+
+Switch platforms in `deployment_config.json`:
+```json
+{
+  "deployment_platform": "kubernetes"
+}
+```
+
 ### Custom Worker Types
 
 Add custom workers to deployment config:
@@ -481,6 +596,35 @@ Workers are deployed to each environment:
 - `hostomatic-prod-worker_email` (production email worker)
 - `hostomatic-uat-worker_email` (UAT email worker)
 
+### Deployment Versioning
+
+The system supports sophisticated deployment versioning:
+
+1. **Unified Tagging**: Single tag covers both project and shared-libs
+2. **UAT → Production**: Production deployments use tested UAT images
+3. **Reproduction**: Exact deployment reproduction from any tag
+4. **Auto-commit**: Automatic commit and tagging before deployment
+
+Example deployment with versioning:
+```bash
+# Deploy to UAT (creates tag: deploy-uat-20250603-120000)
+python orchestrator.py --deploy-uat hostomatic --local
+
+# Deploy to production (promotes UAT images)
+python orchestrator.py --deploy-prod hostomatic
+
+# Reproduce exact deployment later
+python orchestrator.py --reproduce deploy-uat-20250603-120000
+```
+
+### Health Monitoring Features
+
+- **Distributed Consensus**: Multiple monitors must agree on failure
+- **Deterministic Leader Election**: Lowest IP address coordinates recovery
+- **Automatic Recovery**: Snapshot-based recovery with service migration
+- **Email Heartbeats**: Regular "all OK" emails with infrastructure status
+- **Backup Notification**: Backup servers send alerts when master is down
+
 <div style="background-color:#f8f9fa; border:1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 24px;margin-top: 24px;">
 
 ### class `InfrastructureOrchestrator`
@@ -494,7 +638,7 @@ Main orchestrator that coordinates all infrastructure operations including worke
 |------------|--------|------|---------|----------|-------------|
 | | `__init__` | `config_dir: str = "config"` | | Initialization | Initialize the orchestrator with configuration directory. |
 | | `initialize_system` | | `Dict[str, Any]` | Setup | Initialize the entire orchestration system including SSH keys and configurations. |
-| | `orchestrate_infrastructure` | `force_recreate: bool = False` | `Dict[str, Any]` | Infrastructure | Main orchestration function - create infrastructure from JSON specification. |
+| | `orchestrate_infrastructure` | `force_recreate: bool = False`, `skip_confirmation: bool = False` | `Dict[str, Any]` | Infrastructure | Main orchestration function - create infrastructure from JSON specification with transactional approach. |
 | | `add_project` | `project: str`, `environments: List[str]`, `web_droplets: int`, `web_droplet_spec: str` | `Dict[str, Any]` | Project Management | Add a new project to infrastructure with worker support. |
 | | `scale_project` | `project: str`, `target_web_droplets: int` | `Dict[str, Any]` | Scaling | Scale a project to target number of web droplets (workers scale automatically). |
 | | `remove_project` | `project: str` | `Dict[str, Any]` | Project Management | Remove a project from infrastructure including all workers. |
@@ -519,12 +663,11 @@ Main orchestrator that coordinates all infrastructure operations including worke
 | | `_setup_ssh_keys` | | `Dict[str, Any]` | Setup | Setup SSH keys for infrastructure access and upload to DigitalOcean. |
 | | `_load_deployment_config` | | `Dict[str, Any]` | Setup | Load deployment configuration including worker definitions and initialize deployment manager. |
 | | `_validate_infrastructure_spec` | | `Dict[str, Any]` | Validation | Validate infrastructure specification structure and content including worker assignments. |
-| | `_plan_infrastructure_changes_from_spec` | `force_recreate: bool = False` | `Dict[str, Any]` | Planning | Plan what infrastructure changes are needed based on JSON specification including worker services. |
-| | `_execute_infrastructure_plan` | `plan: Dict[str, Any]` | `Dict[str, Any]` | Execution | Execute the planned infrastructure changes including worker deployments. |
+| | `_analyze_infrastructure_state` | | `Dict[str, Any]` | Planning | Analyze current vs desired state and determine what changes are needed including worker services. |
+| | `_validate_infrastructure_changes` | `analysis: Dict[str, Any]` | `Dict[str, Any]` | Validation | Validate proposed infrastructure changes and get user confirmation with cost estimates. |
+| | `_plan_transactional_execution` | `analysis: Dict[str, Any]`, `force_recreate: bool` | `Dict[str, Any]` | Planning | Plan the transactional execution with service migration including worker migrations. |
+| | `_execute_transactional_plan` | `plan: Dict[str, Any]` | `Dict[str, Any]` | Execution | Execute the planned infrastructure changes including worker deployments with rollback capability. |
 | | `_create_droplet` | `name: str`, `config: Dict[str, Any]` | `Dict[str, Any]` | Infrastructure | Create a new droplet with specified configuration for hosting workers. |
-| | `_resize_droplet` | `name: str`, `new_size: str` | `Dict[str, Any]` | Infrastructure | Resize an existing droplet (updates state, actual resize requires manual intervention). |
-| | `_configure_service` | `project: str`, `service_type: str`, `config: Dict[str, Any]` | `Dict[str, Any]` | Infrastructure | Configure a service (web or worker) in the infrastructure state. |
-| | `_remove_service` | `project: str`, `service_type: str` | `Dict[str, Any]` | Infrastructure | Remove a service (web or worker) from the infrastructure state. |
 | | `_destroy_droplet` | `name: str` | `Dict[str, Any]` | Infrastructure | Destroy a droplet and remove from state including all hosted workers. |
 | | `_setup_monitoring_relationships` | `droplet_name: str`, `role: str` | | Monitoring | Setup peer monitoring relationships for new droplet based on role including worker monitoring. |
 
@@ -547,12 +690,12 @@ Manages the normalized infrastructure state with computed relationships includin
 |------------|--------|------|---------|----------|-------------|
 | | `__init__` | `state_file: str = "config/infrastructure.json"` | | Initialization | Initialize infrastructure state with JSON file path. |
 | | `save_state` | | | Persistence | Save current state to JSON file. |
-| | `get_infrastructure_spec` | | `Dict[str, Any]` | Infrastructure Specification | Get infrastructure specification from JSON. |
-| | `update_infrastructure_spec` | `spec: Dict[str, Any]` | | Infrastructure Specification | Update infrastructure specification. |
-| | `add_project_spec` | `project: str`, `environments: List[str]`, `web_droplets: int`, `web_droplet_spec: str` | | Infrastructure Specification | Add project specification for worker and web service deployment. |
-| | `remove_project_spec` | `project: str` | | Infrastructure Specification | Remove project specification including all workers. |
-| | `get_required_droplets` | | `Dict[str, Dict[str, Any]]` | Computed Requirements | Calculate required droplets from spec for hosting workers and web services. |
-| | `get_required_services` | | `Dict[str, Dict[str, Any]]` | Computed Requirements | Calculate required services from spec including workers and infrastructure services. |
+| | `get_desired_droplets` | | `Dict[str, Dict[str, Any]]` | Infrastructure State | Get droplets as defined in JSON (desired state). |
+| | `get_actual_droplets_from_do` | `do_manager` | `Dict[str, Dict[str, Any]]` | Infrastructure State | Get actual droplets from DigitalOcean. |
+| | `get_droplets_to_create` | `do_manager` | `List[Dict[str, Any]]` | Transactional Operations | Get droplets that need to be created. |
+| | `get_droplets_to_modify` | `do_manager` | `List[Dict[str, Any]]` | Transactional Operations | Get droplets that need to be modified (recreated with different specs). |
+| | `get_droplets_to_delete` | `do_manager` | `List[Dict[str, Any]]` | Transactional Operations | Get droplets that exist in DO but not in desired state. |
+| | `get_ip_corrections_needed` | `do_manager` | `List[Dict[str, Any]]` | Transactional Operations | Get droplets where JSON IP doesn't match DO IP (need correction). |
 | | `add_droplet` | `name: str`, `ip: str`, `size: str`, `region: str`, `role: str`, `monitors: List[str] = None`, `project: str = None` | | Droplet Management | Add a new droplet to the state that can host workers. |
 | | `update_droplet_ip` | `name: str`, `new_ip: str` | | Droplet Management | Update droplet IP address. |
 | | `remove_droplet` | `name: str` | | Droplet Management | Remove droplet from state including all hosted workers. |
@@ -560,17 +703,15 @@ Manages the normalized infrastructure state with computed relationships includin
 | | `get_all_droplets` | | `Dict[str, Dict[str, Any]]` | Droplet Management | Get all droplets. |
 | | `get_droplets_by_role` | `role: str` | `Dict[str, Dict[str, Any]]` | Droplet Management | Get droplets filtered by role. |
 | | `get_droplets_by_project` | `project: str` | `Dict[str, Dict[str, Any]]` | Droplet Management | Get droplets filtered by project including worker hosts. |
-| | `add_project_service` | `project: str`, `service_type: str`, `port: int = None`, `assigned_droplets: List[str] = None`, `service_config: Dict[str, Any] = None` | | Project Management | Add a service (web or worker) to a project. |
-| | `remove_project_service` | `project: str`, `service_type: str` | | Project Management | Remove a service (web or worker) from a project. |
+| | `add_project_service` | `project: str`, `service_type: str`, `environment: str = None`, `port: int = None`, `assigned_droplets: List[str] = None`, `service_config: Dict[str, Any] = None` | | Project Management | Add a service (web or worker) to a project. |
+| | `remove_project_service` | `project: str`, `service_type: str`, `environment: str = None` | | Project Management | Remove a service (web or worker) from a project. |
 | | `get_project_services` | `project: str` | `Dict[str, Dict[str, Any]]` | Project Management | Get all services for a project including workers. |
-| | `get_all_projects` | | `Dict[str, Dict[str, Any]]` | Project Management | Get all projects including worker services. |
+| | `get_all_projects` | | `Dict[str, Dict[str, Any]]` | Project Management | Get all projects including worker services with flat keys for backward compatibility. |
 | | `get_service_name` | `project: str`, `service_type: str` | `str` | Computed Relationships | Generate service name from project and service type (web or worker). |
-| | `get_services_on_droplet` | `droplet_name: str` | `List[str]` | Computed Relationships | Get all services running on a specific droplet including workers. |
+| | `get_services_on_droplet` | `droplet_name: str` | `List[Dict[str, Any]]` | Computed Relationships | Get all services running on a specific droplet with full context including workers. |
 | | `get_load_balancer_targets` | `project: str`, `service_type: str` | `List[str]` | Computed Relationships | Get load balancer targets for a service (web services only, excludes workers). |
-| | `get_monitored_by` | `droplet_name: str` | `List[str]` | Computed Relationships | Get list of droplets that monitor the given droplet. |
 | | `generate_resource_hash` | `project: str`, `environment: str` | `str` | Utility | Generate deterministic hash for resource naming. |
 | | `get_hash_based_port` | `project: str`, `environment: str`, `base_port: int`, `port_range: int = 1000` | `int` | Utility | Generate hash-based port allocation for web services. |
-| | `update_heartbeat_config` | `primary_sender: str = None`, `backup_senders: List[str] = None`, `interval_minutes: int = None` | | Health Monitoring | Update heartbeat monitoring configuration. |
 | | `get_heartbeat_config` | | `Dict[str, Any]` | Health Monitoring | Get heartbeat monitoring configuration. |
 | | `get_master_droplet` | | `Optional[Dict[str, Any]]` | Utility | Get the master droplet. |
 | | `get_web_droplets` | | `Dict[str, Dict[str, Any]]` | Utility | Get all web droplets that can host workers. |
@@ -588,6 +729,62 @@ Manages the normalized infrastructure state with computed relationships includin
 |------------|--------|------|---------|----------|-------------|
 | | `_load_state` | | `Dict[str, Any]` | Persistence | Load state from JSON file or create empty state. |
 | | `_create_empty_state` | | `Dict[str, Any]` | Persistence | Create empty state structure with default worker support. |
+| | `_get_flat_project_key` | `project: str`, `environment: str` | `str` | Utility | Generate flat project key from project and environment for backward compatibility. |
+
+</details>
+
+<br>
+
+</div>
+
+<div style="background-color:#f8f9fa; border:1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 24px;margin-top: 24px;">
+
+### class `Emailer`
+
+Main class for sending emails with provider abstraction and attachment support.
+
+<details>
+<summary><strong>Public Methods</strong></summary>
+
+| Decorators | Method | Args | Returns | Category | Description |
+|------------|--------|------|---------|----------|-------------|
+| | `__init__` | `config: EmailConfig` | | Initialization | Initialize the emailer with configuration. |
+| `@try_catch` | `compress_file` | `data: Union[str, bytes]` | `bytes` | Utility | Compresses a file or bytes into a ZIP archive. |
+| `@try_catch` | `send_email` | `subject: str`, `recipients: List[str]`, `text: Optional[str] = None`, `html: Optional[str] = None`, `attached_file: Optional[Union[str, bytes]] = None`, `compress: Optional[bool] = False`, `attached_file_name: Optional[str] = None`, `from_address: Optional[str] = None`, `reply_to: Optional[str] = None`, `cc: Optional[List[str]] = None`, `bcc: Optional[List[str]] = None`, `headers: Optional[Dict[str, str]] = None` | `Dict[str, Any]` | Email | Send an email with optional text, HTML content, and attachments. |
+| | `close` | | `None` | Lifecycle | Close adapter connections and perform cleanup. |
+
+</details>
+
+<br>
+
+</div>
+
+<div style="background-color:#f8f9fa; border:1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 24px;margin-top: 24px;">
+
+### class `EmailConfig`
+
+Configuration for email operations.
+
+<details>
+<summary><strong>Public Methods</strong></summary>
+
+| Decorators | Method | Args | Returns | Category | Description |
+|------------|--------|------|---------|----------|-------------|
+| | `__init__` | `provider: str = "smtp"`, `from_address: Optional[str] = None`, `reply_to: Optional[str] = None`, `default_subject_prefix: str = ""`, `max_file_size_mb: int = 25`, `default_recipients: Optional[List[str]] = None`, `**provider_settings` | | Initialization | Initialize email configuration with connection parameters. |
+| | `with_overrides` | `**overrides` | `EmailConfig` | Configuration | Create a new configuration with specific overrides. |
+| | `get_provider_setting` | `key: str`, `default: Any = None` | `Any` | Configuration | Get a provider-specific setting. |
+| | `to_dict` | | `Dict[str, Any]` | Serialization | Convert configuration to dictionary. |
+
+</details>
+
+<br>
+
+<details>
+<summary><strong>Private/Internal Methods</strong></summary>
+
+| Decorators | Method | Args | Returns | Category | Description |
+|------------|--------|------|---------|----------|-------------|
+| | `_validate_config` | | | Validation | Validate configuration values and adjust if necessary. |
 
 </details>
 
@@ -622,11 +819,8 @@ Distributed health monitoring daemon that runs on each droplet including worker 
 | | `_health_check_loop` | | | Monitoring | Main health checking loop that runs continuously including worker process checks. |
 | | `_perform_health_checks` | | | Monitoring | Perform health checks on all assigned targets including worker status. |
 | | `_check_target_health` | `target_droplet: str` | `HealthCheckResult` | Monitoring | Check health of a specific target droplet including worker processes. |
-| | `_process_health_result` | `result: HealthCheckResult` | | Monitoring | Process a health check result and trigger consensus if needed. |
-| | `_report_failure_to_peers` | `failed_target: str`, `error: str` | | Consensus | Report failure to peer droplets for consensus building. |
-| | `_consensus_check_loop` | | | Consensus | Check for failure consensus and trigger recovery actions including worker recovery. |
-| | `_check_failure_consensus` | | | Consensus | Check if consensus has been reached for any failures. |
-| | `_handle_consensus_failure` | `failed_target: str`, `consensus: FailureConsensus` | | Recovery | Handle a target that has reached failure consensus including worker recovery. |
+| | `_process_health_result` | `result: HealthCheckResult` | | Monitoring | Process a health check result and trigger recovery if needed. |
+| | `_am_i_recovery_leader_for` | `failed_target: str` | `bool` | Recovery | Deterministically determine if this server should lead recovery (lowest IP wins). |
 | | `_coordinate_recovery` | `failed_target: str` | | Recovery | Coordinate recovery of a failed target including workers as the elected leader. |
 | | `_heartbeat_loop` | | | Notifications | Send heartbeat emails at regular intervals including worker status. |
 | | `_send_heartbeat_if_due` | | | Notifications | Send heartbeat email if interval has passed. |
@@ -671,12 +865,62 @@ Manages all configuration files and templates including worker configurations.
 | | `_create_all_templates` | | `Dict[str, Any]` | Templates | Create all deployment templates including worker templates. |
 | | `_create_docker_compose_template` | | `Dict[str, Any]` | Templates | Create Docker Compose template with worker support. |
 | | `_create_k8s_deployment_template` | | `Dict[str, Any]` | Templates | Create Kubernetes deployment template with worker support. |
-| | `_create_k8s_service_template` | | `Dict[str, Any]` | Templates | Create Kubernetes service template (excludes workers). |
-| | `_create_k8s_namespace_template` | | `Dict[str, Any]` | Templates | Create Kubernetes namespace template. |
-| | `_create_nginx_template` | | `Dict[str, Any]` | Templates | Create nginx configuration template. |
-| | `_create_vault_template` | | `Dict[str, Any]` | Templates | Create Vault configuration template. |
 | | `_create_email_templates` | | `Dict[str, Any]` | Templates | Create email notification templates including worker status. |
 | | `_create_env_templates` | | `Dict[str, Any]` | Templates | Create environment file templates including worker environment template. |
+
+</details>
+
+<br>
+
+</div>
+
+<div style="background-color:#f8f9fa; border:1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 24px;margin-top: 24px;">
+
+### class `PlatformManager`
+
+Manages platform-specific operations across different container platforms.
+
+<details>
+<summary><strong>Public Methods</strong></summary>
+
+| Decorators | Method | Args | Returns | Category | Description |
+|------------|--------|------|---------|----------|-------------|
+| | `__init__` | `platform: str = 'docker'`, `secret_manager=None` | | Initialization | Initialize platform manager with specified platform and secret manager. |
+| `@classmethod` | `get_available_platforms` | | `List[str]` | Platform Information | Get list of available platforms (docker, kubernetes). |
+| | `get_platform_name` | | `str` | Platform Information | Get current platform name. |
+| | `get_platform_capabilities` | | `Dict[str, bool]` | Platform Information | Get platform capabilities including secrets, networking, auto-scaling support. |
+| | `build_image` | `image_name: str`, `containerfile_path: str`, `build_context: str`, `build_args: Dict[str, str] = None` | `bool` | Image Management | Build container image using platform-specific method. |
+| | `deploy_service` | `context: Dict[str, Any]`, `config_file_path: str` | `bool` | Service Deployment | Deploy service using platform-specific configuration. |
+| | `generate_deployment_config` | `context: Dict[str, Any]` | `str` | Service Deployment | Generate platform-specific deployment configuration. |
+| | `get_config_file_name` | `service_name: str` | `str` | Service Deployment | Get platform-specific configuration file name. |
+| | `get_deploy_command` | `config_file: str` | `str` | Service Deployment | Get platform-specific deployment command. |
+| | `check_service_status` | `service_name: str` | `str` | Service Management | Check service status. |
+| | `get_service_logs` | `service_name: str`, `lines: int = 100` | `str` | Service Management | Get service logs. |
+| | `stop_service` | `service_name: str` | `bool` | Service Management | Stop service. |
+| | `remove_service` | `service_name: str` | `bool` | Service Management | Remove service. |
+| | `restart_service` | `service_name: str` | `bool` | Service Management | Restart service. |
+| | `create_secrets` | `project: str`, `environment: str`, `secrets: Dict[str, str]` | `List[str]` | Secret Management | Create secrets using platform-specific method. |
+| | `remove_secret` | `secret_name: str`, `**kwargs` | `bool` | Secret Management | Remove a secret. |
+| | `list_secrets` | `**kwargs` | `List[str]` | Secret Management | List all secrets. |
+| | `cleanup_project_secrets` | `project: str`, `environment: str` | `int` | Secret Management | Remove all secrets for a project/environment. |
+| | `get_health_check_url` | `service_name: str`, `host: str`, `port: int` | `str` | Health Checks | Generate health check URL. |
+| | `get_platform_info` | | `Dict[str, Any]` | Platform Information | Get comprehensive platform information. |
+| | `validate_service_configuration` | `context: Dict[str, Any]` | `List[str]` | Validation | Validate service configuration for the platform. |
+| | `switch_platform` | `new_platform: str` | `bool` | Utility | Switch to a different platform. |
+
+</details>
+
+<br>
+
+<details>
+<summary><strong>Private/Internal Methods</strong></summary>
+
+| Decorators | Method | Args | Returns | Category | Description |
+|------------|--------|------|---------|----------|-------------|
+| | `_get_runtime` | `platform: str` | `ContainerRuntime` | Initialization | Get platform-specific runtime. |
+| | `_get_template_engine` | `platform: str` | `TemplateEngine` | Initialization | Get platform-specific template engine. |
+| | `_get_secret_handler` | `platform: str`, `secret_manager` | `SecretHandler` | Initialization | Get platform-specific secret handler. |
+| | `_enhance_context_with_secrets` | `context: Dict[str, Any]` | `Dict[str, Any]` | Secret Management | Enhance context with platform-specific secrets configuration. |
 
 </details>
 

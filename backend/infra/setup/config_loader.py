@@ -156,42 +156,30 @@ class ConfigManager:
         
         # Create example infrastructure configuration
         infrastructure_data = {
-            "droplets": {},
-            "projects": {},
-            "health_monitoring": {
-                "heartbeat_config": {
-                    "primary_sender": "master",
-                    "backup_senders": [],
-                    "interval_minutes": 15
-                }
-            },
-            "infrastructure_spec": {
-                "droplets": {
-                    "master": {
-                        "size": "s-2vcpu-4gb",
-                        "region": "lon1",
-                        "role": "master"
-                    }
-                },
-                "projects": {
-                    "hostomatic": {
-                        "environments": ["prod", "uat"],
-                        "web_droplets": 2,
-                        "web_droplet_spec": "s-2vcpu-4gb"
-                    },
-                    "digitalpixo": {
-                        "environments": ["prod", "uat"],
-                        "web_droplets": 1,
-                        "web_droplet_spec": "s-1vcpu-1gb"
-                    },
-                    "newstartup": {
-                        "environments": ["uat"],
-                        "web_droplets": 1,
-                        "web_droplet_spec": "s-1vcpu-1gb"
-                    }
-                }
-            }
-        }
+  "droplets": {
+    "master": {"ip": "192.168.1.10", "role": "master", "size": "s-2vcpu-4gb", "region": "lon1"},
+    "web1": {"ip": "192.168.1.11", "role": "web", "size": "s-1vcpu-1gb", "region": "lon1"},
+    "web2": {"ip": "192.168.1.12", "role": "web", "size": "s-1vcpu-1gb", "region": "lon1"}
+  },
+  "projects": {
+    "hostomatic": {
+      "prod": {
+        "backend": {"port": 8001, "assigned_droplets": ["web1", "web2"]},
+        "frontend": {"port": 9001, "assigned_droplets": ["web1", "web2"]},
+        "worker_cleaner": {"assigned_droplets": ["master"]}
+      },
+      "uat": {
+        "backend": {"port": 8002, "assigned_droplets": ["web1", "web2"]},
+        "frontend": {"port": 9002, "assigned_droplets": ["web1", "web2"]},
+        "worker_cleaner": {"assigned_droplets": ["web1"]}
+      },
+      "test": {
+        "backend": {"port": 8003, "assigned_droplets": ["web1"]},
+        "frontend": {"port": 9003, "assigned_droplets": ["web1"]}     
+      }
+    }
+  }
+}
         
         with open(json_file, 'w') as f:
             json.dump(infrastructure_data, f, indent=2)
@@ -764,7 +752,7 @@ max_lease_ttl = "8760h"
             f.write(template_content)
         
         return {'status': 'created', 'file': str(template_file)}
-    
+
     def _create_email_templates(self) -> Dict[str, Any]:
         """Create email notification templates"""
         
@@ -784,6 +772,12 @@ max_lease_ttl = "8760h"
 </head>
 <body style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
     <h2 style="color: #28a745;">🟢 All Systems Operational</h2>
+    
+    <div style="background-color: #d4edda; border: 1px solid #c3e6cb; padding: 10px; border-radius: 5px; margin-bottom: 15px;">
+        <p><strong>Heartbeat Leader:</strong> {{leader_droplet}}</p>
+        <p><strong>Leadership Method:</strong> Deterministic (Lowest IP)</p>
+        <p><strong>Available Peers:</strong> {{peer_count}}</p>
+    </div>
     
     <table style="border-collapse: collapse; width: 100%; border: 1px solid #ddd;">
         <tr style="background-color: #f8f9fa;">
@@ -816,7 +810,10 @@ max_lease_ttl = "8760h"
         </tr>
     </table>
     
-    <p style="color: #6c757d; font-size: 14px; margin-top: 15px;">No action needed.</p>
+    <p style="color: #6c757d; font-size: 14px; margin-top: 15px;">
+        No action needed. Leadership rotates automatically based on server availability.
+        Next heartbeat leader will be determined by lowest IP among healthy servers.
+    </p>
 </body>
 </html>"""
             
@@ -824,39 +821,7 @@ max_lease_ttl = "8760h"
                 f.write(heartbeat_content)
             
             results['heartbeat'] = {'status': 'created', 'file': str(heartbeat_file)}
-        
-        # Recovery notification template
-        recovery_file = email_templates_dir / "recovery.html"
-        if not recovery_file.exists():
-            recovery_content = """<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <title>Recovery Notification</title>
-</head>
-<body style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-    <h2 style="color: #17a2b8;">🔄 Automatic Recovery Completed</h2>
-    
-    <div style="background-color: #d1ecf1; border: 1px solid #bee5eb; padding: 15px; border-radius: 5px;">
-        <p><strong>Failed Droplet:</strong> {{failed_droplet}}</p>
-        <p><strong>New Droplet:</strong> {{new_droplet}}</p>
-        <p><strong>New IP:</strong> {{new_ip}}</p>
-        <p><strong>Recovery Time:</strong> {{recovery_time}} minutes</p>
-        <p><strong>Code Version:</strong> {{git_commit}}</p>
-        <p><strong>Services Restored:</strong> {{services_count}} (including workers)</p>
-    </div>
-    
-    <p style="color: #0c5460; margin-top: 15px;">Service restored automatically using latest deployment snapshot.</p>
-</body>
-</html>"""
-            
-            with open(recovery_file, 'w') as f:
-                f.write(recovery_content)
-            
-            results['recovery'] = {'status': 'created', 'file': str(recovery_file)}
-        
-        return results
-    
+
     def _create_env_templates(self) -> Dict[str, Any]:
         """Create environment file templates"""
         

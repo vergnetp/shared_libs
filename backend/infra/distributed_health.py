@@ -383,57 +383,44 @@ class DistributedHealthMonitor:
         if not self.emailer:
             return
         
-        heartbeat_config = self.state.get_heartbeat_config()
-        primary_sender = heartbeat_config.get('primary_sender', 'master')
-        backup_senders = heartbeat_config.get('backup_senders', [])
-        interval_minutes = heartbeat_config.get('interval_minutes', 15)
-        
-        should_send = False
-        email_type = "primary"
-        
-        if self.droplet_name == primary_sender:
-            # Primary sender sends regular heartbeats
+        # Use the same leader election logic as recovery
+        if await self._am_i_heartbeat_leader():
+            # I'm the heartbeat leader - send regular heartbeats
             time_since_last = datetime.now() - self.last_heartbeat_sent
-            if time_since_last >= timedelta(minutes=interval_minutes):
-                should_send = True
-                email_type = "primary"
-        elif self.droplet_name in backup_senders:
-            # Backup senders only send if master is down
-            master_healthy = await self._check_master_health()
-            if not master_healthy:
-                time_since_last = datetime.now() - self.last_heartbeat_sent
-                if time_since_last >= timedelta(minutes=10):  # More frequent for backup
-                    should_send = True
-                    email_type = "backup"
-        
-        if should_send:
-            await self._send_heartbeat_email(email_type)
-            self.last_heartbeat_sent = datetime.now()
+            if time_since_last >= timedelta(minutes=self.heartbeat_interval):
+                await self._send_heartbeat_email("primary")
+                self.last_heartbeat_sent = datetime.now()
     
-    async def _check_master_health(self) -> bool:
-        """Check if master droplet is healthy"""
+    async def _am_i_heartbeat_leader(self) -> bool:
+        """Deterministically determine if this server should send heartbeats (same logic as recovery leader)"""
         
-        master_droplet = self.state.get_master_droplet()
-        if not master_droplet:
+        # Get all healthy droplets
+        all_droplets = self.state.get_all_droplets()
+        candidate_leaders = []
+        
+        for name, config in all_droplets.items():
+            # Quick reachability check for other servers
+            if name == self.droplet_name:
+                # We're always reachable to ourselves
+                candidate_leaders.append((name, config['ip']))
+            elif await self._is_server_reachable(config['ip']):
+                candidate_leaders.append((name, config['ip']))
+        
+        if not candidate_leaders:
+            print("🚨 No healthy servers found for heartbeat leadership!")
             return False
         
-        master_name = None
-        for name, droplet in self.state.get_all_droplets().items():
-            if droplet == master_droplet:
-                master_name = name
-                break
+        # Sort by IP address for deterministic ordering (lowest IP wins)
+        candidate_leaders.sort(key=lambda x: x[1])
         
-        if not master_name or master_name == self.droplet_name:
-            return True  # We are the master or master not found
+        heartbeat_leader = candidate_leaders[0][0]
         
-        # Check if we have recent health data for master
-        master_health = self.health_results.get(master_name)
-        if master_health and master_health.healthy:
-            # Check if health data is recent (within last 5 minutes)
-            if datetime.now() - master_health.timestamp < timedelta(minutes=5):
-                return True
+        # Only log leadership changes, not every check
+        if not hasattr(self, '_last_heartbeat_leader') or self._last_heartbeat_leader != heartbeat_leader:
+            print(f"💓 Heartbeat leader: {heartbeat_leader} (from candidates: {[name for name, _ in candidate_leaders]})")
+            self._last_heartbeat_leader = heartbeat_leader
         
-        return False
+        return heartbeat_leader == self.droplet_name
     
     async def _send_heartbeat_email(self, email_type: str):
         """Send heartbeat email notification"""
@@ -441,38 +428,26 @@ class DistributedHealthMonitor:
         try:
             status_summary = self._get_infrastructure_status_summary()
             
-            if email_type == "primary":
-                subject = f"✅ Infrastructure OK - {datetime.now().strftime('%H:%M')}"
-                
-                html_content = f"""
-                <div style="font-family: Arial, sans-serif; max-width: 600px;">
-                    <h2 style="color: #28a745;">🟢 All Systems Operational</h2>
-                    <table style="border-collapse: collapse; width: 100%; border: 1px solid #ddd;">
-                        <tr style="background-color: #f8f9fa;"><td style="padding: 8px; border: 1px solid #ddd;"><strong>Master:</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{status_summary['master']['status']}</td></tr>
-                        <tr><td style="padding: 8px; border: 1px solid #ddd;"><strong>Web Droplets:</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{status_summary['web_count']} healthy</td></tr>
-                        <tr style="background-color: #f8f9fa;"><td style="padding: 8px; border: 1px solid #ddd;"><strong>Total Services:</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{status_summary['total_services']} running</td></tr>
-                        <tr><td style="padding: 8px; border: 1px solid #ddd;"><strong>Backend Services:</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{status_summary['backend_services']} running</td></tr>
-                        <tr style="background-color: #f8f9fa;"><td style="padding: 8px; border: 1px solid #ddd;"><strong>Frontend Services:</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{status_summary['frontend_services']} running</td></tr>
-                        <tr><td style="padding: 8px; border: 1px solid #ddd;"><strong>Last Check:</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</td></tr>
-                    </table>
-                    <p style="color: #6c757d; font-size: 14px; margin-top: 15px;">No action needed.</p>
+            subject = f"✅ Infrastructure OK - {datetime.now().strftime('%H:%M')} (from {self.droplet_name})"
+            
+            html_content = f"""
+            <div style="font-family: Arial, sans-serif; max-width: 600px;">
+                <h2 style="color: #28a745;">🟢 All Systems Operational</h2>
+                <div style="background-color: #d4edda; border: 1px solid #c3e6cb; padding: 10px; border-radius: 5px; margin-bottom: 15px;">
+                    <p><strong>Heartbeat Leader:</strong> {self.droplet_name}</p>
+                    <p><strong>Leadership Method:</strong> Deterministic (Lowest IP)</p>
                 </div>
-                """
-                
-            else:  # backup
-                subject = f"⚠️ Backup Heartbeat - Master may be down - {datetime.now().strftime('%H:%M')}"
-                
-                html_content = f"""
-                <div style="font-family: Arial, sans-serif; max-width: 600px;">
-                    <h2 style="color: #ffc107;">⚠️ Backup Heartbeat from {self.droplet_name}</h2>
-                    <div style="background-color: #fff3cd; border: 1px solid #ffeaa7; padding: 15px; border-radius: 5px;">
-                        <p><strong>Master status:</strong> {status_summary['master']['status']}</p>
-                        <p><strong>This droplet:</strong> Healthy</p>
-                        <p><strong>Other peers:</strong> {status_summary['peer_status']}</p>
-                    </div>
-                    <p style="color: #856404; margin-top: 15px;">Master droplet may need attention.</p>
-                </div>
-                """
+                <table style="border-collapse: collapse; width: 100%; border: 1px solid #ddd;">
+                    <tr style="background-color: #f8f9fa;"><td style="padding: 8px; border: 1px solid #ddd;"><strong>Master:</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{status_summary['master']['status']}</td></tr>
+                    <tr><td style="padding: 8px; border: 1px solid #ddd;"><strong>Web Droplets:</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{status_summary['web_count']} healthy</td></tr>
+                    <tr style="background-color: #f8f9fa;"><td style="padding: 8px; border: 1px solid #ddd;"><strong>Total Services:</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{status_summary['total_services']} running</td></tr>
+                    <tr><td style="padding: 8px; border: 1px solid #ddd;"><strong>Backend Services:</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{status_summary['backend_services']} running</td></tr>
+                    <tr style="background-color: #f8f9fa;"><td style="padding: 8px; border: 1px solid #ddd;"><strong>Frontend Services:</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{status_summary['frontend_services']} running</td></tr>
+                    <tr><td style="padding: 8px; border: 1px solid #ddd;"><strong>Last Check:</strong></td><td style="padding: 8px; border: 1px solid #ddd;">{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</td></tr>
+                </table>
+                <p style="color: #6c757d; font-size: 14px; margin-top: 15px;">No action needed. Leadership rotates automatically based on server availability.</p>
+            </div>
+            """
             
             # Send email using emailer (recipients will come from config)
             self.emailer.send_email(
@@ -480,7 +455,7 @@ class DistributedHealthMonitor:
                 html=html_content
             )
             
-            print(f"Sent {email_type} heartbeat email")
+            print(f"Sent heartbeat email as leader from {self.droplet_name}")
             
         except Exception as e:
             print(f"Error sending heartbeat email: {e}")
