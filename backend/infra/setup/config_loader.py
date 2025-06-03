@@ -3,10 +3,10 @@ Configuration Management
 
 Handles loading, validation, and creation of all configuration files
 and templates for the Personal Cloud Orchestration System.
+Updated to remove CSV dependency and use JSON as source of truth.
 """
 
 import json
-import csv
 from pathlib import Path
 from typing import Dict, Any, List
 
@@ -27,7 +27,7 @@ class ConfigManager:
         self.templates_dir.mkdir(parents=True, exist_ok=True)
 
     def _create_deployment_config(self) -> Dict[str, Any]:
-        """Create deployment_config.json"""
+        """Create deployment_config.json with worker support"""
         
         config_file = self.config_dir / "deployment_config.json"
         
@@ -115,6 +115,13 @@ class ConfigManager:
                             "containerfile_path": "frontend/Dockerfile",
                             "build_context": "frontend/",
                             "secrets": ["stripe_publishable_key"]
+                        },
+                        "worker_image_processing": {
+                            "type": "worker",
+                            "containerfile_path": "workers/Dockerfile",
+                            "build_context": "workers/",
+                            "command": "python image_processor.py",
+                            "secrets": ["db_password", "openai_api_key"]
                         }
                     }
                 }
@@ -130,7 +137,7 @@ class ConfigManager:
         """Initialize all configuration files with defaults"""
         
         results = {
-            'projects_csv': self._create_projects_csv(),
+            'infrastructure_json': self._create_infrastructure_json(),
             'deployment_config': self._create_deployment_config(),
             'email_config': self._create_email_config(),
             'sms_config': self._create_sms_config(),
@@ -139,27 +146,57 @@ class ConfigManager:
         
         return results
     
-    def _create_projects_csv(self) -> Dict[str, Any]:
-        """Create example projects.csv"""
+    def _create_infrastructure_json(self) -> Dict[str, Any]:
+        """Create example infrastructure.json"""
         
-        csv_file = self.config_dir / "projects.csv"
+        json_file = self.config_dir / "infrastructure.json"
         
-        if csv_file.exists():
-            return {'status': 'exists', 'file': str(csv_file)}
+        if json_file.exists():
+            return {'status': 'exists', 'file': str(json_file)}
         
-        # Create example CSV
-        projects_data = [
-            ['Project', 'Servers', 'MasterSpec', 'WebSpec'],
-            ['hostomatic', '3', 's-2vcpu-4gb', 's-2vcpu-4gb'],
-            ['digitalpixo', '1', 's-1vcpu-1gb', 's-1vcpu-1gb'],
-            ['newstartup', '1', 's-1vcpu-1gb', 's-1vcpu-1gb']
-        ]
+        # Create example infrastructure configuration
+        infrastructure_data = {
+            "droplets": {},
+            "projects": {},
+            "health_monitoring": {
+                "heartbeat_config": {
+                    "primary_sender": "master",
+                    "backup_senders": [],
+                    "interval_minutes": 15
+                }
+            },
+            "infrastructure_spec": {
+                "droplets": {
+                    "master": {
+                        "size": "s-2vcpu-4gb",
+                        "region": "lon1",
+                        "role": "master"
+                    }
+                },
+                "projects": {
+                    "hostomatic": {
+                        "environments": ["prod", "uat"],
+                        "web_droplets": 2,
+                        "web_droplet_spec": "s-2vcpu-4gb"
+                    },
+                    "digitalpixo": {
+                        "environments": ["prod", "uat"],
+                        "web_droplets": 1,
+                        "web_droplet_spec": "s-1vcpu-1gb"
+                    },
+                    "newstartup": {
+                        "environments": ["uat"],
+                        "web_droplets": 1,
+                        "web_droplet_spec": "s-1vcpu-1gb"
+                    }
+                }
+            }
+        }
         
-        with open(csv_file, 'w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerows(projects_data)
+        with open(json_file, 'w') as f:
+            json.dump(infrastructure_data, f, indent=2)
         
-        return {'status': 'created', 'file': str(csv_file)}
+        return {'status': 'created', 'file': str(json_file)}
 
     def _create_email_config(self) -> Dict[str, Any]:
         """Create email_config.json"""
@@ -245,7 +282,7 @@ class ConfigManager:
         return results
     
     def _create_docker_compose_template(self) -> Dict[str, Any]:
-        """Create Docker Compose template"""
+        """Create Docker Compose template with worker support"""
         
         template_file = self.templates_dir / "docker-compose.yml"
         
@@ -309,12 +346,22 @@ services:
       {{/each}}
     {{/if}}
     
+    {{#unless is_worker}}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:{{SERVICE_PORT}}/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
+    {{else}}
+    # Worker health check - check if process is running
+    healthcheck:
+      test: ["CMD", "pgrep", "-f", "{{command}}"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    {{/unless}}
 
 networks:
   app-network:
@@ -337,7 +384,7 @@ volumes:
         return {'status': 'created', 'file': str(template_file)}
     
     def _create_k8s_deployment_template(self) -> Dict[str, Any]:
-        """Create Kubernetes deployment template"""
+        """Create Kubernetes deployment template with worker support"""
         
         template_file = self.templates_dir / "k8s-deployment.yml"
         
@@ -355,6 +402,7 @@ metadata:
     project: {{project}}
     environment: {{environment}}
     service-type: {{service_type}}
+    worker: "{{is_worker}}"
 spec:
   replicas: {{replica_count}}
   selector:
@@ -366,12 +414,14 @@ spec:
         app: {{service_name}}
         project: {{project}}
         environment: {{environment}}
+        worker: "{{is_worker}}"
     spec:
       containers:
       - name: {{service_name}}
         image: {{image_name}}
         {{#if command}}
-        command: [{{command}}]
+        command: ["/bin/sh", "-c"]
+        args: ["{{command}}"]
         {{/if}}
         env:
         # Infrastructure configuration
@@ -427,12 +477,13 @@ spec:
         
         resources:
           requests:
-            memory: "128Mi"
-            cpu: "100m"
+            memory: "{{#if is_worker}}64Mi{{else}}128Mi{{/if}}"
+            cpu: "{{#if is_worker}}50m{{else}}100m{{/if}}"
           limits:
-            memory: "512Mi"
-            cpu: "500m"
+            memory: "{{#if is_worker}}256Mi{{else}}512Mi{{/if}}"
+            cpu: "{{#if is_worker}}200m{{else}}500m{{/if}}"
         
+        {{#unless is_worker}}
         livenessProbe:
           httpGet:
             path: /health
@@ -446,6 +497,17 @@ spec:
             port: {{SERVICE_PORT}}
           initialDelaySeconds: 5
           periodSeconds: 5
+        {{else}}
+        # Worker liveness probe - check if process is still running
+        livenessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - "pgrep -f '{{command}}' || exit 1"
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        {{/unless}}
       
       restartPolicy: Always
 ---
@@ -475,6 +537,7 @@ data:
             return {'status': 'exists', 'file': str(template_file)}
         
         template_content = """# Kubernetes Service Template
+{{#unless is_worker}}
 apiVersion: v1
 kind: Service
 metadata:
@@ -492,7 +555,6 @@ spec:
     protocol: TCP
   type: ClusterIP
 ---
-{{#unless is_worker}}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -745,6 +807,10 @@ max_lease_ttl = "8760h"
             <td style="padding: 8px; border: 1px solid #ddd;">{{frontend_services}} running</td>
         </tr>
         <tr>
+            <td style="padding: 8px; border: 1px solid #ddd;"><strong>Worker Services:</strong></td>
+            <td style="padding: 8px; border: 1px solid #ddd;">{{worker_services}} running</td>
+        </tr>
+        <tr style="background-color: #f8f9fa;">
             <td style="padding: 8px; border: 1px solid #ddd;"><strong>Last Check:</strong></td>
             <td style="padding: 8px; border: 1px solid #ddd;">{{timestamp}}</td>
         </tr>
@@ -777,7 +843,7 @@ max_lease_ttl = "8760h"
         <p><strong>New IP:</strong> {{new_ip}}</p>
         <p><strong>Recovery Time:</strong> {{recovery_time}} minutes</p>
         <p><strong>Code Version:</strong> {{git_commit}}</p>
-        <p><strong>Services Restored:</strong> {{services_count}}</p>
+        <p><strong>Services Restored:</strong> {{services_count}} (including workers)</p>
     </div>
     
     <p style="color: #0c5460; margin-top: 15px;">Service restored automatically using latest deployment snapshot.</p>
@@ -841,6 +907,55 @@ API_VERSION=v1
             
             results['backend'] = {'status': 'created', 'file': str(backend_env_file)}
         
+        # Worker environment template
+        worker_env_file = self.templates_dir / "worker.env"
+        if not worker_env_file.exists():
+            worker_env_content = """# Worker Service Environment Template
+# These variables are dynamically generated by the orchestrator
+
+# Database Configuration
+DB_HOST={{DB_HOST}}
+DB_PORT={{DB_PORT}}
+DB_NAME={{DB_NAME}}
+DB_USER={{DB_USER}}
+# DB_PASSWORD is provided via Docker secrets
+
+# Redis Configuration (for job queues)
+REDIS_HOST={{REDIS_HOST}}
+REDIS_PORT={{REDIS_PORT}}
+# REDIS_PASSWORD is provided via Docker secrets
+
+# Service Configuration
+SERVICE_NAME={{SERVICE_NAME}}
+ENVIRONMENT={{ENVIRONMENT}}
+PROJECT={{PROJECT}}
+WORKER_TYPE={{service_type}}
+
+# Infrastructure Services
+VAULT_HOST={{VAULT_HOST}}
+VAULT_PORT={{VAULT_PORT}}
+OPENSEARCH_HOST={{OPENSEARCH_HOST}}
+OPENSEARCH_PORT={{OPENSEARCH_PORT}}
+OPENSEARCH_INDEX={{OPENSEARCH_INDEX}}
+
+# Worker Settings
+WORKER_CONCURRENCY=1
+WORKER_LOGLEVEL=info
+WORKER_PREFETCH_MULTIPLIER=4
+
+# Queue Settings
+QUEUE_NAME={{service_type}}_queue
+QUEUE_ROUTING_KEY={{service_type}}
+
+# External Service Configuration (secrets via Docker secrets)
+# SENDGRID_API_KEY, OPENAI_API_KEY, etc.
+"""
+            
+            with open(worker_env_file, 'w') as f:
+                f.write(worker_env_content)
+            
+            results['worker'] = {'status': 'created', 'file': str(worker_env_file)}
+        
         # Frontend environment template
         frontend_env_file = self.templates_dir / "frontend.env"
         if not frontend_env_file.exists():
@@ -881,25 +996,40 @@ PUBLIC_URL=/
             'warnings': []
         }
         
-        # Check projects CSV
+        # Check infrastructure JSON
         try:
-            csv_file = self.config_dir / "projects.csv"
-            if csv_file.exists():
-                with open(csv_file, 'r') as f:
-                    reader = csv.DictReader(f)
-                    projects = list(reader)
+            json_file = self.config_dir / "infrastructure.json"
+            if json_file.exists():
+                with open(json_file, 'r') as f:
+                    config = json.load(f)
                     
-                    required_columns = ['Project', 'Servers', 'MasterSpec', 'WebSpec']
-                    for project in projects:
-                        for col in required_columns:
-                            if col not in project or not project[col]:
-                                results['issues'].append(f"Missing or empty {col} for project {project.get('Project', 'unknown')}")
-                                results['valid'] = False
+                    # Check required sections
+                    required_sections = ['infrastructure_spec']
+                    for section in required_sections:
+                        if section not in config:
+                            results['issues'].append(f"Missing {section} section in infrastructure.json")
+                            results['valid'] = False
+                    
+                    # Check infrastructure spec structure
+                    if 'infrastructure_spec' in config:
+                        spec = config['infrastructure_spec']
+                        
+                        if 'projects' not in spec:
+                            results['issues'].append("No projects defined in infrastructure_spec")
+                            results['valid'] = False
+                        else:
+                            # Check each project has required fields
+                            for project, project_config in spec['projects'].items():
+                                required_fields = ['environments', 'web_droplets', 'web_droplet_spec']
+                                for field in required_fields:
+                                    if field not in project_config:
+                                        results['issues'].append(f"Project {project} missing {field}")
+                                        results['valid'] = False
             else:
-                results['issues'].append("projects.csv not found")
+                results['issues'].append("infrastructure.json not found")
                 results['valid'] = False
         except Exception as e:
-            results['issues'].append(f"Error validating projects.csv: {str(e)}")
+            results['issues'].append(f"Error validating infrastructure.json: {str(e)}")
             results['valid'] = False
         
         # Check deployment config
@@ -915,6 +1045,13 @@ PUBLIC_URL=/
                     
                     if 'deployment_platform' not in config:
                         results['warnings'].append("No deployment_platform specified, defaulting to docker")
+                    
+                    # Check for worker services in projects
+                    for project, project_config in config.get('projects', {}).items():
+                        services = project_config.get('services', {})
+                        worker_services = [s for s, c in services.items() if c.get('type') == 'worker']
+                        if worker_services:
+                            print(f"Found worker services in {project}: {worker_services}")
             else:
                 results['issues'].append("deployment_config.json not found")
                 results['valid'] = False
@@ -941,7 +1078,7 @@ PUBLIC_URL=/
         """Get summary of all configuration files"""
         
         config_files = {
-            'projects_csv': self.config_dir / "projects.csv",
+            'infrastructure_json': self.config_dir / "infrastructure.json",
             'deployment_config': self.config_dir / "deployment_config.json",
             'email_config': self.config_dir / "email_config.json",
             'sms_config': self.config_dir / "sms_config.json"
@@ -951,7 +1088,8 @@ PUBLIC_URL=/
             'docker_compose': self.templates_dir / "docker-compose.yml",
             'k8s_deployment': self.templates_dir / "k8s-deployment.yml",
             'nginx_conf': self.templates_dir / "nginx.conf",
-            'vault_config': self.templates_dir / "vault-config.hcl"
+            'vault_config': self.templates_dir / "vault-config.hcl",
+            'worker_env': self.templates_dir / "worker.env"
         }
         
         summary = {

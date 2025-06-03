@@ -3,6 +3,7 @@ Infrastructure State Management
 
 Manages the normalized JSON state for the entire infrastructure,
 including droplets, projects, services, and computed relationships.
+Now uses JSON as the single source of truth instead of CSV.
 """
 
 import json
@@ -30,7 +31,7 @@ class InfrastructureState:
             return self._create_empty_state()
     
     def _create_empty_state(self) -> Dict[str, Any]:
-        """Create empty state structure"""
+        """Create empty state structure with droplet specs"""
         return {
             "droplets": {},
             "projects": {},
@@ -39,6 +40,27 @@ class InfrastructureState:
                     "primary_sender": "master",
                     "backup_senders": [],
                     "interval_minutes": 15
+                }
+            },
+            "infrastructure_spec": {
+                "droplets": {
+                    "master": {
+                        "size": "s-2vcpu-4gb",
+                        "region": "lon1",
+                        "role": "master"
+                    }
+                },
+                "projects": {
+                    "hostomatic": {
+                        "environments": ["prod", "uat"],
+                        "web_droplets": 2,
+                        "web_droplet_spec": "s-2vcpu-4gb"
+                    },
+                    "digitalpixo": {
+                        "environments": ["prod", "uat"],
+                        "web_droplets": 1,
+                        "web_droplet_spec": "s-1vcpu-1gb"
+                    }
                 }
             }
         }
@@ -49,16 +71,149 @@ class InfrastructureState:
         with open(self.state_file, 'w') as f:
             json.dump(self.state, f, indent=2)
     
+    # Infrastructure Specification Management
+    def get_infrastructure_spec(self) -> Dict[str, Any]:
+        """Get infrastructure specification"""
+        return self.state.get("infrastructure_spec", {})
+
+    def update_infrastructure_spec(self, spec: Dict[str, Any]):
+        """Update infrastructure specification"""
+        self.state["infrastructure_spec"] = spec
+        self.save_state()
+
+    def add_project_spec(self, project: str, environments: List[str], 
+                        web_droplets: int, web_droplet_spec: str):
+        """Add project specification"""
+        if "infrastructure_spec" not in self.state:
+            self.state["infrastructure_spec"] = {"droplets": {}, "projects": {}}
+        
+        if "projects" not in self.state["infrastructure_spec"]:
+            self.state["infrastructure_spec"]["projects"] = {}
+        
+        self.state["infrastructure_spec"]["projects"][project] = {
+            "environments": environments,
+            "web_droplets": web_droplets,
+            "web_droplet_spec": web_droplet_spec
+        }
+        self.save_state()
+
+    def remove_project_spec(self, project: str):
+        """Remove project specification"""
+        if "infrastructure_spec" in self.state and "projects" in self.state["infrastructure_spec"]:
+            self.state["infrastructure_spec"]["projects"].pop(project, None)
+            self.save_state()
+
+    def get_required_droplets(self) -> Dict[str, Dict[str, Any]]:
+        """Calculate required droplets from spec"""
+        spec = self.get_infrastructure_spec()
+        required_droplets = {}
+        
+        # Add droplets from spec
+        droplet_specs = spec.get("droplets", {})
+        for name, config in droplet_specs.items():
+            required_droplets[name] = config.copy()
+        
+        # Add web droplets for each project
+        project_specs = spec.get("projects", {})
+        for project, project_config in project_specs.items():
+            web_count = project_config.get("web_droplets", 0)
+            web_spec = project_config.get("web_droplet_spec", "s-1vcpu-1gb")
+            
+            for i in range(1, web_count + 1):
+                droplet_name = f"{project}-web{i}"
+                required_droplets[droplet_name] = {
+                    "size": web_spec,
+                    "region": "lon1",
+                    "role": "web",
+                    "project": project
+                }
+        
+        return required_droplets
+
+    def get_required_services(self) -> Dict[str, Dict[str, Any]]:
+        """Calculate required services from spec"""
+        spec = self.get_infrastructure_spec()
+        required_services = {}
+        
+        project_specs = spec.get("projects", {})
+        for project, project_config in project_specs.items():
+            environments = project_config.get("environments", [])
+            web_count = project_config.get("web_droplets", 0)
+            
+            for env in environments:
+                project_key = f"{project}-{env}"
+                
+                # Determine droplet assignments
+                if web_count == 0:
+                    # Everything on master
+                    assigned_droplets = ["master"]
+                else:
+                    # Distribute across project web droplets
+                    web_droplets = [f"{project}-web{i}" for i in range(1, web_count + 1)]
+                    assigned_droplets = web_droplets
+                
+                # Standard services for each project-environment
+                services = {
+                    "backend": {
+                        "type": "web",
+                        "port": self.get_hash_based_port(project, env, 8000, 1000),
+                        "assigned_droplets": assigned_droplets[:2] if len(assigned_droplets) > 1 else assigned_droplets
+                    },
+                    "frontend": {
+                        "type": "web", 
+                        "port": self.get_hash_based_port(project, env, 9000, 1000),
+                        "assigned_droplets": assigned_droplets[:2] if len(assigned_droplets) > 1 else assigned_droplets
+                    },
+                    "worker_email": {
+                        "type": "worker",
+                        "assigned_droplets": [assigned_droplets[0]]
+                    },
+                    "scheduler": {
+                        "type": "worker", 
+                        "assigned_droplets": [assigned_droplets[0]]
+                    },
+                    # Infrastructure services (always on master)
+                    "database": {
+                        "type": "infrastructure",
+                        "port": self.get_hash_based_port(project, env, 5000, 1000),
+                        "assigned_droplets": ["master"]
+                    },
+                    "redis": {
+                        "type": "infrastructure",
+                        "port": self.get_hash_based_port(project, env, 6000, 1000),
+                        "assigned_droplets": ["master"]
+                    },
+                    "opensearch": {
+                        "type": "infrastructure",
+                        "port": self.get_hash_based_port(project, env, 9200, 200),
+                        "assigned_droplets": ["master"]
+                    },
+                    "vault": {
+                        "type": "infrastructure",
+                        "port": self.get_hash_based_port(project, env, 8200, 200),
+                        "assigned_droplets": ["master"]
+                    }
+                }
+                
+                required_services[project_key] = services
+        
+        return required_services
+    
     # Droplet Management
-    def add_droplet(self, name: str, ip: str, size: str, region: str, role: str, monitors: List[str] = None):
+    def add_droplet(self, name: str, ip: str, size: str, region: str, role: str, monitors: List[str] = None, project: str = None):
         """Add a new droplet to the state"""
-        self.state["droplets"][name] = {
+        droplet_data = {
             "ip": ip,
             "size": size,
             "region": region,
             "role": role,
             "monitors": monitors or []
         }
+        
+        if project:
+            droplet_data["project"] = project
+            
+        self.state["droplets"][name] = droplet_data
         self.save_state()
     
     def update_droplet_ip(self, name: str, new_ip: str):
@@ -86,6 +241,13 @@ class InfrastructureState:
         return {
             name: droplet for name, droplet in self.state["droplets"].items()
             if droplet.get("role") == role
+        }
+    
+    def get_droplets_by_project(self, project: str) -> Dict[str, Dict[str, Any]]:
+        """Get droplets filtered by project"""
+        return {
+            name: droplet for name, droplet in self.state["droplets"].items()
+            if droplet.get("project") == project
         }
     
     # Project Management
@@ -233,6 +395,18 @@ class InfrastructureState:
                         else:
                             droplet_ports[droplet_name].append(port)
         
+        # Validate infrastructure spec consistency
+        spec = self.get_infrastructure_spec()
+        required_droplets = self.get_required_droplets()
+        
+        for name, required_config in required_droplets.items():
+            current_droplet = self.get_droplet(name)
+            if current_droplet:
+                if current_droplet.get("size") != required_config.get("size"):
+                    issues.append(f"Droplet {name} size mismatch: current={current_droplet.get('size')}, required={required_config.get('size')}")
+                if current_droplet.get("role") != required_config.get("role"):
+                    issues.append(f"Droplet {name} role mismatch: current={current_droplet.get('role')}, required={required_config.get('role')}")
+        
         return issues
     
     def get_summary(self) -> Dict[str, Any]:
@@ -241,13 +415,33 @@ class InfrastructureState:
         project_count = len(self.state["projects"])
         
         service_count = 0
+        worker_count = 0
+        web_service_count = 0
+        infrastructure_service_count = 0
+        
         for services in self.state["projects"].values():
-            service_count += len(services)
+            for service_type, service_config in services.items():
+                service_count += 1
+                service_type_info = service_config.get("type", "web")
+                
+                if service_type_info == "worker":
+                    worker_count += 1
+                elif service_type_info == "web":
+                    web_service_count += 1
+                elif service_type_info == "infrastructure":
+                    infrastructure_service_count += 1
+        
+        spec = self.get_infrastructure_spec()
+        projects_in_spec = len(spec.get("projects", {}))
         
         return {
             "droplets": droplet_count,
             "projects": project_count,
             "services": service_count,
+            "worker_services": worker_count,
+            "web_services": web_service_count,
+            "infrastructure_services": infrastructure_service_count,
+            "projects_in_spec": projects_in_spec,
             "master_ip": self.get_master_droplet()["ip"] if self.get_master_droplet() else None,
             "web_droplet_count": len(self.get_web_droplets()),
             "validation_issues": self.validate_state()

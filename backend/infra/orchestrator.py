@@ -2,13 +2,12 @@
 Main Orchestrator
 
 Central coordination system that ties together all components of the
-Personal Cloud Orchestration System. Handles CSV-driven infrastructure
+Personal Cloud Orchestration System. Handles JSON-driven infrastructure
 management, deployment workflows, and operational procedures.
 """
 
 import os
 import json
-import csv
 import asyncio
 from pathlib import Path
 from typing import Dict, List, Any, Optional
@@ -34,8 +33,7 @@ class InfrastructureOrchestrator:
     def __init__(self, config_dir: str = "config"):
         self.config_dir = Path(config_dir)
         
-        # Load configurations
-        self.projects_csv = self.config_dir / "projects.csv"
+        # Load configurations (no more CSV!)
         self.infrastructure_json = self.config_dir / "infrastructure.json"
         self.deployment_config_json = self.config_dir / "deployment_config.json"
         self.email_config_json = self.config_dir / "email_config.json"
@@ -57,7 +55,7 @@ class InfrastructureOrchestrator:
         # Will be initialized when deployment config is loaded
         self.deployment_manager = None
         
-        # Email integration (placeholder - integrate with your emailer)
+        # Email integration
         email_config_path = self.config_dir / "email_config.json"
         if email_config_path.exists():            
             with open(email_config_path, 'r') as f:
@@ -75,13 +73,13 @@ class InfrastructureOrchestrator:
         results = {
             'ssh_keys': self._setup_ssh_keys(),
             'deployment_config': self._load_deployment_config(),
-            'csv_validation': self._validate_projects_csv(),
+            'infrastructure_spec': self._validate_infrastructure_spec(),
             'system_ready': False
         }
         
         if all([results['ssh_keys']['success'], 
                 results['deployment_config']['success'],
-                results['csv_validation']['success']]):
+                results['infrastructure_spec']['success']]):
             results['system_ready'] = True
             print("✅ System initialization completed successfully")
         else:
@@ -139,6 +137,9 @@ class InfrastructureOrchestrator:
                 self.state, self.env_generator, self.ssh_manager, deployment_config
             )
             
+            # Set snapshot manager reference for post-deployment snapshots
+            self.deployment_manager.snapshot_manager = self.snapshot_manager
+            
             return {
                 'success': True,
                 'platform': deployment_config.get('deployment_platform', 'docker'),
@@ -151,48 +152,62 @@ class InfrastructureOrchestrator:
                 'error': str(e)
             }
     
-    def _validate_projects_csv(self) -> Dict[str, Any]:
-        """Validate projects CSV file"""
+    def _validate_infrastructure_spec(self) -> Dict[str, Any]:
+        """Validate infrastructure specification"""
         
         try:
-            if not self.projects_csv.exists():
-                # Create example CSV
-                self.projects_csv.parent.mkdir(parents=True, exist_ok=True)
-                with open(self.projects_csv, 'w', newline='') as f:
-                    writer = csv.writer(f)
-                    writer.writerow(['Project', 'Servers', 'MasterSpec', 'WebSpec'])
-                    writer.writerow(['example', '1', 's-1vcpu-1gb', 's-1vcpu-1gb'])
+            spec = self.state.get_infrastructure_spec()
+            
+            if not spec:
+                # Create default spec
+                default_spec = {
+                    "droplets": {
+                        "master": {
+                            "size": "s-2vcpu-4gb",
+                            "region": "lon1",
+                            "role": "master"
+                        }
+                    },
+                    "projects": {
+                        "example": {
+                            "environments": ["prod", "uat"],
+                            "web_droplets": 1,
+                            "web_droplet_spec": "s-1vcpu-1gb"
+                        }
+                    }
+                }
+                
+                self.state.update_infrastructure_spec(default_spec)
                 
                 return {
                     'success': True,
-                    'message': 'Created example projects.csv - please configure your projects'
+                    'message': 'Created default infrastructure spec - please configure your projects'
                 }
             
-            # Validate CSV structure
-            with open(self.projects_csv, 'r') as f:
-                reader = csv.DictReader(f)
-                projects = list(reader)
+            # Validate spec structure
+            required_sections = ['droplets', 'projects']
+            for section in required_sections:
+                if section not in spec:
+                    return {
+                        'success': False,
+                        'error': f'Missing required section: {section}'
+                    }
             
-            if not projects:
-                return {
-                    'success': False,
-                    'error': 'No projects found in CSV'
-                }
-            
-            # Validate required columns
-            required_columns = ['Project', 'Servers', 'MasterSpec', 'WebSpec']
-            for project in projects:
-                for col in required_columns:
-                    if col not in project:
+            # Validate projects have required fields
+            for project, config in spec.get('projects', {}).items():
+                required_fields = ['environments', 'web_droplets', 'web_droplet_spec']
+                for field in required_fields:
+                    if field not in config:
                         return {
                             'success': False,
-                            'error': f'Missing required column: {col}'
+                            'error': f'Project {project} missing required field: {field}'
                         }
             
+            project_count = len(spec.get('projects', {}))
             return {
                 'success': True,
-                'projects': len(projects),
-                'project_names': [p['Project'] for p in projects]
+                'projects': project_count,
+                'project_names': list(spec.get('projects', {}).keys())
             }
             
         except Exception as e:
@@ -202,16 +217,13 @@ class InfrastructureOrchestrator:
             }
     
     def orchestrate_infrastructure(self, force_recreate: bool = False) -> Dict[str, Any]:
-        """Main orchestration function - create infrastructure from CSV"""
+        """Main orchestration function - create infrastructure from JSON spec"""
         
-        print("🏗️  Starting infrastructure orchestration from CSV")
+        print("🏗️  Starting infrastructure orchestration from JSON spec")
         
         try:
-            # Load projects from CSV
-            projects = self._load_projects_csv()
-            
-            # Plan infrastructure changes
-            infrastructure_plan = self._plan_infrastructure_changes(projects, force_recreate)
+            # Plan infrastructure changes from spec
+            infrastructure_plan = self._plan_infrastructure_changes_from_spec(force_recreate)
             
             print(f"📋 Infrastructure plan: {infrastructure_plan['summary']}")
             
@@ -243,19 +255,15 @@ class InfrastructureOrchestrator:
                 'error': str(e)
             }
     
-    def _load_projects_csv(self) -> List[Dict[str, Any]]:
-        """Load and parse projects CSV"""
-        
-        with open(self.projects_csv, 'r') as f:
-            reader = csv.DictReader(f)
-            return list(reader)
-    
-    def _plan_infrastructure_changes(self, projects: List[Dict[str, Any]], 
-                                   force_recreate: bool = False) -> Dict[str, Any]:
-        """Plan what infrastructure changes are needed"""
+    def _plan_infrastructure_changes_from_spec(self, force_recreate: bool = False) -> Dict[str, Any]:
+        """Plan infrastructure changes from JSON specification"""
         
         current_droplets = self.state.get_all_droplets()
         current_projects = self.state.get_all_projects()
+        
+        # Get required infrastructure from spec
+        required_droplets = self.state.get_required_droplets()
+        required_services = self.state.get_required_services()
         
         plan = {
             'droplets_to_create': [],
@@ -267,58 +275,7 @@ class InfrastructureOrchestrator:
             'summary': {}
         }
         
-        # Calculate required infrastructure
-        required_droplets = {'master': {'size': 's-2vcpu-4gb', 'region': 'lon1', 'role': 'master'}}
-        required_services = {}
-        
-        for project in projects:
-            project_name = project['Project']
-            server_count = int(project['Servers'])
-            web_spec = project['WebSpec']
-            
-            # Add web droplets if multiple servers needed
-            if server_count > 1:
-                for i in range(1, server_count):
-                    droplet_name = f"web{i}"
-                    required_droplets[droplet_name] = {
-                        'size': web_spec,
-                        'region': 'lon1',
-                        'role': 'web'
-                    }
-            
-            # Plan services for each environment
-            for env in ['prod', 'uat', 'test']:
-                project_key = f"{project_name}-{env}"
-                
-                # Determine droplet assignments
-                if server_count == 1:
-                    # Small project - everything on master
-                    assigned_droplets = ['master']
-                else:
-                    # Distribute across web droplets
-                    web_droplets = [f"web{i}" for i in range(1, server_count)]
-                    assigned_droplets = web_droplets
-                
-                # Calculate hash-based ports
-                backend_port = self.state.get_hash_based_port(project_name, env, 8000, 1000)
-                frontend_port = self.state.get_hash_based_port(project_name, env, 9000, 1000)
-                db_port = self.state.get_hash_based_port(project_name, env, 5000, 1000)
-                redis_port = self.state.get_hash_based_port(project_name, env, 6000, 1000)
-                opensearch_port = self.state.get_hash_based_port(project_name, env, 9000, 1000)
-                vault_port = self.state.get_hash_based_port(project_name, env, 8000, 1000)
-                
-                required_services[project_key] = {
-                    'backend': {'port': backend_port, 'assigned_droplets': assigned_droplets[:2]},
-                    'frontend': {'port': frontend_port, 'assigned_droplets': assigned_droplets[:2]},
-                    'database': {'port': db_port, 'assigned_droplets': [assigned_droplets[0]]},
-                    'redis': {'port': redis_port, 'assigned_droplets': [assigned_droplets[0]]},
-                    'opensearch': {'port': opensearch_port, 'assigned_droplets': ['master']},
-                    'vault': {'port': vault_port, 'assigned_droplets': ['master']}
-                }
-        
-        # Compare with current state
-        
-        # Check droplets
+        # Compare droplets
         for name, config in required_droplets.items():
             current_droplet = current_droplets.get(name)
             
@@ -339,7 +296,7 @@ class InfrastructureOrchestrator:
                 plan['droplets_to_destroy'].append(name)
                 plan['changes_needed'] = True
         
-        # Check services
+        # Compare services
         for project_key, services in required_services.items():
             current_project_services = current_projects.get(project_key, {})
             
@@ -347,13 +304,26 @@ class InfrastructureOrchestrator:
                 current_service = current_project_services.get(service_type)
                 
                 if (not current_service or 
-                    current_service.get('port') != service_config['port'] or
-                    current_service.get('assigned_droplets') != service_config['assigned_droplets']):
+                    current_service.get('port') != service_config.get('port') or
+                    current_service.get('assigned_droplets') != service_config['assigned_droplets'] or
+                    current_service.get('type') != service_config.get('type')):
                     
                     plan['services_to_deploy'].append({
                         'project': project_key,
                         'service_type': service_type,
                         'config': service_config
+                    })
+                    plan['changes_needed'] = True
+        
+        # Check for services to remove
+        for project_key, current_services in current_projects.items():
+            required_project_services = required_services.get(project_key, {})
+            
+            for service_type in current_services:
+                if service_type not in required_project_services:
+                    plan['services_to_remove'].append({
+                        'project': project_key,
+                        'service_type': service_type
                     })
                     plan['changes_needed'] = True
         
@@ -363,6 +333,7 @@ class InfrastructureOrchestrator:
             'droplets_to_destroy': len(plan['droplets_to_destroy']),
             'droplets_to_resize': len(plan['droplets_to_resize']),
             'services_to_deploy': len(plan['services_to_deploy']),
+            'services_to_remove': len(plan['services_to_remove']),
             'total_required_droplets': len(required_droplets),
             'total_required_services': sum(len(services) for services in required_services.values())
         }
@@ -417,7 +388,20 @@ class InfrastructureOrchestrator:
                     results['success'] = False
                     results['errors'].append(f"Failed to configure service {service_info['project']}-{service_info['service_type']}")
             
-            # 4. Destroy old droplets (be careful here!)
+            # 4. Remove old services
+            for service_info in plan['services_to_remove']:
+                print(f"🗑️  Removing service: {service_info['project']}-{service_info['service_type']}")
+                
+                result = self._remove_service(
+                    service_info['project'],
+                    service_info['service_type']
+                )
+                results['service_operations'].append(result)
+                
+                if not result['success']:
+                    results['errors'].append(f"Failed to remove service {service_info['project']}-{service_info['service_type']}")
+            
+            # 5. Destroy old droplets (be careful here!)
             for droplet_name in plan['droplets_to_destroy']:
                 print(f"🗑️  Destroying droplet: {droplet_name}")
                 
@@ -455,16 +439,13 @@ class InfrastructureOrchestrator:
                 ip=droplet.ip_address,
                 size=config['size'],
                 region=config['region'],
-                role=config['role']
+                role=config['role'],
+                project=config.get('project')
             )
             
             # Setup monitoring relationships
             self._setup_monitoring_relationships(name, config['role'])
             
-            # After droplet creation, auto-start monitoring
-            if config['role'] in ['master', 'web']:
-                asyncio.create_task(self.start_health_monitoring(name))
-                
             return {
                 'success': True,
                 'operation': 'create_droplet',
@@ -484,9 +465,7 @@ class InfrastructureOrchestrator:
         """Resize an existing droplet"""
         
         try:
-            # This would involve creating a snapshot, creating new droplet, and migrating
-            # For now, just update the state - actual resize would be more complex
-            
+            # Update the state - actual resize would require more complex operations
             droplet_config = self.state.get_droplet(name)
             if droplet_config:
                 self.state.add_droplet(
@@ -495,7 +474,8 @@ class InfrastructureOrchestrator:
                     size=new_size,
                     region=droplet_config['region'],
                     role=droplet_config['role'],
-                    monitors=droplet_config.get('monitors', [])
+                    monitors=droplet_config.get('monitors', []),
+                    project=droplet_config.get('project')
                 )
             
             return {
@@ -531,13 +511,36 @@ class InfrastructureOrchestrator:
                 'operation': 'configure_service',
                 'project': project,
                 'service_type': service_type,
-                'assigned_droplets': config['assigned_droplets']
+                'assigned_droplets': config['assigned_droplets'],
+                'service_type_info': config.get('type', 'web')
             }
             
         except Exception as e:
             return {
                 'success': False,
                 'operation': 'configure_service',
+                'project': project,
+                'service_type': service_type,
+                'error': str(e)
+            }
+    
+    def _remove_service(self, project: str, service_type: str) -> Dict[str, Any]:
+        """Remove a service from the infrastructure state"""
+        
+        try:
+            self.state.remove_project_service(project, service_type)
+            
+            return {
+                'success': True,
+                'operation': 'remove_service',
+                'project': project,
+                'service_type': service_type
+            }
+            
+        except Exception as e:
+            return {
+                'success': False,
+                'operation': 'remove_service',
                 'project': project,
                 'service_type': service_type,
                 'error': str(e)
@@ -583,13 +586,15 @@ class InfrastructureOrchestrator:
         if role == 'master':
             # Master monitors all web droplets
             web_droplets = [name for name, config in all_droplets.items() if config['role'] == 'web']
+            current_config = all_droplets[droplet_name]
             self.state.add_droplet(
                 name=droplet_name,
-                ip=all_droplets[droplet_name]['ip'],
-                size=all_droplets[droplet_name]['size'],
-                region=all_droplets[droplet_name]['region'],
+                ip=current_config['ip'],
+                size=current_config['size'],
+                region=current_config['region'],
                 role=role,
-                monitors=web_droplets
+                monitors=web_droplets,
+                project=current_config.get('project')
             )
             
             # Update web droplets to monitor master
@@ -605,11 +610,12 @@ class InfrastructureOrchestrator:
                         size=web_config['size'],
                         region=web_config['region'],
                         role=web_config['role'],
-                        monitors=current_monitors
+                        monitors=current_monitors,
+                        project=web_config.get('project')
                     )
         
         elif role == 'web':
-            # Web droplet monitors master and one other web droplet (ring topology)
+            # Web droplet monitors master and one other web droplet
             master_droplets = [name for name, config in all_droplets.items() if config['role'] == 'master']
             web_droplets = [name for name, config in all_droplets.items() if config['role'] == 'web' and name != droplet_name]
             
@@ -619,80 +625,93 @@ class InfrastructureOrchestrator:
             if web_droplets:
                 monitors.append(web_droplets[0])  # Monitor first web droplet for ring topology
             
+            current_config = all_droplets[droplet_name]
             self.state.add_droplet(
                 name=droplet_name,
-                ip=all_droplets[droplet_name]['ip'],
-                size=all_droplets[droplet_name]['size'],
-                region=all_droplets[droplet_name]['region'],
+                ip=current_config['ip'],
+                size=current_config['size'],
+                region=current_config['region'],
                 role=role,
-                monitors=monitors
+                monitors=monitors,
+                project=current_config.get('project')
             )
     
-    # Deployment operations
-    def deploy_to_uat(self, project: str, branch: str = "main") -> Dict[str, Any]:
-        """Deploy project to UAT environment"""
-        
-        if not self.deployment_manager:
-            return {'success': False, 'error': 'Deployment manager not initialized'}
-        
-        print(f"🚀 Deploying {project} to UAT from branch {branch}")
+    # Project Management Methods
+    def add_project(self, project: str, environments: List[str], 
+                   web_droplets: int, web_droplet_spec: str) -> Dict[str, Any]:
+        """Add a new project to infrastructure"""
         
         try:
-            result = self.deployment_manager.deploy_to_uat(project, branch)
+            print(f"➕ Adding project: {project}")
             
-            if result['status'] == 'success':
-                # Update load balancer after deployment
-                lb_result = self.load_balancer_manager.deploy_nginx_config()
-                result['load_balancer_update'] = lb_result
+            # Add to spec
+            self.state.add_project_spec(project, environments, web_droplets, web_droplet_spec)
             
-            return result
-            
-        except Exception as e:
-            return {
-                'success': False,
-                'error': str(e)
-            }
-    
-    def deploy_to_prod(self, project: str, use_uat_tag: bool = True) -> Dict[str, Any]:
-        """Deploy project to production environment"""
-        
-        if not self.deployment_manager:
-            return {'success': False, 'error': 'Deployment manager not initialized'}
-        
-        print(f"🚀 Deploying {project} to production")
-        
-        try:
-            result = self.deployment_manager.deploy_to_prod(project, use_uat_tag)
-            
-            if result['status'] == 'success':
-                # Update load balancer after deployment
-                lb_result = self.load_balancer_manager.deploy_nginx_config()
-                result['load_balancer_update'] = lb_result
-            
-            return result
-            
-        except Exception as e:
-            return {
-                'success': False,
-                'error': str(e)
-            }
-    
-    def scale_project(self, project: str, target_servers: int) -> Dict[str, Any]:
-        """Scale a project to target number of servers"""
-        
-        print(f"📈 Scaling {project} to {target_servers} servers")
-        
-        try:
-            # Update CSV with new server count
-            self._update_project_csv(project, target_servers)
-            
-            # Re-orchestrate infrastructure
+            # Re-orchestrate
             result = self.orchestrate_infrastructure()
             
             return {
                 'success': result['success'],
                 'project': project,
-                'target_servers': target_servers,
+                'environments': environments,
+                'web_droplets': web_droplets,
+                'orchestration_result': result
+            }
+            
+        except Exception as e:
+            return {
+                'success': False,
+                'error': str(e)
+            }
+
+    def scale_project(self, project: str, target_web_droplets: int) -> Dict[str, Any]:
+        """Scale a project to target number of web droplets"""
+        
+        print(f"📈 Scaling {project} to {target_web_droplets} web droplets")
+        
+        try:
+            # Update spec
+            spec = self.state.get_infrastructure_spec()
+            if project in spec.get("projects", {}):
+                spec["projects"][project]["web_droplets"] = target_web_droplets
+                self.state.update_infrastructure_spec(spec)
+                
+                # Re-orchestrate infrastructure
+                result = self.orchestrate_infrastructure()
+                
+                return {
+                    'success': result['success'],
+                    'project': project,
+                    'target_web_droplets': target_web_droplets,
+                    'orchestration_result': result
+                }
+            else:
+                return {
+                    'success': False,
+                    'error': f'Project {project} not found in infrastructure spec'
+                }
+            
+        except Exception as e:
+            return {
+                'success': False,
+                'error': str(e)
+            }
+
+    def remove_project(self, project: str) -> Dict[str, Any]:
+        """Remove a project from infrastructure"""
+        
+        try:
+            print(f"➖ Removing project: {project}")
+            
+            # Remove from spec
+            self.state.remove_project_spec(project)
+            
+            # Re-orchestrate
+            result = self.orchestrate_infrastructure()
+            
+            return {
+                'success': result['success'],
+                'project': project,
                 'orchestration_result': result
             }
             
@@ -702,27 +721,60 @@ class InfrastructureOrchestrator:
                 'error': str(e)
             }
     
-    def _update_project_csv(self, project: str, new_server_count: int):
-        """Update project server count in CSV"""
+    # Deployment operations
+    def deploy_to_uat(self, project: str, branch: str = "main", use_local: bool = False, 
+                      local_project_path: str = None) -> Dict[str, Any]:
+        """Deploy project to UAT environment"""
         
-        # Read current CSV
-        projects = []
-        with open(self.projects_csv, 'r') as f:
-            reader = csv.DictReader(f)
-            projects = list(reader)
+        if not self.deployment_manager:
+            return {'success': False, 'error': 'Deployment manager not initialized'}
         
-        # Update target project
-        for proj in projects:
-            if proj['Project'] == project:
-                proj['Servers'] = str(new_server_count)
-                break
+        print(f"🚀 Deploying {project} to UAT from {'local' if use_local else 'git'}")
         
-        # Write back to CSV
-        with open(self.projects_csv, 'w', newline='') as f:
-            if projects:
-                writer = csv.DictWriter(f, fieldnames=projects[0].keys())
-                writer.writeheader()
-                writer.writerows(projects)
+        try:
+            result = self.deployment_manager.deploy_to_uat(
+                project, branch, use_local, local_project_path
+            )
+            
+            if result.get('status') == 'success':
+                # Update load balancer after deployment
+                lb_result = self.load_balancer_manager.deploy_nginx_config()
+                result['load_balancer_update'] = lb_result
+            
+            return result
+            
+        except Exception as e:
+            return {
+                'success': False,
+                'error': str(e)
+            }
+    
+    def deploy_to_prod(self, project: str, use_uat_tag: bool = True, 
+                       promote_images: bool = True) -> Dict[str, Any]:
+        """Deploy project to production environment"""
+        
+        if not self.deployment_manager:
+            return {'success': False, 'error': 'Deployment manager not initialized'}
+        
+        print(f"🚀 Deploying {project} to production")
+        
+        try:
+            result = self.deployment_manager.deploy_to_prod(
+                project, use_uat_tag, promote_images=promote_images
+            )
+            
+            if result.get('status') == 'success':
+                # Update load balancer after deployment
+                lb_result = self.load_balancer_manager.deploy_nginx_config()
+                result['load_balancer_update'] = lb_result
+            
+            return result
+            
+        except Exception as e:
+            return {
+                'success': False,
+                'error': str(e)
+            }
     
     # Health monitoring operations
     async def start_health_monitoring(self, droplet_name: str) -> Dict[str, Any]:
@@ -771,12 +823,16 @@ class InfrastructureOrchestrator:
             # Get snapshot summary
             snapshot_summary = self.snapshot_manager.get_snapshot_summary()
             
+            # Get infrastructure spec
+            infrastructure_spec = self.state.get_infrastructure_spec()
+            
             # Validate infrastructure state
             validation_issues = self.state.validate_state()
             
             return {
                 'timestamp': datetime.now().isoformat(),
                 'infrastructure_summary': summary,
+                'infrastructure_spec': infrastructure_spec,
                 'digitalocean_status': do_summary,
                 'load_balancer_status': lb_status,
                 'snapshot_summary': snapshot_summary,
@@ -922,22 +978,34 @@ def main():
     
     parser = argparse.ArgumentParser(description='Personal Cloud Orchestration System')
     parser.add_argument('--init', action='store_true', help='Initialize the system')
-    parser.add_argument('--orchestrate', action='store_true', help='Orchestrate infrastructure from CSV')
+    parser.add_argument('--orchestrate', action='store_true', help='Orchestrate infrastructure from JSON spec')
     parser.add_argument('--status', action='store_true', help='Get infrastructure status')
+    
+    # Project management
+    parser.add_argument('--add-project', nargs=4, metavar=('PROJECT', 'ENVIRONMENTS', 'WEB_DROPLETS', 'WEB_SPEC'), 
+                       help='Add project (e.g., --add-project myapp "prod,uat" 2 s-2vcpu-4gb)')
+    parser.add_argument('--remove-project', metavar='PROJECT', help='Remove project')
+    parser.add_argument('--scale', nargs=2, metavar=('PROJECT', 'WEB_DROPLETS'), help='Scale project web droplets')
+    
+    # Deployment
     parser.add_argument('--deploy-uat', metavar='PROJECT', help='Deploy project to UAT')
     parser.add_argument('--deploy-prod', metavar='PROJECT', help='Deploy project to production')
-    parser.add_argument('--scale', nargs=2, metavar=('PROJECT', 'SERVERS'), help='Scale project to N servers')
+    
+    # Operations
     parser.add_argument('--monitor', metavar='DROPLET', help='Start health monitoring on droplet')
     parser.add_argument('--recover', metavar='DROPLET', help='Emergency recovery of failed droplet')
     parser.add_argument('--cleanup', action='store_true', help='Clean up old resources')
     parser.add_argument('--update-ip', metavar='NEW_IP', help='Update administrator IP')
     parser.add_argument('--reproduce', metavar='TAG', help='Reproduce deployment from tag')
+    
+    # Flags
     parser.add_argument('--local', action='store_true', help='Use local codebase instead of git clone')
     parser.add_argument('--project-path', metavar='PATH', help='Path to local project directory')
     parser.add_argument('--reproduce-dir', metavar='DIR', help='Directory for reproduced code')
     parser.add_argument('--force', action='store_true', help='Force recreate resources')
     parser.add_argument('--dry-run', action='store_true', help='Dry run (show what would be done)')
     parser.add_argument('--rebuild-images', action='store_true', help='Rebuild images from source instead of promoting UAT images')
+    
     args = parser.parse_args()
     
     # Initialize orchestrator
@@ -955,6 +1023,21 @@ def main():
         result = orchestrator.get_infrastructure_status()
         print(json.dumps(result, indent=2))
     
+    elif args.add_project:
+        project, envs_str, web_count, web_spec = args.add_project
+        environments = [env.strip() for env in envs_str.split(',')]
+        result = orchestrator.add_project(project, environments, int(web_count), web_spec)
+        print(json.dumps(result, indent=2))
+    
+    elif args.remove_project:
+        result = orchestrator.remove_project(args.remove_project)
+        print(json.dumps(result, indent=2))
+    
+    elif args.scale:
+        project, web_droplets = args.scale
+        result = orchestrator.scale_project(project, int(web_droplets))
+        print(json.dumps(result, indent=2))
+    
     elif args.deploy_uat:
         result = orchestrator.deploy_to_uat(
             args.deploy_uat, 
@@ -964,15 +1047,10 @@ def main():
         print(json.dumps(result, indent=2))
     
     elif args.deploy_prod:
-            result = orchestrator.deploy_to_prod(
-                args.deploy_prod, 
-                promote_images=not args.rebuild_images
-            )
-            print(json.dumps(result, indent=2))
-    
-    elif args.scale:
-        project, servers = args.scale
-        result = orchestrator.scale_project(project, int(servers))
+        result = orchestrator.deploy_to_prod(
+            args.deploy_prod, 
+            promote_images=not args.rebuild_images
+        )
         print(json.dumps(result, indent=2))
     
     elif args.monitor:
@@ -991,11 +1069,14 @@ def main():
         print(json.dumps(result, indent=2))
     
     elif args.reproduce:
-        result = orchestrator.deployment_manager.reproduce_deployment(
-            args.reproduce, 
-            args.reproduce_dir
-        )
-        print(json.dumps(result, indent=2))
+        if orchestrator.deployment_manager:
+            result = orchestrator.deployment_manager.reproduce_deployment(
+                args.reproduce, 
+                args.reproduce_dir
+            )
+            print(json.dumps(result, indent=2))
+        else:
+            print(json.dumps({'error': 'Deployment manager not initialized'}, indent=2))
     
     else:
         parser.print_help()
