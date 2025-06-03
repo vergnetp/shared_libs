@@ -933,7 +933,7 @@ def main():
     parser.add_argument('--reproduce-dir', metavar='DIR', help='Directory for reproduced code')
     parser.add_argument('--force', action='store_true', help='Force recreate resources')
     parser.add_argument('--dry-run', action='store_true', help='Dry run (show what would be done)')
-    
+    parser.add_argument('--rebuild-images', action='store_true', help='Rebuild images from source instead of promoting UAT images')
     args = parser.parse_args()
     
     # Initialize orchestrator
@@ -960,8 +960,11 @@ def main():
         print(json.dumps(result, indent=2))
     
     elif args.deploy_prod:
-        result = orchestrator.deploy_to_prod(args.deploy_prod)
-        print(json.dumps(result, indent=2))
+            result = orchestrator.deploy_to_prod(
+                args.deploy_prod, 
+                promote_images=not args.rebuild_images
+            )
+            print(json.dumps(result, indent=2))
     
     elif args.scale:
         project, servers = args.scale

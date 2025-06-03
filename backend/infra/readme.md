@@ -1,16 +1,3 @@
-## Infrastructure Module Analysis
-
-The module is well-structured with clear separation of concerns:
-
-1. **Core Components**: `InfrastructureState`, `InfrastructureOrchestrator`
-2. **Managers**: Various specialized managers for different aspects
-3. **Distributed Health**: Advanced health monitoring with peer consensus
-4. **Environment Generation**: Dynamic configuration management
-5. **Setup System**: Automated configuration initialization
-
-Here's the README for the infrastructure module:
-
-```markdown
 # Infrastructure Module
 
 A comprehensive Personal Cloud Orchestration System for managing multi-project infrastructure with automatic scaling, deployment, health monitoring, and recovery capabilities.
@@ -30,210 +17,298 @@ The Infrastructure Module provides a complete solution for managing cloud infras
 - **Secret Management**: Secure handling of environment variables and secrets
 - **Platform Agnostic**: Support for Docker, Kubernetes, and Podman deployments
 
-## Quick Start
+## 🎯 How It Works: CSV → Infrastructure → JSON State
 
-### 1. Initial Setup
-
-```bash
-# Run the setup script to initialize all configurations
-python infra/setup/setup.py
-
-# This creates:
-# - config/projects.csv
-# - config/deployment_config.json
-# - config/email_config.json
-# - templates/ directory with deployment templates
+```
+┌─────────────────────┐    ┌──────────────────────┐    ┌─────────────────────┐
+│   projects.csv      │    │  --orchestrate      │    │ infrastructure.json │
+│   (Your Spec)       │───▶│  (Creates Servers)   │───▶│ (Runtime State)     │
+│                     │    │                      │    │                     │
+│ hostomatic,3,s-2gb  │    │ • Creates droplets   │    │ • Real IP addresses │
+│ digitalpixo,1,s-1gb │    │ • Assigns services   │    │ • Calculated ports  │
+│                     │    │ • Configures network │    │ • Service mapping   │
+└─────────────────────┘    └──────────────────────┘    └─────────────────────┘
+        ▲                                                         │
+        │                                                         │
+        │ ◄─────────── WINNER: CSV always wins ──────────────────┘
+        │              (JSON is regenerated from CSV)
+        │
+   ┌────▼─────┐
+   │ --scale  │  Updates CSV and re-orchestrates
+   └──────────┘
 ```
 
-### 2. Configure Your Projects
+### Data Flow Example
+
+**Input (projects.csv):**
+```csv
+Project,Servers,MasterSpec,WebSpec
+hostomatic,3,s-2vcpu-4gb,s-2vcpu-4gb
+```
+
+**Processing:** `python orchestrator.py --orchestrate`
+- Creates 3 DigitalOcean droplets (master, web1, web2)
+- Gets real IP addresses from DigitalOcean
+- Calculates deterministic ports using hashing
+- Assigns services to appropriate servers
+
+**Output (infrastructure.json):**
+```json
+{
+  "droplets": {
+    "master": {"ip": "192.168.1.10", "role": "master"},
+    "web1": {"ip": "192.168.1.11", "role": "web"},
+    "web2": {"ip": "192.168.1.12", "role": "web"}
+  },
+  "projects": {
+    "hostomatic-prod": {
+      "backend": {"port": 8001, "assigned_droplets": ["web1", "web2"]},
+      "frontend": {"port": 9001, "assigned_droplets": ["web1", "web2"]}
+    }
+  }
+}
+```
+
+### 🏆 Source of Truth: CSV Wins
+
+**Important:** The `projects.csv` file is the **source of truth**. The `infrastructure.json` is generated from it.
+
+- **If you edit `projects.csv`**: Run `python orchestrator.py --orchestrate` to update servers
+- **If you edit `infrastructure.json`**: Your changes will be **overwritten** when you run `--orchestrate`
+- **To make permanent changes**: Always edit the CSV file, not the JSON
+
+### 🔄 Update Commands
+
+| What Changed | Command to Run | What Happens |
+|--------------|----------------|--------------|
+| Edit `projects.csv` | `python orchestrator.py --orchestrate` | Creates/destroys servers to match CSV |
+| Scale a project | `python orchestrator.py --scale hostomatic 5` | Updates CSV and re-orchestrates |
+| Manual JSON edit | `python orchestrator.py --orchestrate` | **Overwrites your JSON changes** |
+| Add new project | Edit CSV, then `--orchestrate` | Creates new infrastructure |
+
+## 🚀 Quick Start Guide
+
+Follow these steps in order to get your infrastructure running:
+
+### Step 1: Install Dependencies
+
+```bash
+pip install digitalocean paramiko aiohttp jinja2 psutil pyyaml python-dotenv
+```
+
+### Step 2: Initialize Configuration Files
+
+```bash
+python infra/setup/setup.py
+```
+
+This creates:
+- `config/projects.csv` - Define your projects and server requirements
+- `config/deployment_config.json` - Git repositories and service definitions
+- `config/email_config.json` - Email notifications setup
+- `config/sms_config.json` - SMS alerts configuration
+- `templates/` - Deployment templates for Docker/Kubernetes
+- `.env.example` - Example environment variables
+
+### Step 3: Set Required Environment Variables
+
+**Option A: Create `.env` file (recommended)**
+```bash
+# Copy the example and fill in your values
+cp .env.example .env
+```
+
+**Option B: Export environment variables**
+```bash
+# Required: DigitalOcean API Token
+export DO_TOKEN="dop_v1_your_actual_token_here"
+
+# Required: Your public IP for SSH access (will auto-detect if not provided)
+export ADMIN_IP="203.0.113.100/32"
+
+# Optional: Additional authorized IPs
+export ADDITIONAL_IPS="203.0.113.200/32,203.0.113.201/32"
+```
+
+**Getting your DigitalOcean API Token:**
+1. Go to https://cloud.digitalocean.com/account/api/tokens
+2. Click "Generate New Token"
+3. Give it a name like "Infrastructure Orchestrator"
+4. Select "Read" and "Write" scopes
+5. Copy the token and use it as `DO_TOKEN`
+
+### Step 4: Configure Your Projects
 
 Edit `config/projects.csv`:
 ```csv
 Project,Servers,MasterSpec,WebSpec
 hostomatic,3,s-2vcpu-4gb,s-2vcpu-4gb
 digitalpixo,1,s-1vcpu-1gb,s-1vcpu-1gb
+mynewproject,2,s-1vcpu-2gb,s-1vcpu-2gb
 ```
 
-### 3. Set Environment Variables
+**Column meanings:**
+- `Project`: Your project name (must match Git repository name)
+- `Servers`: Total number of servers (1 = master only, 2+ = master + web servers)
+- `MasterSpec`: DigitalOcean droplet size for master server
+- `WebSpec`: DigitalOcean droplet size for web servers
+
+### Step 5: Configure Git Repositories
+
+Edit `config/deployment_config.json` to match your Git setup:
+```json
+{
+  "git_config": {
+    "base_url": "https://github.com/yourusername",
+    "url_pattern": "{base_url}/{project}.git"
+  },
+  "projects": {
+    "hostomatic": {
+      "services": {
+        "backend": {
+          "containerfile_path": "backend/Dockerfile",
+          "secrets": ["db_password", "stripe_key", "openai_api_key"]
+        },
+        "frontend": {
+          "containerfile_path": "frontend/Dockerfile",
+          "secrets": ["stripe_publishable_key"]
+        }
+      }
+    }
+  }
+}
+```
+
+### Step 6: Set Project Secrets
+
+For each project and environment, set the required secrets:
 
 ```bash
-# Required
-export DO_TOKEN="your_digitalocean_api_token"
+# Example for hostomatic production
+export HOSTOMATIC_PROD_DB_PASSWORD="secure_database_password"
+export HOSTOMATIC_PROD_STRIPE_KEY="sk_live_your_stripe_secret_key"
+export HOSTOMATIC_PROD_OPENAI_API_KEY="sk-your_openai_api_key"
 
-# Optional - will auto-detect if not provided
-# export ADMIN_IP="203.0.113.100/32"
+# Example for hostomatic UAT
+export HOSTOMATIC_UAT_DB_PASSWORD="uat_database_password"
+export HOSTOMATIC_UAT_STRIPE_KEY="sk_test_your_test_stripe_key"
 
-# Additional authorized IPs (optional)
-# export ADDITIONAL_IPS="203.0.113.200/32,203.0.113.201/32"
+# Global fallbacks (used if project-specific not found)
+export DB_PASSWORD="default_db_password"
+export STRIPE_PUBLISHABLE_KEY="pk_live_your_publishable_key"
+```
 
-# Project secrets (example for hostomatic)
-export HOSTOMATIC_PROD_DB_PASSWORD="secure_password"
-export HOSTOMATIC_PROD_STRIPE_KEY="sk_live_..."
-
-### 4. Initialize and Orchestrate Infrastructure
+### Step 7: Initialize the System
 
 ```bash
-# Initialize the system
 python orchestrator.py --init
+```
 
-# Create infrastructure from CSV
+This will:
+- ✅ Generate SSH keys for server access
+- ✅ Upload SSH keys to DigitalOcean
+- ✅ Validate configuration files
+- ✅ Test DigitalOcean API connection
+
+### Step 8: Create Infrastructure
+
+```bash
 python orchestrator.py --orchestrate
+```
 
-# Check status
+This will:
+- 🏗️ Create droplets based on your CSV configuration
+- 🔧 Configure firewalls and networking
+- 🚀 Deploy core infrastructure services
+- 📋 Set up load balancer configuration
+- 💾 Initialize infrastructure state
+
+### Step 9: Check Status
+
+```bash
 python orchestrator.py --status
 ```
 
-## Core Components
+Verify that:
+- All droplets are running
+- Services are configured
+- No validation issues exist
 
-### InfrastructureOrchestrator
-
-The main coordinator that ties together all system components.
-
-```python
-from infra.orchestrator import InfrastructureOrchestrator
-
-orchestrator = InfrastructureOrchestrator()
-
-# Initialize system
-result = orchestrator.initialize_system()
-
-# Create infrastructure from CSV
-result = orchestrator.orchestrate_infrastructure()
-
-# Deploy to UAT
-result = orchestrator.deploy_to_uat("hostomatic")
-
-# Deploy to production
-result = orchestrator.deploy_to_prod("hostomatic")
-```
-
-### InfrastructureState
-
-Centralized state management for all infrastructure components.
-
-```python
-from infra.infrastructure_state import InfrastructureState
-
-state = InfrastructureState()
-
-# Add droplets
-state.add_droplet("master", "192.168.1.10", "s-2vcpu-4gb", "lon1", "master")
-
-# Add services
-state.add_project_service("hostomatic-prod", "backend", 8001, ["web1", "web2"])
-
-# Get load balancer targets
-targets = state.get_load_balancer_targets("hostomatic-prod", "backend")
-```
-
-## Deployment Workflows
-
-### UAT Deployment
+### Step 10: Deploy Your First Project
 
 ```bash
-# Deploy from Git (recommended for UAT)
+# Deploy to UAT first (for testing)
 python orchestrator.py --deploy-uat hostomatic
 
-# Deploy from local codebase (for development)
-python orchestrator.py --deploy-uat hostomatic --local --project-path ../hostomatic
+# If UAT works well, deploy to production
+python orchestrator.py --deploy-prod hostomatic
 ```
 
-### Production Deployment
+## 📋 Complete Command Reference
 
+### Infrastructure Management
 ```bash
-# Deploy using latest UAT tag (recommended)
+# Initialize system
+python orchestrator.py --init
+
+# Create/update infrastructure from CSV
+python orchestrator.py --orchestrate
+
+# Force recreate all resources
+python orchestrator.py --orchestrate --force
+
+# Get infrastructure status
+python orchestrator.py --status
+
+# Update your IP address
+python orchestrator.py --update-ip 203.0.113.200
+```
+
+### Project Deployment
+```bash
+# Deploy to UAT from Git
+python orchestrator.py --deploy-uat hostomatic
+
+# Deploy to UAT from local code (for development)
+python orchestrator.py --deploy-uat hostomatic --local --project-path ../hostomatic
+
+# Deploy to production (uses latest UAT tag)
 python orchestrator.py --deploy-prod hostomatic
 
-# Deploy specific tag
-python orchestrator.py --deploy-prod hostomatic --tag v1.2.3-uat-20241215-1430
+# Reproduce exact deployment from tag
+python orchestrator.py --reproduce v1.2.3-uat-20241215-1430 --reproduce-dir ./reproduced
 ```
 
-### Version Management
-
-The system automatically creates deployment tags:
-
-- **UAT**: `v1.2.3-uat-20241215-1430`
-- **Production**: Uses proven UAT tags
-
+### Scaling Operations
 ```bash
-# Reproduce exact deployment state
-python orchestrator.py --reproduce v1.2.3-uat-20241215-1430 --reproduce-dir ./reproduced-deployment
+# Scale hostomatic to 5 servers
+python orchestrator.py --scale hostomatic 5
 ```
 
-## Health Monitoring
-
-### Distributed Monitoring
-
-Each droplet monitors assigned peers with consensus-based failure detection:
-
+### Health Monitoring
 ```bash
-# Start monitoring on master
+# Start monitoring on master (run in background)
 python orchestrator.py --monitor master &
 
-# Start monitoring on web droplets
+# Start monitoring on web servers
 python orchestrator.py --monitor web1 &
 python orchestrator.py --monitor web2 &
 ```
 
-### Automatic Recovery
-
-When consensus is reached on a failure:
-
-1. **Immediate**: Remove from load balancer
-2. **Recovery**: Create new droplet from latest snapshot
-3. **Restoration**: Add back to load balancer
-4. **Notification**: Email alerts sent automatically
-
-### Manual Recovery
-
+### Recovery Operations
 ```bash
-# Emergency recovery of failed droplet
+# Emergency recovery of failed server
 python orchestrator.py --recover web1
+
+# Clean up old snapshots and resources
+python orchestrator.py --cleanup --dry-run  # Preview what will be cleaned
+python orchestrator.py --cleanup             # Actually clean up
 ```
 
-## Scaling Operations
-
-### Horizontal Scaling
-
-```bash
-# Scale hostomatic to 5 servers
-python orchestrator.py --scale hostomatic 5
-
-# This updates the CSV and re-orchestrates infrastructure
-```
-
-### Load Balancer Management
-
-The system automatically:
-- Generates nginx upstream configurations
-- Updates load balancer when services change
-- Provides health check endpoints
-
-## Secret Management
-
-### Environment Variable Patterns
-
-The system supports multiple naming patterns:
-
-```bash
-# Project-specific (highest priority)
-HOSTOMATIC_PROD_DB_PASSWORD="..."
-
-# Environment-specific
-PROD_DB_PASSWORD="..."
-
-# Global fallback
-DB_PASSWORD="..."
-```
-
-### Docker Secrets Integration
-
-Secrets are automatically converted to Docker secrets for secure runtime access.
-
-## Configuration Files
+## 🔧 Configuration Files Reference
 
 ### projects.csv
-Defines infrastructure requirements:
+Defines your infrastructure requirements:
 ```csv
 Project,Servers,MasterSpec,WebSpec
 hostomatic,3,s-2vcpu-4gb,s-2vcpu-4gb
@@ -241,7 +316,7 @@ digitalpixo,1,s-1vcpu-1gb,s-1vcpu-1gb
 ```
 
 ### deployment_config.json
-Defines deployment configuration:
+Defines Git repositories and service configuration:
 ```json
 {
   "deployment_platform": "docker",
@@ -254,7 +329,19 @@ Defines deployment configuration:
       "services": {
         "backend": {
           "containerfile_path": "backend/Dockerfile",
+          "build_context": "backend/",
           "secrets": ["db_password", "stripe_key"]
+        },
+        "frontend": {
+          "containerfile_path": "frontend/Dockerfile",
+          "build_context": "frontend/",
+          "secrets": ["stripe_publishable_key"]
+        },
+        "worker_email": {
+          "type": "worker",
+          "containerfile_path": "workers/Dockerfile",
+          "command": "python email_processor.py",
+          "secrets": ["db_password", "sendgrid_api_key"]
         }
       }
     }
@@ -262,89 +349,241 @@ Defines deployment configuration:
 }
 ```
 
-## Advanced Features
-
-### Hash-Based Resource Allocation
-
-Services get deterministic ports and resource names:
-
-```python
-# Generate consistent port for hostomatic-prod-backend
-port = state.get_hash_based_port("hostomatic", "prod", 8000, 1000)
-# Always returns the same port for the same project/environment
+### email_config.json
+Configure email notifications:
+```json
+{
+  "provider": "smtp",
+  "from_address": "alerts@yourdomain.com",
+  "smtp_settings": {
+    "host": "smtp.gmail.com",
+    "port": 587,
+    "use_tls": true,
+    "username": "alerts@yourdomain.com",
+    "password": "GMAIL_APP_PASSWORD"
+  },
+  "recipients": {
+    "admin": "admin@yourdomain.com"
+  }
+}
 ```
 
-### Infrastructure Validation
+## 🔐 Secret Management
 
-```bash
-# Validate current state
-python orchestrator.py --status
+### Environment Variable Naming Patterns
 
-# The system checks for:
-# - Missing droplets
-# - Port conflicts
-# - Service assignment issues
+The system supports multiple naming patterns with this priority:
+
+1. **Project + Environment specific** (highest priority):
+   ```bash
+   HOSTOMATIC_PROD_DB_PASSWORD="..."
+   DIGITALPIXO_UAT_STRIPE_KEY="..."
+   ```
+
+2. **Project specific**:
+   ```bash
+   HOSTOMATIC_DB_PASSWORD="..."
+   ```
+
+3. **Environment specific**:
+   ```bash
+   PROD_DB_PASSWORD="..."
+   UAT_STRIPE_KEY="..."
+   ```
+
+4. **Global fallback** (lowest priority):
+   ```bash
+   DB_PASSWORD="..."
+   STRIPE_KEY="..."
+   ```
+
+### Common Secret Names
+
+**Database secrets:**
+- `DB_PASSWORD` - Database password
+- `REDIS_PASSWORD` - Redis password
+
+**API keys:**
+- `STRIPE_KEY` - Stripe secret key
+- `STRIPE_PUBLISHABLE_KEY` - Stripe publishable key
+- `OPENAI_API_KEY` - OpenAI API key
+- `SENDGRID_API_KEY` - SendGrid API key
+
+**Authentication:**
+- `JWT_SECRET` - JWT signing secret
+- `GOOGLE_OAUTH_CLIENT_ID` - Google OAuth client ID
+
+**Infrastructure:**
+- `OPENSEARCH_ADMIN_PASSWORD` - OpenSearch admin password
+- `VAULT_ROOT_TOKEN` - Vault root token
+
+## 🏗️ Architecture Overview
+
+### Infrastructure Layout
+
+For a project with 3 servers:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     Load Balancer                          │
+│                    (nginx on master)                       │
+└─────────────────────┬───────────────────────────────────────┘
+                      │
+        ┌─────────────┼─────────────┐
+        │             │             │
+   ┌────▼────┐   ┌────▼────┐   ┌────▼────┐
+   │ Master  │   │  Web1   │   │  Web2   │
+   │         │   │         │   │         │
+   │ • Nginx │   │ • App   │   │ • App   │
+   │ • DB    │   │ • Cache │   │ • Cache │
+   │ • Redis │   │         │   │         │
+   │ • Vault │   │         │   │         │
+   └─────────┘   └─────────┘   └─────────┘
 ```
 
-### Cleanup Operations
+### Service Distribution
 
-```bash
-# Clean up old snapshots and resources (dry run)
-python orchestrator.py --cleanup --dry-run
+- **Master**: Infrastructure services (DB, Redis, Vault, OpenSearch) + Load Balancer
+- **Web Servers**: Application services (Backend, Frontend, Workers)
+- **All Servers**: Health monitoring and peer communication
 
-# Actually perform cleanup
-python orchestrator.py --cleanup
+### Deployment Flow
+
+```
+1. Git Repository
+   ↓
+2. Clone & Build
+   ↓
+3. Create Secrets
+   ↓
+4. Deploy to Servers
+   ↓
+5. Update Load Balancer
+   ↓
+6. Create Snapshots
+   ↓
+7. Health Monitoring
 ```
 
-## Troubleshooting
+## 🔍 Monitoring & Health Checks
 
-### Common Commands
+### Distributed Health Monitoring
 
-```bash
-# Get comprehensive status
-python orchestrator.py --status
+Each server monitors assigned peers:
 
-# Update administrator IP
-python orchestrator.py --update-ip 203.0.113.200
-
-# Test service connectivity
-curl http://master-ip/hostomatic/prod/backend/health
-```
-
-### Log Locations
-
-- **System logs**: Check orchestrator output
-- **Nginx logs**: `/var/log/nginx/` on master droplet
-- **Service logs**: `docker logs <service-name>` on assigned droplets
-
-## Integration Points
+- **Master** monitors all web servers
+- **Web servers** monitor master and one other web server (ring topology)
+- **Consensus required** for failure detection (prevents false positives)
+- **Automatic recovery** when consensus is reached
 
 ### Email Notifications
 
-Configure in `config/email_config.json`:
-- Heartbeat emails (every 15 minutes)
-- Recovery notifications
-- Deployment confirmations
+- **Heartbeat emails** every 15 minutes (all systems OK)
+- **Recovery notifications** when servers are automatically restored
+- **Failure alerts** when recovery fails
 
-### External Services
+### Health Check Endpoints
 
-- **DigitalOcean**: Droplet and snapshot management
-- **Git repositories**: Source code deployment
-- **Docker Registry**: Container image storage
+- `http://your-master-ip/health` - Load balancer health
+- `http://your-master-ip/lb-status` - Load balancer status (JSON)
+- `http://your-master-ip/project/environment/service/health` - Service health
 
-## Security
+## 🆘 Troubleshooting
 
-### Access Control
+### Common Issues
 
-- SSH key-based authentication
-- IP-based firewall rules
-- Secret isolation via Docker secrets
+**1. SSH Key Problems**
+```bash
+# Check if SSH keys exist
+ls -la ~/.ssh/infrastructure_key*
 
-### Network Security
+# Test SSH connection
+ssh -i ~/.ssh/infrastructure_key root@your-droplet-ip
+```
 
-- Private networks between droplets
-- Public access only through load balancer
-- Rate limiting and DDoS protection
+**2. DigitalOcean API Issues**
+```bash
+# Test API token
+curl -X GET "https://api.digitalocean.com/v2/account" \
+  -H "Authorization: Bearer $DO_TOKEN"
+```
+
+**3. Missing Dependencies**
+```bash
+# Install all required packages
+pip install digitalocean paramiko aiohttp jinja2 psutil pyyaml python-dotenv
+```
+
+**4. Configuration Validation**
+```bash
+# Check configuration files
+python orchestrator.py --status
+
+# Look for validation issues in the output
+```
+
+**5. Service Not Starting**
+```bash
+# Check service logs on specific droplet
+ssh -i ~/.ssh/infrastructure_key root@droplet-ip
+docker logs service-name
+```
+
+### Getting Help
+
+1. **Check Status**: `python orchestrator.py --status`
+2. **Review Logs**: Look at orchestrator output for errors
+3. **Validate Config**: Ensure all required files exist and are properly formatted
+4. **Test Connectivity**: Verify DigitalOcean API access and SSH connectivity
+
+## 📚 Advanced Usage
+
+### Local Development Deployment
+
+```bash
+# Deploy from local codebase (faster iteration)
+python orchestrator.py --deploy-uat hostomatic --local --project-path ../hostomatic
+```
+
+### Version Management
+
+```bash
+# List available tags
+git tag -l "v*-uat-*"
+
+# Deploy specific version to production
+python orchestrator.py --deploy-prod hostomatic --tag v1.2.3-uat-20241215-1430
+
+# Reproduce exact deployment state
+python orchestrator.py --reproduce v1.2.3-uat-20241215-1430
+```
+
+### Multi-Platform Support
+
+```bash
+# Switch to Kubernetes (edit deployment_config.json)
+{
+  "deployment_platform": "kubernetes"
+}
+
+# Switch to Podman
+{
+  "deployment_platform": "podman"
+}
+```
+
+### Service Discovery
+
+```bash
+# Get service endpoints for debugging
+python orchestrator.py --status
+
+# Check specific project services
+curl http://master-ip/hostomatic/prod/backend/health
+curl http://master-ip/hostomatic/uat/frontend/health
+```
+
+---
 
 <div style="background-color:#f8f9fa; border:1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 24px;margin-top: 24px;">
 
@@ -495,5 +734,3 @@ Distributed health monitoring daemon that runs on each droplet.
 <br>
 
 </div>
-```
-

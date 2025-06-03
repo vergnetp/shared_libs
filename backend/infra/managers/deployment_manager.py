@@ -481,8 +481,8 @@ class DeploymentManager:
         return False
     
     def deploy_to_prod(self, project: str, use_uat_tag: bool = True, 
-                      specific_tag: str = None) -> Dict[str, Any]:
-        """Deploy project to production environment using UAT tags"""
+                      specific_tag: str = None, promote_images: bool = True) -> Dict[str, Any]:
+        """Deploy project to production environment using UAT images"""
         
         print(f"🚀 Deploying {project} to production")
         
@@ -515,48 +515,190 @@ class DeploymentManager:
                 "error": "No tag specified for production deployment"
             }
         
-        # Clone at specific tag
-        repo_url = self._get_project_git_url(project)
-        project_dir = self.git_manager.work_dir / f"{project}-prod"
-        
-        # Remove existing directory
-        if project_dir.exists():
-            shutil.rmtree(project_dir)
-        
-        # Clone at specific tag
-        try:
-            result = subprocess.run([
-                'git', 'clone', '-b', tag_to_use, '--depth', '1',
-                repo_url, str(project_dir)
-            ], capture_output=True, text=True, check=True)
+        if promote_images:
+            # Promote UAT images to production (much faster)
+            image_promotion_result = self._promote_uat_images_to_prod(project, tag_to_use)
             
-            print(f"Cloned {project} at tag {tag_to_use}")
+            if not image_promotion_result['success']:
+                return {
+                    "status": "failed",
+                    "error": f"Image promotion failed: {image_promotion_result['error']}"
+                }
             
-        except subprocess.CalledProcessError as e:
-            return {
-                "status": "failed",
-                "error": f"Failed to clone at tag {tag_to_use}: {e.stderr}"
-            }
-        
-        # Resolve shared-libs for production deployment
-        self._resolve_shared_libs(project_dir)
-        
-        # Deploy to production environment (reuse UAT images for faster deployment)
-        deployment_result = self.deploy_environment(
-            project=project,
-            environment="prod", 
-            project_dir=project_dir,
-            reuse_uat_images=True
-        )
+            # Deploy using promoted images (no Git clone needed!)
+            deployment_result = self.deploy_environment_with_promoted_images(
+                project=project,
+                environment="prod",
+                uat_tag=tag_to_use,
+                promoted_images=image_promotion_result['promoted_images']
+            )
+        else:
+            # Old approach: rebuild from source (slower)
+            repo_url = self._get_project_git_url(project)
+            project_dir = self.git_manager.work_dir / f"{project}-prod"
+            
+            # Remove existing directory
+            if project_dir.exists():
+                shutil.rmtree(project_dir)
+            
+            # Clone at specific tag
+            try:
+                result = subprocess.run([
+                    'git', 'clone', '-b', tag_to_use, '--depth', '1',
+                    repo_url, str(project_dir)
+                ], capture_output=True, text=True, check=True)
+                
+                print(f"Cloned {project} at tag {tag_to_use}")
+                
+            except subprocess.CalledProcessError as e:
+                return {
+                    "status": "failed",
+                    "error": f"Failed to clone at tag {tag_to_use}: {e.stderr}"
+                }
+            
+            # Resolve shared-libs for production deployment
+            self._resolve_shared_libs(project_dir)
+            
+            # Deploy to production environment (rebuild images)
+            deployment_result = self.deploy_environment(
+                project=project,
+                environment="prod", 
+                project_dir=project_dir,
+                reuse_uat_images=False
+            )
         
         return {
             "status": "success" if deployment_result['success'] else "failed",
             "environment": "prod",
             "tag_used": tag_to_use,
-            "project_path": str(project_dir),
-            "deployment_result": deployment_result,
-            "reused_uat_images": True
+            "image_promotion": promote_images,
+            "deployment_result": deployment_result
         }
+
+    def _promote_uat_images_to_prod(self, project: str, uat_tag: str) -> Dict[str, Any]:
+        """Promote UAT images to production by retagging"""
+        
+        project_config = self.config['projects'].get(project, {})
+        services_config = project_config.get('services', {})
+        
+        promoted_images = {}
+        errors = []
+        
+        for service_type in services_config.keys():
+            try:
+                # UAT image name (what exists)
+                uat_image = f"{project}-{service_type}:uat-{uat_tag}"
+                
+                # Production image name (what we want)
+                prod_image = f"{project}-{service_type}:prod-{uat_tag}"
+                
+                # Tag the UAT image for production
+                result = subprocess.run([
+                    self.build_command, 'tag', uat_image, prod_image
+                ], capture_output=True, text=True)
+                
+                if result.returncode == 0:
+                    promoted_images[service_type] = prod_image
+                    print(f"✅ Promoted {uat_image} → {prod_image}")
+                else:
+                    errors.append(f"Failed to tag {uat_image}: {result.stderr}")
+                    
+            except Exception as e:
+                errors.append(f"Error promoting {service_type}: {str(e)}")
+        
+        if errors:
+            return {
+                'success': False,
+                'error': '; '.join(errors),
+                'promoted_images': promoted_images
+            }
+        
+        return {
+            'success': True,
+            'promoted_images': promoted_images,
+            'uat_tag': uat_tag
+        }
+
+    def deploy_environment_with_promoted_images(self, project: str, environment: str,
+                                              uat_tag: str, promoted_images: Dict[str, str]) -> Dict[str, Any]:
+        """Deploy using pre-built promoted images (no Git clone needed)"""
+        
+        project_config = self.config['projects'].get(project, {})
+        services_config = project_config.get('services', {})
+        
+        deployment_results = {}
+        overall_success = True
+        
+        for service_type, service_config in services_config.items():
+            print(f"Deploying {project}-{environment}-{service_type} with promoted image")
+            
+            try:
+                # Use the promoted image instead of building
+                image_name = promoted_images.get(service_type)
+                if not image_name:
+                    raise ValueError(f"No promoted image found for {service_type}")
+                
+                result = self.deploy_service_with_image(
+                    project=project,
+                    environment=environment,
+                    service_type=service_type,
+                    service_config=service_config,
+                    image_name=image_name
+                )
+                
+                deployment_results[service_type] = result
+                
+                if not result.get('success', False):
+                    overall_success = False
+                    
+            except Exception as e:
+                deployment_results[service_type] = {
+                    'success': False,
+                    'error': str(e)
+                }
+                overall_success = False
+                print(f"Failed to deploy {service_type}: {e}")
+        
+        return {
+            'success': overall_success,
+            'services': deployment_results,
+            'project': project,
+            'environment': environment,
+            'uat_tag': uat_tag,
+            'promoted_images': promoted_images
+        }
+
+    def deploy_service_with_image(self, project: str, environment: str, service_type: str,
+                                service_config: Dict[str, Any], image_name: str) -> Dict[str, Any]:
+        """Deploy a service using a pre-built image"""
+        
+        # Generate environment variables and template context
+        template_context = self.env_generator.generate_template_context(
+            project, environment, service_type, service_config, image_name
+        )
+        
+        # Add service_config to context for deployers
+        template_context['service_config'] = service_config
+        
+        # Get target droplets from infrastructure state
+        project_key = f"{project}-{environment}"
+        state_service_config = self.state.get_project_services(project_key).get(service_type, {})
+        target_droplets = state_service_config.get('assigned_droplets', [])
+        
+        if not target_droplets:
+            return {
+                'success': False,
+                'error': f'No droplets assigned for {project}-{environment}-{service_type}'
+            }
+        
+        # Deploy using platform-specific deployer
+        deployment_result = self.deployer.deploy(
+            template_context=template_context,
+            target_droplets=target_droplets,
+            service_config=service_config
+        )
+        
+        return deployment_result
     
     def deploy_environment(self, project: str, environment: str, 
                           project_dir: Path, reuse_uat_images: bool = False) -> Dict[str, Any]:
@@ -753,56 +895,7 @@ class DockerDeployer:
         }
     
     def _generate_compose_config(self, context: Dict[str, Any]) -> str:
-        """Generate docker-compose.yml content"""
-        
-        # Basic docker-compose template
-        compose_template = f"""version: '3.8'
-services:
-  {context['service_name']}:
-    image: {context['image_name']}"""
-        
-        # Add command for workers
-        if context.get('command'):
-            compose_template += f"\n    command: {context['command']}"
-        
-        # Add environment variables
-        compose_template += "\n    environment:"
-        env_vars = ['DB_USER', 'DB_NAME', 'DB_HOST', 'DB_PORT', 'REDIS_HOST', 'REDIS_PORT',
-                   'VAULT_HOST', 'VAULT_PORT', 'OPENSEARCH_HOST', 'OPENSEARCH_PORT',
-                   'SERVICE_NAME', 'ENVIRONMENT', 'PROJECT', 'RESOURCE_HASH']
-        
-        for var in env_vars:
-            if var in context:
-                compose_template += f"\n      - {var}={context[var]}"
-        
-        # Add SERVICE_PORT for web services only
-        if not context.get('is_worker') and 'SERVICE_PORT' in context:
-            compose_template += f"\n      - SERVICE_PORT={context['SERVICE_PORT']}"
-        
-        # Add secrets
-        if context.get('secrets'):
-            compose_template += "\n    secrets:"
-            for secret in context['secrets']:
-                compose_template += f"\n      - {secret}"
-        
-        # Add ports for web services
-        if not context.get('is_worker') and 'SERVICE_PORT' in context:
-            port = context['SERVICE_PORT']
-            compose_template += f"\n    ports:\n      - \"{port}:{port}\""
-        
-        compose_template += "\n    restart: unless-stopped"
-        compose_template += "\n    networks:\n      - app-network"
-        
-        # Add networks section
-        compose_template += "\n\nnetworks:\n  app-network:\n    driver: bridge"
-        
-        # Add secrets section
-        if context.get('secrets'):
-            compose_template += "\n\nsecrets:"
-            for secret in context['secrets']:
-                compose_template += f"\n  {secret}:\n    external: true"
-        
-        return compose_template
+        return self.platform_manager.generate_deployment_config(context)
     
     def _deploy_to_droplet(self, droplet_ip: str, compose_content: str, 
                           context: Dict[str, Any]) -> Dict[str, Any]:
