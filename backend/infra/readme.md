@@ -353,18 +353,13 @@ Defines Git repositories and service configuration:
 Configure email notifications:
 ```json
 {
-  "provider": "smtp",
-  "from_address": "alerts@yourdomain.com",
-  "smtp_settings": {
-    "host": "smtp.gmail.com",
-    "port": 587,
-    "use_tls": true,
-    "username": "alerts@yourdomain.com",
-    "password": "GMAIL_APP_PASSWORD"
-  },
-  "recipients": {
-    "admin": "admin@yourdomain.com"
-  }
+    "provider": "smtp",
+    "from_address": "alerts@yourdomain.com",
+    "smtp_host": "smtp.gmail.com",
+    "smtp_port": 465,
+    "smtp_user": "myapp@gmail.com",
+    "smtp_password": "app_password",
+    "use_ssl": true
 }
 ```
 

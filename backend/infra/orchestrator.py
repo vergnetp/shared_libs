@@ -461,6 +461,10 @@ class InfrastructureOrchestrator:
             # Setup monitoring relationships
             self._setup_monitoring_relationships(name, config['role'])
             
+            # After droplet creation, auto-start monitoring
+            if config['role'] in ['master', 'web']:
+                asyncio.create_task(self.start_health_monitoring(name))
+                
             return {
                 'success': True,
                 'operation': 'create_droplet',
