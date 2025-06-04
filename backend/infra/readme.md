@@ -52,7 +52,7 @@ The Infrastructure Module provides a complete solution for managing cloud infras
       },
       "uat": {
         "backend": {"type": "web", "assigned_droplets": ["web1", "web2"]},
-        "frontend": {"type": "web", "assigned_droplets": ["web1", "eb2"]},
+        "frontend": {"type": "web", "assigned_droplets": ["web1", "web2"]},
         "worker_cleaner": {"type": "worker", "assigned_droplets": ["web1"]}
       }
     }

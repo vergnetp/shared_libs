@@ -23,57 +23,61 @@ class InfrastructureState:
        self.state = self._load_state()
        
    def _load_state(self) -> Dict[str, Any]:
-       """Load state from JSON file or create empty state"""
-       if self.state_file.exists():
-           with open(self.state_file, 'r') as f:
-               return json.load(f)
-       else:
-           return self._create_empty_state()
-   
+        """Load state from JSON file or create empty state"""
+        if self.state_file.exists():
+            with open(self.state_file, 'r') as f:
+                state = json.load(f)
+                # Apply defaults after loading
+                self._apply_defaults(state)
+                return state
+        else:
+            return self._create_empty_state()
+    
    def _create_empty_state(self) -> Dict[str, Any]:
-       """Create empty state structure"""
-       return {
-           "droplets": {},
-           "projects": {}
-       }
+        """Create empty state structure with new format"""
+        state = {
+            "health_monitoring": {
+                "heartbeat_config": {
+                    "interval_minutes": 15,
+                    "check_interval_seconds": 60,
+                    "failure_timeout_minutes": 10,
+                    "health_timeout_seconds": 20
+                }
+            },
+            "droplets": {},
+            "projects": {}
+        }
+        return state
    
    def save_state(self):
-       """Save current state to JSON file"""
-       self.state_file.parent.mkdir(parents=True, exist_ok=True)
-       with open(self.state_file, 'w') as f:
-           json.dump(self.state, f, indent=2)
+        """Save current state to JSON file with defaults applied"""
+        self._apply_defaults(self.state)
+        self.state_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.state_file, 'w') as f:
+            json.dump(self.state, f, indent=2)
    
    def get_environment_heartbeat_config(self, project: str, environment: str) -> Dict[str, Any]:
-        """Get heartbeat monitoring configuration for a specific project-environment"""
-        project_key = f"{project}-{environment}"
-        env_config = self.get_project_services(project_key)
-        health_config = env_config.get("health_monitoring", {})
-        heartbeat_config = health_config.get("heartbeat_config", {})
+        """Get heartbeat config with inheritance: global -> project -> environment"""
         
-        # Environment-specific defaults
-        env_defaults = {
-            "prod": {
-                "interval_minutes": 5,
-                "check_interval_seconds": 30,
-                "failure_timeout_minutes": 3,
-                "health_timeout_seconds": 10
-            },
-            "uat": {
-                "interval_minutes": 15,
-                "check_interval_seconds": 60,
-                "failure_timeout_minutes": 10,
-                "health_timeout_seconds": 20
-            },
-            "test": {
-                "interval_minutes": 30,
-                "check_interval_seconds": 120,
-                "failure_timeout_minutes": 20,
-                "health_timeout_seconds": 30
-            }
-        }
+        # Start with global default
+        config = self.state.get("health_monitoring", {}).get("heartbeat_config", {
+            "interval_minutes": 15,
+            "check_interval_seconds": 60,
+            "failure_timeout_minutes": 10,
+            "health_timeout_seconds": 20
+        })
         
-        defaults = env_defaults.get(environment, env_defaults["uat"])  # Default to UAT settings
-        return {**defaults, **heartbeat_config}
+        # Apply project-level overrides
+        project_config = self.state.get("projects", {}).get(project, {})
+        project_health = project_config.get("health_monitoring", {}).get("heartbeat_config", {})
+        config.update(project_health)
+        
+        # Apply environment-level overrides
+        env_config = project_config.get(environment, {})
+        env_health = env_config.get("health_monitoring", {}).get("heartbeat_config", {})
+        config.update(env_health)
+        
+        return config
 
    def update_environment_heartbeat_config(self, project: str, environment: str, **config_updates):
         """Update heartbeat monitoring configuration for a specific environment"""
@@ -220,23 +224,42 @@ class InfrastructureState:
            self.save_state()
    
    def get_services_on_droplet(self, droplet_name: str) -> List[Dict[str, Any]]:
-       """Get all services running on a specific droplet with full context"""
-       services = []
-       
-       for project, environments in self.state["projects"].items():
-           for environment, project_services in environments.items():
-               for service_type, service_config in project_services.items():
-                   if droplet_name in service_config.get("assigned_droplets", []):
-                       services.append({
-                           'project': project,
-                           'environment': environment,
-                           'service_type': service_type,
-                           'service_name': f"{project}-{environment}-{service_type}",
-                           'flat_key': f"{project}-{environment}",
-                           'config': service_config
-                       })
-       
-       return services
+        """Get all services running on a specific droplet with new structure"""
+        services = []
+        
+        for project, environments in self.state.get("projects", {}).items():
+            for environment, env_config in environments.items():
+                if environment == "health_monitoring":
+                    continue
+                
+                project_services = env_config.get("services", {})
+                
+                for service_name, service_config in project_services.items():
+                    assigned_droplets = service_config.get("assigned_droplets", [])
+                    if droplet_name in assigned_droplets:
+                        services.append({
+                            'project': project,
+                            'environment': environment,
+                            'service_name': service_name,
+                            'service_type': service_config.get("type"),
+                            'config': service_config
+                        })
+                
+                # Handle workers array
+                workers = env_config.get("services", {}).get("workers", [])
+                if isinstance(workers, list):
+                    for i, worker_config in enumerate(workers):
+                        assigned_droplets = worker_config.get("assigned_droplets", [])
+                        if droplet_name in assigned_droplets:
+                            services.append({
+                                'project': project,
+                                'environment': environment,
+                                'service_name': f"worker_{i}",
+                                'service_type': "worker",
+                                'config': worker_config
+                            })
+        
+        return services
    
    def get_candidate_droplets_for_service_migration(self, service_info: Dict[str, Any], 
                                                    exclude_droplets: List[str] = None) -> List[str]:
@@ -327,27 +350,43 @@ class InfrastructureState:
        """Generate flat project key from project and environment"""
        return f"{project}-{environment}"
    
-   def get_project_services(self, project_key: str) -> Dict[str, Dict[str, Any]]:
-       """Get all services for a project-environment key"""
-       # Handle both flat key (hostomatic-prod) and nested access
-       if '-' in project_key:
-           # It's already a flat key like "hostomatic-prod"
-           project, environment = project_key.rsplit('-', 1)
-           return self.state["projects"].get(project, {}).get(environment, {})
-       else:
-           # It's just a project name, return all environments
-           return self.state["projects"].get(project_key, {})
-   
+   def get_project_services(self, project: str, environment: str) -> Dict[str, Any]:
+        """Get all services for a project/environment in new structure"""
+        
+        if project not in self.state.get("projects", {}):
+            return {}
+        
+        env_config = self.state["projects"][project].get(environment, {})
+        return env_config.get("services", {})
+    
    def get_all_projects(self) -> Dict[str, Dict[str, Any]]:
-       """Get all projects with flat keys for backward compatibility"""
-       flat_projects = {}
-       
-       for project, environments in self.state["projects"].items():
-           for environment, services in environments.items():
-               flat_key = self._get_flat_project_key(project, environment)
-               flat_projects[flat_key] = services
-               
-       return flat_projects
+        """Get all projects with flattened structure for backward compatibility"""
+        
+        flat_projects = {}
+        
+        for project, environments in self.state.get("projects", {}).items():
+            for environment, env_config in environments.items():
+                if environment == "health_monitoring":
+                    continue
+                
+                flat_key = f"{project}-{environment}"
+                
+                # Convert new structure to old flat structure
+                services = env_config.get("services", {})
+                flat_services = {}
+                
+                for service_name, service_config in services.items():
+                    if service_name == "workers":
+                        # Handle workers array - convert to individual services
+                        if isinstance(service_config, list):
+                            for i, worker in enumerate(service_config):
+                                flat_services[f"worker_{i}"] = worker
+                    else:
+                        flat_services[service_name] = service_config
+                
+                flat_projects[flat_key] = flat_services
+        
+        return flat_projects
    
    def add_project_service(self, project: str, service_type: str, environment: str = None,
                           port: int = None, assigned_droplets: List[str] = None, 
@@ -537,26 +576,34 @@ class InfrastructureState:
        return f"{project}-{service_type}"
    
    def get_load_balancer_targets(self, project: str, service_type: str) -> List[str]:
-       """Get load balancer targets for a service (web services only)"""
-       service_config = self.state["projects"].get(project, {}).get(service_type, {})
-       
-       # Skip workers and infrastructure services - they don't need load balancing
-       if service_config.get("type") in ["worker", "infrastructure"]:
-           return []
-       
-       # Skip services without ports
-       if "port" not in service_config:
-           return []
-       
-       targets = []
-       for droplet_name in service_config.get("assigned_droplets", []):
-           droplet = self.get_droplet(droplet_name)
-           if droplet and droplet.get('ip'):
-               droplet_ip = droplet["ip"]
-               port = service_config["port"]
-               targets.append(f"{droplet_ip}:{port}")
-       
-       return targets
+        """Get load balancer targets for a service (web services only)"""
+        
+        # Extract environment from flattened project key
+        if '-' in project:
+            project_name, environment = project.rsplit('-', 1)
+        else:
+            return []
+        
+        services = self.get_project_services(project_name, environment)
+        service_config = services.get(service_type, {})
+        
+        # Skip non-web services
+        if service_config.get("type") != "web":
+            return []
+        
+        targets = []
+        assigned_droplets = service_config.get("assigned_droplets", [])
+        port = service_config.get("port")
+        
+        if not port:
+            return []
+        
+        for droplet_name in assigned_droplets:
+            droplet = self.get_droplet(droplet_name)
+            if droplet and droplet.get('ip'):
+                targets.append(f"{droplet['ip']}:{port}")
+        
+        return targets
    
    def get_monitored_by(self, droplet_name: str) -> List[str]:
        """Get list of droplets that monitor the given droplet"""
@@ -666,3 +713,110 @@ class InfrastructureState:
            "web_droplet_count": len(self.get_web_droplets()),
            "validation_issues": self.validate_state()
        }
+   
+   def get_master_for_project(self, project: str, environment: str) -> Optional[Dict[str, Any]]:
+        """Get master droplet assigned to project/environment"""
+        
+        if project not in self.state.get("projects", {}):
+            return self.get_master_droplet()
+        
+        env_config = self.state["projects"][project].get(environment, {})
+        services = env_config.get("services", {})
+        master_service = services.get("master", {})
+        
+        if master_service.get("type") == "master":
+            assigned_droplets = master_service.get("assigned_droplets", [])
+            if assigned_droplets:
+                master_name = assigned_droplets[0]
+                return self.get_droplet(master_name)
+        
+        # Fallback to global master
+        return self.get_master_droplet()
+   
+   def _apply_defaults(self, state: Dict[str, Any]):
+        """Apply defaults to droplets (size, region) and auto-generate ports"""
+        
+        # Apply droplet defaults
+        for name, droplet_config in state.get("droplets", {}).items():
+            # Apply defaults
+            if "size" not in droplet_config:
+                droplet_config["size"] = "s-1vcpu-1gb"
+            if "region" not in droplet_config:
+                droplet_config["region"] = "lon1"
+            
+            # Validate required fields
+            if "role" not in droplet_config:
+                raise ValueError(f"Droplet {name} missing required 'role' field")
+
+        # Auto-generate ports for web services
+        for project, environments in state.get("projects", {}).items():
+            for environment, env_config in environments.items():
+                if environment == "health_monitoring":
+                    continue
+                
+                services = env_config.get("services", {})
+                for service_name, service_config in services.items():
+                    if service_config.get("type") == "web" and "port" not in service_config:
+                        # Generate hash-based port
+                        service_config["port"] = self.get_hash_based_port(
+                            project, environment, 8000, 1000
+                        )
+
+   def get_workers_for_project(self, project: str, environment: str) -> List[Dict[str, Any]]:
+        """Get all workers for a project/environment"""
+        
+        if project not in self.state.get("projects", {}):
+            return []
+        
+        env_config = self.state["projects"][project].get(environment, {})
+        services = env_config.get("services", {})
+        workers = services.get("workers", [])
+        
+        if isinstance(workers, list):
+            return workers
+        
+        return []
+    
+   def add_worker_to_project(self, project: str, environment: str, worker_config: Dict[str, Any]):
+        """Add a worker to the workers array for a project/environment"""
+        
+        # Ensure project structure exists
+        if project not in self.state.setdefault("projects", {}):
+            self.state["projects"][project] = {}
+        
+        if environment not in self.state["projects"][project]:
+            self.state["projects"][project][environment] = {"services": {}}
+        
+        if "services" not in self.state["projects"][project][environment]:
+            self.state["projects"][project][environment]["services"] = {}
+        
+        services = self.state["projects"][project][environment]["services"]
+        
+        # Initialize workers array if it doesn't exist
+        if "workers" not in services:
+            services["workers"] = []
+        
+        # Ensure worker has required type
+        worker_config["type"] = "worker"
+        
+        # Add worker to array
+        services["workers"].append(worker_config)
+        
+        self.save_state()
+    
+   def remove_worker_from_project(self, project: str, environment: str, worker_index: int):
+        """Remove a worker by index from the workers array"""
+        
+        if project not in self.state.get("projects", {}):
+            return False
+        
+        env_config = self.state["projects"][project].get(environment, {})
+        services = env_config.get("services", {})
+        workers = services.get("workers", [])
+        
+        if isinstance(workers, list) and 0 <= worker_index < len(workers):
+            workers.pop(worker_index)
+            self.save_state()
+            return True
+        
+        return False

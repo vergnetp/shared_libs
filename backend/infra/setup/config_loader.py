@@ -147,114 +147,40 @@ class ConfigManager:
         return results
     
     def _create_infrastructure_json(self) -> Dict[str, Any]:
-        """Create example infrastructure.json with current structure"""
+        """Create example infrastructure.json with new structure"""
         
         json_file = self.config_dir / "infrastructure.json"
         
         if json_file.exists():
             return {'status': 'exists', 'file': str(json_file)}
         
-        # Create example infrastructure configuration with current structure
+        # Create example infrastructure configuration
         infrastructure_data = {
-            "droplets": {
-                "master": {
-                    "size": "s-2vcpu-4gb",
-                    "region": "lon1",
-                    "role": "master"
-                },
-                "web1": {
-                    "size": "s-1vcpu-1gb",
-                    "region": "lon1",
-                    "role": "web"
-                },
-                "web2": {
-                    "size": "s-1vcpu-1gb",
-                    "region": "lon1",
-                    "role": "web"
+            "health_monitoring": {
+                "heartbeat_config": {
+                    "interval_minutes": 5,
+                    "check_interval_seconds": 30,
+                    "failure_timeout_minutes": 3,
+                    "health_timeout_seconds": 10
                 }
+            },
+            "droplets": {
+                "master": {"role": "master", "size": "s-2vcpu-4gb", "region": "lon1"},
+                "master_high_specs": {"ip": None, "role": "master", "size": "s-4vcpu-8gb"},
+                "web1": {"role": "web", "size": "s-1vcpu-1gb", "region": "lon1"},
+                "web2": {"role": "web", "size": "s-2vcpu-4gb"}
             },
             "projects": {
                 "hostomatic": {
                     "prod": {
-                        "health_monitoring": {
-                            "heartbeat_config": {
-                                "interval_minutes": 5,
-                                "check_interval_seconds": 30,
-                                "failure_timeout_minutes": 3,
-                                "health_timeout_seconds": 10
-                            }
-                        },
-                        "backend": {
-                            "type": "web",
-                            "assigned_droplets": ["web1", "web2"]
-                        },
-                        "frontend": {
-                            "type": "web",
-                            "assigned_droplets": ["web1", "web2"]
-                        },
-                        "worker_email": {
-                            "type": "worker",
-                            "assigned_droplets": ["master"]
-                        }
-                    },
-                    "uat": {
-                        "health_monitoring": {
-                            "heartbeat_config": {
-                                "interval_minutes": 15,
-                                "check_interval_seconds": 60,
-                                "failure_timeout_minutes": 10,
-                                "health_timeout_seconds": 20
-                            }
-                        },
-                        "backend": {
-                            "type": "web",
-                            "assigned_droplets": ["web1"]
-                        },
-                        "frontend": {
-                            "type": "web",
-                            "assigned_droplets": ["web1"]
-                        },
-                        "worker_email": {
-                            "type": "worker",
-                            "assigned_droplets": ["web1"]
-                        }
-                    },
-                    "test": {
-                        "health_monitoring": {
-                            "heartbeat_config": {
-                                "interval_minutes": 30,
-                                "check_interval_seconds": 120,
-                                "failure_timeout_minutes": 20,
-                                "health_timeout_seconds": 30
-                            }
-                        },
-                        "backend": {
-                            "type": "web",
-                            "assigned_droplets": ["web1"]
-                        },
-                        "frontend": {
-                            "type": "web",
-                            "assigned_droplets": ["web1"]
-                        }
-                    }
-                },
-                "digitalpixo": {
-                    "prod": {
-                        "health_monitoring": {
-                            "heartbeat_config": {
-                                "interval_minutes": 5,
-                                "check_interval_seconds": 30,
-                                "failure_timeout_minutes": 3,
-                                "health_timeout_seconds": 10
-                            }
-                        },
-                        "backend": {
-                            "type": "web",
-                            "assigned_droplets": ["web1"]
-                        },
-                        "frontend": {
-                            "type": "web",
-                            "assigned_droplets": ["web1"]
+                        "services": {
+                            "master": {"type": "master", "assigned_droplets": ["master_high_specs"]},
+                            "backend": {"type": "web", "port": 8004, "assigned_droplets": ["web1", "web2"]},
+                            "frontend": {"type": "web", "assigned_droplets": ["web1", "web2"]},
+                            "workers": [
+                                {"type": "worker", "assigned_droplets": ["web1", "web2"], "command": "python -m workers.email_processor"},
+                                {"type": "worker", "assigned_droplets": ["web1"], "command": "python -m workers.scheduler"}
+                            ]
                         }
                     },
                     "uat": {
@@ -266,13 +192,22 @@ class ConfigManager:
                                 "health_timeout_seconds": 25
                             }
                         },
-                        "backend": {
-                            "type": "web",
-                            "assigned_droplets": ["web1"]
-                        },
-                        "frontend": {
-                            "type": "web",
-                            "assigned_droplets": ["web1"]
+                        "services": {
+                            "master": {"type": "master", "assigned_droplets": ["master"]},
+                            "backend": {"type": "web", "assigned_droplets": ["web1"]},
+                            "frontend": {"type": "web", "assigned_droplets": ["web1"]},
+                            "workers": [
+                                {"type": "worker", "assigned_droplets": ["web1"], "command": "python -m workers.email_processor"}
+                            ]
+                        }
+                    }
+                },
+                "digitalpixo": {
+                    "prod": {
+                        "services": {
+                            "master": {"type": "master", "assigned_droplets": ["master"]},
+                            "backend": {"type": "web", "assigned_droplets": ["web2"]},
+                            "frontend": {"type": "web", "assigned_droplets": ["web2"]}
                         }
                     }
                 }

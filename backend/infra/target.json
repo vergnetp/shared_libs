@@ -1,8 +1,59 @@
 {
+    "health_monitoring": {
+        "heartbeat_config": {
+            "interval_minutes": 5,
+            "check_interval_seconds": 30,
+            "failure_timeout_minutes": 3,
+            "health_timeout_seconds": 10
+        }},
+  "droplets": {
+    "master": {"role": "master", "size": "s-2vcpu-4gb", "region": "lon1"},
+    "master_high_specs": {"ip": null, "role": "master", "size": "s-4vcpu-8gb"},
+    "web1": { "role": "web", "size": "s-1vcpu-1gb", "region": "lon1"},
+    "web2": { "role": "web", "size": "s-2vcpu-4gb"}
+  },     
+  "projects": {
+    "hostomatic": {
+      "prod": { 
+        "services": {
+            "master": {"type": "master", "assigned_droplets": ["master_high_specs"]},
+            "backend": {"type": "web", "port": 8004, "assigned_droplets": ["web1", "web2"]},
+            "frontend": {"type": "web", "assigned_droplets": ["web1", "web2"]},
+            "workers": [{"type": "worker", "assigned_droplets": ["web1", "web2"], "command": "xxx"}, {"type": "worker", "assigned_droplets": ["web1"], "command": "yyy"}]
+         }
+      },
+      "uat": {
+        "health_monitoring": {
+            "heartbeat_config": {
+                "interval_minutes": 20,
+                "check_interval_seconds": 90,
+                "failure_timeout_minutes": 15,
+                "health_timeout_seconds": 25
+            }},
+        "services": {
+            "master": {"type": "master", "assigned_droplets": ["master"]},
+            "backend": {"type": "web", "assigned_droplets": ["web1"]},
+            "frontend": {"type": "web",  "assigned_droplets": ["web1"]},
+            "workers": [{"type": "worker", "assigned_droplets": ["web1"], "command": "xxx"}]
+      }}
+    }
+  }
+}
+The default health_monitoring is inherited by all projects. All env inherit the project health_monitoring.  User can override health_monitoring at any level (e.g hostomatic/uat is overriden to lower frequency specs in the above example),
+Each droplet size is set to "s-1vcpu-1gb" if not specified, and region to "lon1". The role is mandatory.
+Each project can have many environments ("prod" or even "foo").
+The code will create the droplet if not exist yet (or ip is null) and update the ip of the droplet in the json.
+Port of each "web" service is automatically set to a hash of porject/environment (or left as is if already defined).
+
+
+
+
+
+{
   "droplets": {
     "master": {"ip": "192.168.1.10", "role": "master", "size": "s-2vcpu-4gb", "region": "lon1"},
-    "hostomatic-web1": {"ip": "192.168.1.11", "role": "web", "size": "s-1vcpu-1gb", "region": "lon1", "project": "hostomatic"},
-    "hostomatic-web2": {"ip": "192.168.1.12", "role": "web", "size": "s-2vcpu-4gb", "region": "lon1", "project": "hostomatic"}
+    "web1": {"ip": "192.168.1.11", "role": "web", "size": "s-1vcpu-1gb", "region": "lon1", "project": "hostomatic"},
+    "web2": {"ip": "192.168.1.12", "role": "web", "size": "s-2vcpu-4gb", "region": "lon1", "project": "hostomatic"}
   },
   "projects": {
     "hostomatic": {

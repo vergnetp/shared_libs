@@ -1239,6 +1239,137 @@ class InfrastructureOrchestrator:
                'success': False,
                'error': str(e)
            }
+       
+
+   def add_worker_to_environment(self, project: str, environment: str, 
+                                 command: str, assigned_droplets: List[str],
+                                 worker_config: Dict[str, Any] = None) -> Dict[str, Any]:
+        """Add a worker to project/environment using new structure"""
+        
+        try:
+            base_config = {
+                "type": "worker",
+                "command": command,
+                "assigned_droplets": assigned_droplets
+            }
+            
+            if worker_config:
+                base_config.update(worker_config)
+            
+            self.state.add_worker_to_project(project, environment, base_config)
+            
+            return {
+                'success': True,
+                'project': project,
+                'environment': environment,
+                'worker_command': command,
+                'assigned_droplets': assigned_droplets
+            }
+            
+        except Exception as e:
+            return {
+                'success': False,
+                'error': str(e)
+            }
+    
+   def list_workers_for_environment(self, project: str, environment: str) -> Dict[str, Any]:
+        """List all workers for a project/environment"""
+        
+        try:
+            workers = self.state.get_workers_for_project(project, environment)
+            
+            return {
+                'success': True,
+                'project': project,
+                'environment': environment,
+                'workers': workers,
+                'worker_count': len(workers)
+            }
+            
+        except Exception as e:
+            return {
+                'success': False,
+                'error': str(e)
+            }
+    
+   def remove_worker_from_environment(self, project: str, environment: str, 
+                                     worker_index: int) -> Dict[str, Any]:
+        """Remove a worker by index from project/environment"""
+        
+        try:
+            success = self.state.remove_worker_from_project(project, environment, worker_index)
+            
+            if success:
+                return {
+                    'success': True,
+                    'project': project,
+                    'environment': environment,
+                    'removed_worker_index': worker_index
+                }
+            else:
+                return {
+                    'success': False,
+                    'error': f'Worker index {worker_index} not found in {project}-{environment}'
+                }
+                
+        except Exception as e:
+            return {
+                'success': False,
+                'error': str(e)
+            }
+    
+   def update_health_monitoring(self, level: str, **config_updates) -> Dict[str, Any]:
+        """Update health monitoring configuration at different levels"""
+        
+        try:
+            if level == "global":
+                # Update global health monitoring
+                if "health_monitoring" not in self.state.state:
+                    self.state.state["health_monitoring"] = {"heartbeat_config": {}}
+                if "heartbeat_config" not in self.state.state["health_monitoring"]:
+                    self.state.state["health_monitoring"]["heartbeat_config"] = {}
+                
+                self.state.state["health_monitoring"]["heartbeat_config"].update(config_updates)
+                
+            elif "-" in level:  # project-environment level
+                project, environment = level.split("-", 1)
+                
+                if project not in self.state.state.setdefault("projects", {}):
+                    self.state.state["projects"][project] = {}
+                if environment not in self.state.state["projects"][project]:
+                    self.state.state["projects"][project][environment] = {}
+                if "health_monitoring" not in self.state.state["projects"][project][environment]:
+                    self.state.state["projects"][project][environment]["health_monitoring"] = {"heartbeat_config": {}}
+                if "heartbeat_config" not in self.state.state["projects"][project][environment]["health_monitoring"]:
+                    self.state.state["projects"][project][environment]["health_monitoring"]["heartbeat_config"] = {}
+                
+                self.state.state["projects"][project][environment]["health_monitoring"]["heartbeat_config"].update(config_updates)
+                
+            else:  # project level
+                project = level
+                
+                if project not in self.state.state.setdefault("projects", {}):
+                    self.state.state["projects"][project] = {}
+                if "health_monitoring" not in self.state.state["projects"][project]:
+                    self.state.state["projects"][project]["health_monitoring"] = {"heartbeat_config": {}}
+                if "heartbeat_config" not in self.state.state["projects"][project]["health_monitoring"]:
+                    self.state.state["projects"][project]["health_monitoring"]["heartbeat_config"] = {}
+                
+                self.state.state["projects"][project]["health_monitoring"]["heartbeat_config"].update(config_updates)
+            
+            self.state.save_state()
+            
+            return {
+                'success': True,
+                'level': level,
+                'updated_config': config_updates
+            }
+            
+        except Exception as e:
+            return {
+                'success': False,
+                'error': str(e)
+            }
 
 
 # CLI interface for the orchestrator
@@ -1279,6 +1410,21 @@ def main():
    parser.add_argument('--project-path', metavar='PATH', help='Path to local project directory')
    parser.add_argument('--reproduce-dir', metavar='DIR', help='Directory for reproduced code')
    parser.add_argument('--rebuild-images', action='store_true', help='Rebuild images from source instead of promoting UAT images')
+   
+   parser.add_argument('--add-worker-env', nargs=4,
+                       metavar=('PROJECT', 'ENVIRONMENT', 'COMMAND', 'DROPLETS'),
+                       help='Add worker to environment (e.g., --add-worker-env hostomatic prod "python worker.py" "web1,web2")')
+   parser.add_argument('--list-workers-env', nargs=2,
+                       metavar=('PROJECT', 'ENVIRONMENT'),
+                       help='List workers in environment (e.g., --list-workers-env hostomatic prod)')
+   parser.add_argument('--remove-worker-env', nargs=3,
+                       metavar=('PROJECT', 'ENVIRONMENT', 'INDEX'),
+                       help='Remove worker by index (e.g., --remove-worker-env hostomatic prod 0)')
+    
+   # Health monitoring configuration
+   parser.add_argument('--update-health', nargs='+',
+                       metavar=('LEVEL', 'CONFIG'),
+                       help='Update health config (e.g., --update-health global interval_minutes=10)')
    
    args = parser.parse_args()
    
@@ -1354,7 +1500,41 @@ def main():
            print(json.dumps(result, indent=2))
        else:
            print(json.dumps({'error': 'Deployment manager not initialized'}, indent=2))
-   
+
+   elif args.add_worker_env:
+        project, environment, command, droplets_str = args.add_worker_env
+        droplets = [d.strip() for d in droplets_str.split(',')]
+        result = orchestrator.add_worker_to_environment(project, environment, command, droplets)
+        print(json.dumps(result, indent=2))
+    
+   elif args.list_workers_env:
+        project, environment = args.list_workers_env
+        result = orchestrator.list_workers_for_environment(project, environment)
+        print(json.dumps(result, indent=2))
+    
+   elif args.remove_worker_env:
+        project, environment, index = args.remove_worker_env
+        result = orchestrator.remove_worker_from_environment(project, environment, int(index))
+        print(json.dumps(result, indent=2))
+    
+   elif args.update_health:
+        level = args.update_health[0]
+        config_updates = {}
+        for config_item in args.update_health[1:]:
+            if '=' in config_item:
+                key, value = config_item.split('=', 1)
+                # Try to convert to appropriate type
+                try:
+                    if value.isdigit():
+                        value = int(value)
+                    elif value.replace('.', '').isdigit():
+                        value = float(value)
+                except:
+                    pass
+                config_updates[key] = value
+        
+        result = orchestrator.update_health_monitoring(level, **config_updates)
+        print(json.dumps(result, indent=2))   
    else:
        parser.print_help()
 
