@@ -27,24 +27,33 @@ The Infrastructure Module provides a complete solution for managing cloud infras
 │ (Infrastructure     │───▶│  (Creates Servers)   │───▶│   (Runtime State)   │
 │  Specification)     │    │                      │    │                     │
 │                     │    │ • Creates droplets   │    │ • Real IP addresses │
-│ "hostomatic": {     │    │ • Assigns services   │    │ • Calculated ports  │
-│   "environments":   │    │ • Configures network │    │ • Service mapping   │
-│   ["prod", "uat"]   │    │ • Deploys workers    │    │ • Worker processes  │
-│ }                   │    │                      │    │                     │
+│ "droplets": {...}   │    │ • Assigns services   │    │ • Calculated ports  │
+│ "projects": {...}   │    │ • Configures network │    │ • Service mapping   │
+│                     │    │ • Deploys workers    │    │ • Worker processes  │
 └─────────────────────┘    └──────────────────────┘    └─────────────────────┘
 ```
 
 ### Data Flow Example
 
-**Input (infrastructure.json with infrastructure_spec):**
+**Input (infrastructure.json with direct specification):**
 ```json
 {
-  "infrastructure_spec": {
-    "projects": {
-      "hostomatic": {
-        "environments": ["prod", "uat"],
-        "web_droplets": 2,
-        "web_droplet_spec": "s-2vcpu-4gb"
+  "droplets": {
+    "master": {"ip": null, "role": "master", "size": "s-2vcpu-4gb", "region": "lon1"},
+    "web1": {"role": "web", "project": "hostomatic"},
+    "web2": {"ip": null, "role": "web", "size": "s-2vcpu-4gb", "region": "lon1", "project": "hostomatic"}
+  },
+  "projects": {
+    "hostomatic": {
+      "prod": {
+        "backend": {"type": "web", "assigned_droplets": ["web1", "web2"]},
+        "frontend": {"type": "web", "assigned_droplets": ["web1", "web2"]},
+        "worker_cleaner": {"type": "worker", "assigned_droplets": ["hostomatic-web1"]}
+      },
+      "uat": {
+        "backend": {"type": "web", "assigned_droplets": ["web1", "web2"]},
+        "frontend": {"type": "web", "assigned_droplets": ["web1", "eb2"]},
+        "worker_cleaner": {"type": "worker", "assigned_droplets": ["web1"]}
       }
     }
   }
@@ -52,38 +61,52 @@ The Infrastructure Module provides a complete solution for managing cloud infras
 ```
 
 **Processing:** `python orchestrator.py --orchestrate`
-- Creates droplets: master, hostomatic-web1, hostomatic-web2
+- Creates droplets with null or missing IPs: master, web1, web2
 - Gets real IP addresses from DigitalOcean
-- Calculates deterministic ports using hashing
+- Updates JSON with actual IPs
 - Assigns services including workers to appropriate servers
+- Create ports using a hash of project name and environment
+- Add default health monitoring settings (can be overriden - if different project or env on the same server, most strict one wins)
 
 **Output (runtime state in same file):**
 ```json
 {
   "droplets": {
     "master": {"ip": "192.168.1.10", "role": "master", "size": "s-2vcpu-4gb", "region": "lon1"},
-    "hostomatic-web1": {"ip": "192.168.1.11", "role": "web", "size": "s-2vcpu-4gb", "region": "lon1", "project": "hostomatic"},
+    "hostomatic-web1": {"ip": "192.168.1.11", "role": "web", "size": "s-1vcpu-1gb", "region": "lon1", "project": "hostomatic"},
     "hostomatic-web2": {"ip": "192.168.1.12", "role": "web", "size": "s-2vcpu-4gb", "region": "lon1", "project": "hostomatic"}
   },
   "projects": {
     "hostomatic": {
-      "prod": {
-        "backend": {"type": "web", "port": 8001, "assigned_droplets": ["hostomatic-web1", "hostomatic-web2"]},
-        "frontend": {"type": "web", "port": 9001, "assigned_droplets": ["hostomatic-web1", "hostomatic-web2"]},
-        "worker_cleaner": {"type": "worker", "assigned_droplets": ["hostomatic-web1"]}
+      "prod": { 
+        "health_monitoring": {
+            "heartbeat_config": {
+                "interval_minutes": 5,
+                "check_interval_seconds": 30,
+                "failure_timeout_minutes": 3,
+                "health_timeout_seconds": 10
+            }},
+        "services": {
+            "backend": {"type": "web", "port": 8001, "assigned_droplets": ["web1", "web2"]},
+            "frontend": {"type": "web", "port": 9001, "assigned_droplets": ["web1", "web2"]},
+            "worker_cleaner": {"type": "worker", "assigned_droplets": ["web1"]}
+         }
       },
       "uat": {
-        "backend": {"type": "web", "port": 8002, "assigned_droplets": ["hostomatic-web1", "hostomatic-web2"]},
-        "frontend": {"type": "web", "port": 9002, "assigned_droplets": ["hostomatic-web1", "hostomatic-web2"]},
-        "worker_cleaner": {"type": "worker", "assigned_droplets": ["hostomatic-web1"]}
-      }
+        "health_monitoring": {
+            "heartbeat_config": {
+                "interval_minutes": 20,
+                "check_interval_seconds": 90,
+                "failure_timeout_minutes": 15,
+                "health_timeout_seconds": 25
+            }},
+        "services": {
+            "backend": {"type": "web", "port": 8002, "assigned_droplets": ["web1", "web2"]},
+            "frontend": {"type": "web", "port": 9002, "assigned_droplets": ["web1", "web2"]},
+            "worker_cleaner": {"type": "worker", "assigned_droplets": ["web1"]}
+      }}
     }
-  },
-  "health_monitoring": {
-    "heartbeat_config": {
-      "interval_minutes": 15
-    }
-  }
+}
 }
 ```
 
@@ -102,7 +125,7 @@ python infra/setup/setup.py
 ```
 
 This creates:
-- `config/infrastructure.json` - Define your projects and server requirements
+- `config/infrastructure.json` - Define your projects and server requirements directly
 - `config/deployment_config.json` - Git repositories and service definitions (including workers)
 - `config/email_config.json` - Email notifications setup
 - `config/sms_config.json` - SMS alerts configuration
@@ -127,27 +150,42 @@ export GMAIL_APP_PASSWORD="your_gmail_app_password"
 
 ### Step 4: Configure Your Infrastructure
 
-Edit `config/infrastructure.json`:
+Edit `config/infrastructure.json` directly:
 ```json
 {
-  "infrastructure_spec": {
-    "droplets": {
-      "master": {
-        "size": "s-2vcpu-4gb",
-        "region": "lon1",
-        "role": "master"
-      }
+  "droplets": {
+    "master": {
+      "ip": null,
+      "size": "s-2vcpu-4gb",
+      "region": "lon1",
+      "role": "master"
     },
-    "projects": {
-      "hostomatic": {
-        "environments": ["prod", "uat"],
-        "web_droplets": 2,
-        "web_droplet_spec": "s-2vcpu-4gb"
+    "hostomatic-web1": {
+      "ip": null,
+      "size": "s-2vcpu-4gb", 
+      "region": "lon1",
+      "role": "web",
+      "project": "hostomatic"
+    },
+    "hostomatic-web2": {
+      "ip": null,
+      "size": "s-2vcpu-4gb",
+      "region": "lon1", 
+      "role": "web",
+      "project": "hostomatic"
+    }
+  },
+  "projects": {
+    "hostomatic": {
+      "prod": {
+        "backend": {"type": "web", "port": 8001, "assigned_droplets": ["hostomatic-web1", "hostomatic-web2"]},
+        "frontend": {"type": "web", "port": 9001, "assigned_droplets": ["hostomatic-web1", "hostomatic-web2"]},
+        "worker_cleaner": {"type": "worker", "assigned_droplets": ["hostomatic-web1"]}
       },
-      "digitalpixo": {
-        "environments": ["prod", "uat"],
-        "web_droplets": 1,
-        "web_droplet_spec": "s-1vcpu-1gb"
+      "uat": {
+        "backend": {"type": "web", "port": 8002, "assigned_droplets": ["hostomatic-web1", "hostomatic-web2"]},
+        "frontend": {"type": "web", "port": 9002, "assigned_droplets": ["hostomatic-web1", "hostomatic-web2"]},
+        "worker_cleaner": {"type": "worker", "assigned_droplets": ["hostomatic-web1"]}
       }
     }
   }
@@ -237,14 +275,16 @@ python orchestrator.py --status
 
 ### Project Management
 ```bash
-# Add a new project
+# Add a new project (using helper command)
 python orchestrator.py --add-project myapp "prod,uat" 2 s-2vcpu-4gb
 
-# Scale existing project
+# Scale existing project (using helper command)
 python orchestrator.py --scale hostomatic 3
 
-# Remove project
+# Remove project (using helper command)
 python orchestrator.py --remove-project oldproject
+
+# Or edit infrastructure.json directly for full control
 ```
 
 ### Deployment (Web Services + Workers)
@@ -291,7 +331,8 @@ python orchestrator.py --reproduce v1.0.0-uat-20250603-1200 --reproduce-dir ./re
 ## 🔧 Configuration Files Reference
 
 ### infrastructure.json
-Single source of truth for your infrastructure with transactional orchestration:
+Single source of truth for your infrastructure - define droplets and projects directly:
+
 ```json
 {
   "droplets": {
@@ -327,22 +368,6 @@ Single source of truth for your infrastructure with transactional orchestration:
   "health_monitoring": {
     "heartbeat_config": {
       "interval_minutes": 15
-    }
-  },
-  "infrastructure_spec": {
-    "droplets": {
-      "master": {
-        "size": "s-2vcpu-4gb",
-        "region": "lon1",
-        "role": "master"
-      }
-    },
-    "projects": {
-      "hostomatic": {
-        "environments": ["prod", "uat"],
-        "web_droplets": 2,
-        "web_droplet_spec": "s-2vcpu-4gb"
-      }
     }
   }
 }
@@ -559,8 +584,8 @@ redis-cli LLEN scheduler_queue
 # Deploy only workers (after code changes)
 python orchestrator.py --deploy-uat hostomatic
 
-# Scale workers independently (modify infrastructure.json worker assignments)
-python orchestrator.py --orchestrate
+# Scale workers by editing infrastructure.json
+# Then run: python orchestrator.py --orchestrate
 
 # Monitor worker health
 python orchestrator.py --status | grep worker
@@ -604,10 +629,25 @@ Add custom workers to deployment config:
 
 ### Worker Scaling
 
-Workers scale with web droplets automatically:
+Workers scale by editing infrastructure.json directly:
+```json
+{
+  "projects": {
+    "hostomatic": {
+      "prod": {
+        "worker_email": {
+          "type": "worker",
+          "assigned_droplets": ["hostomatic-web1", "hostomatic-web2"]
+        }
+      }
+    }
+  }
+}
+```
+
+Then run:
 ```bash
-# Scale project (includes workers)
-python orchestrator.py --scale hostomatic 4
+python orchestrator.py --orchestrate
 ```
 
 ### Multi-Environment Workers

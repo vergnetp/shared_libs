@@ -3,7 +3,7 @@ Configuration Management
 
 Handles loading, validation, and creation of all configuration files
 and templates for the Personal Cloud Orchestration System.
-Updated to remove CSV dependency and use JSON as source of truth.
+Updated to match current JSON structure and remove outdated infrastructure_spec.
 """
 
 import json
@@ -147,39 +147,137 @@ class ConfigManager:
         return results
     
     def _create_infrastructure_json(self) -> Dict[str, Any]:
-        """Create example infrastructure.json"""
+        """Create example infrastructure.json with current structure"""
         
         json_file = self.config_dir / "infrastructure.json"
         
         if json_file.exists():
             return {'status': 'exists', 'file': str(json_file)}
         
-        # Create example infrastructure configuration
+        # Create example infrastructure configuration with current structure
         infrastructure_data = {
-  "droplets": {
-    "master": {"ip": "192.168.1.10", "role": "master", "size": "s-2vcpu-4gb", "region": "lon1"},
-    "web1": {"ip": "192.168.1.11", "role": "web", "size": "s-1vcpu-1gb", "region": "lon1"},
-    "web2": {"ip": "192.168.1.12", "role": "web", "size": "s-1vcpu-1gb", "region": "lon1"}
-  },
-  "projects": {
-    "hostomatic": {
-      "prod": {
-        "backend": {"port": 8001, "assigned_droplets": ["web1", "web2"]},
-        "frontend": {"port": 9001, "assigned_droplets": ["web1", "web2"]},
-        "worker_cleaner": {"assigned_droplets": ["master"]}
-      },
-      "uat": {
-        "backend": {"port": 8002, "assigned_droplets": ["web1", "web2"]},
-        "frontend": {"port": 9002, "assigned_droplets": ["web1", "web2"]},
-        "worker_cleaner": {"assigned_droplets": ["web1"]}
-      },
-      "test": {
-        "backend": {"port": 8003, "assigned_droplets": ["web1"]},
-        "frontend": {"port": 9003, "assigned_droplets": ["web1"]}     
-      }
-    }
-  }
-}
+            "droplets": {
+                "master": {
+                    "size": "s-2vcpu-4gb",
+                    "region": "lon1",
+                    "role": "master"
+                },
+                "web1": {
+                    "size": "s-1vcpu-1gb",
+                    "region": "lon1",
+                    "role": "web"
+                },
+                "web2": {
+                    "size": "s-1vcpu-1gb",
+                    "region": "lon1",
+                    "role": "web"
+                }
+            },
+            "projects": {
+                "hostomatic": {
+                    "prod": {
+                        "health_monitoring": {
+                            "heartbeat_config": {
+                                "interval_minutes": 5,
+                                "check_interval_seconds": 30,
+                                "failure_timeout_minutes": 3,
+                                "health_timeout_seconds": 10
+                            }
+                        },
+                        "backend": {
+                            "type": "web",
+                            "assigned_droplets": ["web1", "web2"]
+                        },
+                        "frontend": {
+                            "type": "web",
+                            "assigned_droplets": ["web1", "web2"]
+                        },
+                        "worker_email": {
+                            "type": "worker",
+                            "assigned_droplets": ["master"]
+                        }
+                    },
+                    "uat": {
+                        "health_monitoring": {
+                            "heartbeat_config": {
+                                "interval_minutes": 15,
+                                "check_interval_seconds": 60,
+                                "failure_timeout_minutes": 10,
+                                "health_timeout_seconds": 20
+                            }
+                        },
+                        "backend": {
+                            "type": "web",
+                            "assigned_droplets": ["web1"]
+                        },
+                        "frontend": {
+                            "type": "web",
+                            "assigned_droplets": ["web1"]
+                        },
+                        "worker_email": {
+                            "type": "worker",
+                            "assigned_droplets": ["web1"]
+                        }
+                    },
+                    "test": {
+                        "health_monitoring": {
+                            "heartbeat_config": {
+                                "interval_minutes": 30,
+                                "check_interval_seconds": 120,
+                                "failure_timeout_minutes": 20,
+                                "health_timeout_seconds": 30
+                            }
+                        },
+                        "backend": {
+                            "type": "web",
+                            "assigned_droplets": ["web1"]
+                        },
+                        "frontend": {
+                            "type": "web",
+                            "assigned_droplets": ["web1"]
+                        }
+                    }
+                },
+                "digitalpixo": {
+                    "prod": {
+                        "health_monitoring": {
+                            "heartbeat_config": {
+                                "interval_minutes": 5,
+                                "check_interval_seconds": 30,
+                                "failure_timeout_minutes": 3,
+                                "health_timeout_seconds": 10
+                            }
+                        },
+                        "backend": {
+                            "type": "web",
+                            "assigned_droplets": ["web1"]
+                        },
+                        "frontend": {
+                            "type": "web",
+                            "assigned_droplets": ["web1"]
+                        }
+                    },
+                    "uat": {
+                        "health_monitoring": {
+                            "heartbeat_config": {
+                                "interval_minutes": 20,
+                                "check_interval_seconds": 90,
+                                "failure_timeout_minutes": 15,
+                                "health_timeout_seconds": 25
+                            }
+                        },
+                        "backend": {
+                            "type": "web",
+                            "assigned_droplets": ["web1"]
+                        },
+                        "frontend": {
+                            "type": "web",
+                            "assigned_droplets": ["web1"]
+                        }
+                    }
+                }
+            }
+        }
         
         with open(json_file, 'w') as f:
             json.dump(infrastructure_data, f, indent=2)
@@ -821,6 +919,10 @@ max_lease_ttl = "8760h"
                 f.write(heartbeat_content)
             
             results['heartbeat'] = {'status': 'created', 'file': str(heartbeat_file)}
+        else:
+            results['heartbeat'] = {'status': 'exists', 'file': str(heartbeat_file)}
+
+        return results
 
     def _create_env_templates(self) -> Dict[str, Any]:
         """Create environment file templates"""
@@ -871,6 +973,8 @@ API_VERSION=v1
                 f.write(backend_env_content)
             
             results['backend'] = {'status': 'created', 'file': str(backend_env_file)}
+        else:
+            results['backend'] = {'status': 'exists', 'file': str(backend_env_file)}
         
         # Worker environment template
         worker_env_file = self.templates_dir / "worker.env"
@@ -920,6 +1024,8 @@ QUEUE_ROUTING_KEY={{service_type}}
                 f.write(worker_env_content)
             
             results['worker'] = {'status': 'created', 'file': str(worker_env_file)}
+        else:
+            results['worker'] = {'status': 'exists', 'file': str(worker_env_file)}
         
         # Frontend environment template
         frontend_env_file = self.templates_dir / "frontend.env"
@@ -949,6 +1055,8 @@ PUBLIC_URL=/
                 f.write(frontend_env_content)
             
             results['frontend'] = {'status': 'created', 'file': str(frontend_env_file)}
+        else:
+            results['frontend'] = {'status': 'exists', 'file': str(frontend_env_file)}
         
         return results
     
@@ -969,26 +1077,39 @@ PUBLIC_URL=/
                     config = json.load(f)
                     
                     # Check required sections
-                    required_sections = ['infrastructure_spec']
+                    required_sections = ['droplets', 'projects']
                     for section in required_sections:
                         if section not in config:
                             results['issues'].append(f"Missing {section} section in infrastructure.json")
                             results['valid'] = False
                     
-                    # Check infrastructure spec structure
-                    if 'infrastructure_spec' in config:
-                        spec = config['infrastructure_spec']
-                        
-                        if 'projects' not in spec:
-                            results['issues'].append("No projects defined in infrastructure_spec")
-                            results['valid'] = False
-                        else:
-                            # Check each project has required fields
-                            for project, project_config in spec['projects'].items():
-                                required_fields = ['environments', 'web_droplets', 'web_droplet_spec']
-                                for field in required_fields:
-                                    if field not in project_config:
-                                        results['issues'].append(f"Project {project} missing {field}")
+                    # Check droplets structure
+                    if 'droplets' in config:
+                        for droplet_name, droplet_config in config['droplets'].items():
+                            required_fields = ['size', 'region', 'role']
+                            for field in required_fields:
+                                if field not in droplet_config:
+                                    results['issues'].append(f"Droplet {droplet_name} missing {field}")
+                                    results['valid'] = False
+                    
+                    # Check projects structure
+                    if 'projects' in config:
+                        for project, environments in config['projects'].items():
+                            if not isinstance(environments, dict):
+                                results['issues'].append(f"Project {project} should contain environment configurations")
+                                results['valid'] = False
+                                continue
+                            
+                            for env, services in environments.items():
+                                if 'health_monitoring' not in services:
+                                    results['warnings'].append(f"No health monitoring config for {project}-{env}")
+                                
+                                # Check services have assigned_droplets
+                                for service_name, service_config in services.items():
+                                    if service_name == 'health_monitoring':
+                                        continue
+                                    if 'assigned_droplets' not in service_config:
+                                        results['issues'].append(f"Service {project}-{env}-{service_name} missing assigned_droplets")
                                         results['valid'] = False
             else:
                 results['issues'].append("infrastructure.json not found")

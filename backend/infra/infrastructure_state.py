@@ -34,12 +34,7 @@ class InfrastructureState:
        """Create empty state structure"""
        return {
            "droplets": {},
-           "projects": {},
-           "health_monitoring": {
-               "heartbeat_config": {
-                   "interval_minutes": 15
-               }
-           }
+           "projects": {}
        }
    
    def save_state(self):
@@ -48,6 +43,56 @@ class InfrastructureState:
        with open(self.state_file, 'w') as f:
            json.dump(self.state, f, indent=2)
    
+   def get_environment_heartbeat_config(self, project: str, environment: str) -> Dict[str, Any]:
+        """Get heartbeat monitoring configuration for a specific project-environment"""
+        project_key = f"{project}-{environment}"
+        env_config = self.get_project_services(project_key)
+        health_config = env_config.get("health_monitoring", {})
+        heartbeat_config = health_config.get("heartbeat_config", {})
+        
+        # Environment-specific defaults
+        env_defaults = {
+            "prod": {
+                "interval_minutes": 5,
+                "check_interval_seconds": 30,
+                "failure_timeout_minutes": 3,
+                "health_timeout_seconds": 10
+            },
+            "uat": {
+                "interval_minutes": 15,
+                "check_interval_seconds": 60,
+                "failure_timeout_minutes": 10,
+                "health_timeout_seconds": 20
+            },
+            "test": {
+                "interval_minutes": 30,
+                "check_interval_seconds": 120,
+                "failure_timeout_minutes": 20,
+                "health_timeout_seconds": 30
+            }
+        }
+        
+        defaults = env_defaults.get(environment, env_defaults["uat"])  # Default to UAT settings
+        return {**defaults, **heartbeat_config}
+
+   def update_environment_heartbeat_config(self, project: str, environment: str, **config_updates):
+        """Update heartbeat monitoring configuration for a specific environment"""
+        # Ensure environment exists
+        if project not in self.state["projects"]:
+            raise ValueError(f"Project {project} not found")
+        if environment not in self.state["projects"][project]:
+            raise ValueError(f"Environment {environment} not found in project {project}")
+        
+        # Ensure health_monitoring structure exists
+        if "health_monitoring" not in self.state["projects"][project][environment]:
+            self.state["projects"][project][environment]["health_monitoring"] = {}
+        if "heartbeat_config" not in self.state["projects"][project][environment]["health_monitoring"]:
+            self.state["projects"][project][environment]["health_monitoring"]["heartbeat_config"] = {}
+        
+        # Update configuration
+        self.state["projects"][project][environment]["health_monitoring"]["heartbeat_config"].update(config_updates)
+        self.save_state()
+
    # Transactional Orchestration Methods
    def get_desired_droplets(self) -> Dict[str, Dict[str, Any]]:
        """Get droplets as defined in JSON (desired state)"""

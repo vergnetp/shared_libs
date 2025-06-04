@@ -55,19 +55,59 @@ class DistributedHealthMonitor:
         self.emailer = emailer
         
         # Health monitoring state
-        self.health_results = {}  # target -> HealthCheckResult
-        self.failure_start_times = {}  # target -> datetime when failure first detected
+        self.health_results = {}
+        self.failure_start_times = {}
         self.last_heartbeat_sent = datetime.now() - timedelta(hours=1)
         
-        # Configuration
-        self.check_interval = 30  # seconds between health checks
-        self.health_timeout = 10  # seconds for individual health check
-        self.failure_timeout_minutes = 5  # minutes before triggering recovery
-        self.heartbeat_interval = 15  # minutes between heartbeat emails
+        # Detect which environments this droplet serves and use the most critical config
+        self.monitoring_config = self._get_monitoring_config_for_droplet()
+        
+        # Apply configuration
+        self.heartbeat_interval = self.monitoring_config['interval_minutes']
+        self.check_interval = self.monitoring_config['check_interval_seconds']
+        self.failure_timeout_minutes = self.monitoring_config['failure_timeout_minutes']
+        self.health_timeout = self.monitoring_config['health_timeout_seconds']
         
         # Recovery coordination
-        self.recovery_operations = set()  # Track ongoing recovery operations
+        self.recovery_operations = set()
+
+    def _get_monitoring_config_for_droplet(self) -> Dict[str, Any]:
+        """Get the most critical monitoring config for this droplet based on services it hosts"""
         
+        # Get all services running on this droplet
+        services = self.state.get_services_on_droplet(self.droplet_name)
+        
+        if not services:
+            # No services, use default config
+            return {
+                "interval_minutes": 15,
+                "check_interval_seconds": 30,
+                "failure_timeout_minutes": 5,
+                "health_timeout_seconds": 10
+            }
+        
+        # Find the most critical environment (shortest intervals = most critical)
+        most_critical_config = None
+        min_interval = float('inf')
+        
+        for service in services:
+            project = service['project']
+            environment = service['environment']
+            
+            config = self.state.get_environment_heartbeat_config(project, environment)
+            
+            # Use the environment with the shortest interval (most critical)
+            if config['interval_minutes'] < min_interval:
+                min_interval = config['interval_minutes']
+                most_critical_config = config
+        
+        return most_critical_config or {
+            "interval_minutes": 15,
+            "check_interval_seconds": 30,
+            "failure_timeout_minutes": 5,
+            "health_timeout_seconds": 10
+        }
+
     async def start_monitoring(self):
         """Start the distributed health monitoring daemon"""
         print(f"Starting simplified health monitoring on {self.droplet_name}")
