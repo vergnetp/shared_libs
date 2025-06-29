@@ -3,6 +3,37 @@ import os
 from pathlib import Path
 from .. import log as logger
 
+
+import socket
+import struct
+
+def get_container_host_ip():
+    """
+    Returns the ip of the server hosting the docker container.
+
+    Notes: 
+    * This code need to be called inside a running container.
+    * Returns None if not found/error
+    """
+    try:
+        # Try Docker's built-in hostname first (works on Windows/Mac)
+        host_ip = socket.gethostbyname('host.docker.internal')
+        return host_ip
+    except socket.gaierror:
+        # Fallback for Linux - get default gateway (host IP in bridge mode)
+        try:
+            with open('/proc/net/route') as f:
+                for line in f:
+                    fields = line.strip().split()
+                    if fields[1] != '00000000' or not int(fields[3], 16) & 2:
+                        continue
+                    gateway = socket.inet_ntoa(struct.pack("<L", int(fields[2], 16)))
+                    return gateway
+        except:
+            return None
+    except:
+        return None
+    
 def parse_docker_compose(compose_file):
     """
     Parse a Docker Compose file and extract service information needed for readiness checks.

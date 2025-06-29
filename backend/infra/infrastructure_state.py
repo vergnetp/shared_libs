@@ -223,6 +223,7 @@ class InfrastructureState:
            self.state["droplets"][name]["ip"] = new_ip
            self.save_state()
    
+
    def get_services_on_droplet(self, droplet_name: str) -> List[Dict[str, Any]]:
         """Get all services running on a specific droplet with new structure"""
         services = []
@@ -235,60 +236,65 @@ class InfrastructureState:
                 project_services = env_config.get("services", {})
                 
                 for service_name, service_config in project_services.items():
-                    assigned_droplets = service_config.get("assigned_droplets", [])
-                    if droplet_name in assigned_droplets:
-                        services.append({
-                            'project': project,
-                            'environment': environment,
-                            'service_name': service_name,
-                            'service_type': service_config.get("type"),
-                            'config': service_config
-                        })
-                
-                # Handle workers array
-                workers = env_config.get("services", {}).get("workers", [])
-                if isinstance(workers, list):
-                    for i, worker_config in enumerate(workers):
-                        assigned_droplets = worker_config.get("assigned_droplets", [])
+                    if service_name == "workers":
+                        # Handle workers array
+                        if isinstance(service_config, list):
+                            for i, worker_config in enumerate(service_config):
+                                assigned_droplets = worker_config.get("assigned_droplets", [])
+                                if droplet_name in assigned_droplets:
+                                    services.append({
+                                        'project': project,
+                                        'environment': environment,
+                                        'service_name': f"worker_{i}",
+                                        'service_type': "worker",
+                                        'config': worker_config
+                                    })
+                    else:
+                        # Handle regular services (backend, frontend, master)
+                        assigned_droplets = service_config.get("assigned_droplets", [])
                         if droplet_name in assigned_droplets:
                             services.append({
                                 'project': project,
                                 'environment': environment,
-                                'service_name': f"worker_{i}",
-                                'service_type': "worker",
-                                'config': worker_config
+                                'service_name': service_name,
+                                'service_type': service_config.get("type", "web"),
+                                'config': service_config
                             })
         
         return services
    
    def get_candidate_droplets_for_service_migration(self, service_info: Dict[str, Any], 
                                                    exclude_droplets: List[str] = None) -> List[str]:
-       """Get candidate droplets where a service can be migrated"""
-       exclude_droplets = exclude_droplets or []
-       service_type = service_info['config'].get('type', 'web')
-       
-       candidates = []
-       
-       for droplet_name, droplet_config in self.state["droplets"].items():
-           if droplet_name in exclude_droplets:
-               continue
-           
-           droplet_role = droplet_config.get('role')
-           
-           # Service type placement rules
-           if service_type == 'worker':
-               # Workers can go anywhere
-               candidates.append(droplet_name)
-           elif service_type == 'web':
-               # Web services prefer web droplets, but can go on master if needed
-               if droplet_role in ['web', 'master']:
-                   candidates.append(droplet_name)
-           elif service_type == 'infrastructure':
-               # Infrastructure services prefer master
-               if droplet_role == 'master':
-                   candidates.append(droplet_name)
-       
-       return candidates
+        """Get candidate droplets where a service can be migrated"""
+        exclude_droplets = exclude_droplets or []
+        service_type = service_info['config'].get('type', 'web')
+        
+        candidates = []
+        
+        for droplet_name, droplet_config in self.state["droplets"].items():
+            if droplet_name in exclude_droplets:
+                continue
+            
+            droplet_role = droplet_config.get('role')
+            
+            # Service type placement rules
+            if service_type == 'worker':
+                # Workers can go anywhere
+                candidates.append(droplet_name)
+            elif service_type == 'web':
+                # Web services prefer web droplets, but can go on master if needed
+                if droplet_role in ['web', 'master']:
+                    candidates.append(droplet_name)
+            elif service_type == 'master':
+                # Master services only go on master droplets
+                if droplet_role == 'master':
+                    candidates.append(droplet_name)
+            elif service_type == 'infrastructure':
+                # Infrastructure services prefer master
+                if droplet_role == 'master':
+                    candidates.append(droplet_name)
+        
+        return candidates
    
    def plan_service_migration(self, droplet_to_remove: str) -> Dict[str, Any]:
        """Plan how to migrate services away from a droplet that will be removed"""
@@ -647,72 +653,107 @@ class InfrastructureState:
        return self.get_droplets_by_role("web")
    
    def validate_state(self) -> List[str]:
-       """Validate the current state and return any issues"""
-       issues = []
-       
-       # Check for missing master droplet
-       if not self.get_master_droplet():
-           issues.append("No master droplet found")
-       
-       # Check for services assigned to non-existent droplets
-       for project, environments in self.state["projects"].items():
-           for environment, services in environments.items():
-               for service_type, service_config in services.items():
-                   for droplet_name in service_config.get("assigned_droplets", []):
-                       if droplet_name not in self.state["droplets"]:
-                           issues.append(f"Service {project}-{environment}-{service_type} assigned to non-existent droplet {droplet_name}")
-       
-       # Check for duplicate ports on same droplet
-       droplet_ports = {}
-       for project, environments in self.state["projects"].items():
-           for environment, services in environments.items():
-               for service_type, service_config in services.items():
-                   if "port" in service_config:
-                       port = service_config["port"]
-                       for droplet_name in service_config.get("assigned_droplets", []):
-                           if droplet_name not in droplet_ports:
-                               droplet_ports[droplet_name] = []
-                           if port in droplet_ports[droplet_name]:
-                               issues.append(f"Port {port} conflict on droplet {droplet_name}")
-                           else:
-                               droplet_ports[droplet_name].append(port)
-       
-       return issues
-   
+        """Validate the current state and return any issues"""
+        issues = []
+        
+        # Check for missing master droplet
+        if not self.get_master_droplet():
+            issues.append("No master droplet found")
+        
+        # Check for services assigned to non-existent droplets
+        for project, environments in self.state["projects"].items():
+            for environment, env_config in environments.items():
+                if environment == "health_monitoring":
+                    continue
+                
+                services = env_config.get("services", {})
+                for service_name, service_config in services.items():
+                    if service_name == "workers":
+                        # Handle workers array
+                        if isinstance(service_config, list):
+                            for i, worker in enumerate(service_config):
+                                for droplet_name in worker.get("assigned_droplets", []):
+                                    if droplet_name not in self.state["droplets"]:
+                                        issues.append(f"Worker {i} in {project}-{environment} assigned to non-existent droplet {droplet_name}")
+                    else:
+                        # Handle regular services
+                        for droplet_name in service_config.get("assigned_droplets", []):
+                            if droplet_name not in self.state["droplets"]:
+                                issues.append(f"Service {project}-{environment}-{service_name} assigned to non-existent droplet {droplet_name}")
+        
+        # Check for duplicate ports on same droplet
+        droplet_ports = {}
+        for project, environments in self.state["projects"].items():
+            for environment, env_config in environments.items():
+                if environment == "health_monitoring":
+                    continue
+                
+                services = env_config.get("services", {})
+                for service_name, service_config in services.items():
+                    if service_name == "workers":
+                        # Workers don't use ports
+                        continue
+                    
+                    if "port" in service_config:
+                        port = service_config["port"]
+                        for droplet_name in service_config.get("assigned_droplets", []):
+                            if droplet_name not in droplet_ports:
+                                droplet_ports[droplet_name] = []
+                            if port in droplet_ports[droplet_name]:
+                                issues.append(f"Port {port} conflict on droplet {droplet_name}")
+                            else:
+                                droplet_ports[droplet_name].append(port)
+        
+        return issues
+
    def get_summary(self) -> Dict[str, Any]:
-       """Get infrastructure summary"""
-       droplet_count = len(self.state["droplets"])
-       project_count = len(self.state["projects"])
-       
-       service_count = 0
-       worker_count = 0
-       web_service_count = 0
-       infrastructure_service_count = 0
-       
-       for project, environments in self.state["projects"].items():
-           for environment, services in environments.items():
-               for service_type, service_config in services.items():
-                   service_count += 1
-                   service_type_info = service_config.get("type", "web")
-                   
-                   if service_type_info == "worker":
-                       worker_count += 1
-                   elif service_type_info == "web":
-                       web_service_count += 1
-                   elif service_type_info == "infrastructure":
-                       infrastructure_service_count += 1
-       
-       return {
-           "droplets": droplet_count,
-           "projects": project_count,
-           "services": service_count,
-           "worker_services": worker_count,
-           "web_services": web_service_count,
-           "infrastructure_services": infrastructure_service_count,
-           "master_ip": self.get_master_droplet()["ip"] if self.get_master_droplet() else None,
-           "web_droplet_count": len(self.get_web_droplets()),
-           "validation_issues": self.validate_state()
-       }
+        """Get infrastructure summary"""
+        droplet_count = len(self.state["droplets"])
+        project_count = len(self.state["projects"])
+        
+        service_count = 0
+        worker_count = 0
+        web_service_count = 0
+        infrastructure_service_count = 0
+        master_service_count = 0
+        
+        for project, environments in self.state["projects"].items():
+            for environment, env_config in environments.items():
+                if environment == "health_monitoring":
+                    continue
+                
+                services = env_config.get("services", {})
+                for service_name, service_config in services.items():
+                    if service_name == "workers":
+                        # Count workers in array
+                        if isinstance(service_config, list):
+                            worker_count += len(service_config)
+                            service_count += len(service_config)
+                    else:
+                        service_count += 1
+                        service_type_info = service_config.get("type", "web")
+                        
+                        if service_type_info == "worker":
+                            worker_count += 1
+                        elif service_type_info == "web":
+                            web_service_count += 1
+                        elif service_type_info == "master":
+                            master_service_count += 1
+                        elif service_type_info == "infrastructure":
+                            infrastructure_service_count += 1
+        
+        return {
+            "droplets": droplet_count,
+            "projects": project_count,
+            "services": service_count,
+            "worker_services": worker_count,
+            "web_services": web_service_count,
+            "master_services": master_service_count,
+            "infrastructure_services": infrastructure_service_count,
+            "master_ip": self.get_master_droplet()["ip"] if self.get_master_droplet() else None,
+            "web_droplet_count": len(self.get_web_droplets()),
+            "validation_issues": self.validate_state()
+        }
    
    def get_master_for_project(self, project: str, environment: str) -> Optional[Dict[str, Any]]:
         """Get master droplet assigned to project/environment"""
@@ -736,6 +777,24 @@ class InfrastructureState:
    def _apply_defaults(self, state: Dict[str, Any]):
         """Apply defaults to droplets (size, region) and auto-generate ports"""
         
+        # Apply global health monitoring defaults if missing
+        if "health_monitoring" not in state:
+            state["health_monitoring"] = {
+                "heartbeat_config": {
+                    "interval_minutes": 15,
+                    "check_interval_seconds": 60,
+                    "failure_timeout_minutes": 10,
+                    "health_timeout_seconds": 20
+                }
+            }
+        elif "heartbeat_config" not in state["health_monitoring"]:
+            state["health_monitoring"]["heartbeat_config"] = {
+                "interval_minutes": 15,
+                "check_interval_seconds": 60,
+                "failure_timeout_minutes": 10,
+                "health_timeout_seconds": 20
+            }
+        
         # Apply droplet defaults
         for name, droplet_config in state.get("droplets", {}).items():
             # Apply defaults
@@ -756,11 +815,15 @@ class InfrastructureState:
                 
                 services = env_config.get("services", {})
                 for service_name, service_config in services.items():
-                    if service_config.get("type") == "web" and "port" not in service_config:
+                    if service_name == "workers":
+                        # Skip workers array - no ports needed
+                        continue
+                    elif service_config.get("type") == "web" and "port" not in service_config:
                         # Generate hash-based port
                         service_config["port"] = self.get_hash_based_port(
                             project, environment, 8000, 1000
                         )
+
 
    def get_workers_for_project(self, project: str, environment: str) -> List[Dict[str, Any]]:
         """Get all workers for a project/environment"""

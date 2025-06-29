@@ -1,0 +1,41 @@
+{
+  "jobs": [
+    {
+      "name": "demo_backup",
+      "schedule": "*/2 * * * *",
+      "script_path": "jobs/backup_job.py",
+      "args": [
+        "testlocal",
+        "dev",
+        "maindb",
+        "demo"
+      ],
+      "description": "Demo backup job",
+      "enabled": false
+    },
+    {
+      "name": "health_check",
+      "schedule": "*/5 * * * *",
+      "script_path": "jobs/health_check_job.py",
+      "args": [
+        "testlocal",
+        "dev",
+        "maindb",
+        "cache"
+      ],
+      "description": "Health check for core services",
+      "enabled": false
+    },
+    {
+      "name": "secrets_check",
+      "schedule": "0 */6 * * *",
+      "script_path": "jobs/secrets_check_job.py",
+      "args": [
+        "testlocal",
+        "dev"
+      ],
+      "description": "Verify secrets are accessible",
+      "enabled": false
+    }
+  ]
+}

@@ -195,14 +195,15 @@ class EnvironmentGenerator:
         issues = []
         warnings = []
         
-        # Check required secrets
-        required_secrets = service_config.get('secrets', [])
-        missing_secrets = self.container_secret_manager.secret_manager.get_missing_secrets(
-            project, environment, required_secrets
-        )
-        
-        if missing_secrets:
-            issues.append(f"Missing secrets: {', '.join(missing_secrets)}")
+        # Check required secrets (skip for master services as they don't need app secrets)
+        if service_config.get("type") != "master":
+            required_secrets = service_config.get('secrets', [])
+            missing_secrets = self.container_secret_manager.secret_manager.get_missing_secrets(
+                project, environment, required_secrets
+            )
+            
+            if missing_secrets:
+                issues.append(f"Missing secrets: {', '.join(missing_secrets)}")
         
         # Check assigned droplets exist
         assigned_droplets = service_config.get('assigned_droplets', [])
@@ -210,79 +211,102 @@ class EnvironmentGenerator:
             if not self.state.get_droplet(droplet_name):
                 issues.append(f"Assigned droplet {droplet_name} does not exist")
         
-        # Check for port conflicts (web services only)
-        if service_config.get('type') != 'worker' and 'port' in service_config:
+        # Check for port conflicts (web services only, not workers or master)
+        service_type_info = service_config.get('type', 'web')
+        if service_type_info == 'web' and 'port' in service_config:
             port = service_config['port']
             
             # Check if port is already used by another service on same droplets
             for droplet_name in assigned_droplets:
                 other_services = self.state.get_services_on_droplet(droplet_name)
                 for other_service in other_services:
-                    if other_service != self.state.get_service_name(f"{project}-{environment}", service_type):
-                        # Parse other service to get project/env/type
-                        parts = other_service.split('-')
-                        if len(parts) >= 3:
-                            other_project = parts[0]
-                            other_env = parts[1]
-                            other_type = '-'.join(parts[2:])
-                            
-                            other_config = self.state.get_project_services(f"{other_project}-{other_env}").get(other_type, {})
-                            if other_config.get('port') == port:
-                                issues.append(f"Port {port} conflict with {other_service} on droplet {droplet_name}")
+                    current_service_name = self.state.get_service_name(f"{project}-{environment}", service_type)
+                    if other_service['service_name'] != service_type and other_service.get('config', {}).get('port') == port:
+                        issues.append(f"Port {port} conflict with {other_service['service_name']} on droplet {droplet_name}")
         
-        # Check database/redis connectivity
-        if 'database' in [s.lower() for s in required_secrets]:
-            db_host = self._get_database_host(project, environment)
-            if db_host == "localhost":
-                warnings.append("Database host defaulting to localhost - check database service deployment")
-        
-        if 'redis' in [s.lower() for s in required_secrets]:
-            redis_host = self._get_redis_host(project, environment)
-            if redis_host == "localhost":
-                warnings.append("Redis host defaulting to localhost - check Redis service deployment")
+        # Check database/redis connectivity (skip for master services)
+        if service_type_info != "master":
+            required_secrets = service_config.get('secrets', [])
+            if any('database' in s.lower() or 'db' in s.lower() for s in required_secrets):
+                db_host = self._get_database_host(project, environment)
+                if db_host == "localhost":
+                    warnings.append("Database host defaulting to localhost - check database service deployment")
+            
+            if any('redis' in s.lower() for s in required_secrets):
+                redis_host = self._get_redis_host(project, environment)
+                if redis_host == "localhost":
+                    warnings.append("Redis host defaulting to localhost - check Redis service deployment")
         
         return {
             "valid": len(issues) == 0,
             "issues": issues,
             "warnings": warnings,
-            "missing_secrets": missing_secrets
+            "missing_secrets": self.container_secret_manager.secret_manager.get_missing_secrets(
+                project, environment, service_config.get('secrets', [])
+            ) if service_config.get("type") != "master" else []
         }
     
     def get_service_discovery_info(self, project: str, environment: str) -> Dict[str, Dict[str, Any]]:
         """Get service discovery information for all services in a project/environment"""
         
-        project_key = f"{project}-{environment}"
-        services = self.state.get_project_services(project_key)
+        services = self.state.get_project_services(project, environment)
         
         discovery_info = {}
         
         for service_type, service_config in services.items():
-            service_name = self.state.get_service_name(project_key, service_type)
-            
-            # Get service endpoints
-            endpoints = []
-            assigned_droplets = service_config.get('assigned_droplets', [])
-            
-            for droplet_name in assigned_droplets:
-                droplet = self.state.get_droplet(droplet_name)
-                if droplet:
-                    endpoint_info = {
-                        "droplet": droplet_name,
-                        "ip": droplet["ip"]
-                    }
-                    
-                    # Add port for web services
-                    if 'port' in service_config:
-                        endpoint_info["port"] = service_config['port']
-                        endpoint_info["url"] = f"http://{droplet['ip']}:{service_config['port']}"
-                    
-                    endpoints.append(endpoint_info)
-            
-            discovery_info[service_name] = {
-                "type": service_config.get('type', 'web'),
-                "endpoints": endpoints,
-                "load_balanced": len(endpoints) > 1 and service_config.get('type') != 'worker',
-                "health_check_url": f"http://{endpoints[0]['ip']}:{service_config.get('port', 8080)}/health" if endpoints and 'port' in service_config else None
-            }
+            if service_type == "workers":
+                # Handle workers array
+                if isinstance(service_config, list):
+                    for i, worker_config in enumerate(service_config):
+                        worker_name = f"worker_{i}"
+                        endpoints = []
+                        assigned_droplets = worker_config.get("assigned_droplets", [])
+                        
+                        for droplet_name in assigned_droplets:
+                            droplet = self.state.get_droplet(droplet_name)
+                            if droplet:
+                                endpoint_info = {
+                                    "droplet": droplet_name,
+                                    "ip": droplet["ip"],
+                                    "command": worker_config.get("command")
+                                }
+                                endpoints.append(endpoint_info)
+                        
+                        discovery_info[worker_name] = {
+                            "type": "worker",
+                            "endpoints": endpoints,
+                            "load_balanced": False,  # Workers are not load balanced
+                            "health_check_url": None  # Workers don't have HTTP health checks
+                        }
+            else:
+                # Handle regular services
+                service_name = self.state.get_service_name(f"{project}-{environment}", service_type)
+                
+                # Get service endpoints
+                endpoints = []
+                assigned_droplets = service_config.get("assigned_droplets", [])
+                
+                for droplet_name in assigned_droplets:
+                    droplet = self.state.get_droplet(droplet_name)
+                    if droplet:
+                        endpoint_info = {
+                            "droplet": droplet_name,
+                            "ip": droplet["ip"]
+                        }
+                        
+                        # Add port for web services
+                        if 'port' in service_config:
+                            endpoint_info["port"] = service_config['port']
+                            endpoint_info["url"] = f"http://{droplet['ip']}:{service_config['port']}"
+                        
+                        endpoints.append(endpoint_info)
+                
+                service_type_info = service_config.get("type", "web")
+                discovery_info[service_name] = {
+                    "type": service_type_info,
+                    "endpoints": endpoints,
+                    "load_balanced": len(endpoints) > 1 and service_type_info == "web",
+                    "health_check_url": f"http://{endpoints[0]['ip']}:{service_config.get('port', 8080)}/health" if endpoints and service_type_info == "web" and 'port' in service_config else None
+                }
         
         return discovery_info

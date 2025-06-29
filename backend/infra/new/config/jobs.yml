@@ -1,0 +1,36 @@
+jobs:
+  - name: backup_maindb
+    schedule: "0 2 * * *"
+    script_path: "jobs/backup_job.py"
+    args: ["testlocal", "dev", "maindb"]
+    description: "Daily backup of main database"
+    enabled: true
+
+  - name: backup_redis
+    schedule: "0 3 * * *"
+    script_path: "jobs/backup_job.py"
+    args: ["testlocal", "dev", "cache"]
+    description: "Daily backup of Redis cache"
+    enabled: false
+
+  - name: health_check
+    schedule: "*/10 * * * *"
+    script_path: "jobs/health_check_job.py"
+    args: ["testlocal", "dev", "maindb", "cache"]
+    description: "Every 10 minutes health check"
+    enabled: true
+
+  - name: comprehensive_monitoring
+    schedule: "0 */6 * * *"
+    script_path: "jobs/monitoring_job.py"
+    args: ["testlocal", "dev"]
+    description: "Every 6 hours comprehensive monitoring"
+    enabled: true
+
+  # Demo job for testing (runs every minute)
+  - name: demo_backup
+    schedule: "*/1 * * * *"
+    script_path: "jobs/backup_job.py"
+    args: ["testlocal", "dev", "maindb", "demo"]
+    description: "Demo backup for testing"
+    enabled: false  # Disabled by default

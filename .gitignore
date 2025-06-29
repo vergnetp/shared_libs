@@ -31,3 +31,7 @@ build/
 # OS-specific files
 .DS_Store  # macOS
 Thumbs.db  # Windows
+
+# Secrets and environment files - SECURITY CRITICAL
+.env*
+secrets*.json
