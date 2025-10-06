@@ -1,0 +1,3 @@
+Project: new_project
+Config File: C:\Users\vergn\Desktop\Projects\shared_libs\backend\infra\light\config\projects\new_project.json
+Deployment ID: deployment_61097eeb-4718-479e-bab5-fdeebc9c6334
