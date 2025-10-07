@@ -10,22 +10,24 @@ INDENT = 2
 class Logger:
     offset = 0
     log_file = None
-    _lock = threading.Lock()  # NEW: Thread lock
+    _lock = threading.RLock()
     _thread_offsets = {}  # NEW: Per-thread indentation
     
     @staticmethod
     def _get_log_file():
         with Logger._lock:  # ADD LOCK HERE
             if Logger.log_file is None:
-                log_dir = Path("C:\\logs")
-                log_dir.mkdir(exist_ok=True)
-                
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                Logger.log_file = log_dir / f"deployment_{timestamp}.log"
-                
-                with open(Logger.log_file, 'w', encoding='utf-8') as f:
-                    f.write(f"=== Deployment Log Started at {datetime.now().isoformat()} ===\n")
-            
+                try:
+                    log_dir = Path("C:\\logs")
+                    log_dir.mkdir(exist_ok=True)
+                    
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    Logger.log_file = log_dir / f"deployment_{timestamp}.log"
+                    
+                    with open(Logger.log_file, 'w', encoding='utf-8') as f:
+                        f.write(f"=== Deployment Log Started at {datetime.now().isoformat()} ===\n")
+                except Exception as e:
+                    print(f'Cannot get log file: {e}')
             return Logger.log_file
     
     @staticmethod

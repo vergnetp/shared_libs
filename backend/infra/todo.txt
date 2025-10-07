@@ -8,3 +8,4 @@ deploy strategy (canary etc) -> DONE
 password rotation (schedule)
 backups (schedule)
 health checks
+maybe run docker login first

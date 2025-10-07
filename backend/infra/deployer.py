@@ -80,7 +80,7 @@ class Deployer:
         """Get version - either override or from config"""
         if hasattr(self, '_override_version') and self._override_version:
             return self._override_version
-        return self._get_version()
+        return self.deployment_configurer.get_version()
 
     # =============================================================================
     # PUBLIC SYNC API - Manual sync operations
@@ -495,23 +495,30 @@ class Deployer:
                 # For scheduled services, still need a server
                 # Use first available or create one
                 zone = config.get("server_zone", "lon1")
-                cpu = config.get("server_cpu", 1)
-                memory = config.get("server_memory", 1024)
-                
-                servers = ServerInventory.get_servers(
-                    deployment_status=ServerInventory.STATUS_GREEN,
-                    zone=zone,
-                    cpu=cpu,
-                    memory=memory
-                )
-                
-                if not servers:
-                    # No green servers with matching specs, claim one
-                    server_ips = ServerInventory.claim_servers(1, zone, cpu, memory)
-                    ServerInventory.promote_blue_to_green(server_ips)
-                    server = server_ips[0]
+                if zone == "localhost":
+                    server = 'localhost'
                 else:
-                    server = servers[0]['ip']
+                    cpu = config.get("server_cpu", 1)
+                    memory = config.get("server_memory", 1024)
+                    
+                    servers = ServerInventory.get_servers(
+                        deployment_status=ServerInventory.STATUS_GREEN,
+                        zone=zone,
+                        cpu=cpu,
+                        memory=memory
+                    )
+                
+                    if not servers:
+                        # No green servers with matching specs, claim one
+                        server_ips = ServerInventory.claim_servers(1, zone, cpu, memory)
+                        if not server_ips or len(server_ips) == 0:
+                            log(f"Failed to claim servers for {svc_name}")
+                            Logger.end()
+                            return False
+                        ServerInventory.promote_blue_to_green(server_ips)
+                        server = server_ips[0]
+                    else:
+                        server = servers[0]['ip']
                 
                 # Remove old scheduled job
                 EnhancedCronManager.remove_scheduled_service(project_name, env or 'dev', svc_name, server)
@@ -680,6 +687,41 @@ class Deployer:
         log(f"Immutable deployment for {service_name}")
         Logger.start()
         
+
+        # Get server requirements
+        zone = service_config.get("server_zone", "lon1")
+        
+        # LOCALHOST SPECIAL CASE: Skip server provisioning
+        if zone == "localhost":
+            log(f"Localhost deployment - starting service directly")
+            
+            # Create network
+            self.create_containers_network(env, 'localhost')
+            
+            # Start service
+            try:
+                self.start_service(project, env, service_name, service_config, 'localhost')
+                
+                # Record deployment
+                from deployment_state_manager import DeploymentStateManager
+                DeploymentStateManager.record_deployment(
+                    project=project,
+                    env=env,
+                    service=service_name,
+                    servers=['localhost'],
+                    container_name=DeploymentNaming.get_container_name(project, env, service_name),
+                    version=self._get_version()
+                )
+                
+                Logger.end()
+                log(f"Localhost deployment successful")
+                return True
+                
+            except Exception as e:
+                log(f"Localhost deployment failed: {e}")
+                Logger.end()
+                return False        
+       
         # Get server requirements from config with defaults
         servers_count = service_config.get("servers_count", 1)
         zone = service_config.get("server_zone", "lon1")
@@ -1149,6 +1191,7 @@ class Deployer:
         Returns:
             Dictionary with deployment status
         """
+        print('DEBUG')
         from deployment_state_manager import DeploymentStateManager
         from server_inventory import ServerInventory
         from do_cost_tracker import DOCostTracker

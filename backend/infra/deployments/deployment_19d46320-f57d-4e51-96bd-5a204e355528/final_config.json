@@ -31,9 +31,6 @@
                     "worker": {
                         "dockerfile": "config/Dockerfile.worker",
                         "build_context": "C:\\Users\\vergn\\Desktop\\Projects\\TEST_PROJECT",
-                        "servers": [
-                            "localhost"
-                        ],
                         "schedule": "*/10 * * * * *",
                         "startup_order": 3,
                         "restart": false,
@@ -101,9 +98,6 @@
                     "worker": {
                         "dockerfile": "config/Dockerfile.worker",
                         "build_context": "C:\\Users\\vergn\\Desktop\\Projects\\TEST_PROJECT",
-                        "servers": [
-                            "localhost"
-                        ],
                         "schedule": "*/10 * * * * *",
                         "startup_order": 3,
                         "restart": false,
@@ -171,9 +165,6 @@
                     "worker": {
                         "dockerfile": "config/Dockerfile.worker",
                         "build_context": "C:\\Users\\vergn\\Desktop\\Projects\\TEST_PROJECT",
-                        "servers": [
-                            "localhost"
-                        ],
                         "schedule": "*/10 * * * * *",
                         "startup_order": 3,
                         "restart": false,
@@ -244,9 +235,6 @@
                     "worker": {
                         "dockerfile": "config/Dockerfile.worker",
                         "build_context": "C:\\Users\\vergn\\Desktop\\Projects\\TEST_PROJECT",
-                        "servers": [
-                            "localhost"
-                        ],
                         "schedule": "*/10 * * * * *",
                         "startup_order": 3,
                         "restart": false,

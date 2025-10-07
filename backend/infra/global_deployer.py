@@ -45,7 +45,7 @@ class UnifiedDeployer:
         self.project = project
         self.auto_sync = auto_sync
         self.configurer = DeploymentConfigurer(project)
-        log(f"Initialized deployer for project: {project}")
+        log(f"Initialized global deployer for project: {project}")
     
     # =========================================================================
     # PUBLIC API - Simple interface
@@ -115,7 +115,7 @@ class UnifiedDeployer:
             
             # Sequential deployment (easier debugging)
             deployer.deploy(env="prod", parallel=False)
-        """
+        """        
         log(f"Starting deployment: {self.project}/{env}")
         Logger.start()
         
@@ -405,6 +405,11 @@ class UnifiedDeployer:
             if zone:
                 zones.add(zone)
         
+            # DEFAULT: If no zones configured, use localhost
+            if not zones:
+                log("No zones configured in services, defaulting to 'localhost'")
+                zones.add("lon1")
+
         return sorted(list(zones))
     
     def _filter_services_for_zone(
@@ -629,37 +634,39 @@ def main():
     
     parser = argparse.ArgumentParser(description='Unified deployment CLI')
     parser.add_argument('--project', required=True, help='Project name')
-    parser.add_argument('--env', required=True, help='Environment')
     
     subparsers = parser.add_subparsers(dest='command', required=True)
     
     # Build
     build_cmd = subparsers.add_parser('build', help='Build images')
+    build_cmd.add_argument('--env', required=True, help='Environment')
     build_cmd.add_argument('--no-push', action='store_true', help='Skip registry push')
     
     # Deploy
     deploy_cmd = subparsers.add_parser('deploy', help='Deploy services')
+    deploy_cmd.add_argument('--env', required=True, help='Environment')
     deploy_cmd.add_argument('--zones', nargs='+', help='Target zones')
     deploy_cmd.add_argument('--service', help='Specific service')
     deploy_cmd.add_argument('--no-build', action='store_true', help='Skip build')
     deploy_cmd.add_argument('--sequential', action='store_true', help='Sequential deployment')
 
-    # Status command
+    # Status
     status_cmd = subparsers.add_parser('status', help='Show deployment status')
     status_cmd.add_argument('--env', help='Filter by environment')
     status_cmd.add_argument('--json', action='store_true', help='Output as JSON')
+    status_cmd.add_argument('--no-costs', action='store_true', help='Skip cost information')
 
-    # Logs command
+    # Logs
     logs_cmd = subparsers.add_parser('logs', help='Fetch service logs')
-    logs_cmd.add_argument('--service', required=True, help='Service name')
     logs_cmd.add_argument('--env', required=True, help='Environment')
+    logs_cmd.add_argument('--service', required=True, help='Service name')
     logs_cmd.add_argument('--lines', type=int, default=100, help='Number of lines')
 
     # Rollback
-    build_cmd = subparsers.add_parser('rollback', help='Rollback deployment')
-    parser.add_argument('--env', required=True, help='Environment')
-    deploy_cmd.add_argument('--service', help='Specific service')
-    deploy_cmd.add_argument('--version', help='To specific version (default to latest)')
+    rollback_cmd = subparsers.add_parser('rollback', help='Rollback deployment')
+    rollback_cmd.add_argument('--env', required=True, help='Environment')
+    rollback_cmd.add_argument('--service', required=True, help='Service name')
+    rollback_cmd.add_argument('--version', help='Target version (default: previous)')
     
     args = parser.parse_args()
     
@@ -669,7 +676,7 @@ def main():
         success = deployer.build(env=args.env, push=not args.no_push)
         exit(0 if success else 1)
     
-    elif args.command == 'deploy':
+    elif args.command == 'deploy':       
         results = deployer.deploy(
             env=args.env,
             zones=args.zones,
@@ -682,10 +689,16 @@ def main():
     elif args.command == 'status':
         if args.json:
             import json
-            status = deployer.list_deployments(env=args.env)
+            status = deployer.list_deployments(
+                env=args.env,
+                include_costs=not args.no_costs
+            )
             print(json.dumps(status, indent=2))
         else:
-            deployer.print_deployments(env=args.env)
+            deployer.print_deployments(
+                env=args.env,
+                include_costs=not args.no_costs
+            )
 
     elif args.command == 'logs':
         deployer.print_logs(
@@ -695,7 +708,11 @@ def main():
         )
 
     elif args.command == 'rollback':
-        success = deployer.rollback(env=args.env, service=not args.service, version=args.version)
+        success = deployer.rollback(
+            env=args.env,
+            service=args.service,
+            version=args.version
+        )
         exit(0 if success else 1)
 
 if __name__ == "__main__":

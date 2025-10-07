@@ -244,6 +244,8 @@ class DOManager:
     @staticmethod
     def list_vpcs() -> List[Dict[str, Any]]:
         """List all VPCs in DO account"""
+        if os.getenv("DIGITALOCEAN_API_TOKEN") is None:
+            return []
         response = DOManager._api_request("GET", "/vpcs")
         return response.get("vpcs", [])
     
@@ -447,6 +449,8 @@ class DOManager:
     @staticmethod
     def list_droplets(tags: List[str] = None) -> List[Dict[str, Any]]:
         """List all droplets, optionally filtered by tags"""
+        if os.getenv("DIGITALOCEAN_API_TOKEN") is None:
+            return []
         endpoint = "/droplets"
         if tags:
             tag_query = "&".join([f"tag_name={tag}" for tag in tags])

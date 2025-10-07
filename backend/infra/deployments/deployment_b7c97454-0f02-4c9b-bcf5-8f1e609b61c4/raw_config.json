@@ -17,6 +17,8 @@
                 },
                 "build_context": "C:\\Users\\vergn\\Desktop\\Projects\\TEST_PROJECT",
                 "startup_order": 2,
+                "server_zone": "localhost",
+                "servers_count": 0,
                 "restart": false,
                 "volumes": [
                     "C:/local/new_project/{env}/config/job:/app/config:ro",
@@ -29,11 +31,10 @@
             "worker": {
                 "dockerfile": "config/Dockerfile.worker",
                 "build_context": "C:\\Users\\vergn\\Desktop\\Projects\\TEST_PROJECT",
-                "servers": [
-                    "localhost"
-                ],
                 "schedule": "*/10 * * * * *",
                 "startup_order": 3,
+                "server_zone": "localhost",
+                "servers_count": 0,
                 "restart": false,
                 "volumes": [
                     "C:/local/new_project/{env}/config/worker:/app/config:ro",
@@ -45,6 +46,8 @@
             },
             "postgres": {
                 "image": "postgres:15",
+                "server_zone": "localhost",
+                "servers_count": 0,
                 "startup_order": 1,
                 "volumes": [
                     "new_project_{env}_data_postgres:/var/lib/postgresql/data",
@@ -54,6 +57,8 @@
             },
             "redis": {
                 "image": "redis:7-alpine",
+                "server_zone": "localhost",
+                "servers_count": 0,
                 "startup_order": 1,
                 "volumes": [
                     "new_project_{env}_data_redis:/data",
