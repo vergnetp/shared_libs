@@ -4,16 +4,20 @@ import requests
 from typing import Dict, Any, List, Optional
 from uuid import uuid4
 from pathlib import Path
+
 import constants
+from nginx_config_generator import NginxConfigGenerator
 from deployment_config import DeploymentConfigurer
 from deployment_naming import DeploymentNaming
 from deployment_port_resolver import DeploymentPortResolver
 from deployment_syncer import DeploymentSyncer
 from execute_docker import DockerExecuter
+from deployment_state_manager import DeploymentStateManager
 from scheduler_manager import EnhancedCronManager
 from cron_manager import CronManager
 from logger import Logger
 from server_inventory import ServerInventory
+from do_cost_tracker import DOCostTracker
 import env_loader
 
 
@@ -592,8 +596,7 @@ class Deployer:
             if target_server == 'localhost':
                 log(f"Setting up nginx for {service_name} on localhost (self-signed)")
                 Logger.start()
-                try:
-                    from nginx_config_generator import NginxConfigGenerator
+                try:                    
                     NginxConfigGenerator.setup_service(
                         project=self.project_name,
                         env=env,
@@ -613,8 +616,7 @@ class Deployer:
             elif cf_token and email:
                 log(f"Setting up nginx for {service_name} on {target_server} (Let's Encrypt DNS-01 + Cloudflare)")
                 Logger.start()
-                try:
-                    from nginx_config_generator import NginxConfigGenerator
+                try:                 
                     NginxConfigGenerator.setup_service(
                         project=self.project_name,
                         env=env,
@@ -635,8 +637,7 @@ class Deployer:
                 # Has email but no Cloudflare token - standalone LE
                 log(f"Setting up nginx for {service_name} on {target_server} (Let's Encrypt standalone)")
                 Logger.start()
-                try:
-                    from nginx_config_generator import NginxConfigGenerator
+                try:                 
                     NginxConfigGenerator.setup_service(
                         project=self.project_name,
                         env=env,
@@ -701,17 +702,6 @@ class Deployer:
             # Start service
             try:
                 self.start_service(project, env, service_name, service_config, 'localhost')
-                
-                # Record deployment
-                from deployment_state_manager import DeploymentStateManager
-                DeploymentStateManager.record_deployment(
-                    project=project,
-                    env=env,
-                    service=service_name,
-                    servers=['localhost'],
-                    container_name=DeploymentNaming.get_container_name(project, env, service_name),
-                    version=self._get_version()
-                )
                 
                 Logger.end()
                 log(f"Localhost deployment successful")
@@ -785,7 +775,6 @@ class Deployer:
             log("All blues healthy - promoting to green")
             old_green_ips = ServerInventory.promote_blue_to_green(blue_ips, project, env)            
 
-            from deployment_state_manager import DeploymentStateManager
             DeploymentStateManager.record_deployment(
                 project=project,
                 env=env,
@@ -846,9 +835,7 @@ class Deployer:
         if admin_ip and admin_ip.lower() == "auto":
             admin_ip = None
         
-        try:
-            from nginx_config_generator import NginxConfigGenerator
-            
+        try:            
             # Create updated config with actual server IPs for nginx upstream
             updated_config = {
                 **service_config,
@@ -1000,8 +987,7 @@ class Deployer:
             )
 
         if server_ip and server_ip != 'localhost':
-            log(f"Pulling image {image} to {server_ip}...")
-            from execute_docker import DockerExecuter
+            log(f"Pulling image {image} to {server_ip}...")            
             DockerExecuter.pull_image(image, server_ip, user)
 
         log(f"Using volumes for {service_name}: {volumes}")
@@ -1029,7 +1015,6 @@ class Deployer:
             host = server_ip or "localhost"
             url = f"http://{host}:{port}"
             if self.wait_for_health_check(url, timeout, service_name=service_name):
-                from deployment_state_manager import DeploymentStateManager
                 DeploymentStateManager.record_deployment(
                     project=project_name,
                     env=env,
@@ -1191,11 +1176,6 @@ class Deployer:
         Returns:
             Dictionary with deployment status
         """
-        print('DEBUG')
-        from deployment_state_manager import DeploymentStateManager
-        from server_inventory import ServerInventory
-        from do_cost_tracker import DOCostTracker
-        
         log("Gathering deployment status...")
         Logger.start()
         
@@ -1335,9 +1315,7 @@ class Deployer:
             
         Returns:
             Formatted log output
-        """
-        from deployment_state_manager import DeploymentStateManager
-        from execute_docker import DockerExecuter
+        """      
         
         # Determine environment
         if not env:
