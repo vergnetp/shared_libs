@@ -1307,6 +1307,7 @@ http {{
         location_block = NginxConfigGenerator._generate_location_block(backend, service_name, nginx_config)
         ssl_redirect   = NginxConfigGenerator._generate_ssl_redirect(ssl_enabled, nginx_config)
         static_cache   = NginxConfigGenerator._generate_static_cache_rules(nginx_config) if nginx_config.get("cache_static") else ""
+        alt_svc_header = """add_header Alt-Svc 'h3=":443"';"""
 
         return f"""
 # Project={project}, Env={env}, Service={service_name}
@@ -1321,7 +1322,7 @@ http {{
     {'ssl_protocols ' + nginx_config['ssl_protocols'] + ';' if ssl_enabled else ''}
 
     # Advertise HTTP/3 support
-    {'add_header Alt-Svc \'h3=":443"\';' if ssl_enabled else ''}
+    {alt_svc_header if ssl_enabled else ''}
     {'add_header QUIC-Status $quic;' if ssl_enabled else ''}
 
     access_log /var/log/nginx/{service_name}_access.log main;
@@ -1515,12 +1516,15 @@ http {{
         # 2. Create origin pools (one per zone)
         pool_ids = []
         for idx, ip in enumerate(origin_ips):
+            domain_safe = domain.replace('.', '_')  # Move outside f-string
+            ip_safe = ip.replace('.', '_')          # Move outside f-string
+            
             pool_data = {
-                "name": f"{domain.replace('.', '_')}_pool_{idx}",
+                "name": f"{domain_safe}_pool_{idx}",
                 "enabled": True,
                 "monitor": monitor_id,
                 "origins": [{
-                    "name": f"origin_{ip.replace('.', '_')}",
+                    "name": f"origin_{ip_safe}",
                     "address": ip,
                     "enabled": True,
                     "weight": 1

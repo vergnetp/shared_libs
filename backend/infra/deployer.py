@@ -699,6 +699,18 @@ class Deployer:
             # Create network
             self.create_containers_network(env, 'localhost')
             
+            # Stop and remove existing container if it exists
+            container_name = DeploymentNaming.get_container_name(project, env, service_name)
+            try:
+                log(f"Stopping existing container {container_name} if present...")
+                DockerExecuter.stop_and_remove_container(
+                    container_name, 
+                    'localhost', 
+                    ignore_if_not_exists=True
+                )
+            except Exception as e:
+                log(f"Note: Could not remove old container (may not exist): {e}")
+            
             # Start service
             try:
                 self.start_service(project, env, service_name, service_config, 'localhost')
@@ -710,7 +722,7 @@ class Deployer:
             except Exception as e:
                 log(f"Localhost deployment failed: {e}")
                 Logger.end()
-                return False        
+                return False 
        
         # Get server requirements from config with defaults
         servers_count = service_config.get("servers_count", 1)
@@ -1027,6 +1039,14 @@ class Deployer:
             else:
                 log(f"Warning: {service_name} did not respond within {timeout} seconds")
                 log(f"  Service may still be starting up. Check manually at {url}")
+                DeploymentStateManager.record_deployment(
+                    project=project_name,
+                    env=env,
+                    service=service_name,
+                    servers=[server_ip or "localhost"],
+                    container_name=container_name,
+                    version=self._get_version()
+                )
                 return False        
         else:
             log(f"No ports detected for {service_name}, skipping health check")
@@ -1067,6 +1087,14 @@ class Deployer:
 
         if success:
             log(f"Scheduled service {service_name} installed successfully")
+            DeploymentStateManager.record_deployment(
+                project=project_name,
+                env=env,
+                service=service_name,
+                servers=[server_ip or 'localhost'],
+                container_name=DeploymentNaming.get_container_name(project_name, env, service_name),
+                version=version
+            )
         else:
             log(f"Failed to install scheduled service {service_name}")
 

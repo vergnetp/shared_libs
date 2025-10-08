@@ -1,0 +1,66 @@
+{
+  "new_project": {
+    "uat": {
+      "postgres": {
+        "current": {
+          "servers": [
+            "localhost"
+          ],
+          "container_name": "new_project_uat_postgres",
+          "version": "latest",
+          "deployed_at": "2025-10-08T07:26:18.084776"
+        },
+        "history": [
+          {
+            "servers": [
+              "localhost"
+            ],
+            "container_name": "new_project_uat_postgres",
+            "version": "latest",
+            "deployed_at": "2025-10-08T07:26:18.084776"
+          }
+        ]
+      },
+      "redis": {
+        "current": {
+          "servers": [
+            "localhost"
+          ],
+          "container_name": "new_project_uat_redis",
+          "version": "latest",
+          "deployed_at": "2025-10-08T07:26:25.735831"
+        },
+        "history": [
+          {
+            "servers": [
+              "localhost"
+            ],
+            "container_name": "new_project_uat_redis",
+            "version": "latest",
+            "deployed_at": "2025-10-08T07:26:25.735831"
+          }
+        ]
+      },
+      "worker": {
+        "current": {
+          "servers": [
+            "localhost"
+          ],
+          "container_name": "new_project_uat_worker",
+          "version": "latest",
+          "deployed_at": "2025-10-08T07:26:27.829096"
+        },
+        "history": [
+          {
+            "servers": [
+              "localhost"
+            ],
+            "container_name": "new_project_uat_worker",
+            "version": "latest",
+            "deployed_at": "2025-10-08T07:26:27.829096"
+          }
+        ]
+      }
+    }
+  }
+}
