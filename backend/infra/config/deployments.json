@@ -4,60 +4,195 @@
       "postgres": {
         "current": {
           "servers": [
-            "localhost"
+            "165.22.119.148"
           ],
           "container_name": "new_project_uat_postgres",
           "version": "latest",
-          "deployed_at": "2025-10-08T07:26:18.084776"
+          "deployed_at": "2025-10-12T21:54:21.826867"
         },
         "history": [
           {
             "servers": [
-              "localhost"
+              "165.22.119.148"
             ],
             "container_name": "new_project_uat_postgres",
             "version": "latest",
-            "deployed_at": "2025-10-08T07:26:18.084776"
+            "deployed_at": "2025-10-12T21:54:21.826867"
+          },
+          {
+            "servers": [
+              "206.189.120.29"
+            ],
+            "container_name": "new_project_uat_postgres",
+            "version": "latest",
+            "deployed_at": "2025-10-12T21:30:56.037009"
+          },
+          {
+            "servers": [
+              "46.101.95.95"
+            ],
+            "container_name": "new_project_uat_postgres",
+            "version": "latest",
+            "deployed_at": "2025-10-12T19:23:19.357690"
+          },
+          {
+            "servers": [
+              "167.172.52.202"
+            ],
+            "container_name": "new_project_uat_postgres",
+            "version": "latest",
+            "deployed_at": "2025-10-12T18:23:42.227745"
+          },
+          {
+            "servers": [
+              "178.62.112.13"
+            ],
+            "container_name": "new_project_uat_postgres",
+            "version": "latest",
+            "deployed_at": "2025-10-12T14:38:49.238013"
+          },
+          {
+            "servers": [
+              "144.126.203.67"
+            ],
+            "container_name": "new_project_uat_postgres",
+            "version": "latest",
+            "deployed_at": "2025-10-11T07:36:17.726393"
+          },
+          {
+            "servers": [
+              "144.126.203.67"
+            ],
+            "container_name": "new_project_uat_postgres",
+            "version": "latest",
+            "deployed_at": "2025-10-11T07:36:17.695694"
           }
         ]
       },
       "redis": {
         "current": {
           "servers": [
-            "localhost"
+            "165.22.119.148"
           ],
           "container_name": "new_project_uat_redis",
           "version": "latest",
-          "deployed_at": "2025-10-08T07:26:25.735831"
+          "deployed_at": "2025-10-12T21:55:18.368910"
         },
         "history": [
           {
             "servers": [
-              "localhost"
+              "165.22.119.148"
             ],
             "container_name": "new_project_uat_redis",
             "version": "latest",
-            "deployed_at": "2025-10-08T07:26:25.735831"
+            "deployed_at": "2025-10-12T21:55:18.368910"
+          },
+          {
+            "servers": [
+              "206.189.120.29"
+            ],
+            "container_name": "new_project_uat_redis",
+            "version": "latest",
+            "deployed_at": "2025-10-12T21:31:53.406560"
+          },
+          {
+            "servers": [
+              "46.101.95.95"
+            ],
+            "container_name": "new_project_uat_redis",
+            "version": "latest",
+            "deployed_at": "2025-10-12T19:24:36.522316"
+          },
+          {
+            "servers": [
+              "167.172.52.202"
+            ],
+            "container_name": "new_project_uat_redis",
+            "version": "latest",
+            "deployed_at": "2025-10-12T18:24:39.979665"
+          },
+          {
+            "servers": [
+              "178.62.112.13"
+            ],
+            "container_name": "new_project_uat_redis",
+            "version": "latest",
+            "deployed_at": "2025-10-12T14:39:59.515083"
+          },
+          {
+            "servers": [
+              "144.126.203.67"
+            ],
+            "container_name": "new_project_uat_redis",
+            "version": "latest",
+            "deployed_at": "2025-10-11T07:37:03.145189"
+          },
+          {
+            "servers": [
+              "144.126.203.67"
+            ],
+            "container_name": "new_project_uat_redis",
+            "version": "latest",
+            "deployed_at": "2025-10-11T07:37:03.116952"
+          }
+        ]
+      },
+      "job": {
+        "current": {
+          "servers": [
+            "165.22.119.148",
+            "161.35.175.246"
+          ],
+          "container_name": "new_project_uat_job",
+          "version": "latest",
+          "deployed_at": "2025-10-12T22:01:56.870045"
+        },
+        "history": [
+          {
+            "servers": [
+              "165.22.119.148",
+              "161.35.175.246"
+            ],
+            "container_name": "new_project_uat_job",
+            "version": "latest",
+            "deployed_at": "2025-10-12T22:01:56.870045"
+          },
+          {
+            "servers": [
+              "144.126.203.67",
+              "134.209.183.129"
+            ],
+            "container_name": "new_project_uat_job",
+            "version": "latest",
+            "deployed_at": "2025-10-11T07:43:44.379560"
           }
         ]
       },
       "worker": {
         "current": {
           "servers": [
-            "localhost"
+            "142.93.43.176"
           ],
           "container_name": "new_project_uat_worker",
           "version": "latest",
-          "deployed_at": "2025-10-08T07:26:27.829096"
+          "deployed_at": "2025-10-11T07:52:40.951167"
         },
         "history": [
           {
             "servers": [
-              "localhost"
+              "142.93.43.176"
             ],
             "container_name": "new_project_uat_worker",
             "version": "latest",
-            "deployed_at": "2025-10-08T07:26:27.829096"
+            "deployed_at": "2025-10-11T07:52:40.951167"
+          },
+          {
+            "servers": [
+              "134.209.183.129"
+            ],
+            "container_name": "new_project_uat_worker",
+            "version": "latest",
+            "deployed_at": "2025-10-11T07:50:45.996886"
           }
         ]
       }

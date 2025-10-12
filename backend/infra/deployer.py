@@ -19,6 +19,7 @@ from logger import Logger
 from server_inventory import ServerInventory
 from do_cost_tracker import DOCostTracker
 import env_loader
+from path_resolver import PathResolver
 
 
 def log(msg):
@@ -226,8 +227,14 @@ class Deployer:
                 end_idx = i
                 break
         
-        # Get /app directories from service volumes
-        volumes = DeploymentSyncer.generate_service_volumes("temp", "temp", service_name)
+        # Use localhost for Dockerfile generation (build context)
+        volumes = PathResolver.generate_all_volume_mounts(
+            "temp", "temp", service_name,
+            server_ip="localhost",  # Dockerfile build happens locally
+            use_docker_volumes=True,
+            user="root",
+            auto_create_dirs=False  # Don't create dirs during Dockerfile gen
+        )
         app_dirs = set()
         
         for volume in volumes:
@@ -395,8 +402,7 @@ class Deployer:
                         project_name,
                         env,
                         service_name,
-                        version,
-                        service_config.get("is_proxy", False)
+                        version
                     )
 
                     build_context = service_config.get("build_context", ".")
@@ -496,45 +502,53 @@ class Deployer:
                 # Scheduled services: use simple deployment (can't do blue-green on cron jobs)
                 log(f"{svc_name} is scheduled - using simple deployment")
                 
-                # For scheduled services, still need a server
-                # Use first available or create one
+                # Get server requirements
                 zone = config.get("server_zone", "lon1")
+                servers_count = config.get("servers_count", 1)
+                
                 if zone == "localhost":
-                    server = 'localhost'
+                    target_servers = ['localhost']
                 else:
                     cpu = config.get("server_cpu", 1)
                     memory = config.get("server_memory", 1024)
                     
-                    servers = ServerInventory.get_servers(
+                    # Get existing green servers with matching specs
+                    existing_servers = ServerInventory.get_servers(
                         deployment_status=ServerInventory.STATUS_GREEN,
                         zone=zone,
                         cpu=cpu,
                         memory=memory
                     )
-                
-                    if not servers:
-                        # No green servers with matching specs, claim one
-                        server_ips = ServerInventory.claim_servers(1, zone, cpu, memory)
-                        if not server_ips or len(server_ips) == 0:
+                    
+                    # Claim additional servers if needed
+                    needed = servers_count - len(existing_servers)
+                    if needed > 0:
+                        log(f"Need {needed} more servers for scheduled service {svc_name}")
+                        new_server_ips = ServerInventory.claim_servers(needed, zone, cpu, memory)
+                        if not new_server_ips:
                             log(f"Failed to claim servers for {svc_name}")
                             Logger.end()
                             return False
-                        ServerInventory.promote_blue_to_green(server_ips)
-                        server = server_ips[0]
-                    else:
-                        server = servers[0]['ip']
+                        ServerInventory.promote_blue_to_green(new_server_ips)
+                        existing_servers.extend([{'ip': ip} for ip in new_server_ips])
+                    
+                    target_servers = [s['ip'] for s in existing_servers[:servers_count]]
                 
-                # Remove old scheduled job
-                EnhancedCronManager.remove_scheduled_service(project_name, env or 'dev', svc_name, server)
+                log(f"Installing scheduled service {svc_name} on {len(target_servers)} servers: {target_servers}")
                 
-                # Clean up old containers
-                try:
-                    CronManager.cleanup_old_containers(project_name, env or 'dev', svc_name, server)
-                except Exception as e:
-                    log(f"Warning: Could not cleanup containers: {e}")
-                
-                # Install new scheduled job
-                self.install_scheduled_service(project_name, env or 'dev', svc_name, config, server)
+                # Install on all target servers
+                for server in target_servers:
+                    # Remove old scheduled job
+                    EnhancedCronManager.remove_scheduled_service(project_name, env or 'dev', svc_name, server)
+                    
+                    # Clean up old containers
+                    try:
+                        CronManager.cleanup_old_containers(project_name, env or 'dev', svc_name, server)
+                    except Exception as e:
+                        log(f"Warning: Could not cleanup containers on {server}: {e}")
+                    
+                    # Install new scheduled job
+                    self.install_scheduled_service(project_name, env or 'dev', svc_name, config, server)
             else:
                 # Long-running services: use immutable infrastructure
                 success = self._deploy_immutable(project_name, env or 'dev', svc_name, config)
@@ -657,173 +671,895 @@ class Deployer:
             else:
                 log(f"Skipping nginx setup for {service_name} (no CLOUDFLARE_EMAIL in .env)")
                 log(f"  Add credentials to .env file to enable automatic SSL/DNS setup")
+            
+    # =============================================================================
+    # NEW: TOGGLE DEPLOYMENT HELPERS
+    # =============================================================================
+
+    def _determine_toggle(
+        self,
+        project: str,
+        env: str,
+        service: str,
+        server_ip: str,
+        base_port: int,
+        base_name: str
+    ) -> Dict[str, Any]:
+        """
+        Determine which port/name to use based on what's currently running.
+        
+        Toggle logic:
+        - If nothing running → use base (port 8357, name "base")
+        - If base running → use secondary (port 18357, name "base_secondary")
+        - If secondary running → use base (port 8357, name "base")
+        
+        Args:
+            project: Project name
+            env: Environment
+            service: Service name
+            server_ip: Target server IP
+            base_port: Base host port (e.g., 8357)
+            base_name: Base container name
+            
+        Returns:
+            {"port": 8357, "name": "base_name"} or
+            {"port": 18357, "name": "base_name_secondary"}
+        """
+        existing = DockerExecuter.find_service_container(project, env, service, server_ip)
+        
+        if not existing:
+            # First deployment - use base
+            log(f"First deployment of {service} on {server_ip} - using base")
+            return {"port": base_port, "name": base_name}
+        
+        # Toggle logic based on what's currently running
+        if existing.get("port") == base_port or existing.get("port") is None:
+            # Currently on base (or no port mapping) - toggle to secondary
+            log(f"Toggle: {service} on {server_ip} currently on base → deploying secondary")
+            return {"port": base_port + 10000, "name": f"{base_name}_secondary"}
+        else:
+            # Currently on secondary - toggle back to base
+            log(f"Toggle: {service} on {server_ip} currently on secondary → deploying base")
+            return {"port": base_port, "name": base_name}
+
+    def _determine_backend_mode_for_service(
+        self,
+        project: str,
+        env: str,
+        service: str,
+        deployed_servers: List[str]
+    ) -> str:
+        """
+        Determine nginx backend mode FOR THIS SPECIFIC SERVICE.
+        
+        CRITICAL: This is per-service, not global!
+        
+        Decision:
+        - Service on 1 server → "single_server" (use container names, no port mapping)
+        - Service on 2+ servers → "multi_server" (use IPs + host ports)
+        
+        Args:
+            project: Project name
+            env: Environment
+            service: Service name
+            deployed_servers: Servers where THIS SERVICE is deployed
+            
+        Returns:
+            "single_server" or "multi_server"
+        """
+        if len(deployed_servers) == 1:
+            log(f"Backend mode for {service}: single_server (deployed on {deployed_servers[0]} only)")
+            return "single_server"
+        else:
+            log(f"Backend mode for {service}: multi_server (deployed on {len(deployed_servers)} servers)")
+            return "multi_server"
+
+    def _generate_nginx_backends(
+        self,
+        mode: str,
+        project: str,
+        env: str,
+        service: str,
+        deployed_servers: List[str]
+    ) -> List[Dict[str, Any]]:
+        """
+        Generate backend list for nginx based on deployment mode.
+        
+        Args:
+            mode: "single_server" or "multi_server"
+            project: Project name
+            env: Environment
+            service: Service name
+            deployed_servers: Servers where THIS SERVICE is deployed
+            
+        Returns:
+            Single-server: [{"container_name": "...", "port": "5432"}, ...]
+            Multi-server: [{"ip": "...", "port": 8357}, ...]
+        """
+        if mode == "single_server":
+            # Use container names (Docker DNS)
+            backends = []
+            server_ip = deployed_servers[0]
+            
+            # Get both primary and secondary containers if they exist
+            for suffix in ["", "_secondary"]:
+                container_name = DeploymentNaming.get_container_name(project, env, service)
+                if suffix:
+                    container_name = f"{container_name}{suffix}"
+                
+                # Check if container exists
+                if DockerExecuter.container_exists(container_name, server_ip):
+                    # Get container port (not host port!)
+                    service_config = self.deployment_configurer.get_services(env)[service]
+                    dockerfile = service_config.get("dockerfile")
+                    container_ports = DeploymentPortResolver.get_container_ports(service, dockerfile)
+                    container_port = container_ports[0] if container_ports else "8000"
+                    
+                    backends.append({
+                        "container_name": container_name,
+                        "port": container_port  # Container port (5432, not 8357)
+                    })
+            
+            return backends
+        
+        else:  # multi_server
+            # Use IP + host ports
+            backends = []
+            
+            for server_ip in deployed_servers:
+                # Find what's actually running on this server
+                base_name = DeploymentNaming.get_container_name(project, env, service)
+                
+                # Check for both primary and secondary
+                for suffix in ["", "_secondary"]:
+                    container_name = f"{base_name}{suffix}" if suffix else base_name
+                    
+                    if DockerExecuter.container_exists(container_name, server_ip):
+                        # Get published host port
+                        port_map = DockerExecuter.get_published_ports(container_name, server_ip)
+                        
+                        # Find the host port (format: "5432/tcp" -> "8357")
+                        service_config = self.deployment_configurer.get_services(env)[service]
+                        dockerfile = service_config.get("dockerfile")
+                        container_ports = DeploymentPortResolver.get_container_ports(service, dockerfile)
+                        container_port = container_ports[0] if container_ports else "8000"
+                        
+                        port_key = f"{container_port}/tcp"
+                        if port_key in port_map:
+                            host_port = port_map[port_key]
+                            
+                            backends.append({
+                                "ip": server_ip,
+                                "port": host_port  # Host port (8357 or 18357)
+                            })
+            
+            return backends
+
+    def _update_all_nginx_for_service(
+        self,
+        project: str,
+        env: str,
+        service: str,
+        deployed_servers: List[str],
+        all_zone_servers: List[Dict[str, Any]]
+    ) -> None:
+        """
+        Update nginx stream config on all servers in zone FOR THIS SERVICE.
+        
+        CRITICAL: Mode is determined per-service, not globally!
+        
+        This allows mixed deployments where some services are single-server
+        and others are multi-server within the same zone.
+        
+        Args:
+            project: Project name
+            env: Environment
+            service: Service name
+            deployed_servers: Servers where THIS SERVICE is deployed
+            all_zone_servers: All servers in the zone (for nginx updates)
+        """
+        if not self._is_tcp_service(service):
+            log(f"Skipping nginx stream config for {service} (not a TCP service)")
+            return
+        
+        # Determine mode FOR THIS SPECIFIC SERVICE
+        mode = self._determine_backend_mode_for_service(
+            project, env, service, deployed_servers
+        )
+        
+        log(f"Updating nginx stream config for {service} (mode: {mode})")
+        
+        # Generate backends based on THIS SERVICE's deployment
+        backends = self._generate_nginx_backends(
+            mode, project, env, service, deployed_servers
+        )
+        
+        if not backends:
+            log(f"No backends found for {service}")
+            return
+        
+        # Calculate internal port (stable for this service)
+        internal_port = DeploymentPortResolver.get_internal_port(project, env, service)
+        log(f"Internal port for {service}: {internal_port}")
+        
+        # Update nginx on EVERY server in the zone
+        # (Even servers that don't run this service need the config)
+        for server in all_zone_servers:
+            try:
+                NginxConfigGenerator.update_stream_config_on_server(
+                    server['ip'], project, env, service, backends, internal_port, mode
+                )
+            except Exception as e:
+                log(f"Warning: Failed to update nginx on {server['ip']}: {e}")
+
+    def _is_tcp_service(self, service_name: str) -> bool:
+        """
+        Check if service needs TCP proxying (nginx stream).
+        
+        Args:
+            service_name: Service name
+            
+        Returns:
+            True if service needs TCP stream proxying
+        """
+        tcp_services = ["postgres", "redis", "mongo", "mysql", "rabbitmq", "kafka", "opensearch", "elasticsearch"]
+        return service_name.lower() in tcp_services
+
+    def _get_all_servers_in_zone(self, zone: str) -> List[Dict[str, Any]]:
+        """
+        Get all green servers in a zone.
+        
+        Args:
+            zone: Zone name
+            
+        Returns:
+            List of server dicts
+        """
+        return ServerInventory.get_servers(
+            deployment_status=ServerInventory.STATUS_GREEN,
+            zone=zone
+        )
+
+    def _should_map_host_port(self, deployed_servers: List[str]) -> bool:
+        """
+        Determine if service needs host port mapping.
+        
+        Single-server deployment: NO port mapping (use Docker DNS)
+        Multi-server deployment: YES port mapping (cross-network communication)
+        
+        Args:
+            deployed_servers: Servers where THIS SERVICE is deployed
+            
+        Returns:
+            True if host port mapping needed
+        """
+        return len(deployed_servers) > 1
+
+    def _get_opposite_container_name(self, current_name: str, base_name: str) -> Optional[str]:
+        """
+        Get the opposite container name for cleanup after toggle.
+        
+        Args:
+            current_name: Name of the newly deployed container
+            base_name: Base container name
+            
+        Returns:
+            Name of the old container to stop, or None
+            
+        Examples:
+            _get_opposite_container_name("myproj_dev_api", "myproj_dev_api")
+            → "myproj_dev_api_secondary"
+            
+            _get_opposite_container_name("myproj_dev_api_secondary", "myproj_dev_api")
+            → "myproj_dev_api"
+        """
+        if current_name == base_name:
+            # New is base, old is secondary
+            return f"{base_name}_secondary"
+        else:
+            # New is secondary, old is base
+            return base_name
 
     # =============================================================================
-    # EXISTING DEPLOYMENT METHODS
+    # CORE DEPLOYMENT WITH TOGGLE LOGIC
     # =============================================================================
 
     def _deploy_immutable(
+            self,
+            project: str,
+            env: str,
+            service_name: str,
+            service_config: Dict[str, Any]
+        ) -> bool:
+            """
+            Deploy with immutable infrastructure strategy + toggle-based naming.
+            
+            Process:
+            1. Ensure required servers exist (claim from pool or create new)
+            2. Deploy to blue servers using toggle logic (base ↔ secondary)
+            3. Smart health check based on service type
+            4. Update nginx on ALL servers in zone (per-service mode)
+            5. Stop old containers
+            6. If healthy: promote blue→green, old green→reserve
+            7. If failed: release blues back to reserve
+
+            NEW: Smart health checking:
+            - HTTP services (has port, not TCP): HTTP ping
+            - TCP services (database/redis): verify running
+            - Workers (no ports, running): verify running
+            - One-time jobs (no ports, stopped): check exit code
+            
+            Returns:
+                True if deployment successful
+            """
+            log(f"Immutable deployment for {service_name}")
+            Logger.start()
+            
+            # Get server requirements
+            zone = service_config.get("server_zone", "lon1")
+            
+            # LOCALHOST SPECIAL CASE: Skip server provisioning
+            if zone == "localhost":
+                log(f"Localhost deployment - starting service directly")
+                
+                # Create network
+                self.create_containers_network(env, 'localhost')
+                
+                # Get base naming
+                base_name = DeploymentNaming.get_container_name(project, env, service_name)
+                dockerfile = service_config.get("dockerfile")
+                container_ports = DeploymentPortResolver.get_container_ports(service_name, dockerfile)
+                container_port = container_ports[0] if container_ports else "8000"
+                base_port = DeploymentPortResolver.generate_host_port(project, env, service_name, container_port)
+                
+                # Determine toggle
+                toggle = self._determine_toggle(project, env, service_name, 'localhost', base_port, base_name)
+                new_name = toggle["name"]
+                
+                # Stop old container (opposite of new)
+                old_name = self._get_opposite_container_name(new_name, base_name)
+                if old_name:
+                    try:
+                        log(f"Stopping old container {old_name}")
+                        DockerExecuter.stop_and_remove_container(
+                            old_name, 
+                            'localhost', 
+                            ignore_if_not_exists=True
+                        )
+                    except Exception as e:
+                        log(f"Note: Could not remove old container (may not exist): {e}")
+                
+                # Start service with new name (no port mapping for localhost)
+                try:
+                    self.start_service(project, env, service_name, service_config, 'localhost')
+                    
+                    # Update nginx for TCP services (single-server mode)
+                    all_zone_servers = [{'ip': 'localhost'}]
+                    self._update_all_nginx_for_service(
+                        project, env, service_name, ['localhost'], all_zone_servers
+                    )
+                    
+                    Logger.end()
+                    log(f"Localhost deployment successful")
+                    return True
+                    
+                except Exception as e:
+                    log(f"Localhost deployment failed: {e}")
+                    Logger.end()
+                    return False
+            
+            # REMOTE SERVER DEPLOYMENT
+            servers_count = service_config.get("servers_count", 1)
+            zone = service_config.get("server_zone", "lon1")
+            cpu = service_config.get("server_cpu", 1)
+            memory = service_config.get("server_memory", 1024)
+            dedicated_servers = service_config.get("dedicated_servers", False)
+            
+            # Check if we can reuse existing green servers (if not dedicated)
+            blue_ips = []
+            reused_ips = []
+            
+            if not dedicated_servers:
+                # Try to reuse existing green servers with matching specs
+                existing_greens = ServerInventory.get_servers(
+                    deployment_status=ServerInventory.STATUS_GREEN,
+                    zone=zone,
+                    cpu=cpu,
+                    memory=memory
+                )
+                
+                if len(existing_greens) > 0:
+                    # Reuse as many existing greens as possible
+                    reuse_count = min(len(existing_greens), servers_count)
+                    reused_ips = [s['ip'] for s in existing_greens[:reuse_count]]
+                    blue_ips = reused_ips.copy()
+                    
+                    if len(existing_greens) >= servers_count:
+                        log(f"Reusing {len(blue_ips)} existing green servers: {blue_ips}")
+                    else:
+                        log(f"Found {len(existing_greens)} existing greens, need {servers_count} - will reuse these and create {servers_count - len(existing_greens)} more")
+            else:
+                log(f"dedicated_servers=True - creating new servers for {service_name}")
+            
+            # Claim servers if we don't have enough
+            if len(blue_ips) < servers_count:
+                needed = servers_count - len(blue_ips)
+                try:
+                    new_blue_ips = ServerInventory.claim_servers(
+                        count=needed,
+                        zone=zone,
+                        cpu=cpu,
+                        memory=memory
+                    )
+                    blue_ips.extend(new_blue_ips)
+                    log(f"Created {len(new_blue_ips)} new servers: {new_blue_ips}")
+                except Exception as e:
+                    log(f"Failed to claim servers: {e}")
+                    Logger.end()
+                    return False
+            
+            # Deploy to all blue servers with TOGGLE LOGIC
+            deployment_success = True
+            deployed_servers = []
+            
+            # Calculate base naming (same for all servers)
+            base_name = DeploymentNaming.get_container_name(project, env, service_name)
+            dockerfile = service_config.get("dockerfile")
+            container_ports = DeploymentPortResolver.get_container_ports(service_name, dockerfile)
+            container_port = container_ports[0] if container_ports else "8000"
+            base_port = DeploymentPortResolver.generate_host_port(project, env, service_name, container_port)
+            
+            # Determine if we need port mapping (multi-server needs it)
+            need_port_mapping = self._should_map_host_port(blue_ips)
+            
+            for blue_ip in blue_ips:
+                log(f"Deploying to blue server {blue_ip}")
+                Logger.start()
+                
+                try:
+                    # Create network
+                    self.create_containers_network(env, blue_ip)
+                    
+                    # Determine toggle for THIS server
+                    toggle = self._determine_toggle(project, env, service_name, blue_ip, base_port, base_name)
+                    new_port = toggle["port"]
+                    new_name = toggle["name"]
+                    
+                    # Deploy with appropriate port config
+                    if need_port_mapping:
+                        # Multi-server: map host ports
+                        ports = {str(new_port): str(container_port)}
+                    else:
+                        # Single-server: no port mapping (Docker DNS)
+                        ports = None
+                    
+                    # Start container
+                    network_name = DeploymentNaming.get_network_name(project, env)
+                    volumes = PathResolver.generate_all_volume_mounts(
+                        project, env, service_name,
+                        server_ip=blue_ip,
+                        use_docker_volumes=True,
+                        user="root"
+                    )
+                    
+                    # Get image name
+                    if service_config.get("image"):
+                        image = service_config["image"]
+                    else:
+                        docker_hub_user = self.deployment_configurer.get_docker_hub_user()
+                        version = self._get_version()
+                        image = DeploymentNaming.get_image_name(
+                            docker_hub_user, project, env, service_name, version
+                        )
+                    
+                    # Pull image if remote
+                    if blue_ip != 'localhost':
+                        log(f"Pulling image {image} to {blue_ip}...")
+                        DockerExecuter.pull_image(image, blue_ip, "root")
+                    
+                    # Get restart policy
+                    restart_policy = "unless-stopped" if service_config.get("restart", True) else "no"
+                    
+                    # Run container
+                    DockerExecuter.run_container(
+                        image=image,
+                        name=new_name,
+                        network=network_name,
+                        ports=ports,
+                        volumes=volumes,
+                        environment=service_config.get("env_vars", {}),
+                        restart_policy=restart_policy,
+                        server_ip=blue_ip,
+                        user="root"
+                    )
+                    
+                    # SMART HEALTH CHECK LOGIC
+                    # 1) Scheduled services don't go through _deploy_immutable
+                    
+                    # 2) Determine if HTTP health check is possible (has port AND not TCP)
+                    has_http_port = (
+                        need_port_mapping and 
+                        container_ports and 
+                        not self._is_tcp_service(service_name)
+                    )
+                    
+                    if has_http_port:
+                        # HTTP health check for APIs/websites
+                        log(f"HTTP health checking {service_name}")
+                        url = f"http://{blue_ip}:{new_port}"
+                        if not self.wait_for_health_check(url, timeout=30, service_name=service_name):
+                            log(f"HTTP health check failed on {blue_ip}")
+                            deployment_success = False
+                            break
+                    
+                    elif container_ports:
+                        # 3) TCP service (database/redis) - just verify running
+                        log(f"TCP service - verifying container is running")
+                        time.sleep(5)
+                        if not DockerExecuter.is_container_running(new_name, blue_ip):
+                            log(f"Container not running on {blue_ip}")
+                            deployment_success = False
+                            break
+                        log(f"TCP service container running successfully")
+                    
+                    else:
+                        # 4) No ports - either long-running worker or one-time job
+                        log(f"No ports detected - checking container status")
+                        time.sleep(5)  # Give it time to start or run
+                        
+                        if DockerExecuter.is_container_running(new_name, blue_ip):
+                            # Long-running worker still running - success!
+                            log(f"Long-running worker container is running")
+                        else:
+                            # Container stopped - check if one-time job (exit 0) or crash
+                            exit_code = DockerExecuter.get_container_exit_code(new_name, blue_ip)
+                            
+                            if exit_code in [0, 3]:
+                                log(f"One-time job completed successfully (exit code 0)")
+                            else:
+                                log(f"Container exited with error code {exit_code}")
+                                logs = DockerExecuter.get_container_logs(new_name, lines=50, server_ip=blue_ip)
+                                log(f"Last 50 lines of logs:\n{logs}")
+                                deployment_success = False
+                                break
+                    
+                    # Stop old container (opposite toggle)
+                    old_name = self._get_opposite_container_name(new_name, base_name)
+                    if old_name:
+                        try:
+                            log(f"Stopping old container {old_name}")
+                            DockerExecuter.stop_and_remove_container(old_name, blue_ip, ignore_if_not_exists=True)
+                        except Exception as e:
+                            log(f"Warning: Could not stop old container: {e}")
+                    
+                    deployed_servers.append(blue_ip)
+                    
+                except Exception as e:
+                    log(f"Deployment failed on {blue_ip}: {e}")
+                    deployment_success = False
+                    break
+                
+                Logger.end()
+            
+            # Update nginx on ALL servers in zone (per-service mode)
+            if deployment_success and deployed_servers:
+                all_zone_servers = self._get_all_servers_in_zone(zone)
+                self._update_all_nginx_for_service(
+                    project, env, service_name, deployed_servers, all_zone_servers
+                )
+            
+            destroy_old = not service_config.get("keep_reserve", False)
+            
+            # Swap or rollback
+            if deployment_success:
+                log("All blues healthy - promoting to green")
+                
+                # Only skip blue-green swap if ALL servers were reused
+                all_reused = len(reused_ips) == servers_count
+                
+                if all_reused:
+                    log("All servers were reused from existing greens - no blue-green swap needed")
+                    old_green_ips = []
+                else:
+                    log(f"Performing blue-green swap (reused: {len(reused_ips)}, new: {servers_count - len(reused_ips)})")
+                    old_green_ips = ServerInventory.promote_blue_to_green(blue_ips, project, env)
+                
+                # Record deployment state
+                DeploymentStateManager.record_deployment(
+                    project=project,
+                    env=env,
+                    service=service_name,
+                    servers=blue_ips,
+                    container_name=base_name,  # Record base name
+                    version=self._get_version()
+                )
+                
+                # Update nginx if this service has a domain
+                if service_config.get("domain"):
+                    self._update_nginx_for_new_servers(project, env, service_name, service_config, blue_ips)
+                
+                # Optionally destroy old greens
+                if old_green_ips:
+                    ServerInventory.release_servers(old_green_ips, destroy=destroy_old)
+                
+                Logger.end()
+                log(f"Immutable deployment successful")
+                return True
+            else:
+                log("Deployment failed - rolling back")
+                
+                # Stop containers on blue servers
+                for blue_ip in blue_ips:
+                    try:
+                        # Try to stop both possible names (in case of partial deployment)
+                        for suffix in ["", "_secondary"]:
+                            container_name = f"{base_name}{suffix}" if suffix else base_name
+                            DockerExecuter.stop_and_remove_container(container_name, blue_ip, ignore_if_not_exists=True)
+                    except Exception as e:
+                        log(f"Cleanup failed on {blue_ip}: {e}")
+                
+                # Only release newly created servers
+                newly_created_ips = [ip for ip in blue_ips if ip not in reused_ips]
+                if newly_created_ips:
+                    log(f"Releasing {len(newly_created_ips)} newly created servers: {newly_created_ips}")
+                    ServerInventory.release_servers(newly_created_ips, destroy=destroy_old)
+                
+                if reused_ips:
+                    log(f"Keeping {len(reused_ips)} reused servers: {reused_ips}")
+                
+                Logger.end()
+                log("Rollback complete - old containers still running")
+                return False
+
+    def get_services_by_startup_order(self, env: str = None) -> Dict[str, Dict[str, Any]]:
+        """
+        Get services sorted by startup_order.
+        
+        Args:
+            env: Environment name (None = all environments)
+            
+        Returns:
+            Ordered dict of services
+        """
+        if env:
+            services = self.deployment_configurer.get_services(env)
+        else:
+            # Merge all environments
+            services = {}
+            for environment in self.deployment_configurer.get_environments():
+                services.update(self.deployment_configurer.get_services(environment))
+        
+        # Sort by startup_order (default to 5 if not specified)
+        sorted_services = sorted(
+            services.items(),
+            key=lambda x: x[1].get('startup_order', 5)
+        )
+        
+        return dict(sorted_services)
+
+    def create_containers_network(self, env: str, server_ip: str = 'localhost', user: str = "root"):
+        """Create Docker network for services communication"""
+        network_name = DeploymentNaming.get_network_name(self.project_name, env)
+        
+        try:
+            DockerExecuter.create_network(network_name, server_ip, user, ignore_if_exists=True)
+            log(f"Network {network_name} ready on {server_ip}")
+        except Exception as e:
+            log(f"Warning: Could not create network {network_name} on {server_ip}: {e}")
+
+    def start_service(
         self,
         project: str,
         env: str,
         service_name: str,
-        service_config: Dict[str, Any]
+        service_config: Dict[str, Any],
+        server_ip: str = 'localhost',
+        user: str = "root"
+    ):
+        """
+        Start a service container (wrapper for compatibility).
+        Determines if long-running or scheduled and calls appropriate method.
+        """
+        if self.is_service_scheduled(service_config):
+            # For scheduled services, install the cron job
+            return self.install_scheduled_service(project, env, service_name, service_config, server_ip)
+        else:
+            # For long-running services, start the container
+            return self.start_long_running_service(project, env, service_name, service_config, server_ip, user)
+
+    def start_long_running_service(
+        self,
+        project_name: str,
+        env: str,
+        service_name: str,
+        service_config: Dict[str, Any],
+        server_ip: str = 'localhost',
+        user: str = "root"
     ) -> bool:
         """
-        Deploy with immutable infrastructure strategy.
+        Start a long-running service container.
         
-        Process:
-        1. Ensure required servers exist (claim from pool or create new)
-        2. Deploy to blue servers
-        3. Health check all blues
-        4. If healthy: promote blue→green, old green→reserve
-        5. If failed: release blues back to reserve
-
-        Notes:
-        You need keep_reserve set to True in the config to keep a reserve of servers. Otherwise unused server sare destroyed.
-        
-        Returns:
-            True if deployment successful
+        This method is called during deployment to start service containers.
+        It handles network setup, volume mounting, and container lifecycle.
         """
-        log(f"Immutable deployment for {service_name}")
-        Logger.start()
-        
-
-        # Get server requirements
-        zone = service_config.get("server_zone", "lon1")
-        
-        # LOCALHOST SPECIAL CASE: Skip server provisioning
-        if zone == "localhost":
-            log(f"Localhost deployment - starting service directly")
-            
-            # Create network
-            self.create_containers_network(env, 'localhost')
-            
-            # Stop and remove existing container if it exists
-            container_name = DeploymentNaming.get_container_name(project, env, service_name)
-            try:
-                log(f"Stopping existing container {container_name} if present...")
-                DockerExecuter.stop_and_remove_container(
-                    container_name, 
-                    'localhost', 
-                    ignore_if_not_exists=True
-                )
-            except Exception as e:
-                log(f"Note: Could not remove old container (may not exist): {e}")
-            
-            # Start service
-            try:
-                self.start_service(project, env, service_name, service_config, 'localhost')
-                
-                Logger.end()
-                log(f"Localhost deployment successful")
-                return True
-                
-            except Exception as e:
-                log(f"Localhost deployment failed: {e}")
-                Logger.end()
-                return False 
-       
-        # Get server requirements from config with defaults
-        servers_count = service_config.get("servers_count", 1)
-        zone = service_config.get("server_zone", "lon1")
-        cpu = service_config.get("server_cpu", 1)
-        memory = service_config.get("server_memory", 1024)
-        
-        # Claim servers (creates if needed, marks as blue)
         try:
-            blue_ips = ServerInventory.claim_servers(
-                count=servers_count,
-                zone=zone,
-                cpu=cpu,
-                memory=memory
+            # Create network
+            self.create_containers_network(env, server_ip, user)
+            network_name = DeploymentNaming.get_network_name(project_name, env)
+            
+            # Get container name and image
+            base_name = DeploymentNaming.get_container_name(project_name, env, service_name)
+            
+            # Get image (either custom or prebuilt)
+            if service_config.get("image"):
+                image = service_config["image"]
+            else:
+                docker_hub_user = self.deployment_configurer.get_docker_hub_user()
+                version = self._get_version()
+                image = DeploymentNaming.get_image_name(
+                    docker_hub_user, project_name, env, service_name, version
+                )
+            
+            # Pull image if remote
+            if server_ip != 'localhost':
+                log(f"Pulling image {image} to {server_ip}...")
+                DockerExecuter.pull_image(image, server_ip, user)
+            
+            # Get volumes
+            volumes = PathResolver.generate_all_volume_mounts(
+                project_name, env, service_name,
+                server_ip=server_ip,
+                use_docker_volumes=True,
+                user=user
             )
-        except Exception as e:
-            log(f"Failed to claim servers: {e}")
-            Logger.end()
-            return False
-        
-        # Deploy to all blue servers
-        deployment_success = True
-        for blue_ip in blue_ips:
-            log(f"Deploying to blue server {blue_ip}")
-            Logger.start()
             
-            try:
-                # Create network
-                self.create_containers_network(env, blue_ip)
-                
-                # Start service on this blue server
-                self.start_service(project, env, service_name, service_config, blue_ip)
-                
-            except Exception as e:
-                log(f"Deployment failed on {blue_ip}: {e}")
-                deployment_success = False
-                break
+            # Get dockerfile for port detection
+            dockerfile = service_config.get("dockerfile")
+            container_ports = DeploymentPortResolver.get_container_ports(service_name, dockerfile)
+            container_port = container_ports[0] if container_ports else "8000"
             
-            Logger.end()
-        
-        # Health check all blue servers
-        if deployment_success:
-            log("Health checking blue servers...")
-            for blue_ip in blue_ips:
-                # Get port for health check
-                dockerfile = service_config.get("dockerfile")
-                container_ports = DeploymentPortResolver.get_container_ports(service_name, dockerfile)
-                
-                if container_ports:
-                    port = DeploymentPortResolver.generate_host_port(project, env, service_name, container_ports[0])
-                    url = f"http://{blue_ip}:{port}"
-                    
-                    if not self.wait_for_health_check(url, timeout=30, service_name=service_name):
-                        log(f"Health check failed on {blue_ip}")
-                        deployment_success = False
-                        break
-        
-        destroy_old = service_config.get("keep_reserve", False)
-
-        # Swap or rollback
-        if deployment_success:
-            log("All blues healthy - promoting to green")
-            old_green_ips = ServerInventory.promote_blue_to_green(blue_ips, project, env)            
-
-            DeploymentStateManager.record_deployment(
-                project=project,
-                env=env,
-                service=service_name,
-                servers=blue_ips,
-                container_name=DeploymentNaming.get_container_name(project, env, service_name),
-                version=self._get_version()
+            # Determine if we need port mapping (based on deployment strategy)
+            # For localhost or single-server internal services, no port mapping
+            # This will be refined in _deploy_immutable based on actual deployment topology
+            ports = None  # Default: no port mapping
+            
+            # Get environment variables
+            env_vars = service_config.get("env_vars", {})
+            
+            # Get restart policy
+            restart_policy = "unless-stopped" if service_config.get("restart", True) else "no"
+            
+            # Run container
+            DockerExecuter.run_container(
+                image=image,
+                name=base_name,
+                network=network_name,
+                ports=ports,
+                volumes=volumes,
+                environment=env_vars,
+                restart_policy=restart_policy,
+                server_ip=server_ip,
+                user=user
             )
-
-            # Update nginx if this service has a domain
-            if service_config.get("domain"):
-                self._update_nginx_for_new_servers(project, env, service_name, service_config, blue_ips)
             
-            # Optionally destroy old greens (or keep in reserve pool)            
-            if old_green_ips:
-                ServerInventory.release_servers(old_green_ips, destroy=destroy_old)
-            
-            Logger.end()
-            log(f"Immutable deployment successful")
+            log(f"Started {service_name} on {server_ip}")
             return True
-        else:
-            log("Deployment failed - rolling back")
             
-            # Stop containers on blue servers
-            for blue_ip in blue_ips:
-                try:
-                    container_name = DeploymentNaming.get_container_name(project, env, service_name)
-                    DockerExecuter.stop_and_remove_container(container_name, blue_ip, ignore_if_not_exists=True)
-                except Exception as e:
-                    log(f"Cleanup failed on {blue_ip}: {e}")
-            
-            # Release blues back to reserve
-            ServerInventory.release_servers(blue_ips, destroy=destroy_old)
-            
-            Logger.end()
-            log("Rollback complete - old green servers still running")
+        except Exception as e:
+            log(f"Failed to start {service_name} on {server_ip}: {e}")
             return False
+
+    def install_scheduled_service(
+            self,
+            project_name: str,
+            env: str,
+            service_name: str,
+            service_config: Dict[str, Any],
+            server_ip: str = 'localhost'
+        ):
+            """Install a scheduled service using CronManager"""
+            schedule = service_config.get("schedule")
+            
+            if not schedule or not CronManager.validate_cron_schedule(schedule):
+                log(f"Invalid schedule for {service_name}: {schedule}")
+                return False
+            
+            # Get image
+            if service_config.get("image"):
+                image = service_config["image"]
+            else:
+                docker_hub_user = self.deployment_configurer.get_docker_hub_user()
+                version = self._get_version()
+                image = DeploymentNaming.get_image_name(
+                    docker_hub_user, project_name, env, service_name, version
+                )
+            
+            # Pull image if remote
+            if server_ip != 'localhost':
+                log(f"Pulling image {image} to {server_ip}...")
+                DockerExecuter.pull_image(image, server_ip, "root")
+            
+            # Install via CronManager directly
+            success = CronManager.install_cron_job(
+                project=project_name,
+                env=env,
+                service_name=service_name,
+                service_config=service_config,
+                docker_hub_user=self.deployment_configurer.get_docker_hub_user(),
+                version=self._get_version(),
+                server_ip=server_ip,
+                user="root"
+            )
+            
+            if success:
+                log(f"Installed scheduled service {service_name} on {server_ip}")
+            else:
+                log(f"Failed to install scheduled service {service_name} on {server_ip}")
+            
+            return success
+
+    def wait_for_health_check(
+        self,
+        url: Optional[str],
+        timeout: int = 60,
+        service_name: str = ""
+    ) -> bool:
+        """
+        Wait for service to become healthy.
+        
+        Args:
+            url: Health check URL (None = skip HTTP check)
+            timeout: Timeout in seconds
+            service_name: Service name for logging
+            
+        Returns:
+            True if healthy
+        """
+        if not url:
+            log(f"Skipping HTTP health check for {service_name}")
+            return True
+        
+        log(f"Health checking {service_name} at {url}...")
+        start_time = time.time()
+        
+        while time.time() - start_time < timeout:
+            try:
+                response = requests.get(url, timeout=5)
+                if response.status_code == 200:
+                    log(f"Health check passed for {service_name}")
+                    return True
+            except Exception:
+                pass
+            
+            time.sleep(2)
+        
+        log(f"Health check failed for {service_name} after {timeout}s")
+        return False
+
+    def create_temporary_dockerfile(self, dockerfile_content: Dict[str, str], service_name: str) -> str:
+        """Generate Dockerfile from dockerfile_content dict"""
+        # Sort keys properly
+        def sort_key(key):
+            parts = key.split('.')
+            return [int(part) for part in parts]
+        
+        sorted_keys = sorted(dockerfile_content.keys(), key=sort_key)
+        
+        lines = []
+        for key in sorted_keys:
+            lines.append(dockerfile_content[key])
+        
+        return '\n'.join(lines)
+
+    def write_temporary_dockerfile(self, content: str, service_name: str, env: str) -> str:
+        """Write temporary Dockerfile and inject /app directories"""
+        dockerfile_path = constants.get_dockerfiles_path() / f"Dockerfile.{self.project_name}-{env}-{service_name}.tmp"
+        
+        # Write initial content
+        dockerfile_path.write_text(content)
+        
+        # Inject /app directories
+        return self.inject_app_directories_to_dockerfile(str(dockerfile_path), service_name)
 
     def _update_nginx_for_new_servers(
         self,
@@ -833,603 +1569,471 @@ class Deployer:
         service_config: Dict[str, Any],
         new_server_ips: List[str]
     ):
-        """Update nginx configuration to point to new server IPs"""
-        log(f"Updating nginx configuration for new servers: {new_server_ips}")
+        """Update nginx for services that have a domain"""
+        domain = service_config.get("domain")
+        if not domain:
+            return
         
-        # Nginx should be on first server
-        nginx_server = new_server_ips[0]
+        # Get email and Cloudflare token from env
+        import os
+        email = os.getenv("ADMIN_EMAIL")
+        cloudflare_api_token = os.getenv("CLOUDFLARE_API_TOKEN")
         
-        # Re-run nginx setup with new backend IPs
-        cf_token = os.getenv("CLOUDFLARE_API_TOKEN")
-        email = os.getenv("CLOUDFLARE_EMAIL")
-        admin_ip = os.getenv("ADMIN_IP")
-        
-        if admin_ip and admin_ip.lower() == "auto":
-            admin_ip = None
-        
-        try:            
-            # Create updated config with actual server IPs for nginx upstream
-            updated_config = {
-                **service_config,
-                'servers': new_server_ips  # Override with actual IPs for nginx
-            }
-            
-            NginxConfigGenerator.setup_service(
-                project=project,
-                env=env,
-                service_name=service_name,
-                service_config=updated_config,
-                target_server=nginx_server,
-                email=email,
-                cloudflare_api_token=cf_token,
-                admin_ip=admin_ip,
-                auto_firewall=True
-            )
-            log("Nginx configuration updated successfully")
-        except Exception as e:
-            log(f"Warning: Nginx update failed: {e}")
-
-    def create_containers_network(self, env: str = None, server: str = 'localhost'):
-        """Create Docker network for containers"""
-        project_name = self.deployment_configurer.get_project_name()
-        network_name = DeploymentNaming.get_network_name(project_name, env)
-        
-        if DockerExecuter.network_exists(network_name, server):
-            log(f"Network {network_name} already exists on {server}")
-        else:
-            DockerExecuter.create_network(network_name, server, ignore_if_exists=True)
-            log(f"Network {network_name} created on {server}")
-
-    def get_services_by_startup_order(self, env: str = None) -> Dict[str, Any]:
-        """Get services sorted by startup order, separating scheduled from long-running services"""
-        
-        services_with_order = []
-        envs = [env] if env else self.deployment_configurer.get_environments()
-
-        for e in envs:
-            for name, config in self.deployment_configurer.get_services(e).items():
-                if not config.get("disabled", False):
-                    # Scheduled services get higher priority (lower order) to ensure images are built first
-                    order = config.get("startup_order", 999)
-                    services_with_order.append((order, name, config))
-
-        sorted_services = sorted(services_with_order, key=lambda x: x[0])
-        return {name: cfg for _, name, cfg in sorted_services}
-   
-    def wait_for_health_check(self, url: str, timeout: int = 30, interval: int = 5, service_name: str=None) -> bool:
-        """Wait for service to respond to HTTP requests"""  
-        if service_name in ['redis', 'postgres']:
-            log(f"Skipping HTTP health check for {service_name} (non-HTTP service)")
-            return True      
-        for i in range(0, timeout, interval):
+        # Update nginx on each new server
+        for server_ip in new_server_ips:
             try:
-                response = requests.get(url, timeout=3)
-                if 200 <= response.status_code < 300:  # Any 2xx response                   
-                    return True
-            except requests.exceptions.RequestException:              
-                pass            
-            if i % (interval * 4) == 0 and i > 0:  # Show progress every 20 seconds
-                log(f"  Still waiting for {url}... (timeout in {timeout-i} seconds)")                
-            time.sleep(interval)        
-        return False
-
-    def _create_required_volumes(self, project_name: str, env: str, server_ip: str = 'localhost'):
-        """Create all required Docker volumes for the project/environment"""
-        volumes = DeploymentSyncer.generate_docker_volumes(project_name, env)
-        
-        for volume_name in volumes.keys():
-            # Check if volume exists first
-            if not DockerExecuter.volume_exists(volume_name, server_ip):
-                DockerExecuter.create_volume(volume_name, server_ip)
-                log(f"Created Docker volume: {volume_name}")
-            else:
-                log(f"Docker volume already exists: {volume_name}")
-
-    def start_service(
-        self,
-        project_name: str,
-        env: str,
-        service_name: str,
-        service_config: Dict[str, Any],
-        server_ip: str = None,
-        user: str = "root"
-    ) -> bool:
-        """Start a single service - either as long-running container or scheduled cron job."""
-        log(f"Starting {service_name}...") 
-
-        # Check if this is a scheduled service
-        if self.is_service_scheduled(service_config):
-            return self.install_scheduled_service(
-                project_name, env, service_name, service_config, server_ip, user
-            )
-        else:
-            return self.start_long_running_service(
-                project_name, env, service_name, service_config, server_ip, user
-            ) 
-
-    def start_long_running_service(
-        self,
-        project_name: str,
-        env: str,
-        service_name: str,
-        service_config: Dict[str, Any],
-        server_ip: str = None,
-        user: str = "root"
-    ) -> bool:
-        """Start a long-running service container."""
-        container_name = DeploymentNaming.get_container_name(project_name, env, service_name)        
-        network_name = DeploymentNaming.get_network_name(project_name, env)
-
-        # Create required Docker volumes first
-        self._create_required_volumes(project_name, env, server_ip or 'localhost')
-
-        # Get port mappings (auto-detected)
-        dockerfile = service_config.get("dockerfile")
-        container_ports = DeploymentPortResolver.get_container_ports(service_name, dockerfile)
-        ports = {}
-        host_ports = []
-        
-        for container_port in container_ports:
-            host_port = DeploymentPortResolver.generate_host_port(
-                project_name, env, service_name, container_port
-            )
-            host_ports.append(host_port)
-            ports[str(host_port)] = str(container_port)
-
-        # Use auto-generated volumes from DeploymentSyncer
-        volumes = DeploymentSyncer.generate_service_volumes(
-            project_name, env, service_name, use_docker_volumes=True
-        )
-
-        # Get image name - use provided image or generate build name
-        if service_config.get("image"):
-            # Use specified image (for prebuilt services like postgres)
-            image = service_config["image"]
-        else:
-            # Generate image name for built services
-            docker_hub_user = self.deployment_configurer.get_docker_hub_user()
-            version = self._get_version()
-            image = DeploymentNaming.get_image_name(
-                docker_hub_user,
-                project_name,
-                env,
-                service_name,
-                version,
-                service_config.get("is_proxy", False)
-            )
-
-        if server_ip and server_ip != 'localhost':
-            log(f"Pulling image {image} to {server_ip}...")            
-            DockerExecuter.pull_image(image, server_ip, user)
-
-        log(f"Using volumes for {service_name}: {volumes}")
-
-        # Get restart policy from service config (default to unless-stopped for backward compatibility)
-        restart_policy = "unless-stopped" if service_config.get("restart", True) else "no"
-
-        # Run container using DockerExecuter
-        DockerExecuter.run_container(
-            image=image,
-            name=container_name,
-            network=service_config.get("network_name", network_name),
-            ports=ports,
-            volumes=volumes,
-            environment=service_config.get("env_vars", {}),
-            restart_policy=restart_policy,
-            server_ip=server_ip,
-            user=user
-        )
-
-        # Wait for health check for long-running services only
-        timeout = 30
-        if host_ports:
-            port = host_ports[0]
-            host = server_ip or "localhost"
-            url = f"http://{host}:{port}"
-            if self.wait_for_health_check(url, timeout, service_name=service_name):
-                DeploymentStateManager.record_deployment(
-                    project=project_name,
+                from nginx_config_generator import NginxConfigGenerator
+                
+                NginxConfigGenerator.setup_service(
+                    project=project,
                     env=env,
-                    service=service_name,
-                    servers=[server_ip or "localhost"],
-                    container_name=container_name,
-                    version=self._get_version()
+                    service_name=service_name,
+                    service_config=service_config,
+                    target_server=server_ip,
+                    email=email,
+                    cloudflare_api_token=cloudflare_api_token,
+                    auto_firewall=True
                 )
-                return True
-            else:
-                log(f"Warning: {service_name} did not respond within {timeout} seconds")
-                log(f"  Service may still be starting up. Check manually at {url}")
-                DeploymentStateManager.record_deployment(
-                    project=project_name,
-                    env=env,
-                    service=service_name,
-                    servers=[server_ip or "localhost"],
-                    container_name=container_name,
-                    version=self._get_version()
-                )
-                return False        
-        else:
-            log(f"No ports detected for {service_name}, skipping health check")
-            return True
-
-    def install_scheduled_service(
-        self,
-        project_name: str,
-        env: str,
-        service_name: str,
-        service_config: Dict[str, Any],
-        server_ip: str = None,
-        user: str = "root"
-    ) -> bool:
-        """Install a scheduled service with cross-platform support."""
-        log(f"Installing scheduled service {service_name} (schedule: {service_config.get('schedule')})")
-
-        # Validate schedule
-        schedule = service_config.get("schedule")
-        if not CronManager.validate_cron_schedule(schedule):
-            log(f"Error: Invalid cron schedule '{schedule}' for service {service_name}")
-            return False
-
-        # Create network (needed for scheduled containers)
-        self.create_containers_network(env, server_ip or 'localhost')
-
-        # Create required Docker volumes
-        self._create_required_volumes(project_name, env, server_ip or 'localhost')
-
-        # Install scheduled service with platform detection
-        docker_hub_user = self.deployment_configurer.get_docker_hub_user()
-        version = self._get_version()
-
-        success = EnhancedCronManager.install_scheduled_service(
-            project_name, env, service_name, service_config,
-            docker_hub_user, version, server_ip or 'localhost', user
-        )
-
-        if success:
-            log(f"Scheduled service {service_name} installed successfully")
-            DeploymentStateManager.record_deployment(
-                project=project_name,
-                env=env,
-                service=service_name,
-                servers=[server_ip or 'localhost'],
-                container_name=DeploymentNaming.get_container_name(project_name, env, service_name),
-                version=version
-            )
-        else:
-            log(f"Failed to install scheduled service {service_name}")
-
-        return success
-
-    def create_temporary_dockerfile(self, dockerfile_content: Dict[str, str], service_name: str) -> str:
-        """Create a temporary Dockerfile from content and inject app directories"""
-        
-        # Generate base Dockerfile content
-        base_content = self.generate_dockerfile_from_content(dockerfile_content)
-        if not base_content:
-            return None
-        
-        # Get /app directories from service volumes
-        volumes = DeploymentSyncer.generate_service_volumes("temp", "temp", service_name)
-        app_dirs = set()
-        
-        for volume in volumes:
-            if ':' in volume:
-                container_path = volume.split(':', 1)[1].split(':')[0]
-                if container_path.startswith('/app/'):
-                    app_dirs.add(container_path)
-        
-        # If no /app directories, return content as-is
-        if not app_dirs:
-            return base_content
-        
-        # Inject app directories
-        lines = base_content.split('\n')
-        
-        # Find insertion point (after WORKDIR /app or before CMD/ENTRYPOINT)
-        insert_index = -1
-        for i, line in enumerate(lines):
-            line_upper = line.strip().upper()
-            if line_upper.startswith('WORKDIR /APP'):
-                insert_index = i + 1
-                break
-            elif line_upper.startswith(('CMD', 'ENTRYPOINT')):
-                insert_index = i
-                break
-        
-        if insert_index == -1:
-            insert_index = len(lines) - 1
-        
-        # Build directory creation command
-        sorted_dirs = sorted(app_dirs)
-        app_dirs_creation = [
-            "",
-            "# AUTO-GENERATED: Create required directories for volume mounts"
-        ]
-        
-        if len(sorted_dirs) == 1:
-            app_dirs_creation.append(f"RUN mkdir -p {sorted_dirs[0]}")
-        else:
-            mkdir_cmd = f"RUN mkdir -p {' '.join(sorted_dirs)}"
-            app_dirs_creation.append(mkdir_cmd)
-        
-        app_dirs_creation.extend(["# END AUTO-GENERATED", ""])
-        
-        # Insert the directory creation
-        for i, new_line in enumerate(app_dirs_creation):
-            lines.insert(insert_index + i, new_line)
-        
-        return '\n'.join(lines)
-
-    def generate_dockerfile_from_content(self, dockerfile_content: Dict[str, str]) -> str:
-        """Generate Dockerfile content from numbered dictionary"""
-        if not dockerfile_content:
-            return None
-        
-        # Sort by numeric keys (handle both "1" and "1.1" style keys)
-        def sort_key(key):
-            parts = key.split('.')
-            return [int(part) for part in parts]
-        
-        sorted_keys = sorted(dockerfile_content.keys(), key=sort_key)
-        
-        # Generate Dockerfile lines
-        dockerfile_lines = []
-        for key in sorted_keys:
-            dockerfile_lines.append(dockerfile_content[key])
-        
-        return '\n'.join(dockerfile_lines)
-
-    def write_temporary_dockerfile(self, dockerfile_content: str, service_name: str, env: str) -> str:
-        """Write dockerfile content to a temporary file"""
-
-        temp_dir = constants.get_deployment_files_path(self.id)
-
-        temp_dockerfile = temp_dir / f"Dockerfile.{service_name}.{env}"
-        
-        with open(temp_dockerfile, 'w', encoding='utf-8') as f:
-            f.write(dockerfile_content)
-        
-        log(f"Created temporary Dockerfile: {temp_dockerfile}")
-        return str(temp_dockerfile)
-    
+                
+                log(f"Updated nginx for {service_name} on {server_ip}")
+            except Exception as e:
+                log(f"Failed to update nginx on {server_ip}: {e}")
 
     def list_deployments(self, env: str = None, include_costs: bool = True) -> Dict[str, Any]:
         """
-        Show current deployment state across all services and servers.
+        Get current deployment status.
         
         Args:
-            env: Filter by environment (None = all environments)
-            include_costs: Include DigitalOcean cost information
+            env: Filter by environment
+            include_costs: Include cost information from DigitalOcean
             
         Returns:
-            Dictionary with deployment status
+            Deployment status dictionary
         """
-        log("Gathering deployment status...")
-        Logger.start()
+        from deployment_state_manager import DeploymentStateManager
         
-        # Sync server inventory first
-        ServerInventory.sync_with_digitalocean()
+        # Get all deployments
+        if env:
+            deployments = DeploymentStateManager.get_all_services(self.project_name, env)
+        else:
+            deployments = DeploymentStateManager.get_all_services(self.project_name)
         
-        result = {
-            'project': self.project_name,
-            'environments': {},
-            'costs': None
-        }
-        
-        # Get cost information
+        # Enrich with cost data if requested
         if include_costs:
-            try:
-                result['costs'] = DOCostTracker.get_cost_breakdown()
-            except Exception as e:
-                log(f"Warning: Could not fetch cost information: {e}")
-                result['costs'] = None
-        
-        # Get all deployed services
-        environments = [env] if env else self.deployment_configurer.get_environments()
-        
-        for environment in environments:
-            env_services = DeploymentStateManager.get_all_services(
-                project=self.project_name,
-                env=environment
-            )
+            total_cost = 0
             
-            if not env_services:
+            # Get all servers used by this project
+            all_servers = set()
+            if isinstance(deployments, dict):
+                for env_data in deployments.values():
+                    if isinstance(env_data, dict):
+                        for service_data in env_data.values():
+                            if isinstance(service_data, dict):
+                                servers = service_data.get("servers", [])
+                                all_servers.update(servers)
+            
+            # Calculate costs
+            if all_servers:
+                try:
+                    cost_tracker = DOCostTracker()
+                    for server_ip in all_servers:
+                        server_info = ServerInventory.get_server_by_ip(server_ip)
+                        if server_info:
+                            cost = cost_tracker.calculate_server_cost(
+                                server_info['cpu'],
+                                server_info['memory']
+                            )
+                            total_cost += cost
+                except Exception as e:
+                    log(f"Could not calculate costs: {e}")
+            
+            deployments['_metadata'] = {
+                'total_servers': len(all_servers),
+                'monthly_cost_usd': total_cost
+            }
+        
+        return deployments
+
+    def print_deployments(self, env: str = None, include_costs: bool = True):
+        """Pretty-print deployment status to console"""
+        deployments = self.list_deployments(env, include_costs)
+        
+        print(f"\n{'='*60}")
+        print(f"Deployment Status: {self.project_name}")
+        print(f"{'='*60}\n")
+        
+        # Print metadata if available
+        if '_metadata' in deployments:
+            meta = deployments.pop('_metadata')
+            print(f"Total Servers: {meta.get('total_servers', 0)}")
+            if 'monthly_cost_usd' in meta:
+                print(f"Monthly Cost: ${meta['monthly_cost_usd']:.2f}")
+            print()
+        
+        # Print deployments by environment
+        for env_name, env_data in deployments.items():
+            if not isinstance(env_data, dict):
                 continue
             
-            result['environments'][environment] = {
-                'services': {},
-                'servers': {}
-            }
+            print(f"Environment: {env_name}")
+            print("-" * 40)
             
-            # Process each service
-            for service_name, deployment_info in env_services.items():
-                if not deployment_info:
+            for service_name, service_data in env_data.items():
+                if not isinstance(service_data, dict):
                     continue
                 
-                result['environments'][environment]['services'][service_name] = {
-                    'version': deployment_info.get('version', 'unknown'),
-                    'servers': deployment_info.get('servers', []),
-                    'container_name': deployment_info.get('container_name'),
-                    'deployed_at': deployment_info.get('deployed_at'),
-                    'status': 'running'  # Could enhance with actual health check
-                }
+                version = service_data.get('version', 'unknown')
+                servers = service_data.get('servers', [])
+                container_name = service_data.get('container_name', 'unknown')
+                deployed_at = service_data.get('deployed_at', 'unknown')
                 
-                # Track which services run on which servers
-                for server_ip in deployment_info.get('servers', []):
-                    if server_ip not in result['environments'][environment]['servers']:
-                        # Get server info from inventory
-                        server_info = ServerInventory.get_server_by_ip(server_ip)
-                        
-                        result['environments'][environment]['servers'][server_ip] = {
-                            'zone': server_info.get('zone', 'unknown') if server_info else 'unknown',
-                            'status': server_info.get('deployment_status', 'unknown') if server_info else 'unknown',
-                            'cpu': server_info.get('cpu') if server_info else None,
-                            'memory': server_info.get('memory') if server_info else None,
-                            'services': []
-                        }
-                    
-                    result['environments'][environment]['servers'][server_ip]['services'].append(service_name)
-        
-        Logger.end()
-        log("Deployment status gathered")
-        
-        return result
-
-
-    def print_deployments(self, env: str = None):
-        """
-        Pretty-print deployment status to console.
-        
-        Args:
-            env: Filter by environment (None = all)
-        """
-        status = self.list_deployments(env)
-        
-        print(f"\nProject: {status['project']}")
-        print("=" * 80)
-        
-        for env_name, env_data in status['environments'].items():
-            print(f"\nEnvironment: {env_name}")
-            print("-" * 80)
-            
-            # Services section
-            print("\nServices:")
-            if not env_data['services']:
-                print("  No services deployed")
-            else:
-                for service_name, service_info in env_data['services'].items():
-                    print(f"\n  {service_name}")
-                    print(f"    Version: {service_info['version']}")
-                    print(f"    Container: {service_info['container_name']}")
-                    print(f"    Deployed: {service_info['deployed_at']}")
-                    print(f"    Servers: {', '.join(service_info['servers'])}")
-            
-            # Servers section
-            print("\nServers:")
-            if not env_data['servers']:
-                print("  No servers")
-            else:
-                for server_ip, server_info in env_data['servers'].items():
-                    status_marker = {
-                        'green': '✓',
-                        'blue': '○',
-                        'reserve': '□',
-                        'destroying': '✗'
-                    }.get(server_info['status'], '?')
-                    
-                    print(f"\n  {status_marker} {server_ip} ({server_info['zone']}) - {server_info['status']}")
-                    if server_info.get('cpu') and server_info.get('memory'):
-                        print(f"    Resources: {server_info['cpu']} CPU, {server_info['memory']}MB RAM")
-                    print(f"    Services: {', '.join(server_info['services'])}")
+                print(f"  Service: {service_name}")
+                print(f"    Version: {version}")
+                print(f"    Container: {container_name}")
+                print(f"    Servers: {len(servers)}")
+                for server in servers:
+                    print(f"      - {server}")
+                print(f"    Deployed: {deployed_at}")
+                print()
             
             print()
 
-
-    def logs(
-        self,
-        service_name: str,
-        env: str = None,
-        lines: int = 100,
-        follow: bool = False
-    ) -> str:
+    def logs(self, service: str, env: str, lines: int = 100) -> str:
         """
-        Fetch logs from service containers across all servers.
+        Fetch logs from service containers.
         
         Args:
-            service_name: Service to get logs from
-            env: Environment (defaults to first environment if not specified)
-            lines: Number of lines to tail from each server
-            follow: Stream logs (not implemented - use docker logs -f directly)
+            service: Service name
+            env: Environment
+            lines: Number of lines to tail
             
         Returns:
-            Formatted log output
-        """      
+            Log output
+        """
+        from deployment_state_manager import DeploymentStateManager
         
-        # Determine environment
-        if not env:
-            environments = self.deployment_configurer.get_environments()
-            if not environments:
-                log("No environments configured")
-                return ""
-            env = environments[0]
-            log(f"Using environment: {env}")
-        
-        log(f"Fetching logs for {service_name} in {env}...")
-        Logger.start()
-        
-        # Get service deployment info
+        # Get deployment info
         deployment = DeploymentStateManager.get_current_deployment(
-            self.project_name,
-            env,
-            service_name
+            self.project_name, env, service
         )
         
         if not deployment:
-            log(f"Service {service_name} not found in {env}")
-            Logger.end()
-            return f"Service {service_name} not deployed in environment {env}"
+            return f"No deployment found for {self.project_name}/{env}/{service}"
         
-        servers = deployment.get('servers', [])
-        container_name = deployment.get('container_name')
+        container_name = deployment['container_name']
+        servers = deployment['servers']
         
         if not servers:
-            log("No servers found for service")
-            Logger.end()
-            return f"No servers running {service_name}"
+            return "No servers found for this deployment"
         
-        log(f"Fetching logs from {len(servers)} server(s)...")
+        # Fetch logs from first server
+        server_ip = servers[0]
         
-        # Aggregate logs from all servers
-        all_logs = []
-        
-        for server_ip in servers:
-            log(f"Fetching from {server_ip}...")
-            
-            try:
-                server_logs = DockerExecuter.get_container_logs(
-                    container_name,
-                    lines=lines,
-                    server_ip=server_ip,
-                    user="root"
-                )
-                
-                # Format with server prefix if multiple servers
-                if len(servers) > 1:
-                    header = f"\n{'='*60}\nServer: {server_ip}\n{'='*60}\n"
-                    all_logs.append(header + server_logs)
-                else:
-                    all_logs.append(server_logs)
-                    
-            except Exception as e:
-                error_msg = f"\nError fetching logs from {server_ip}: {e}\n"
-                all_logs.append(error_msg)
-                log(f"Error: {e}")
-        
-        Logger.end()
-        log(f"Logs fetched from {len(servers)} server(s)")
-        
-        result = "\n".join(all_logs)
-        
-        if follow:
-            log("Note: follow mode not supported in Python API. Use 'docker logs -f' directly on server.")
-        
-        return result
+        try:
+            logs = DockerExecuter.get_container_logs(
+                container_name, lines, server_ip
+            )
+            return logs
+        except Exception as e:
+            return f"Failed to fetch logs: {e}"
 
-
-    def print_logs(
-        self,
-        service_name: str,
-        env: str = None,
-        lines: int = 100
-    ):
-        """
-        Fetch and print logs to console.
+    def print_logs(self, service: str, env: str, lines: int = 100):
+        """Fetch and print logs to console"""
+        print(f"\n{'='*60}")
+        print(f"Logs: {self.project_name}/{env}/{service}")
+        print(f"{'='*60}\n")
         
-        Args:
-            service_name: Service to get logs from
-            env: Environment
-            lines: Number of lines to tail
-        """
-        logs = self.logs(service_name, env, lines)
+        logs = self.logs(service, env, lines)
         print(logs)
 
+
+    def _determine_toggle(
+        self,
+        project: str,
+        env: str,
+        service: str,
+        server_ip: str,
+        base_port: int,
+        base_name: str
+    ) -> Dict[str, Any]:
+        """
+        Determine which port/name to use based on what's currently running.
+        
+        Toggle logic:
+        - If nothing running → use base (port 8357, name "base")
+        - If base running → use secondary (port 18357, name "base_secondary")
+        - If secondary running → use base (port 8357, name "base")
+        
+        Args:
+            project: Project name
+            env: Environment
+            service: Service name
+            server_ip: Target server IP
+            base_port: Base host port (e.g., 8357)
+            base_name: Base container name
+            
+        Returns:
+            {"port": 8357, "name": "base_name"} or
+            {"port": 18357, "name": "base_name_secondary"}
+        """
+        existing = DockerExecuter.find_service_container(project, env, service, server_ip)
+        
+        if not existing:
+            # First deployment - use base
+            log(f"First deployment of {service} on {server_ip} - using base")
+            return {"port": base_port, "name": base_name}
+        
+        # Toggle logic based on what's currently running
+        if existing.get("port") == base_port or existing.get("port") is None:
+            # Currently on base (or no port mapping) - toggle to secondary
+            log(f"Toggle: {service} on {server_ip} currently on base → deploying secondary")
+            return {"port": base_port + 10000, "name": f"{base_name}_secondary"}
+        else:
+            # Currently on secondary - toggle back to base
+            log(f"Toggle: {service} on {server_ip} currently on secondary → deploying base")
+            return {"port": base_port, "name": base_name}
+
+
+    def _determine_backend_mode_for_service(
+        self,
+        project: str,
+        env: str,
+        service: str,
+        deployed_servers: List[str]
+    ) -> str:
+        """
+        Determine nginx backend mode FOR THIS SPECIFIC SERVICE.
+        
+        CRITICAL: This is per-service, not global!
+        
+        Decision:
+        - Service on 1 server → "single_server" (use container names, no port mapping)
+        - Service on 2+ servers → "multi_server" (use IPs + host ports)
+        
+        Args:
+            project: Project name
+            env: Environment
+            service: Service name
+            deployed_servers: Servers where THIS SERVICE is deployed
+            
+        Returns:
+            "single_server" or "multi_server"
+        """
+        if len(deployed_servers) == 1:
+            log(f"Backend mode for {service}: single_server (deployed on {deployed_servers[0]} only)")
+            return "single_server"
+        else:
+            log(f"Backend mode for {service}: multi_server (deployed on {len(deployed_servers)} servers)")
+            return "multi_server"
+
+
+    def _generate_nginx_backends(
+        self,
+        mode: str,
+        project: str,
+        env: str,
+        service: str,
+        deployed_servers: List[str]
+    ) -> List[Dict[str, Any]]:
+        """
+        Generate backend list for nginx based on deployment mode.
+        
+        Args:
+            mode: "single_server" or "multi_server"
+            project: Project name
+            env: Environment
+            service: Service name
+            deployed_servers: Servers where THIS SERVICE is deployed
+            
+        Returns:
+            Single-server: [{"container_name": "...", "port": "5432"}, ...]
+            Multi-server: [{"ip": "...", "port": 8357}, ...]
+        """
+        if mode == "single_server":
+            # Use container names (Docker DNS)
+            backends = []
+            server_ip = deployed_servers[0]
+            
+            # Get both primary and secondary containers if they exist
+            for suffix in ["", "_secondary"]:
+                container_name = DeploymentNaming.get_container_name(project, env, service)
+                if suffix:
+                    container_name = f"{container_name}{suffix}"
+                
+                # Check if container exists
+                if DockerExecuter.container_exists(container_name, server_ip):
+                    # Get container port (not host port!)
+                    service_config = self.deployment_configurer.get_services(env)[service]
+                    dockerfile = service_config.get("dockerfile")
+                    container_ports = DeploymentPortResolver.get_container_ports(service, dockerfile)
+                    container_port = container_ports[0] if container_ports else "8000"
+                    
+                    backends.append({
+                        "container_name": container_name,
+                        "port": container_port  # Container port (5432, not 8357)
+                    })
+            
+            return backends
+        
+        else:  # multi_server
+            # Use IP + host ports
+            backends = []
+            
+            for server_ip in deployed_servers:
+                # Find what's actually running on this server
+                base_name = DeploymentNaming.get_container_name(project, env, service)
+                
+                # Check for both primary and secondary
+                for suffix in ["", "_secondary"]:
+                    container_name = f"{base_name}{suffix}" if suffix else base_name
+                    
+                    if DockerExecuter.container_exists(container_name, server_ip):
+                        # Get published host port
+                        port_map = DockerExecuter.get_published_ports(container_name, server_ip)
+                        
+                        # Find the host port (format: "5432/tcp" -> "8357")
+                        service_config = self.deployment_configurer.get_services(env)[service]
+                        dockerfile = service_config.get("dockerfile")
+                        container_ports = DeploymentPortResolver.get_container_ports(service, dockerfile)
+                        container_port = container_ports[0] if container_ports else "8000"
+                        
+                        port_key = f"{container_port}/tcp"
+                        if port_key in port_map:
+                            host_port = port_map[port_key]
+                            
+                            backends.append({
+                                "ip": server_ip,
+                                "port": host_port  # Host port (8357 or 18357)
+                            })
+            
+            return backends
+
+
+    def _update_all_nginx_for_service(
+        self,
+        project: str,
+        env: str,
+        service: str,
+        deployed_servers: List[str],
+        all_zone_servers: List[Dict[str, Any]]
+    ) -> None:
+        """
+        Update nginx stream config on all servers in zone FOR THIS SERVICE.
+        
+        CRITICAL: Mode is determined per-service, not globally!
+        
+        This allows mixed deployments where some services are single-server
+        and others are multi-server within the same zone.
+        
+        Args:
+            project: Project name
+            env: Environment
+            service: Service name
+            deployed_servers: Servers where THIS SERVICE is deployed
+            all_zone_servers: All servers in the zone (for nginx updates)
+        """
+        if not self._is_tcp_service(service):
+            log(f"Skipping nginx stream config for {service} (not a TCP service)")
+            return
+        
+        # Determine mode FOR THIS SPECIFIC SERVICE
+        mode = self._determine_backend_mode_for_service(
+            project, env, service, deployed_servers
+        )
+        
+        log(f"Updating nginx stream config for {service} (mode: {mode})")
+        
+        # Generate backends based on THIS SERVICE's deployment
+        backends = self._generate_nginx_backends(
+            mode, project, env, service, deployed_servers
+        )
+        
+        if not backends:
+            log(f"No backends found for {service}")
+            return
+        
+        # Calculate internal port (stable for this service)
+        internal_port = DeploymentPortResolver.get_internal_port(project, env, service)
+        log(f"Internal port for {service}: {internal_port}")
+        
+        # Update nginx on EVERY server in the zone
+        # (Even servers that don't run this service need the config)
+        for server in all_zone_servers:
+            try:
+                NginxConfigGenerator.update_stream_config_on_server(
+                    server['ip'], project, env, service, backends, internal_port, mode
+                )
+            except Exception as e:
+                log(f"Warning: Failed to update nginx on {server['ip']}: {e}")
+
+
+    def _is_tcp_service(self, service_name: str) -> bool:
+        """
+        Check if service needs TCP proxying (nginx stream).
+        
+        Args:
+            service_name: Service name
+            
+        Returns:
+            True if service needs TCP stream proxying
+        """
+        tcp_services = ["postgres", "redis", "mongo", "mysql", "rabbitmq", "kafka", "opensearch", "elasticsearch"]
+        return service_name.lower() in tcp_services
+
+
+    def _get_all_servers_in_zone(self, zone: str) -> List[Dict[str, Any]]:
+        """
+        Get all green servers in a zone.
+        
+        Args:
+            zone: Zone name
+            
+        Returns:
+            List of server dicts
+        """
+        return ServerInventory.get_servers(
+            deployment_status=ServerInventory.STATUS_GREEN,
+            zone=zone
+        )
+
+
+    def _should_map_host_port(self, deployed_servers: List[str]) -> bool:
+        """
+        Determine if service needs host port mapping.
+        
+        Single-server deployment: NO port mapping (use Docker DNS)
+        Multi-server deployment: YES port mapping (cross-network communication)
+        
+        Args:
+            deployed_servers: Servers where THIS SERVICE is deployed
+            
+        Returns:
+            True if host port mapping needed
+        """
+        return len(deployed_servers) > 1
+
+
+    def _get_opposite_container_name(self, current_name: str, base_name: str) -> Optional[str]:
+        """
+        Get the opposite container name for cleanup after toggle.
+        
+        Args:
+            current_name: Name of the newly deployed container
+            base_name: Base container name
+            
+        Returns:
+            Name of the old container to stop, or None
+            
+        Examples:
+            _get_opposite_container_name("myproj_dev_api", "myproj_dev_api")
+            → "myproj_dev_api_secondary"
+            
+            _get_opposite_container_name("myproj_dev_api_secondary", "myproj_dev_api")
+            → "myproj_dev_api"
+        """
+        if current_name == base_name:
+            # New is base, old is secondary
+            return f"{base_name}_secondary"
+        else:
+            # New is secondary, old is base
+            return base_name

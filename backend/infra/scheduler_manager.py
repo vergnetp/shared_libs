@@ -6,7 +6,7 @@ from deployment_naming import DeploymentNaming
 from deployment_syncer import DeploymentSyncer
 from logger import Logger
 from pathlib import Path
-
+from path_resolver import PathResolver
 
 def log(msg):
     Logger.log(msg)
@@ -451,9 +451,12 @@ class WindowsTaskScheduler:
             "--network", network_name
         ]
         
-        # Add volumes
-        volumes = DeploymentSyncer.generate_service_volumes(
-            project, env, service_name, use_docker_volumes=True
+        # Add volumes (directories auto-created)
+        volumes = PathResolver.generate_all_volume_mounts(
+            project, env, service_name,
+            server_ip="localhost",  # Windows tasks run locally
+            use_docker_volumes=True,
+            user="root"
         )
         for volume in volumes:
             docker_parts.extend(["-v", volume])

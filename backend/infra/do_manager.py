@@ -252,7 +252,7 @@ class DOManager:
     @staticmethod
     def get_or_create_vpc(region: str, ip_range: str = "10.0.0.0/16") -> str:
         """Thread-safe VPC creation"""
-        vpc_name = f"deployer_vpc_{region}"
+        vpc_name = f"deployer-vpc-{region}"
         
         with DOManager._vpc_lock:  # Protect creation
             # Check existing VPCs
@@ -338,12 +338,54 @@ class DOManager:
         
         # Install health monitor
         from health_monitor_installer import HealthMonitorInstaller
-        HealthMonitorInstaller.install_on_server(ip)
-        
+        HealthMonitorInstaller.install_on_server(ip)        
+
+        # Create a minimal project/env context for nginx
+        # Or install nginx without project context
+        DOManager._install_basic_nginx(ip)
+
         log(f"Droplet {droplet_id} ({ip}) fully provisioned")
         
         return droplet_id
     
+    def _install_basic_nginx(server_ip: str):
+        """Install nginx container with empty config directories"""
+        from execute_docker import DockerExecuter
+        from execute_cmd import CommandExecuter
+        
+        # Create nginx directories
+        CommandExecuter.run_cmd("mkdir -p /local/nginx/conf.d /local/nginx/stream.d", server_ip, "root")
+        
+        # Create basic nginx.conf with stream support
+        nginx_conf = """
+    events { worker_connections 1024; }
+    stream { include /etc/nginx/stream.d/*.conf; }
+    http { include /etc/nginx/conf.d/*.conf; }
+    """
+        
+        CommandExecuter.run_cmd_with_stdin(
+            "cat > /local/nginx/nginx.conf",
+            nginx_conf.encode('utf-8'),
+            server_ip, "root"
+        )
+        
+        # Start nginx container (without project-specific network)
+        DockerExecuter.run_container(
+            image="nginx:alpine",
+            name="nginx",
+            ports={"80": "80", "443": "443"},
+            volumes=[
+                "/local/nginx/nginx.conf:/etc/nginx/nginx.conf:ro",
+                "/local/nginx/conf.d:/etc/nginx/conf.d:ro",
+                "/local/nginx/stream.d:/etc/nginx/stream.d:ro"
+            ],
+            restart_policy="unless-stopped",
+            server_ip=server_ip,
+            user="root"
+        )
+        
+        log(f"Nginx container installed on {server_ip}")
+
     @staticmethod
     def create_droplets(
         count: int,
@@ -506,34 +548,77 @@ class DOManager:
     
     @staticmethod
     def install_docker(ip: str, user: str = "root") -> bool:
-        """SSH to droplet and install Docker"""
+        """SSH to droplet and install Docker using official convenience script"""
         log(f"Installing Docker on {ip}...")
         
         try:
-            # Docker installation script
+            # Wait for cloud-init to complete (Ubuntu's first-boot initialization)
+            log(f"Waiting for cloud-init to complete on {ip}...")
+            CommandExecuter.run_cmd(
+                "cloud-init status --wait || timeout 300 bash -c 'while [ ! -f /var/lib/cloud/instance/boot-finished ]; do sleep 2; done'",
+                ip, user
+            )
+            log(f"Cloud-init completed on {ip}")
+            
+            # Wait for apt locks to clear with more aggressive timeout
+            log(f"Waiting for apt locks to clear on {ip}...")
+            wait_commands = [
+                # Wait up to 10 minutes for dpkg lock
+                "timeout 600 bash -c 'while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do echo \"Waiting for dpkg lock...\"; sleep 5; done'",
+                # Wait for apt lists lock
+                "timeout 600 bash -c 'while fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do echo \"Waiting for apt lists lock...\"; sleep 5; done'",
+                # Wait for dpkg lock itself
+                "timeout 600 bash -c 'while fuser /var/lib/dpkg/lock >/dev/null 2>&1; do echo \"Waiting for dpkg lock...\"; sleep 5; done'",
+                # Kill any stuck unattended-upgrade processes
+                "pkill -9 unattended-upgrade || true",
+                "pkill -9 apt-get || true",
+                # Final wait to ensure processes are truly dead
+                "sleep 5"
+            ]
+            
+            for cmd in wait_commands:
+                try:
+                    CommandExecuter.run_cmd(cmd, ip, user)
+                except Exception as e:
+                    log(f"Warning during lock wait: {e}")
+            
+            log(f"Apt locks cleared on {ip}")
+            
+            # Use Docker's official installation script (works on all distros)
             commands = [
-                "apt-get update",
-                "apt-get install -y ca-certificates curl gnupg",
-                "install -m 0755 -d /etc/apt/keyrings",
-                "curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg",
-                "chmod a+r /etc/apt/keyrings/docker.gpg",
-                'echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null',
-                "apt-get update",
-                "apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin",
+                # Download Docker install script
+                "curl -fsSL https://get.docker.com -o get-docker.sh",
+                
+                # Run installation with retry logic
+                "for i in 1 2 3; do sh get-docker.sh && break || sleep 10; done",
+                
+                # Cleanup
+                "rm get-docker.sh",
+                
+                # Start and enable Docker service
                 "systemctl start docker",
-                "systemctl enable docker"
+                "systemctl enable docker",
+                
+                # Wait for Docker daemon to be ready
+                "timeout 30 bash -c 'until docker ps >/dev/null 2>&1; do echo \"Waiting for Docker daemon...\"; sleep 2; done'",
+                
+                # Verify installation
+                "docker --version",
+                
+                # Verify Docker daemon is responsive
+                "docker ps"
             ]
             
             for cmd in commands:
                 CommandExecuter.run_cmd(cmd, ip, user)
             
-            log(f"Docker installed successfully on {ip}")
+            log(f"Docker installed and verified on {ip}")
             return True
             
         except Exception as e:
             log(f"Failed to install Docker on {ip}: {e}")
             return False
-    
+
     @staticmethod
     def update_droplet_tags(droplet_id: str, add_tags: List[str] = None, remove_tags: List[str] = None):
         """Update tags on existing droplet"""

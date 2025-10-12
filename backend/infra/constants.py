@@ -3,7 +3,6 @@ from typing import List
 
 ROOT_PATH = Path(__file__).resolve().parent  # Folder containing constants.py
 DEPLOYMENTS_FOLDER = Path("deployments")
-TOOLS_FOLDER = Path("tools")
 
 
 def get_root_path() -> Path:
@@ -26,21 +25,6 @@ def get_deployment_files_path(deployment_id: str) -> Path:
         Path: Path to the deployment folder.
     """
     folder = get_root_path() / DEPLOYMENTS_FOLDER / deployment_id
-    folder.mkdir(exist_ok=True, parents=True)
-    return folder
-
-
-def get_tools_path() -> Path:
-    """
-    Return the absolute path to the folder holding tools such as openssl.
-    Creates the folder if it does not exist.
-
-    Currently: ROOT_PATH / 'tools'
-
-    Returns:
-        Path: Path to the tools folder.
-    """
-    folder = get_root_path() / TOOLS_FOLDER
     folder.mkdir(exist_ok=True, parents=True)
     return folder
 

@@ -54,6 +54,7 @@ class ServerInventory:
         for droplet in droplets_info:
             server_entry = {
                 "droplet_id": droplet['droplet_id'],
+                "name": droplet.get('name', 'unknown'),
                 "ip": droplet['ip'],
                 "private_ip": droplet['private_ip'],
                 "zone": droplet['zone'],

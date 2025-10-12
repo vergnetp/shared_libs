@@ -9,6 +9,7 @@ from deployment_syncer import DeploymentSyncer
 from execute_docker import DockerExecuter
 from deployment_naming import DeploymentNaming
 from logger import Logger
+from path_resolver import PathResolver
 
 def log(msg):
     Logger.log(msg)
@@ -18,8 +19,7 @@ class SecretsRotator:
     
     def __init__(self, project: str, env: str):
         self.project = project
-        self.env = env
-        self.local_base = DeploymentSyncer.get_local_base(project, env)
+        self.env = env        
         self.safe_chars = string.ascii_letters + string.digits
     
     def _backup_secret(self, secret_path: Path) -> Path:
@@ -43,7 +43,9 @@ class SecretsRotator:
     def rotate_postgres_password(self, service_name: str = "postgres") -> bool:
         """Rotate PostgreSQL password"""
         try:
-            secrets_dir = Path(self.local_base) / "secrets" / service_name
+            secrets_dir = PathResolver.get_volume_host_path(
+                self.project, self.env, service_name, "secrets", "localhost"
+            )
             password_file = secrets_dir / "db_password"
             
             # Backup existing password

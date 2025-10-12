@@ -67,13 +67,7 @@ def post_process_dockerfile_content(services: Dict[str, Dict[str, Any]]) -> Dict
 
 def prepare_raw_config(config):
     """Add volumes to base services and provision standard services"""
-    project = config.get("project", {})
-    base_services = project.get("services", {})
-    
-    # Add volumes to all services
-    for service, service_config in base_services.items():
-       volumes = DeploymentSyncer.generate_service_volumes(project.get('name'), '{env}', service, use_docker_volumes=True)
-       service_config['volumes'] = volumes
+    pass
 
 def provision_standard_service(project: str, env: str, service: str, existing_config: Dict[str, Any]) -> Dict[str, Any]:
     """Auto-generate configuration for standard services, respecting existing config"""

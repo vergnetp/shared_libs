@@ -3,10 +3,7 @@ from execute_cmd import CommandExecuter
 from deployment_naming import DeploymentNaming
 from deployment_syncer import DeploymentSyncer
 from logger import Logger
-import hashlib
-import os
-import subprocess
-
+from path_resolver import PathResolver
 
 def log(msg):
     Logger.log(msg)
@@ -21,8 +18,10 @@ class CronManager:
         env: str, 
         service_name: str, 
         service_config: Dict[str, Any],
-        docker_hub_user: str,
-        version: str = "latest"
+        docker_hub_user: str,        
+        server_ip: str,
+        user: str = "root",
+        version: str = "latest",
     ) -> Optional[str]:
         """
         Generate a cron entry for a scheduled service.
@@ -33,6 +32,8 @@ class CronManager:
             service_name: Service name
             service_config: Service configuration dict
             docker_hub_user: Docker Hub username
+            server_ip: Target ip of the server (or 'localhost')
+            user: the Target server user. Default to 'root'
             version: Image version
             
         Returns:
@@ -51,8 +52,7 @@ class CronManager:
                 project,
                 env,
                 service_name,
-                version,
-                service_config.get("is_proxy", False)
+                version                
             )
         
         # Generate unique container name with timestamp to avoid conflicts
@@ -66,10 +66,11 @@ class CronManager:
         docker_cmd_parts = ["docker", "run", "--rm", "--name", container_name]
         
         # Add network
-        docker_cmd_parts.extend(["--network", network_name])
+        if network_name:
+            docker_cmd_parts.extend(["--network", network_name])
         
         # Add volumes
-        volumes = CronManager._prepare_volumes_for_cron(project, env, service_name, service_config)
+        volumes = CronManager._prepare_volumes_for_cron(project, env, service_name, service_config, server_ip, user)
         for volume in volumes:
             docker_cmd_parts.extend(["-v", volume])
         
@@ -99,7 +100,7 @@ class CronManager:
         return cron_entry
 
     @staticmethod
-    def _prepare_volumes_for_cron(project: str, env: str, service_name: str, service_config: Dict[str, Any]) -> List[str]:
+    def _prepare_volumes_for_cron(project: str, env: str, service_name: str, service_config: Dict[str, Any], server_ip: str, user: str = "root") -> List[str]:
         """Prepare volumes for cron job containers"""
         volumes = []
         
@@ -114,9 +115,10 @@ class CronManager:
             elif isinstance(volume_config, list):
                 volumes = volume_config
         else:
-            # Use auto-generated volumes from DeploymentSyncer
-            volumes = DeploymentSyncer.generate_service_volumes(
-                project, env, service_name, use_docker_volumes=True
+            # Use auto-generated volumes from PathResolver
+            volumes = PathResolver.generate_all_volume_mounts(
+                project, env, service_name, server_ip,
+                use_docker_volumes=True, user=user
             )
         
         return volumes
@@ -144,7 +146,7 @@ class CronManager:
             True if cron job was installed/updated successfully
         """
         cron_entry = CronManager.generate_cron_entry(
-            project, env, service_name, service_config, docker_hub_user, version
+            project, env, service_name, service_config, docker_hub_user, server_ip, user, version
         )
         
         if not cron_entry:
@@ -163,10 +165,13 @@ class CronManager:
             # Create temporary cron file
             temp_cron_file = f"/tmp/cron_temp_{project}_{env}_{service_name}"
             
+            # Escape the cron entry for shell
+            escaped_cron_entry = full_cron_entry.replace("'", "'\\''")
+
             # Get current crontab, add new entry, and install
             commands = [
                 f"crontab -l 2>/dev/null > {temp_cron_file} || touch {temp_cron_file}",
-                f'echo "{full_cron_entry}" >> {temp_cron_file}',
+                f"echo '{escaped_cron_entry}' >> {temp_cron_file}",  # Use single quotes
                 f"crontab {temp_cron_file}",
                 f"rm {temp_cron_file}"
             ]

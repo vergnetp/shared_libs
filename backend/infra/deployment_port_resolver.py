@@ -9,6 +9,7 @@ def log(msg):
 
 
 class DeploymentPortResolver:
+    """Port resolution for deployment system with toggle support."""
 
     @staticmethod
     def extract_ports_from_dockerfile(dockerfile_path: str) -> List[str]:
@@ -62,8 +63,65 @@ class DeploymentPortResolver:
     def generate_host_port(
         project_name: str, env: str, service_name: str, container_port: str, base_port: int = 8000
     ) -> int:
-        """Generate deterministic host port for mapping."""
+        """
+        Generate deterministic host port for mapping.
+        
+        This is the BASE port that will be used in toggle deployments.
+        Secondary deployments add 10000 to this port.
+        
+        Args:
+            project_name: Project name
+            env: Environment
+            service_name: Service name
+            container_port: Container port being mapped
+            base_port: Base port range start (default: 8000)
+            
+        Returns:
+            Base host port (8000-8999 range)
+            
+        Examples:
+            generate_host_port("proj", "dev", "postgres", "5432") -> 8357
+            Secondary deployment would use: 8357 + 10000 = 18357
+        """
         hash_input = f"{project_name}_{env}_{service_name}_{container_port}"
+        hash_value = int(hashlib.md5(hash_input.encode()).hexdigest()[:8], 16)
+        port_offset = hash_value % 1000
+        return base_port + port_offset
+
+    @staticmethod
+    def get_internal_port(
+        project_name: str, env: str, service_name: str, base_port: int = 5000
+    ) -> int:
+        """
+        Generate deterministic internal port for nginx to listen on.
+        
+        This port is STABLE across deployments and toggle states.
+        Apps always connect to localhost:INTERNAL_PORT regardless of backend changes.
+        
+        The hash input does NOT include container_port or version - only project/env/service.
+        This ensures the internal port never changes for a given service.
+        
+        Args:
+            project_name: Project name
+            env: Environment
+            service_name: Service name
+            base_port: Internal port range start (default: 5000)
+            
+        Returns:
+            Internal port (5000-5999 range)
+            
+        Examples:
+            get_internal_port("new_project", "uat", "postgres") -> 5234
+            get_internal_port("new_project", "uat", "redis") -> 5678
+            get_internal_port("new_project", "prod", "postgres") -> 5789
+            
+        Note:
+            This port is used by nginx for the listen directive.
+            Applications connect to this port via localhost.
+            It NEVER changes, even during toggle deployments.
+        """
+        # Hash input: only project_env_service (no version, no container_port)
+        hash_input = f"{project_name}_{env}_{service_name}_internal"
         hash_value = int(hashlib.md5(hash_input.encode()).hexdigest()[:8], 16)
         port_offset = hash_value % 1000
         return base_port + port_offset

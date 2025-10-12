@@ -2,131 +2,128 @@ from typing import Dict
 
 
 class DeploymentNaming:
-    """Centralized naming functions for all deployment artifacts"""
+    """Centralized naming functions for all deployment artifacts (no proxy flag)."""
 
     @staticmethod
-    def get_service_name(service_name: str, is_proxy: bool = False) -> str:
-        """
-        Get the effective service name.
+    def get_service_name(service_name: str) -> str:
+        """Return the service name unchanged.
 
-        Logic:
-        - If `is_proxy=True` and `service_name` does NOT already end with `-proxy`, append `-proxy`.
-        - Otherwise, return `service_name` unchanged.
-
-        Examples:
-        - get_service_name("api") → "api"
-        - get_service_name("api", is_proxy=True) → "api-proxy"
-        - get_service_name("api-proxy", is_proxy=True) → "api-proxy"
+        This method exists for symmetry with other helpers and future extension.
         """
-        if is_proxy and not service_name.endswith("-proxy"):
-            return f"{service_name}-proxy"
         return service_name
 
     @staticmethod
-    def get_container_name(project: str, env: str, service_name: str, is_proxy: bool = False) -> str:
-        """
-        Generate Docker container name using the standard convention.
+    def get_container_name(project: str, env: str, service_name: str) -> str:
+        """Generate Docker container name using the standard convention.
 
-        Logic:
-        - First resolve `effective_service` with `get_service_name()`.
-        - Format: `<project>_<env>_<effective_service>`
+        Format: ``<project>_<env>_<service>``
 
         Examples:
-        - get_container_name("myproj", "dev", "api") → "myproj_dev_api"
-        - get_container_name("myproj", "prod", "api", is_proxy=True) → "myproj_prod_api-proxy"
+        - get_container_name("myproj", "dev", "api") -> "myproj_dev_api"
+        - get_container_name("myproj", "prod", "web") -> "myproj_prod_web"
         """
-        effective_service = DeploymentNaming.get_service_name(service_name, is_proxy)
+        effective_service = DeploymentNaming.get_service_name(service_name)
         return f"{project}_{env}_{effective_service}"
+
+    @staticmethod
+    def get_container_name_pattern(project: str, env: str, service_name: str) -> str:
+        """
+        Generate wildcard pattern for finding service containers (both primary and secondary).
+        
+        Used to find all containers for a service regardless of toggle state.
+        
+        Format: ``<project>_<env>_<service>*``
+        
+        Matches:
+        - myproj_dev_api (primary)
+        - myproj_dev_api_secondary (secondary)
+        
+        Args:
+            project: Project name
+            env: Environment name
+            service_name: Service name
+            
+        Returns:
+            Pattern string for container name matching
+            
+        Examples:
+            get_container_name_pattern("myproj", "dev", "api") -> "myproj_dev_api*"
+        """
+        base_name = DeploymentNaming.get_container_name(project, env, service_name)
+        return f"{base_name}*"
 
     @staticmethod
     def get_image_name(
         docker_hub_user: str, project: str, env: str,
-        service_name: str, version: str = "latest", is_proxy: bool = False
+        service_name: str, version: str = "latest"
     ) -> str:
-        """
-        Generate Docker image name for registry.
+        """Generate Docker image name for registry.
 
-        Logic:
-        - First resolve `effective_service` with `get_service_name()`.
-        - Format: `<docker_hub_user>/<project>-<env>-<effective_service>:<version>`
+        Format: ``<docker_hub_user>/<project>-<env>-<service>:<version>``
 
         Examples:
-        - get_image_name("alice", "myproj", "dev", "api") → "alice/myproj-dev-api:latest"
-        - get_image_name("bob", "proj", "staging", "web", "1.2.3", is_proxy=True) → "bob/proj-staging-web-proxy:1.2.3"
+        - get_image_name("alice", "myproj", "dev", "api") -> "alice/myproj-dev-api:latest"
+        - get_image_name("bob", "proj", "staging", "web", "1.2.3") -> "bob/proj-staging-web:1.2.3"
         """
-        effective_service = DeploymentNaming.get_service_name(service_name, is_proxy)
+        effective_service = DeploymentNaming.get_service_name(service_name)
         return f"{docker_hub_user}/{project}-{env}-{effective_service}:{version}"
 
     @staticmethod
     def get_network_name(project: str, env: str) -> str:
-        """
-        Generate Docker network name.
+        """Generate Docker network name.
 
-        Logic:
-        - Format: `<project>_<env>_network`
+        Format: ``<project>_<env>_network``
 
         Example:
-        - get_network_name("myproj", "dev") → "myproj_dev_network"
+        - get_network_name("myproj", "dev") -> "myproj_dev_network"
         """
         return f"{project}_{env}_network"
 
     @staticmethod
-    def get_dockerfile_name(project: str, env: str, service_name: str, is_proxy: bool = False) -> str:
-        """
-        Generate Dockerfile name with project/env/service discrimination.
+    def get_dockerfile_name(project: str, env: str, service_name: str) -> str:
+        """Generate Dockerfile name with project/env/service discrimination.
 
-        Logic:
-        - First resolve `effective_service` with `get_service_name()`.
-        - Format: `Dockerfile.<project>-<env>-<effective_service>`
+        Format: ``Dockerfile.<project>-<env>-<service>``
 
         Examples:
-        - get_dockerfile_name("proj", "dev", "api") → "Dockerfile.proj-dev-api"
-        - get_dockerfile_name("proj", "prod", "nginx", is_proxy=True) → "Dockerfile.proj-prod-nginx-proxy"
+        - get_dockerfile_name("proj", "dev", "api") -> "Dockerfile.proj-dev-api"
+        - get_dockerfile_name("proj", "prod", "nginx") -> "Dockerfile.proj-prod-nginx"
         """
-        effective_service = DeploymentNaming.get_service_name(service_name, is_proxy)
+        effective_service = DeploymentNaming.get_service_name(service_name)
         return f"Dockerfile.{project}-{env}-{effective_service}"
 
     @staticmethod
     def get_nginx_config_name(project: str, env: str, service_name: str) -> str:
-        """
-        Generate nginx configuration file name for a proxy service.
+        """Generate nginx configuration file name for a service.
 
-        Logic:
-        - Always treat the service as a proxy (force `is_proxy=True`).
-        - Format: `nginx-<project>_<env>_<effective_service>.conf`
+        Format: ``nginx-<project>_<env>_<service>.conf``
 
-        Examples:
-        - get_nginx_config_name("proj", "dev", "api") → "nginx-proj_dev_api-proxy.conf"
+        Example:
+        - get_nginx_config_name("proj", "dev", "api") -> "nginx-proj_dev_api.conf"
         """
-        effective_service = DeploymentNaming.get_service_name(service_name, is_proxy=True)
+        effective_service = DeploymentNaming.get_service_name(service_name)
         return f"nginx-{project}_{env}_{effective_service}.conf"
 
     @staticmethod
     def get_all_names(
         docker_hub_user: str, project: str, env: str,
-        service_name: str, version: str = "latest", is_proxy: bool = False
+        service_name: str, version: str = "latest"
     ) -> Dict[str, str]:
-        """
-        Get all naming artifacts for a service in one call.
+        """Get all naming artifacts for a service in one call.
 
-        Example:
-         get_all_names("alice", "proj", "dev", "api", "1.0.0", is_proxy=True) →  
-         {  
-           "service_name": "api-proxy",  
-            "container_name": "proj_dev_api-proxy",  
-            "image_name": "alice/proj-dev-api-proxy:1.0.0",  
-            "dockerfile_name": "Dockerfile.proj-dev-api-proxy",  
-            "network_name": "proj_dev_network",  
-            "nginx_config_name": "nginx-proj_dev_api-proxy.conf" # only if is_proxy is True  
-         }  
+        Returns a dict with:
+        - service_name
+        - container_name
+        - image_name
+        - dockerfile_name
+        - network_name
+        - nginx_config_name
         """
-        result = {
-            "service_name": DeploymentNaming.get_service_name(service_name, is_proxy),
-            "container_name": DeploymentNaming.get_container_name(project, env, service_name, is_proxy),
-            "image_name": DeploymentNaming.get_image_name(docker_hub_user, project, env, service_name, version, is_proxy),
-            "dockerfile_name": DeploymentNaming.get_dockerfile_name(project, env, service_name, is_proxy),
+        return {
+            "service_name": DeploymentNaming.get_service_name(service_name),
+            "container_name": DeploymentNaming.get_container_name(project, env, service_name),
+            "image_name": DeploymentNaming.get_image_name(docker_hub_user, project, env, service_name, version),
+            "dockerfile_name": DeploymentNaming.get_dockerfile_name(project, env, service_name),
             "network_name": DeploymentNaming.get_network_name(project, env),
+            "nginx_config_name": DeploymentNaming.get_nginx_config_name(project, env, service_name),
         }
-        if is_proxy:
-            result["nginx_config_name"] = DeploymentNaming.get_nginx_config_name(project, env, service_name)
-        return result

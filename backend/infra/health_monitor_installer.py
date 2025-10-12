@@ -66,14 +66,12 @@ class HealthMonitorInstaller:
             log(f"Created project tarball")
             
             # 2. Transfer to server
-            tarball_content = Path(tarball_path).read_bytes()
-            import base64
-            encoded = base64.b64encode(tarball_content).decode('ascii')
-            
-            CommandExecuter.run_cmd(
-                f"echo '{encoded}' | base64 -d > /tmp/health_monitor.tar.gz",
-                server_ip, user
-            )
+            with open(tarball_path, "rb") as f:
+                CommandExecuter.run_cmd_with_stdin(
+                    "cat > /tmp/health_monitor.tar.gz",
+                    f.read(),
+                    server_ip, user
+                )
             
             # 3. Extract to build directory
             CommandExecuter.run_cmd("mkdir -p /tmp/health_monitor_build", server_ip, user)
@@ -84,10 +82,12 @@ class HealthMonitorInstaller:
             
             # 4. Generate Dockerfile from content
             dockerfile_text = HealthMonitorInstaller._generate_dockerfile()
-            
-            CommandExecuter.run_cmd(
-                f"cat > /tmp/health_monitor_build/Dockerfile << 'EOFMARKER'\n{dockerfile_text}\nEOFMARKER",
-                server_ip, user
+
+            CommandExecuter.run_cmd_with_stdin(
+                "cat > /tmp/health_monitor_build/Dockerfile",
+                dockerfile_text.encode("utf-8"),
+                server_ip,
+                user,
             )
             
             # 5. Build Docker image
@@ -109,7 +109,8 @@ class HealthMonitorInstaller:
             service_config = {
                 "schedule": HealthMonitorInstaller.SCHEDULE,
                 "image": HealthMonitorInstaller.IMAGE_NAME,
-                "env_vars": {}
+                "env_vars": {},
+                "network_name": None  # Health monitor doesn't need a project network
             }
             
             success = CronManager.install_cron_job(

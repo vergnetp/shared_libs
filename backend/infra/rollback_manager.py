@@ -166,8 +166,7 @@ class RollbackManager:
                     project,
                     env,
                     service,
-                    target_version,
-                    service_config.get("is_proxy", False)
+                    target_version
                 ).split(':')[0].split('/')[-1]  # Extract repo name
                 
                 if not RollbackManager.check_image_exists_in_registry(

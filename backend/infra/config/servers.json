@@ -1,3 +1,26 @@
 {
-    "servers": []
+    "servers": [
+        {
+            "droplet_id": "523973787",
+            "name": "droplet-lon1-1760298918-0",
+            "ip": "161.35.175.246",
+            "private_ip": "10.0.0.6",
+            "zone": "lon1",
+            "cpu": 1,
+            "memory": 1024,
+            "deployment_status": "reserve",
+            "created": "2025-10-12T19:55:19Z"
+        },
+        {
+            "droplet_id": "523974719",
+            "name": "droplet-lon1-1760299317-0",
+            "ip": "68.183.33.114",
+            "private_ip": "10.0.0.5",
+            "zone": "lon1",
+            "cpu": 1,
+            "memory": 1024,
+            "deployment_status": "green",
+            "created": "2025-10-12T20:01:59Z"
+        }
+    ]
 }

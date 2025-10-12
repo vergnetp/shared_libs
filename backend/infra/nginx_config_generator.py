@@ -12,6 +12,7 @@ from execute_cmd import CommandExecuter
 from execute_docker import DockerExecuter
 from logger import Logger
 import env_loader
+from path_resolver import PathResolver
 
 # Optional: precise zone parsing for Cloudflare zones
 try:
@@ -43,76 +44,10 @@ def _registrable_zone(domain: str) -> str:
 
 class NginxConfigGenerator:
     """
-    Nginx config generator for a shared LB with per-service configs (conf.d model),
-    HTTP/3 by default (HTTP/2/1.1 fallback), Cloudflare DNS automation (proxied ON),
-    real client IP at origin, containerized Let's Encrypt/self-signed, and remote firewall.
-
-    ASSUMPTIONS
-    -----------
-    • Remote servers are accessible via SSH with root user (or configured SSH keys)
-    • Docker is installed and running on all target servers (or localhost)
-    • Nginx runs in a Docker container named "nginx" on target servers
-    • Remote servers are Linux-based (firewall automation uses UFW)
-    • For localhost testing: 
-      - Firewall automation is automatically skipped
-      - Certificate storage uses C:/local/certs on Windows, /local/certs on Linux/macOS
-      - Works with Docker Desktop (Linux containers)
-    • Port 22 (SSH), 80 (HTTP), and 443 (HTTPS/HTTP3) are available on remote servers
-    • This script can be run from Windows, Linux, or macOS (PowerShell or curl available)
-    • Certificate directories persist at /etc/letsencrypt and /etc/nginx/ssl on remote Linux servers
-    • Certificate directories persist on remote host at /etc/letsencrypt and /etc/nginx/ssl
-
-    PUBLIC API (only two methods)
-    -----------------------------
-    1) setup_service(
-           project, env, service_name, service_config, *,
-           target_server,
-           email=None,                       # for Let's Encrypt
-           cloudflare_api_token=None,        # to auto-create DNS + DNS-01 ACME
-           auto_firewall=True,
-           admin_ip=None,                    # your public IP for SSH/443 access; auto-detected if None
-       ) -> Path
-
-       What it does (end-to-end, idempotent):
-       - Ensures /etc/nginx/nginx.conf exists with:
-           • include /etc/nginx/conf.d/*.conf;
-           • Cloudflare real_ip section (managed markers).
-       - Writes per-service conf at /etc/nginx/conf.d/{project}_{env}_{service}.conf
-         with HTTP/3 listeners, proxy headers (incl. CF-Connecting-IP), caching, etc.
-       - If cloudflare_api_token+domain → upserts A record (proxied=ON) to the public
-         IP auto-detected on the remote host.
-       - Issues certificates:
-           • If cloudflare_api_token provided → LE DNS-01 via Cloudflare
-           • Else if email provided → LE standalone (http-01 on :80)
-           • Else → self-signed
-       - Locks down firewall: 443 (TCP/UDP) to Cloudflare IPs + admin IP; 22 (TCP) to admin IP only.
-       - Reloads Nginx.
-
-    2) refresh_infra(
-           target_server, *,
-           project=None, env=None, service_name=None,   # filter which confs' domains to renew
-           email=None,                                  # required for Let's Encrypt modes
-           cloudflare_api_token=None,                   # if provided, renew via DNS-01
-           admin_ip=None,                               # update firewall rules with current admin IP
-       ) -> None
-
-       What it does (safe to run periodically):
-       - Scans /etc/nginx/conf.d/*.conf on remote, extracts server_name domains,
-         optionally filtered by project/env/service, and renews in batch.
-         • auto-detects mode: DNS-01 if cloudflare token present; else standalone; else self-signed.
-       - Refreshes Cloudflare IP ranges in nginx.conf (managed markers) so real client IP stays accurate.
-       - Updates firewall rules if admin_ip provided.
-       - Reloads Nginx if anything changed.
-
-    Notes
-    -----
-    • Cloudflare DNS records are created with orange-cloud (proxied) ON by default.
-    • We forward `CF-Connecting-IP` to your app and configure `real_ip_header CF-Connecting-IP;`
-      so your FastAPI middleware can log true client IPs.
-    • All cert issuance runs inside short-lived containers on the remote host – no host certbot needed.
-    • Firewall locks down to Cloudflare IPs + your admin IP for 443, and admin IP only for SSH (22).
-    • Works from Windows/Linux/macOS bastion – IP detection and curl use PowerShell-first with fallback.
-    • Mode auto-detection: presence of cloudflare_api_token or email determines certificate strategy.
+    Nginx config generator for HTTP/HTTPS and TCP/stream (for internal service mesh).
+    
+    NEW: Stream support for TCP services (postgres, redis, etc.) to enable service discovery
+    via localhost:INTERNAL_PORT regardless of backend deployment strategy (single vs multi-server).
     """
 
     # ---- Internal paths on the REMOTE host ----
@@ -122,17 +57,18 @@ class NginxConfigGenerator:
     SSL_DIR = "/etc/nginx/ssl"
     MAIN_NGINX = "/etc/nginx/nginx.conf"
     CONFD_DIR = "/etc/nginx/conf.d"
+    STREAMD_DIR = "/etc/nginx/stream.d"  # NEW: Stream configs directory
 
     # ---- Cloudflare DNS defaults (proxied ON) ----
-    CF_PROXIED_DEFAULT = True    # orange cloud ON by default
-    CF_TTL_DEFAULT = 1           # "auto" in Cloudflare (ignored when proxied=True)
+    CF_PROXIED_DEFAULT = True
+    CF_TTL_DEFAULT = 1
 
     # ---- Nginx container name (fixed convention) ----
     NGINX_CONTAINER = "nginx"
 
     # ---- sensible Nginx defaults ----
     DEFAULTS: Dict[str, Any] = {
-        "load_balance_method": "least_conn",          # round_robin | least_conn | ip_hash | random
+        "load_balance_method": "least_conn",
         "client_max_body_size": "100M",
         "proxy_timeout": 300,
         "keepalive_timeout": 65,
@@ -163,44 +99,26 @@ class NginxConfigGenerator:
 
     @staticmethod
     def _get_cert_paths(target_server: str) -> Dict[str, str]:
-        """
-        Get appropriate certificate paths for target server.
-        Localhost uses local filesystem, remote uses standard Linux paths.
+        """Get certificate paths for nginx - uses custom logic"""
+        target_os = PathResolver.detect_target_os(target_server)
         
-        Returns:
-            Dict with keys: 'etc', 'var', 'log', 'ssl'
-        """
         if target_server == "localhost" or target_server is None:
-            import platform
-            
-            # Localhost: use paths that work with Docker Desktop
-            if platform.system() == 'Windows':
-                base = Path("C:/local/certs")
+            if target_os == "windows":
+                base = Path("C:/local/nginx/certs")
             else:
-                base = Path("/local/certs")
-            
-            # Ensure directories exist
-            base.mkdir(parents=True, exist_ok=True)
-            (base / "letsencrypt").mkdir(exist_ok=True)
-            (base / "letsencrypt" / "var").mkdir(exist_ok=True)
-            (base / "letsencrypt" / "log").mkdir(exist_ok=True)
-            (base / "ssl").mkdir(exist_ok=True)
-            
-            return {
-                'etc': str(base / "letsencrypt"),
-                'var': str(base / "letsencrypt" / "var"),
-                'log': str(base / "letsencrypt" / "log"),
-                'ssl': str(base / "ssl")
-            }
+                base = Path("/local/nginx/certs")
         else:
-            # Remote server: standard Linux paths
-            return {
-                'etc': NginxConfigGenerator.LE_ETC,
-                'var': NginxConfigGenerator.LE_VAR,
-                'log': NginxConfigGenerator.LE_LOG,
-                'ssl': NginxConfigGenerator.SSL_DIR
-            }
-    
+            # Remote servers always use Linux paths
+            base = Path("/local/nginx/certs")
+        
+        # Convert paths to strings with forward slashes
+        return {
+            'etc': str(base / "letsencrypt").replace("\\", "/"),
+            'var': str(base / "letsencrypt_var").replace("\\", "/"),
+            'log': str(base / "letsencrypt_log").replace("\\", "/"),
+            'ssl': str(base / "ssl").replace("\\", "/")
+        }
+        
     @staticmethod
     def _get_main_nginx_path(target_server: str = "localhost") -> Path:
         """Get the path to main nginx.conf based on target server"""
@@ -238,7 +156,7 @@ class NginxConfigGenerator:
         if not NginxConfigGenerator.ensure_nginx_container(project, env, target_server):
             raise Exception(f"Failed to ensure nginx container for {project}/{env}")
     
-        # 1) Ensure main nginx.conf exists & is sane (include conf.d + real_ip markers)
+        # 1) Ensure main nginx.conf exists & is sane (include conf.d + stream.d + real_ip markers)
         NginxConfigGenerator._ensure_main_nginx(target_server)
 
         # 2) Write per-service conf
@@ -246,7 +164,7 @@ class NginxConfigGenerator:
             project, env, service_name, service_config,
             target_server=target_server,
             cloudflare_api_token=cloudflare_api_token,
-            auto_reload=False,  # we will reload at the end anyway
+            auto_reload=False,
         )
 
         # 3) Determine domains for cert issuance
@@ -312,6 +230,162 @@ class NginxConfigGenerator:
             NginxConfigGenerator._reload_nginx(target_server=target_server)
 
     # =========================
+    # NEW: STREAM (TCP) SUPPORT
+    # =========================
+
+    @staticmethod
+    def generate_stream_config(
+        project: str,
+        env: str,
+        service_name: str,
+        backends: List[Dict[str, Any]],
+        listen_port: int,
+        mode: str
+    ) -> str:
+        """
+        Generate nginx stream configuration for TCP proxying (service mesh).
+        
+        Args:
+            project: Project name
+            env: Environment
+            service_name: Service name
+            backends: Backend list (format depends on mode)
+                      single_server: [{"container_name": "...", "port": "5432"}, ...]
+                      multi_server: [{"ip": "...", "port": 8357}, ...]
+            listen_port: Internal port for nginx to listen on (stable)
+            mode: "single_server" or "multi_server"
+            
+        Returns:
+            Nginx stream config string
+            
+        Example (single-server):
+            upstream myproj_dev_postgres {
+                server myproj_dev_postgres:5432;
+                server myproj_dev_postgres_secondary:5432;
+                least_conn;
+            }
+            
+            server {
+                listen 5234;
+                proxy_pass myproj_dev_postgres;
+                proxy_connect_timeout 1s;
+                proxy_timeout 10m;
+            }
+            
+        Example (multi-server):
+            upstream myproj_dev_api {
+                server 10.0.0.1:8412;
+                server 10.0.0.2:18412;
+                least_conn;
+            }
+            
+            server {
+                listen 5890;
+                proxy_pass myproj_dev_api;
+                proxy_connect_timeout 1s;
+                proxy_timeout 10m;
+            }
+        """
+        upstream_name = f"{project}_{env}_{service_name}"
+        
+        # Build upstream block based on mode
+        upstream = f"upstream {upstream_name} {{\n"
+        
+        if mode == "single_server":
+            # Use container names (Docker DNS)
+            for backend in backends:
+                upstream += f"    server {backend['container_name']}:{backend['port']};\n"
+        else:  # multi_server
+            # Use IP + host ports
+            for backend in backends:
+                upstream += f"    server {backend['ip']}:{backend['port']};\n"
+        
+        upstream += "    least_conn;\n"
+        upstream += "}\n\n"
+        
+        # Build server block (same for both modes)
+        server = f"server {{\n"
+        server += f"    listen {listen_port};\n"
+        server += f"    proxy_pass {upstream_name};\n"
+        server += f"    proxy_connect_timeout 1s;\n"
+        server += f"    proxy_timeout 10m;\n"
+        server += f"    proxy_next_upstream_timeout 5s;\n"
+        server += f"    proxy_next_upstream_tries 2;\n"
+        server += "}\n"
+        
+        return upstream + server
+
+    @staticmethod
+    def update_stream_config_on_server(
+        server_ip: str,
+        project: str,
+        env: str,
+        service: str,
+        backends: List[Dict[str, Any]],
+        internal_port: int,
+        mode: str,
+        user: str = "root"
+    ) -> bool:
+        """
+        Write stream config file for a service and reload nginx.
+        
+        Args:
+            server_ip: Target server
+            project: Project name
+            env: Environment
+            service: Service name
+            backends: Backend list (format depends on mode)
+            internal_port: Stable internal port for this service
+            mode: "single_server" or "multi_server"
+            user: SSH user
+            
+        Returns:
+            True if successful
+        """
+        try:
+            # Generate stream config
+            stream_config = NginxConfigGenerator.generate_stream_config(
+                project, env, service, backends, internal_port, mode
+            )
+            
+            # Determine config file path
+            if server_ip == "localhost" or server_ip is None:
+                import platform
+                if platform.system() == 'Windows':
+                    stream_dir = Path("C:/local/nginx/stream.d")
+                else:
+                    stream_dir = Path("/local/nginx/stream.d")
+            else:
+                stream_dir = Path(NginxConfigGenerator.STREAMD_DIR)
+            
+            stream_dir.mkdir(parents=True, exist_ok=True)
+            config_file = stream_dir / f"{project}_{env}_{service}.conf"
+            
+            # Write config file
+            if server_ip == "localhost" or server_ip is None:
+                # Local write
+                config_file.write_text(stream_config)
+            else:
+                # Remote write via SSH
+                CommandExecuter.run_cmd_with_stdin(
+                    f"cat > {config_file}",
+                    stream_config.encode('utf-8'),
+                    server_ip,
+                    user
+                )
+            
+            log(f"Wrote stream config: {config_file}")
+            
+            # Reload nginx
+            NginxConfigGenerator._reload_nginx(server_ip)
+            
+            return True
+            
+        except Exception as e:
+            log(f"Failed to update stream config on {server_ip}: {e}")
+            return False
+
+    # =========================
     # INTERNALS
     # =========================
 
@@ -334,20 +408,22 @@ class NginxConfigGenerator:
     def _ensure_main_nginx(target_server: str = "localhost") -> None:
         """
         Ensure nginx.conf exists with:
-          - include /etc/nginx/conf.d/*.conf;
-          - a managed Cloudflare real_ip block (initial static set; later updatable).
+          - include /etc/nginx/conf.d/*.conf; (HTTP)
+          - include /etc/nginx/stream.d/*.conf; (TCP/stream) [NEW]
+          - a managed Cloudflare real_ip block
         """
         main = NginxConfigGenerator._get_main_nginx_path(target_server)
-        include_line = "include /etc/nginx/conf.d/*.conf;"
+        http_include = "include /etc/nginx/conf.d/*.conf;"
+        stream_include = "include /etc/nginx/stream.d/*.conf;"  # NEW
 
         if not main.exists():
             text = NginxConfigGenerator._generate_main_config(NginxConfigGenerator.DEFAULTS)
             main.parent.mkdir(parents=True, exist_ok=True)
             main.write_text(text)
-            log(f"Created {main} with conf.d include and CF real_ip.")
+            log(f"Created {main} with conf.d + stream.d includes and CF real_ip.")
             return
 
-        # Read, ensure include, and ensure CF block exists
+        # Read, ensure includes, and ensure CF block exists
         try:
             text = main.read_text()
         except Exception as e:
@@ -357,20 +433,23 @@ class NginxConfigGenerator:
             return
 
         updated = False
-        if include_line not in text:
-            text = text.replace("include /etc/nginx/mime.types;", "include /etc/nginx/mime.types;\n    " + include_line)
+        
+        # Ensure HTTP include
+        if http_include not in text:
+            text = text.replace("include /etc/nginx/mime.types;", 
+                              f"include /etc/nginx/mime.types;\n    {http_include}")
             updated = True
 
+        # Ensure CF block
         if NginxConfigGenerator.CF_BLOCK_BEGIN not in text or NginxConfigGenerator.CF_BLOCK_END not in text:
-            # Insert CF block after 'default_type' line
             cf_block = NginxConfigGenerator._render_cf_block(NginxConfigGenerator._default_cf_ranges())
             text = text.replace("default_type application/octet-stream;",
-                                "default_type application/octet-stream;\n\n    " + cf_block)
+                              f"default_type application/octet-stream;\n\n    {cf_block}")
             updated = True
 
         if updated:
             main.write_text(text)
-            log(f"Updated {main} to include conf.d and CF real_ip block.")
+            log(f"Updated {main} to include conf.d, stream.d, and CF real_ip block.")
 
     @staticmethod
     def _render_cf_block(ranges: List[str]) -> str:
@@ -383,7 +462,6 @@ class NginxConfigGenerator:
 
     @staticmethod
     def _default_cf_ranges() -> List[str]:
-        # Static baseline; refresh_infra() can update this from Cloudflare.
         return [
             "173.245.48.0/20", "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22",
             "141.101.64.0/18", "108.162.192.0/18", "190.93.240.0/20", "188.114.96.0/20",
@@ -393,10 +471,7 @@ class NginxConfigGenerator:
 
     @staticmethod
     def _refresh_cf_real_ip_in_main(target_server: str = "localhost") -> bool:
-        """
-        Fetch Cloudflare IP ranges (v4 & v6) and rewrite the managed block in nginx.conf if changed.
-        Returns True if file changed.
-        """
+        """Fetch and update Cloudflare IP ranges in nginx.conf"""
         main = NginxConfigGenerator._get_main_nginx_path(target_server)
         if not main.exists():
             NginxConfigGenerator._ensure_main_nginx(target_server)
@@ -424,7 +499,6 @@ class NginxConfigGenerator:
 
         new_block = NginxConfigGenerator._render_cf_block(ranges or NginxConfigGenerator._default_cf_ranges())
 
-        # Replace managed block
         pattern = re.compile(
             re.escape(NginxConfigGenerator.CF_BLOCK_BEGIN) + r".*?" + re.escape(NginxConfigGenerator.CF_BLOCK_END),
             re.DOTALL,
@@ -432,9 +506,8 @@ class NginxConfigGenerator:
         if NginxConfigGenerator.CF_BLOCK_BEGIN in old and NginxConfigGenerator.CF_BLOCK_END in old:
             updated = pattern.sub(new_block, old)
         else:
-            # Insert under default_type if markers missing
             updated = old.replace("default_type application/octet-stream;",
-                                  "default_type application/octet-stream;\n\n    " + new_block)
+                                f"default_type application/octet-stream;\n\n    {new_block}")
 
         if updated != old:
             main.write_text(updated)
@@ -446,8 +519,7 @@ class NginxConfigGenerator:
 
     @staticmethod
     def _curl_local(url: str) -> Optional[str]:
-        """Fetch URL from local machine (PowerShell-first for Windows compatibility)."""
-        # Try PowerShell first (works on Windows, modern Linux with pwsh)
+        """Fetch URL from local machine"""
         try:
             out = CommandExecuter.run_cmd(
                 f'powershell -Command "(Invoke-WebRequest -Uri {url} -UseBasicParsing).Content"',
@@ -457,14 +529,13 @@ class NginxConfigGenerator:
         except Exception:
             pass
         
-        # Fallback to curl (Linux/macOS/WSL)
         try:
             out = CommandExecuter.run_cmd(f'curl -fsSL "{url}"', target_server=None)
             return str(out)
         except Exception:
             return None
 
-    # ----- Per-service conf + DNS + headers -----
+    # ----- Per-service HTTP conf + DNS + headers -----
 
     @staticmethod
     def _write_service_conf(
@@ -477,24 +548,17 @@ class NginxConfigGenerator:
         cloudflare_api_token: Optional[str],
         auto_reload: bool = False,
     ) -> Path:
-        # Merge config
         nginx_cfg = NginxConfigGenerator._merge_with_defaults(service_config.get("nginx") or {})
-
-        # Resolve upstreams
         upstream_servers = NginxConfigGenerator._get_upstream_servers(project, env, service_name, service_config)
-
-        # Render server block
         conf_text = NginxConfigGenerator._generate_server_config(
             project, env, service_name, service_config, nginx_cfg, upstream_servers
         )
 
-        # Write per-service file
         conf_path = NginxConfigGenerator._get_conf_path(project, env, service_name, target_server)
         conf_path.parent.mkdir(parents=True, exist_ok=True)
         conf_path.write_text(conf_text)
         log(f"Wrote per-service config: {conf_path}")
 
-        # Optional DNS upsert (single A record) if we have a domain + token
         domain = service_config.get("domain")
         if domain and cloudflare_api_token and not domain.startswith("*."):
             zone = _registrable_zone(domain)
@@ -567,60 +631,47 @@ class NginxConfigGenerator:
         target_server: str = "localhost",
         user: str = "root"
     ) -> bool:
-        """
-        Ensure nginx container is running with proper configuration on the Docker network.
-        
-        This is critical for single-droplet deployments where nginx proxies to other
-        containers on the same Docker network.
-        
-        Returns:
-            True if nginx container is ready
-        """
+        """Ensure nginx container is running with proper configuration"""
         container_name = NginxConfigGenerator.NGINX_CONTAINER
         network_name = DeploymentNaming.get_network_name(project, env)
         
-        # Check if container already running
         if DockerExecuter.is_container_running(container_name, target_server, user):
             log(f"Nginx container '{container_name}' already running")
-            # TODO: Could verify it's on correct network, but skip for now
             return True
         
         log(f"Starting nginx container '{container_name}' on network '{network_name}'")
         
-        # Get cert paths
         cert_paths = NginxConfigGenerator._get_cert_paths(target_server)
-        
-        # Get paths using helper
         main_conf_path = NginxConfigGenerator._get_main_nginx_path(target_server)
         conf_dir = main_conf_path.parent / "conf.d"
-        conf_dir.mkdir(parents=True, exist_ok=True)
+        stream_dir = main_conf_path.parent / "stream.d"  # NEW
         
-        # Ensure main nginx.conf exists before mounting
+        conf_dir.mkdir(parents=True, exist_ok=True)
+        stream_dir.mkdir(parents=True, exist_ok=True)  # NEW
+        
         if not main_conf_path.exists():
             NginxConfigGenerator._ensure_main_nginx(target_server)
         
         volumes = [
             f"{main_conf_path}:/etc/nginx/nginx.conf:ro",
             f"{conf_dir}:/etc/nginx/conf.d:ro",
+            f"{stream_dir}:/etc/nginx/stream.d:ro",  # NEW
             f"{cert_paths['etc']}:/etc/letsencrypt:ro",
             f"{cert_paths['ssl']}:/etc/nginx/ssl:ro",
             "/var/log/nginx:/var/log/nginx"
         ]
         
-        # Port mappings for HTTP, HTTPS, and HTTP/3
         ports = {
             "80": "80",
             "443": "443"
         }
         
         try:
-            # Remove old container if exists but not running
             if DockerExecuter.container_exists(container_name, target_server, user):
                 DockerExecuter.remove_container(
                     container_name, target_server, user, force=True, ignore_if_not_exists=True
                 )
             
-            # Start nginx container
             DockerExecuter.run_container(
                 image="nginx:alpine",
                 name=container_name,
@@ -633,11 +684,8 @@ class NginxConfigGenerator:
             )
             
             log(f"Nginx container started on network '{network_name}'")
-            
-            # Wait a moment for nginx to start
             time.sleep(2)
             
-            # Verify it's running
             if DockerExecuter.is_container_running(container_name, target_server, user):
                 log(f"Nginx container verified running")
                 return True
@@ -762,14 +810,9 @@ class NginxConfigGenerator:
         if m not in ("letsencrypt_dns_cloudflare", "letsencrypt_standalone", "selfsigned"):
             raise ValueError("mode must be 'letsencrypt_dns_cloudflare' | 'letsencrypt_standalone' | 'selfsigned'")
 
-        # Get appropriate paths for target (localhost vs remote)
         cert_paths = NginxConfigGenerator._get_cert_paths(target_server)
-        
-        # Ensure persistent dirs on host
-        for d in (cert_paths['etc'], cert_paths['var'], cert_paths['log'], cert_paths['ssl']):
-            DockerExecuter.mkdir_on_server(d, server_ip=target_server)
+        PathResolver.ensure_nginx_cert_directories(target_server, user="root")
 
-        # Optional: upsert DNS records per zone (proxied ON)
         if apply_dns and cloudflare_api_token:
             lb_ipv4 = NginxConfigGenerator._detect_public_ipv4(target_server)
             if lb_ipv4:
@@ -818,7 +861,6 @@ class NginxConfigGenerator:
             except Exception as e:
                 log(f"Could not reload nginx on {target_server}: {e}")
 
-        # Volume mounts using dynamic paths
         le_vols = [
             f"{cert_paths['etc']}:/etc/letsencrypt",
             f"{cert_paths['var']}:/var/lib/letsencrypt",
@@ -871,11 +913,9 @@ class NginxConfigGenerator:
             for d in domains:
                 d_args.extend(["-d", d])
 
-            # Use HTTP-01 challenge on port 80 (not 443 to avoid conflict)
             publish = ["-p", "80:80"]
             challenge_args = ["--preferred-challenges", "http-01"]
 
-            # Stop nginx to free port 80
             stop_nginx()
             
             try:
@@ -897,7 +937,6 @@ class NginxConfigGenerator:
                 for d in domains:
                     log(f"LE cert ensured (standalone HTTP-01) for {d} on {target_server}")
             finally:
-                # Always restart nginx even if cert issuance fails
                 start_nginx()
                 reload_nginx()
             
@@ -935,9 +974,6 @@ class NginxConfigGenerator:
         email: Optional[str],
         cloudflare_api_token: Optional[str],
     ) -> bool:
-        """
-        Return True if renewal ran (or attempted).
-        """
         try:
             listing = CommandExecuter.run_cmd("ls -1 /etc/nginx/conf.d/*.conf 2>/dev/null", target_server)
         except Exception as e:
@@ -950,7 +986,7 @@ class NginxConfigGenerator:
             return False
 
         def match_name(path: str) -> bool:
-            name = Path(path).name  # myproj_prod_api.conf
+            name = Path(path).name
             if project is not None and not name.startswith(f"{project}_"):
                 return False
             if env is not None and f"_{env}_" not in name:
@@ -983,7 +1019,6 @@ class NginxConfigGenerator:
             log("No domains found in matching confs; nothing to renew.")
             return False
 
-        # Auto-detect mode
         mode = NginxConfigGenerator._detect_mode(email, cloudflare_api_token)
 
         if mode in ("letsencrypt_dns_cloudflare", "letsencrypt_standalone"):
@@ -995,11 +1030,10 @@ class NginxConfigGenerator:
                 email=email,
                 mode=mode,
                 cloudflare_api_token=cloudflare_api_token,
-                apply_dns=False,  # DNS should already exist
+                apply_dns=False,
             )
             return True
 
-        # selfsigned fallback
         NginxConfigGenerator._provision_cert_containers_and_issue(
             target_server=target_server,
             domains=domains,
@@ -1040,19 +1074,12 @@ class NginxConfigGenerator:
 
     @staticmethod
     def _ensure_firewall(target_server: Optional[str], admin_ip: Optional[str] = None) -> None:
-        """
-        Lock down firewall:
-        - Port 443 (TCP/UDP): Cloudflare IPs + admin IP
-        - Port 22 (TCP): admin IP only
-        - Default: deny all incoming
-        """
         if not target_server or target_server == "localhost":
             log("Skipping firewall automation for localhost")
             return
         
         os_name = (NginxConfigGenerator._detect_remote_os(target_server)).lower()
         
-        # Detect admin IP if not provided
         if not admin_ip:
             admin_ip = NginxConfigGenerator._detect_my_public_ip()
             if admin_ip:
@@ -1062,7 +1089,6 @@ class NginxConfigGenerator:
             log("Cannot detect admin IP; firewall rules may lock you out. Provide admin_ip explicitly.")
             return
         
-        # Fetch Cloudflare IP ranges
         cf_v4 = NginxConfigGenerator._curl_local("https://www.cloudflare.com/ips-v4")
         cf_v6 = NginxConfigGenerator._curl_local("https://www.cloudflare.com/ips-v6")
         cf_ranges = []
@@ -1079,19 +1105,14 @@ class NginxConfigGenerator:
         
         try:
             if os_name == "linux":
-                # Reset UFW to defaults (deny incoming, allow outgoing)
                 CommandExecuter.run_cmd("ufw --force reset", target_server)
                 CommandExecuter.run_cmd("ufw default deny incoming", target_server)
                 CommandExecuter.run_cmd("ufw default allow outgoing", target_server)
                 
-                # Allow SSH from admin IP only
                 CommandExecuter.run_cmd(f"ufw allow from {admin_ip} to any port 22 proto tcp comment 'SSH admin only'", target_server)
-                
-                # Allow 443 TCP/UDP from admin IP (for testing/curl)
                 CommandExecuter.run_cmd(f"ufw allow from {admin_ip} to any port 443 proto tcp comment 'HTTPS admin'", target_server)
                 CommandExecuter.run_cmd(f"ufw allow from {admin_ip} to any port 443 proto udp comment 'HTTP/3 admin'", target_server)
                 
-                # Allow 443 TCP/UDP from Cloudflare ranges
                 for cidr in cf_ranges:
                     try:
                         CommandExecuter.run_cmd(f"ufw allow from {cidr} to any port 443 proto tcp comment 'CF-HTTPS'", target_server)
@@ -1099,19 +1120,16 @@ class NginxConfigGenerator:
                     except Exception as e:
                         log(f"Failed to add Cloudflare range {cidr}: {e}")
                 
-                # Enable UFW
                 CommandExecuter.run_cmd("ufw --force enable", target_server)
                 log(f"Firewall locked down on {target_server}: 443 (CF+admin), 22 (admin only)")
                 
             elif os_name == "windows":
-                # Remove existing rules
                 for rule_name in ["Allow443TCP", "Allow443UDP", "Allow22Admin", "Allow443TCPAdmin", "Allow443UDPAdmin", "Allow443TCPCF", "Allow443UDPCF"]:
                     CommandExecuter.run_cmd(
                         f'powershell -Command "Remove-NetFirewallRule -DisplayName {rule_name} -ErrorAction SilentlyContinue"',
                         target_server
                     )
                 
-                # Allow SSH from admin IP
                 admin_ip_escaped = admin_ip.replace('"', '`"')
                 CommandExecuter.run_cmd(
                     f'powershell -Command "New-NetFirewallRule -DisplayName Allow22Admin '
@@ -1120,7 +1138,6 @@ class NginxConfigGenerator:
                     target_server
                 )
                 
-                # Allow 443 from admin IP
                 CommandExecuter.run_cmd(
                     f'powershell -Command "New-NetFirewallRule -DisplayName Allow443TCPAdmin '
                     f'-Direction Inbound -LocalPort 443 -Protocol TCP -Action Allow '
@@ -1134,7 +1151,6 @@ class NginxConfigGenerator:
                     target_server
                 )
                 
-                # Allow 443 from Cloudflare ranges (batch)
                 cf_list = ",".join(cf_ranges)
                 CommandExecuter.run_cmd(
                     f'powershell -Command "New-NetFirewallRule -DisplayName Allow443TCPCF '
@@ -1157,8 +1173,6 @@ class NginxConfigGenerator:
     
     @staticmethod
     def _detect_my_public_ip() -> Optional[str]:
-        """Detect the public IP of the machine running this script (works on Windows/Linux)."""
-        # Try PowerShell first (works on Windows, and modern Linux with pwsh)
         try:
             val = str(CommandExecuter.run_cmd(
                 'powershell -Command "(Invoke-WebRequest -Uri https://ifconfig.me -UseBasicParsing).Content.Trim()"',
@@ -1169,7 +1183,6 @@ class NginxConfigGenerator:
         except Exception:
             pass
         
-        # Fallback to curl (Linux/macOS/WSL)
         try:
             val = str(CommandExecuter.run_cmd('curl -s ifconfig.me', target_server=None)).strip()
             if val and "html" not in val.lower() and len(val) < 50:
@@ -1198,20 +1211,13 @@ class NginxConfigGenerator:
         service_name: str,
         service_config: Dict[str, Any],
     ) -> List[Dict[str, Any]]:
-        """
-        Generate upstream server list for nginx.
-        Accepts both old format (servers list) and new format (servers_count).
-        """
         servers: List[Dict[str, Any]] = []
         
-        # Check for explicit servers list (from deployer after claiming)
         server_ips = service_config.get("servers")
         
         if server_ips and isinstance(server_ips, list):
-            # Use provided server IPs
             pass
         else:
-            # Fallback: shouldn't happen in production but handle gracefully
             log(f"Warning: No servers list provided for {service_name}, using localhost")
             server_ips = ["localhost"]
         
@@ -1220,7 +1226,6 @@ class NginxConfigGenerator:
         container_port = container_ports[0] if container_ports else "8000"
 
         if len(server_ips) > 1:
-            # Multiple servers: use host IPs with mapped ports
             for server_ip in server_ips:
                 host_port = DeploymentPortResolver.generate_host_port(project, env, service_name, container_port)
                 servers.append({
@@ -1231,7 +1236,6 @@ class NginxConfigGenerator:
                     "fail_timeout": "30s",
                 })
         else:
-            # Single server: use container name (Docker networking)
             container_name = DeploymentNaming.get_container_name(project, env, service_name)
             servers.append({"host": container_name, "port": container_port, "weight": 1})
         
@@ -1249,6 +1253,10 @@ events {{
     worker_connections {nginx_config['worker_connections']};
     use epoll;
     multi_accept on;
+}}
+
+stream {{
+    include /etc/nginx/stream.d/*.conf;
 }}
 
 http {{
@@ -1321,14 +1329,12 @@ http {{
     {'ssl_certificate_key ' + ssl_key + ';' if ssl_enabled and ssl_key else ''}
     {'ssl_protocols ' + nginx_config['ssl_protocols'] + ';' if ssl_enabled else ''}
 
-    # Advertise HTTP/3 support
     {alt_svc_header if ssl_enabled else ''}
     {'add_header QUIC-Status $quic;' if ssl_enabled else ''}
 
     access_log /var/log/nginx/{service_name}_access.log main;
     error_log  /var/log/nginx/{service_name}_error.log warn;
 
-    # Security headers
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header X-XSS-Protection "1; mode=block" always;
@@ -1468,7 +1474,6 @@ http {{
             True if successful
         """
         import json
-        from execute_cmd import CommandExecuter
         
         zone_name = _registrable_zone(domain)
         
@@ -1516,8 +1521,8 @@ http {{
         # 2. Create origin pools (one per zone)
         pool_ids = []
         for idx, ip in enumerate(origin_ips):
-            domain_safe = domain.replace('.', '_')  # Move outside f-string
-            ip_safe = ip.replace('.', '_')          # Move outside f-string
+            domain_safe = domain.replace('.', '_')
+            ip_safe = ip.replace('.', '_')
             
             pool_data = {
                 "name": f"{domain_safe}_pool_{idx}",

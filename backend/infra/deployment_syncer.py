@@ -12,11 +12,32 @@ def log(msg):
     Logger.log(msg)
 
 class DeploymentSyncer:
-    """Universal synchronization utility with clean push/pull/sync API"""
+    """
+    Universal synchronization utility with clean push/pull/sync API.
+    
+    SCOPE: Only handles file sync operations between local machine and remote servers.
+    PATH GENERATION: Handled by PathResolver (see path_resolver.py).
+    
+    This class is ONLY for:
+    - Pushing config/secrets/files TO servers
+    - Pulling data/logs/backups FROM servers
+    - Bidirectional sync operations
+    
+    IMPORTANT: Volume mount generation has been moved to PathResolver.
+    Use PathResolver.generate_all_volume_mounts() for deployment operations.
+    """
 
     @staticmethod
     def get_local_base(project: str, env: str) -> Path:
-        # Use absolute paths to match Docker mount expectations
+        """
+        Get local base path for file sync operations.
+        
+        NOTE: This is for file sync only (push/pull operations).
+        For volume mounting, use PathResolver.get_volume_host_path().
+        
+        Returns:
+            Path to local sync directory
+        """
         if platform.system() == 'Windows':
             local_base = Path("C:/") / BASE / project / env
         else:
@@ -25,6 +46,15 @@ class DeploymentSyncer:
 
     @staticmethod
     def get_remote_base(project: str, env: str) -> str:
+        """
+        Get remote base path for file sync operations.
+        
+        NOTE: This is for file sync only (push/pull operations).
+        For volume mounting, use PathResolver.get_volume_host_path().
+        
+        Returns:
+            String path on remote server
+        """
         remote_base = f"/{BASE}/{project}/{env}"
         return remote_base
 
@@ -223,7 +253,7 @@ class DeploymentSyncer:
 
     @staticmethod
     def list_volumes() -> List[str]:
-        """List all Docker volumes - this should actually be in DockerExecuter"""
+        """List all Docker volumes"""
         try:
             result = CommandExecuter.run_cmd(["docker", "volume", "ls", "--format", "{{.Name}}"])
             if hasattr(result, 'stdout'):
@@ -336,111 +366,3 @@ class DeploymentSyncer:
             return [targets]
         else:
             return targets
-
-    # =============================================================================
-    # VOLUME AND SERVICE GENERATION METHODS (for Deployer integration)
-    # =============================================================================
-
-    @staticmethod
-    def generate_docker_volumes(project: str, env: str) -> Dict[str, Dict]:
-        """Generate Docker volume definitions"""
-        volume_prefix = DeploymentSyncer.get_volume_prefix(project, env)
-        
-        return {
-            f"{volume_prefix}_data": {"driver": "local"},
-            f"{volume_prefix}_logs": {"driver": "local"},
-            f"{volume_prefix}_backups": {"driver": "local"},
-            f"{volume_prefix}_monitoring": {"driver": "local"}
-        }
-
-    @staticmethod
-    def generate_service_volumes(project: str, env: str, service: str, use_docker_volumes: bool = True) -> List[str]:
-        """Generate volume mounts for a service"""
-        
-        if use_docker_volumes:
-            # Hybrid approach: host mounts for config/secrets, Docker volumes for data/logs
-            volume_prefix = DeploymentSyncer.get_volume_prefix(project, env)
-            local_base = DeploymentSyncer.get_local_base(project, env)
-            local_base_str = str(local_base).replace('\\', '/')
-            
-            if service == "postgres":
-                return [
-                    f"{volume_prefix}_data_postgres:/var/lib/postgresql/data",
-                    f"{local_base_str}/config/postgres:/etc/postgresql:ro",
-                    f"{local_base_str}/secrets/postgres:/run/secrets:ro"
-                ]
-            elif service == "redis":
-                return [
-                    f"{volume_prefix}_data_redis:/data",
-                    f"{local_base_str}/config/redis:/usr/local/etc/redis:ro",
-                    f"{local_base_str}/secrets/redis:/run/secrets:ro"
-                ]
-            elif service == "nginx":
-                return [
-                    f"{local_base_str}/config/nginx:/etc/nginx:ro",
-                    f"{volume_prefix}_logs_nginx:/var/log/nginx",
-                    f"{local_base_str}/secrets/nginx:/etc/ssl/certs:ro"
-                ]
-            else:
-                # Custom services
-                return [
-                    f"{local_base_str}/config/{service}:/app/config:ro",
-                    f"{local_base_str}/secrets/{service}:/app/secrets:ro", 
-                    f"{volume_prefix}_logs_{service}:/app/logs",
-                    f"{volume_prefix}_data_{service}:/app/data",
-                    f"{local_base_str}/files:/app/files:ro"
-                ]
-        else:
-            # Pure host mount approach
-            base_path = DeploymentSyncer.get_remote_base(project, env)
-            
-            if service == "postgres":
-                return [
-                    f"{base_path}/data/postgres:/var/lib/postgresql/data",
-                    f"{base_path}/config/postgres:/etc/postgresql:ro",
-                    f"{base_path}/secrets/postgres:/run/secrets:ro"
-                ]
-            elif service == "redis":
-                return [
-                    f"{base_path}/data/redis:/data",
-                    f"{base_path}/config/redis:/usr/local/etc/redis:ro", 
-                    f"{base_path}/secrets/redis:/run/secrets:ro"
-                ]
-            elif service == "nginx":
-                return [
-                    f"{base_path}/config/nginx:/etc/nginx:ro",
-                    f"{base_path}/logs/nginx:/var/log/nginx",
-                    f"{base_path}/secrets/nginx:/etc/ssl/certs:ro"
-                ]
-            else:
-                return [
-                    f"{base_path}/config/{service}:/app/config:ro",
-                    f"{base_path}/secrets/{service}:/app/secrets:ro",
-                    f"{base_path}/logs/{service}:/app/logs", 
-                    f"{base_path}/data/{service}:/app/data",
-                    f"{base_path}/files:/app/files:ro"
-                ]
-
-    @staticmethod
-    def create_local_directories(project: str, environments: List[str] = None) -> List[str]:
-        """Create local directory structure"""
-        
-        if environments is None:
-            environments = ["dev", "test", "uat", "production"]
-        
-        created_dirs = []
-        
-        for env in environments:
-            local_base = DeploymentSyncer.get_local_base(project, env)
-            
-            # Create all sync type directories
-            for sync_type in ['config', 'secrets', 'files', 'data', 'logs', 'backups', 'monitoring']:
-                dir_path = local_base / sync_type
-                dir_path.mkdir(parents=True, exist_ok=True)
-                created_dirs.append(str(dir_path))
-        
-        log(f"Created local directory structure for project '{project}'")
-        for directory in created_dirs:
-            log(f"  {directory}")
-        
-        return created_dirs

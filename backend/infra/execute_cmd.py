@@ -178,14 +178,26 @@ class CommandExecuter:
         """Run command via SSH with cross-platform support (Docker on Windows)"""
         import platform
         
-        # Normalize the command first
-        cmd_list = CommandExecuter._normalize_command(cmd)
-        
-        if not cmd_list:
-            raise ValueError("Empty command")
-        
-        # Properly escape the remote command for SSH
-        remote_cmd = " ".join(shlex.quote(arg) for arg in cmd_list)
+        # If it's already a string, use it as-is (it may contain shell operators)
+        if isinstance(cmd, str):
+            remote_cmd = cmd
+        else:
+            # Normalize the command first
+            cmd_list = CommandExecuter._normalize_command(cmd)
+            
+            if not cmd_list:
+                raise ValueError("Empty command")
+            
+            # Check if any shell operators are present - if so, treat as shell command
+            cmd_str = " ".join(str(c) for c in cmd_list)
+            shell_operators = [">", ">>", "|", "||", "&&", "2>", "2>&1", "<"]
+            
+            if any(op in cmd_str for op in shell_operators):
+                # Contains shell operators - use as-is
+                remote_cmd = cmd_str
+            else:
+                # Properly escape the remote command for SSH
+                remote_cmd = " ".join(shlex.quote(arg) for arg in cmd_list)
         
         system = platform.system()
         ssh_key_path = Path.home() / ".ssh" / "deployer_id_rsa"
@@ -196,14 +208,19 @@ class CommandExecuter:
             if key_path_str[1] == ":":
                 key_path_str = f"/{key_path_str[0].lower()}{key_path_str[2:]}"
             
+            # For Windows Docker execution, we need to escape the remote command properly
+            # The remote_cmd will be executed through: docker -> sh -c -> ssh -> remote shell
+            # So we need proper quoting for the sh -c context
+            escaped_remote_cmd = remote_cmd.replace("'", "'\\''")  # Escape single quotes for sh -c
+            
             docker_ssh_cmd = [
                 "docker", "run", "--rm",
-                "-v", f"{key_path_str}:/root/.ssh/deployer_id_rsa:ro",
+                "-v", f"{key_path_str}:/root/.ssh/deployer_id_rsa",
                 "alpine:latest",
                 "sh", "-c",
                 f"apk add --no-cache openssh-client && "
                 f"chmod 600 /root/.ssh/deployer_id_rsa && "
-                f"ssh -o StrictHostKeyChecking=no -i /root/.ssh/deployer_id_rsa {user}@{server_ip} {shlex.quote(remote_cmd)}"
+                f"ssh -o StrictHostKeyChecking=no -i /root/.ssh/deployer_id_rsa {user}@{server_ip} '{escaped_remote_cmd}'"
             ]
             
             try:
@@ -232,3 +249,37 @@ class CommandExecuter:
                 return result.stdout.strip()
             except FileNotFoundError:
                 raise FileNotFoundError("SSH client not found. Please install SSH.")
+            
+    @staticmethod
+    def run_cmd_with_stdin(remote_cmd: str, data: bytes, server_ip: str, user: str = "root") -> None:
+        """Run a remote command and stream data to its stdin (avoids huge base64 echoes)."""
+        import platform
+
+        ssh_key_path = Path.home() / ".ssh" / "deployer_id_rsa"
+        system = platform.system()
+
+        if system == "Windows":
+            # Use Dockerized SSH same as _run_ssh_cmd
+            key_path_str = str(ssh_key_path).replace("\\", "/")
+            if key_path_str[1] == ":":
+                key_path_str = f"/{key_path_str[0].lower()}{key_path_str[2:]}"
+            ssh_wrapper = [
+                "docker", "run", "--rm",
+                "-i",  # keep stdin open
+                "-v", f"{key_path_str}:/root/.ssh/deployer_id_rsa",
+                "alpine:latest",
+                "sh", "-c",
+                f"apk add --no-cache openssh-client && "
+                f"chmod 600 /root/.ssh/deployer_id_rsa && "
+                f"ssh -o StrictHostKeyChecking=no -i /root/.ssh/deployer_id_rsa {user}@{server_ip} {shlex.quote(remote_cmd)}"
+            ]
+        else:
+            ssh_wrapper = [
+                "ssh", "-o", "StrictHostKeyChecking=no",
+                "-i", str(ssh_key_path),
+                f"{user}@{server_ip}", remote_cmd
+            ]
+
+        result = subprocess.run(ssh_wrapper, input=data, capture_output=True)
+        if result.returncode != 0:
+            raise Exception(f"SSH stdin transfer failed: {result.stderr.decode('utf-8', 'replace')}")
