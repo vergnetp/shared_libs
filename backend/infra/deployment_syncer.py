@@ -283,12 +283,33 @@ class DeploymentSyncer:
             for server_ip in target_servers:
                 if server_ip == 'localhost':
                     continue  # No need to copy to localhost
-                    
-                full_remote = f"root@{server_ip}:{config['remote_path']}"
-                CommandExecuter.run_cmd(f"scp -r {config['local_path']} {full_remote}")
                 
-                if config.get('secure_perms', False):
-                    CommandExecuter.run_cmd(f"ssh root@{server_ip} 'chmod -R 700 {config['remote_path']}'")
+                # Remove wildcards to get base paths
+                local_path = config['local_path'].rstrip('/*')
+                remote_path = config['remote_path'].rstrip('/')
+                
+                # Create remote directory structure first
+                CommandExecuter.run_cmd(f"ssh root@{server_ip} 'mkdir -p {remote_path}'", target_server=None)
+                
+                # Check if local path exists and has content
+                if not Path(local_path).exists():
+                    log(f"Warning: Local path {local_path} does not exist, creating it")
+                    Path(local_path).mkdir(parents=True, exist_ok=True)
+                
+                # Check if there's anything to sync
+                import os
+                if os.listdir(local_path):
+                    # Copy recursively - use /. to copy contents including subdirectories
+                    # This ensures subdirectories like secrets/postgres/ are copied
+                    full_command = f"scp -r {local_path}/. root@{server_ip}:{remote_path}/"
+                    log(f"Syncing {sync_type}: {local_path} -> {server_ip}:{remote_path}")
+                    CommandExecuter.run_cmd(full_command, target_server=None)
+                    
+                    if config.get('secure_perms', False):
+                        CommandExecuter.run_cmd(f"ssh root@{server_ip} 'chmod -R 700 {remote_path}'", target_server=None)
+                else:
+                    log(f"Nothing to sync in {local_path}")
+                    
         else:
             # Pull: Remote servers → Local
             for server_ip in target_servers:
@@ -300,9 +321,17 @@ class DeploymentSyncer:
                 server_local_dir = Path(config['local_path']) / sanitized_ip
                 server_local_dir.mkdir(parents=True, exist_ok=True)
                 
-                # Pull into server subdirectory
-                full_remote = f"root@{server_ip}:{config['remote_path']}/*"
-                CommandExecuter.run_cmd(f"scp -r {full_remote} {str(server_local_dir)}")
+                # Pull recursively into server subdirectory
+                remote_path = config['remote_path'].rstrip('/')
+                
+                # Check if remote directory exists first
+                try:
+                    CommandExecuter.run_cmd(f"ssh root@{server_ip} 'test -d {remote_path}'", server_ip=None)
+                    # If it exists, copy its contents
+                    full_command = f"scp -r root@{server_ip}:{remote_path}/. {str(server_local_dir)}/"
+                    CommandExecuter.run_cmd(full_command, server_ip=None)
+                except Exception as e:
+                    log(f"Remote path {remote_path} may not exist on {server_ip}: {e}")
 
     @staticmethod
     def _get_sync_configs(project: str, env: str) -> Dict[str, Dict[str, Any]]:
@@ -316,20 +345,20 @@ class DeploymentSyncer:
         return {
             # Push operations (host mounts for easy editing)
             'config': {
-                'local_path': f"{local_base_str}/config/*",
-                'remote_path': f"{remote_base}/config/",
+                'local_path': f"{local_base_str}/config",  
+                'remote_path': f"{remote_base}/config",   
                 'secure_perms': False,
                 'push': True
             },
             'secrets': {
-                'local_path': f"{local_base_str}/secrets/*",
-                'remote_path': f"{remote_base}/secrets/",
+                'local_path': f"{local_base_str}/secrets",  
+                'remote_path': f"{remote_base}/secrets",
                 'secure_perms': True,
                 'push': True
             },
             'files': {
-                'local_path': f"{local_base_str}/files/*",
-                'remote_path': f"{remote_base}/files/",
+                'local_path': f"{local_base_str}/files",  
+                'remote_path': f"{remote_base}/files",
                 'secure_perms': False,
                 'push': True
             },

@@ -487,19 +487,36 @@ class DOManager:
             'cpu': cpu,
             'memory': memory
         }
-    
+
     @staticmethod
     def list_droplets(tags: List[str] = None) -> List[Dict[str, Any]]:
         """List all droplets, optionally filtered by tags"""
         if os.getenv("DIGITALOCEAN_API_TOKEN") is None:
             return []
+        
+        # Default to only listing "Infra" tagged droplets
+        if tags is None:
+            tags = ["Infra"]
+        
         endpoint = "/droplets"
+        
+        # DigitalOcean API requires tag filtering via query params
         if tags:
             tag_query = "&".join([f"tag_name={tag}" for tag in tags])
             endpoint = f"/droplets?{tag_query}"
         
         response = DOManager._api_request("GET", endpoint)
         droplets = response.get('droplets', [])
+        
+        # Double-check filtering (in case API filtering isn't working)
+        if tags:
+            filtered = []
+            for d in droplets:
+                droplet_tags = d.get('tags', [])
+                # Check if all required tags are present
+                if all(tag in droplet_tags for tag in tags):
+                    filtered.append(d)
+            droplets = filtered
         
         return [DOManager.get_droplet_info(str(d['id'])) for d in droplets]
     
@@ -554,25 +571,38 @@ class DOManager:
         try:
             # Wait for cloud-init to complete (Ubuntu's first-boot initialization)
             log(f"Waiting for cloud-init to complete on {ip}...")
-            CommandExecuter.run_cmd(
-                "cloud-init status --wait || timeout 300 bash -c 'while [ ! -f /var/lib/cloud/instance/boot-finished ]; do sleep 2; done'",
-                ip, user
-            )
-            log(f"Cloud-init completed on {ip}")
             
-            # Wait for apt locks to clear with more aggressive timeout
+            # More robust cloud-init wait with retries
+            for attempt in range(3):
+                try:
+                    CommandExecuter.run_cmd(
+                        "cloud-init status --wait || timeout 300 bash -c 'while [ ! -f /var/lib/cloud/instance/boot-finished ]; do sleep 2; done'",
+                        ip, user
+                    )
+                    log(f"Cloud-init completed on {ip}")
+                    break
+                except Exception as e:
+                    if attempt < 2:
+                        log(f"Waiting for cloud-init (attempt {attempt + 1}/3)...")
+                        time.sleep(30)  # Wait 30 seconds before retry
+                    else:
+                        log(f"Cloud-init wait failed after 3 attempts: {e}")
+                        return False
+            
+            # Additional stabilization wait
+            time.sleep(10)
+            
+            # Rest of the Docker installation code...
             log(f"Waiting for apt locks to clear on {ip}...")
             wait_commands = [
                 # Wait up to 10 minutes for dpkg lock
                 "timeout 600 bash -c 'while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do echo \"Waiting for dpkg lock...\"; sleep 5; done'",
                 # Wait for apt lists lock
                 "timeout 600 bash -c 'while fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do echo \"Waiting for apt lists lock...\"; sleep 5; done'",
-                # Wait for dpkg lock itself
-                "timeout 600 bash -c 'while fuser /var/lib/dpkg/lock >/dev/null 2>&1; do echo \"Waiting for dpkg lock...\"; sleep 5; done'",
-                # Kill any stuck unattended-upgrade processes
+                # Kill any stuck processes
                 "pkill -9 unattended-upgrade || true",
                 "pkill -9 apt-get || true",
-                # Final wait to ensure processes are truly dead
+                # Final wait
                 "sleep 5"
             ]
             
@@ -582,9 +612,7 @@ class DOManager:
                 except Exception as e:
                     log(f"Warning during lock wait: {e}")
             
-            log(f"Apt locks cleared on {ip}")
-            
-            # Use Docker's official installation script (works on all distros)
+            # Use Docker's official installation script
             commands = [
                 # Download Docker install script
                 "curl -fsSL https://get.docker.com -o get-docker.sh",
@@ -599,13 +627,11 @@ class DOManager:
                 "systemctl start docker",
                 "systemctl enable docker",
                 
-                # Wait for Docker daemon to be ready
+                # Wait for Docker daemon
                 "timeout 30 bash -c 'until docker ps >/dev/null 2>&1; do echo \"Waiting for Docker daemon...\"; sleep 2; done'",
                 
-                # Verify installation
+                # Verify
                 "docker --version",
-                
-                # Verify Docker daemon is responsive
                 "docker ps"
             ]
             
@@ -622,18 +648,52 @@ class DOManager:
     @staticmethod
     def update_droplet_tags(droplet_id: str, add_tags: List[str] = None, remove_tags: List[str] = None):
         """Update tags on existing droplet"""
+        # Get current tags
         info = DOManager.get_droplet_info(droplet_id)
-        current_tags = set(info['tags'])
+        current_tags = set(info.get('tags', []))
         
-        if add_tags:
-            current_tags.update(add_tags)
-        
+        # Remove unwanted tags
         if remove_tags:
-            current_tags -= set(remove_tags)
+            for tag in remove_tags:
+                if tag in current_tags:
+                    try:
+                        # DigitalOcean API requires JSON body with resources array
+                        resource_data = {
+                            "resources": [
+                                {
+                                    "resource_id": droplet_id,  # Don't convert to string
+                                    "resource_type": "droplet"
+                                }
+                            ]
+                        }
+                        DOManager._api_request("DELETE", f"/tags/{tag}/resources", resource_data)
+                        current_tags.remove(tag)
+                    except Exception as e:
+                        log(f"Warning: Could not remove tag {tag}: {e}")
         
-        # Update via API
-        DOManager._api_request("PUT", f"/droplets/{droplet_id}", {
-            "tags": list(current_tags)
-        })
+        # Add new tags
+        if add_tags:
+            for tag in add_tags:
+                if tag not in current_tags:
+                    try:
+                        # Create tag if it doesn't exist
+                        try:
+                            DOManager._api_request("POST", "/tags", {"name": tag})
+                        except:
+                            pass  # Tag might already exist
+                        
+                        # Add tag to droplet - ensure resource_id is integer
+                        resource_data = {
+                            "resources": [
+                                {
+                                    "resource_id": int(droplet_id) if isinstance(droplet_id, str) else droplet_id,
+                                    "resource_type": "droplet"
+                                }
+                            ]
+                        }
+                        DOManager._api_request("POST", f"/tags/{tag}/resources", resource_data)
+                        current_tags.add(tag)
+                    except Exception as e:
+                        log(f"Warning: Could not add tag {tag}: {e}")
         
         log(f"Updated tags for droplet {droplet_id}")

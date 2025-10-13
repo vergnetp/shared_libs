@@ -11,11 +11,11 @@ class Logger:
     offset = 0
     log_file = None
     _lock = threading.RLock()
-    _thread_offsets = {}  # NEW: Per-thread indentation
+    _thread_offsets = {}
     
     @staticmethod
     def _get_log_file():
-        with Logger._lock:  # ADD LOCK HERE
+        with Logger._lock: 
             if Logger.log_file is None:
                 try:
                     log_dir = Path("C:\\logs")
@@ -58,17 +58,17 @@ class Logger:
             else:
                 prefix = ""
             
-            indented_msg = f"{' ' * offset}{prefix}{msg}"
+            timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            indented_msg = f"[{timestamp}] {' ' * offset}{prefix}{msg}"
             
             # Print to console
             print(indented_msg)
             
             # Write to file (thread-safe)
             try:
-                log_file = Logger._get_log_file()
-                timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                log_file = Logger._get_log_file()                
                 with open(log_file, 'a', encoding='utf-8') as f:
-                    f.write(f"[{timestamp}] {indented_msg}\n")
+                    f.write(f"{indented_msg}\n")
                     f.flush()
             except Exception as e:
                 print(f"LOG FILE ERROR: {e}")
