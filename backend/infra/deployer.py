@@ -4,6 +4,7 @@ import requests
 from typing import Dict, Any, List, Optional
 from uuid import uuid4
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import constants
 from nginx_config_generator import NginxConfigGenerator
@@ -20,7 +21,7 @@ from server_inventory import ServerInventory
 from do_cost_tracker import DOCostTracker
 import env_loader
 from path_resolver import PathResolver
-
+from do_manager import DOManager
 
 def log(msg):
     Logger.log(msg)
@@ -471,6 +472,8 @@ class Deployer:
         
         log(f'Deploying {project_name}, env: {env or "all"}, service: {service_name or "all"}')
         Logger.start()
+
+        self.pre_provision_servers(env, service_name)
 
         # Auto-sync: Push config before deployment
         if self.auto_sync:
@@ -2037,3 +2040,167 @@ class Deployer:
         else:
             # New is secondary, old is base
             return base_name
+        
+    def pre_provision_servers(self, env: str, service_name: str = None) -> Dict[str, List[str]]:
+        """
+        Pre-provision all servers needed for deployment based on service requirements.
+        
+        This analyzes all services that will be deployed and provisions all required
+        servers upfront in parallel, making the actual deployment much faster.
+        
+        Args:
+            env: Environment to provision for
+            service_name: Optional specific service, otherwise all services
+            
+        Returns:
+            Dictionary mapping "cpu_memory_zone" -> list of provisioned server IPs
+            
+        Example:
+            # Call this before deploy() for faster deployment
+            deployer.pre_provision_servers(env="prod")
+            deployer.deploy(env="prod")
+        """
+        project = self.deployment_configurer.get_project_name()
+        log(f"Pre-provisioning servers for {project}/{env}")
+        
+        # Get all services to deploy
+        services = self.get_services_by_startup_order(env)
+        if service_name:
+            services = {k: v for k, v in services.items() if k == service_name}
+            if not services:
+                log(f"Service '{service_name}' not found")
+                return {}
+        
+        # Calculate all server requirements
+        server_requirements = {}  # key: "cpu_memory_zone" -> value: count needed
+        
+        log("Calculating server requirements...")
+        
+        for svc_name, svc_config in services.items():
+            # Skip localhost services
+            zone = svc_config.get("server_zone", "lon1")
+            if zone == "localhost":
+                continue
+            
+            # Skip scheduled services (they handle their own servers)
+            if self.is_service_scheduled(svc_config):
+                continue
+            
+            # Get server specs
+            cpu = svc_config.get("server_cpu", 1)
+            memory = svc_config.get("server_memory", 1024)
+            servers_count = svc_config.get("servers_count", 1)
+            dedicated_servers = svc_config.get("dedicated_servers", False)
+            
+            # Create requirement key
+            key = f"{cpu}_{memory}_{zone}"
+            
+            # Calculate total servers needed for this spec
+            if key in server_requirements:
+                if dedicated_servers:
+                    # Dedicated servers always add to the count
+                    server_requirements[key] += servers_count
+                else:
+                    # Shared servers - take the max
+                    server_requirements[key] = max(server_requirements[key], servers_count)
+            else:
+                server_requirements[key] = servers_count
+            
+            log(f"  {svc_name}: {servers_count} x ({cpu}CPU/{memory}MB) in {zone} {'[dedicated]' if dedicated_servers else '[shared]'}")
+        
+        # Provision all required servers IN PARALLEL
+        provisioned_servers = {}
+        
+        log("\nCalculating provisioning needs...")
+        provisioning_tasks = []
+        
+        # First pass: determine what needs to be created
+        for key, required_count in server_requirements.items():
+            cpu, memory, zone = key.split('_')
+            cpu = int(cpu)
+            memory = int(memory)
+            
+            # Find existing reserve/green servers with matching specs
+            existing_reserves = ServerInventory.get_servers(
+                deployment_status=ServerInventory.STATUS_RESERVE,
+                zone=zone,
+                cpu=cpu,
+                memory=memory
+            )
+            
+            existing_greens = ServerInventory.get_servers(
+                deployment_status=ServerInventory.STATUS_GREEN,
+                zone=zone,
+                cpu=cpu,
+                memory=memory  
+            )
+            
+            existing_count = len(existing_reserves) + len(existing_greens)
+            existing_ips = [s['ip'] for s in existing_reserves] + [s['ip'] for s in existing_greens]
+            
+            log(f"  Spec: {cpu}CPU/{memory}MB in {zone}")
+            log(f"    Required: {required_count}, Existing: {existing_count}")
+            
+            # Calculate how many new servers needed
+            new_servers_needed = max(0, required_count - existing_count)
+            
+            if new_servers_needed > 0:
+                log(f"    Need to create: {new_servers_needed}")
+                provisioning_tasks.append({
+                    'key': key,
+                    'count': new_servers_needed,
+                    'cpu': cpu,
+                    'memory': memory,
+                    'zone': zone,
+                    'existing_ips': existing_ips,
+                    'required_total': required_count
+                })
+            else:
+                log(f"    Sufficient servers already exist")
+                provisioned_servers[key] = existing_ips[:required_count]
+        
+        # Create ALL servers in parallel across different specs
+        if provisioning_tasks:
+            log(f"\nProvisioning {sum(t['count'] for t in provisioning_tasks)} servers in parallel...")
+                        
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                futures = {}
+                
+                for task in provisioning_tasks:
+                    # Submit each provisioning task
+                    future = executor.submit(
+                        DOManager.create_droplets,
+                        count=task['count'],
+                        region=task['zone'],
+                        cpu=task['cpu'],
+                        memory=task['memory'],
+                        tags=[
+                            ServerInventory.TAG_PREFIX, 
+                            f"zone:{task['zone']}", 
+                            f"status:{ServerInventory.STATUS_RESERVE}"
+                        ]
+                    )
+                    futures[future] = task
+                
+                # Collect results as they complete
+                for future in as_completed(futures):
+                    task = futures[future]
+                    try:
+                        new_droplets = future.result()
+                        new_ips = [d['ip'] for d in new_droplets]
+                        log(f"  Created {len(new_ips)} servers for {task['key']}: {new_ips}")
+                        
+                        # Combine with existing and store
+                        all_ips = task['existing_ips'] + new_ips
+                        provisioned_servers[task['key']] = all_ips[:task['required_total']]
+                        
+                    except Exception as e:
+                        log(f"  Failed to create servers for {task['key']}: {e}")
+                        # Store what we have (existing servers only)
+                        provisioned_servers[task['key']] = task['existing_ips'][:task['required_total']]
+        
+        log(f"\nPre-provisioning complete. Provisioned servers by spec:")
+        for key, ips in provisioned_servers.items():
+            log(f"  {key}: {len(ips)} servers")
+        
+        return provisioned_servers

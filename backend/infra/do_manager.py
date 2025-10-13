@@ -646,54 +646,52 @@ class DOManager:
             return False
 
     @staticmethod
-    def update_droplet_tags(droplet_id: str, add_tags: List[str] = None, remove_tags: List[str] = None):
-        """Update tags on existing droplet"""
-        # Get current tags
-        info = DOManager.get_droplet_info(droplet_id)
-        current_tags = set(info.get('tags', []))
+    def update_droplet_tags(droplet_id: int, add_tags: List[str] = None, remove_tags: List[str] = None):
+        """
+        Update tags for a droplet - FIXED VERSION.
         
-        # Remove unwanted tags
-        if remove_tags:
-            for tag in remove_tags:
-                if tag in current_tags:
-                    try:
-                        # DigitalOcean API requires JSON body with resources array
-                        resource_data = {
-                            "resources": [
-                                {
-                                    "resource_id": droplet_id,  # Don't convert to string
-                                    "resource_type": "droplet"
-                                }
-                            ]
-                        }
-                        DOManager._api_request("DELETE", f"/tags/{tag}/resources", resource_data)
-                        current_tags.remove(tag)
-                    except Exception as e:
-                        log(f"Warning: Could not remove tag {tag}: {e}")
+        Instead of complex add/remove operations, just replace all tags at once.
+        This is simpler and avoids all the API errors.
         
-        # Add new tags
-        if add_tags:
-            for tag in add_tags:
-                if tag not in current_tags:
-                    try:
-                        # Create tag if it doesn't exist
-                        try:
-                            DOManager._api_request("POST", "/tags", {"name": tag})
-                        except:
-                            pass  # Tag might already exist
-                        
-                        # Add tag to droplet - ensure resource_id is integer
-                        resource_data = {
-                            "resources": [
-                                {
-                                    "resource_id": int(droplet_id) if isinstance(droplet_id, str) else droplet_id,
-                                    "resource_type": "droplet"
-                                }
-                            ]
-                        }
-                        DOManager._api_request("POST", f"/tags/{tag}/resources", resource_data)
-                        current_tags.add(tag)
-                    except Exception as e:
-                        log(f"Warning: Could not add tag {tag}: {e}")
-        
-        log(f"Updated tags for droplet {droplet_id}")
+        Args:
+            droplet_id: The droplet ID  
+            add_tags: Tags to add
+            remove_tags: Tags to remove
+        """
+        try:
+            # Get current droplet info to get existing tags
+            droplet_info = DOManager.get_droplet_info(droplet_id)
+            current_tags = droplet_info.get('tags', [])
+            
+            # Calculate new tag set
+            new_tags = set(current_tags)
+            
+            # Remove tags
+            if remove_tags:
+                for tag in remove_tags:
+                    new_tags.discard(tag)
+            
+            # Add tags
+            if add_tags:
+                for tag in add_tags:
+                    new_tags.add(tag)
+            
+            # Ensure all tags exist first
+            for tag in new_tags:
+                try:
+                    DOManager._api_request("POST", "/tags", {"name": tag})
+                except:
+                    pass  # Tag might already exist, that's fine
+            
+            # Use the droplet update endpoint to set all tags at once
+            # This avoids the complex tag resource add/remove operations
+            DOManager._api_request(
+                "PUT", 
+                f"/droplets/{droplet_id}",
+                {"tags": list(new_tags)}
+            )
+            
+            log(f"Updated tags for droplet {droplet_id}")
+                
+        except Exception as e:
+            log(f"Warning: Could not update tags for droplet {droplet_id}: {e}")
