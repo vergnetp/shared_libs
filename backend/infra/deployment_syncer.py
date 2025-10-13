@@ -75,7 +75,8 @@ class DeploymentSyncer:
     @staticmethod
     def push(project: str, env: str, targets: Union[str, List[str]] = None) -> bool:
         """
-        Push local content (config, secrets, files) to remote servers/containers.
+        Push local content (config, secrets, files) to remote servers - OPTIMIZED.
+        Single archive, single transfer per server.
         
         Args:
             project: Project name
@@ -88,19 +89,96 @@ class DeploymentSyncer:
         log(f"Pushing content for {project}/{env}")
         Logger.start()
         
-        success = True
-        push_types = ['config', 'secrets', 'files']
+        # Get paths
+        local_base = DeploymentSyncer.get_local_base(project, env)
+        remote_base = DeploymentSyncer.get_remote_base(project, env)
         
-        for sync_type in push_types:
+        # Ensure local directories exist
+        push_dirs = ['config', 'secrets', 'files']
+        for dir_name in push_dirs:
+            dir_path = local_base / dir_name
+            dir_path.mkdir(parents=True, exist_ok=True)
+        
+        # Get target servers and filter localhost
+        target_servers = DeploymentSyncer._resolve_targets(targets, ['localhost'])
+        remote_servers = [s for s in target_servers if s != 'localhost']
+        
+        if not remote_servers:
+            log("No remote servers to push to")
+            Logger.end()
+            return True
+        
+        # Check if there's anything to push
+        has_content = False
+        content_summary = []
+        for dir_name in push_dirs:
+            dir_path = local_base / dir_name
+            if dir_path.exists():
+                file_count = sum(1 for _ in dir_path.rglob('*') if _.is_file())
+                if file_count > 0:
+                    has_content = True
+                    content_summary.append(f"{dir_name}: {file_count} files")
+        
+        if not has_content:
+            log("No content to push (all directories empty)")
+            Logger.end()
+            return True
+        
+        log(f"Content to push: {', '.join(content_summary)}")
+        
+        # Create single tar archive of all push directories
+        import tarfile
+        import io
+        
+        log("Creating archive...")
+        tar_buffer = io.BytesIO()
+        
+        with tarfile.open(fileobj=tar_buffer, mode='w:gz') as tar:
+            for dir_name in push_dirs:
+                dir_path = local_base / dir_name
+                if dir_path.exists():
+                    # Add entire directory tree preserving structure
+                    for root, dirs, files in os.walk(dir_path):
+                        for file in files:
+                            file_path = os.path.join(root, file)
+                            # Archive path relative to local_base preserves structure
+                            arcname = os.path.relpath(file_path, local_base).replace('\\', '/')
+                            tar.add(file_path, arcname=arcname)
+        
+        tar_data = tar_buffer.getvalue()
+        archive_size_mb = len(tar_data) / 1024 / 1024
+        log(f"Archive created: {archive_size_mb:.2f} MB")
+        
+        # Push to each server
+        success = True
+        for server_ip in remote_servers:
             try:
-                DeploymentSyncer._sync_type(project, env, sync_type, targets, direction='push')
-                log(f"  ✓ Pushed {sync_type}")
+                log(f"Pushing to {server_ip}...")
+                
+                # Ensure remote directory exists
+                CommandExecuter.run_cmd(f"mkdir -p {remote_base}", server_ip, "root")
+                
+                # Transfer and extract in one command
+                extract_cmd = f"cd {remote_base} && tar -xzf -"
+                CommandExecuter.run_cmd_with_stdin(extract_cmd, tar_data, server_ip, "root")
+                
+                # Set permissions on secrets directory if it exists
+                CommandExecuter.run_cmd(
+                    f"if [ -d {remote_base}/secrets ]; then "
+                    f"find {remote_base}/secrets -type d -exec chmod 700 {{}} \\; && "
+                    f"find {remote_base}/secrets -type f -exec chmod 600 {{}} \\;; "
+                    f"fi",
+                    server_ip, "root"
+                )
+                
+                log(f"  ✓ Successfully pushed to {server_ip}")
+                
             except Exception as e:
-                log(f"  ✗ Failed to push {sync_type}: {e}")
+                log(f"  ✗ Failed to push to {server_ip}: {e}")
                 success = False
         
         Logger.end()
-        log("Push complete" if success else "Push completed with errors")
+        log(f"Push {'complete' if success else 'completed with errors'}")
         return success
 
     @staticmethod  
@@ -167,6 +245,12 @@ class DeploymentSyncer:
     def _sync_type(project: str, env: str, sync_type: str, targets: Union[str, List[str]], direction: str):
         """Internal method to sync a specific type in a specific direction"""
         
+        # For push operations of config/secrets/files, this should not be called anymore
+        # as the optimized push() method handles all three at once
+        if direction == 'push' and sync_type in ['config', 'secrets', 'files']:
+            log(f"Warning: _sync_type called for {sync_type} push - should use push() method directly")
+            return
+        
         sync_configs = DeploymentSyncer._get_sync_configs(project, env)
         
         if sync_type not in sync_configs:
@@ -185,6 +269,7 @@ class DeploymentSyncer:
         if 'volume_name' in config:
             DeploymentSyncer._sync_docker_volume(project, env, sync_type, config, direction)
         else:
+            # This path should only be used for pull operations now
             DeploymentSyncer._sync_host_mount(project, env, sync_type, config, targets, direction)
 
     @staticmethod
@@ -266,72 +351,64 @@ class DeploymentSyncer:
     @staticmethod
     def _sync_host_mount(project: str, env: str, sync_type: str, config: Dict[str, Any], 
                         targets: Union[str, List[str]], direction: str):
-        """Handle host mount sync operations using SSH"""
-        
-        target_servers = DeploymentSyncer._resolve_targets(targets, ['localhost'])
-        
-        # Ensure local directories exist
-        if config.get('push', False):
-            local_dir = config['local_path'].rstrip('/*')
-        else:
-            local_dir = config['local_path']
-        
-        Path(local_dir).mkdir(parents=True, exist_ok=True)
+        """
+        Handle host mount sync operations - ONLY for pull operations now.
+        Push operations should use the optimized push() method.
+        """
         
         if direction == 'push':
-            # Push: Local → Remote servers
-            for server_ip in target_servers:
-                if server_ip == 'localhost':
-                    continue  # No need to copy to localhost
-                
-                # Remove wildcards to get base paths
-                local_path = config['local_path'].rstrip('/*')
-                remote_path = config['remote_path'].rstrip('/')
-                
-                # Create remote directory structure first
-                CommandExecuter.run_cmd(f"ssh root@{server_ip} 'mkdir -p {remote_path}'", target_server=None)
-                
-                # Check if local path exists and has content
-                if not Path(local_path).exists():
-                    log(f"Warning: Local path {local_path} does not exist, creating it")
-                    Path(local_path).mkdir(parents=True, exist_ok=True)
-                
-                # Check if there's anything to sync
-                import os
-                if os.listdir(local_path):
-                    # Copy recursively - use /. to copy contents including subdirectories
-                    # This ensures subdirectories like secrets/postgres/ are copied
-                    full_command = f"scp -r {local_path}/. root@{server_ip}:{remote_path}/"
-                    log(f"Syncing {sync_type}: {local_path} -> {server_ip}:{remote_path}")
-                    CommandExecuter.run_cmd(full_command, target_server=None)
-                    
-                    if config.get('secure_perms', False):
-                        CommandExecuter.run_cmd(f"ssh root@{server_ip} 'chmod -R 700 {remote_path}'", target_server=None)
-                else:
-                    log(f"Nothing to sync in {local_path}")
-                    
-        else:
-            # Pull: Remote servers → Local
-            for server_ip in target_servers:
-                if server_ip == 'localhost':
-                    continue  # No need to copy from localhost
-                    
-                # Create server-specific subdirectory  
-                sanitized_ip = DeploymentSyncer._sanitize_server_ip(server_ip)
-                server_local_dir = Path(config['local_path']) / sanitized_ip
-                server_local_dir.mkdir(parents=True, exist_ok=True)
-                
-                # Pull recursively into server subdirectory
-                remote_path = config['remote_path'].rstrip('/')
-                
+            log(f"Warning: _sync_host_mount should not be used for push - use push() method")
+            return
+        
+        # Pull operations remain unchanged
+        target_servers = DeploymentSyncer._resolve_targets(targets, ['localhost'])
+        local_dir = config['local_path']
+        Path(local_dir).mkdir(parents=True, exist_ok=True)
+        
+        # Pull: Remote servers → Local (with server separation)
+        for server_ip in target_servers:
+            if server_ip == 'localhost':
+                continue
+            
+            remote_path = config['remote_path'].rstrip('/')
+            sanitized_ip = DeploymentSyncer._sanitize_server_ip(server_ip)
+            server_local_dir = Path(local_dir) / sanitized_ip
+            server_local_dir.mkdir(parents=True, exist_ok=True)
+            
+            try:
                 # Check if remote directory exists first
-                try:
-                    CommandExecuter.run_cmd(f"ssh root@{server_ip} 'test -d {remote_path}'", server_ip=None)
-                    # If it exists, copy its contents
-                    full_command = f"scp -r root@{server_ip}:{remote_path}/. {str(server_local_dir)}/"
-                    CommandExecuter.run_cmd(full_command, server_ip=None)
-                except Exception as e:
-                    log(f"Remote path {remote_path} may not exist on {server_ip}: {e}")
+                CommandExecuter.run_cmd(f"test -d {remote_path}", server_ip, "root")
+                
+                # Create tar on remote and transfer back
+                tar_cmd = f"cd {remote_path} && tar -czf - ."
+                result = CommandExecuter.run_cmd(tar_cmd, server_ip, "root")
+                
+                # Extract locally
+                import tarfile
+                import io
+                
+                # Handle the result properly - it should be bytes or string
+                if isinstance(result, str):
+                    tar_data = result.encode('latin-1')
+                elif isinstance(result, bytes):
+                    tar_data = result
+                else:
+                    # Handle subprocess.CompletedProcess or other types
+                    if hasattr(result, 'stdout'):
+                        if isinstance(result.stdout, bytes):
+                            tar_data = result.stdout
+                        else:
+                            tar_data = result.stdout.encode('latin-1')
+                    else:
+                        tar_data = str(result).encode('latin-1')
+                
+                # Extract tar to local directory
+                with tarfile.open(fileobj=io.BytesIO(tar_data), mode='r:gz') as tar:
+                    tar.extractall(path=server_local_dir)
+                
+                log(f"Successfully pulled {sync_type} from {server_ip}")
+            except Exception as e:
+                log(f"Remote path {remote_path} may not exist on {server_ip}: {e}")
 
     @staticmethod
     def _get_sync_configs(project: str, env: str) -> Dict[str, Dict[str, Any]]:
