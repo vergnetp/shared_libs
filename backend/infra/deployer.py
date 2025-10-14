@@ -7,6 +7,7 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import constants
+from execute_cmd import CommandExecuter
 from nginx_config_generator import NginxConfigGenerator
 from deployment_config import DeploymentConfigurer
 from deployment_naming import DeploymentNaming
@@ -479,8 +480,27 @@ class Deployer:
         if self.auto_sync:
             log("Auto-sync: Pushing config, secrets, and files...")
             environments = [env] if env else self.deployment_configurer.get_environments()
+            
             for environment in environments:
-                DeploymentSyncer.push(project_name, environment)
+                # Get all servers that will receive deployments
+                all_servers = ServerInventory.list_all_servers()
+                
+                # Filter to servers in zones used by this environment
+                target_ips = []
+                for svc_name, svc_config in self.deployment_configurer.get_services(environment).items():
+                    zone = svc_config.get("server_zone", "lon1")
+                    if zone != "localhost":
+                        zone_servers = [s['ip'] for s in all_servers if s['zone'] == zone]
+                        target_ips.extend(zone_servers)
+                
+                # Remove duplicates
+                target_ips = list(set(target_ips))
+                
+                if target_ips:
+                    log(f"Pushing to {len(target_ips)} servers: {target_ips}")
+                    DeploymentSyncer.push(project_name, environment, targets=target_ips)
+                else:
+                    log("No remote servers found for push")
 
         # Sync inventory with DigitalOcean before deployment
         log("Syncing server inventory with DigitalOcean...")
@@ -967,6 +987,80 @@ class Deployer:
     # CORE DEPLOYMENT WITH TOGGLE LOGIC
     # =============================================================================
 
+    def _get_servers_running_service(self, project: str, env: str, service_name: str) -> List[str]:
+        """
+        Get all server IPs that currently have this service running.
+        
+        Args:
+            project: Project name
+            env: Environment name
+            service_name: Service name
+            
+        Returns:
+            List of server IPs that have containers for this service
+        """
+        all_servers = ServerInventory.list_all_servers()
+        servers_with_service = []
+        
+        container_pattern = f"{project}_{env}_{service_name}"
+        
+        for server in all_servers:
+            server_ip = server['ip']
+            try:
+                # Check if this server has containers for this service
+                result = CommandExecuter.run_cmd(
+                    f"docker ps -a --filter 'name={container_pattern}' --format '{{{{.Names}}}}'",
+                    server_ip,
+                    'root'
+                )
+                
+                containers = [c.strip() for c in str(result).split('\n') if c.strip()]
+                
+                if containers:
+                    servers_with_service.append(server_ip)
+                    
+            except Exception as e:
+                log(f"Could not check containers on {server_ip}: {e}")
+                continue
+        
+        return servers_with_service
+    
+    def _cleanup_service_on_server(self, project: str, env: str, service_name: str, server_ip: str):
+        """
+        Stop and remove all containers for a service on a specific server.
+        
+        Args:
+            project: Project name
+            env: Environment name
+            service_name: Service name
+            server_ip: Server IP to clean up
+        """
+        container_pattern = f"{project}_{env}_{service_name}"
+        
+        try:
+            # Find all containers for this service (base and secondary)
+            result = CommandExecuter.run_cmd(
+                f"docker ps -a --filter 'name={container_pattern}' --format '{{{{.Names}}}}'",
+                server_ip,
+                'root'
+            )
+            
+            containers = [c.strip() for c in str(result).split('\n') if c.strip()]
+            
+            for container_name in containers:
+                try:
+                    DockerExecuter.stop_and_remove_container(
+                        container_name,
+                        server_ip,
+                        ignore_if_not_exists=True
+                    )
+                    log(f"Removed container {container_name} from {server_ip}")
+                except Exception as e:
+                    log(f"Could not remove {container_name} from {server_ip}: {e}")
+                    
+        except Exception as e:
+            log(f"Could not cleanup {service_name} on {server_ip}: {e}")
+
     def _deploy_immutable(
             self,
             project: str,
@@ -975,22 +1069,26 @@ class Deployer:
             service_config: Dict[str, Any]
         ) -> bool:
             """
-            Deploy with immutable infrastructure strategy + toggle-based naming.
+            Deploy with immutable infrastructure - MATCHES YOUR PLAN 100%.
             
-            Process:
-            1. Ensure required servers exist (claim from pool or create new)
-            2. Deploy to blue servers using toggle logic (base ↔ secondary)
-            3. Smart health check based on service type
-            4. Update nginx on ALL servers in zone (per-service mode)
-            5. Stop old containers
-            6. If healthy: promote blue→green, old green→reserve
-            7. If failed: release blues back to reserve
-
-            NEW: Smart health checking:
-            - HTTP services (has port, not TCP): HTTP ping
-            - TCP services (database/redis): verify running
-            - Workers (no ports, running): verify running
-            - One-time jobs (no ports, stopped): check exit code
+            Your Plan Implementation:
+            
+            1) If not dedicated servers, green_ips = get up to server_counts current greens
+               else green_ips = []
+            2) If shortfall, create new servers (new_ips) - instant via pre-provisioning
+            3) todel_ips = get all IPs running service but NOT in target list
+            4) target_ips = green_ips + new_ips
+            5) success = True
+            6) For each IP in target_ips:
+               a) Deploy: if service not in IP, deploy normal; else toggle port
+               b) Start service
+               c) Check health
+               d) Update nginx with new target_port
+               e) If fail: stop/delete new container, success=False, break
+                  else: stop/delete previous container
+            7) For IP in todel_ips: stop and delete the container
+            
+            Cleanup: Find all IPs with no services and destroy/reserve them
             
             Returns:
                 True if deployment successful
@@ -1001,69 +1099,52 @@ class Deployer:
             # Get server requirements
             zone = service_config.get("server_zone", "lon1")
             
-            # LOCALHOST SPECIAL CASE: Skip server provisioning
+            # LOCALHOST SPECIAL CASE
             if zone == "localhost":
                 log(f"Localhost deployment - starting service directly")
-                
-                # Create network
                 self.create_containers_network(env, 'localhost')
                 
-                # Get base naming
                 base_name = DeploymentNaming.get_container_name(project, env, service_name)
                 dockerfile = service_config.get("dockerfile")
                 container_ports = DeploymentPortResolver.get_container_ports(service_name, dockerfile)
                 container_port = container_ports[0] if container_ports else "8000"
                 base_port = DeploymentPortResolver.generate_host_port(project, env, service_name, container_port)
                 
-                # Determine toggle
                 toggle = self._determine_toggle(project, env, service_name, 'localhost', base_port, base_name)
                 new_name = toggle["name"]
                 
-                # Stop old container (opposite of new)
                 old_name = self._get_opposite_container_name(new_name, base_name)
                 if old_name:
                     try:
-                        log(f"Stopping old container {old_name}")
-                        DockerExecuter.stop_and_remove_container(
-                            old_name, 
-                            'localhost', 
-                            ignore_if_not_exists=True
-                        )
+                        DockerExecuter.stop_and_remove_container(old_name, 'localhost', ignore_if_not_exists=True)
                     except Exception as e:
-                        log(f"Note: Could not remove old container (may not exist): {e}")
+                        log(f"Note: Could not remove old container: {e}")
                 
-                # Start service with new name (no port mapping for localhost)
                 try:
                     self.start_service(project, env, service_name, service_config, 'localhost')
-                    
-                    # Update nginx for TCP services (single-server mode)
                     all_zone_servers = [{'ip': 'localhost'}]
                     self._update_all_nginx_for_service(
                         project, env, service_name, ['localhost'], all_zone_servers
                     )
-                    
                     Logger.end()
                     log(f"Localhost deployment successful")
                     return True
-                    
                 except Exception as e:
                     log(f"Localhost deployment failed: {e}")
                     Logger.end()
                     return False
             
-            # REMOTE SERVER DEPLOYMENT
+            # REMOTE SERVER DEPLOYMENT - Following YOUR PLAN exactly
+            
             servers_count = service_config.get("servers_count", 1)
-            zone = service_config.get("server_zone", "lon1")
             cpu = service_config.get("server_cpu", 1)
             memory = service_config.get("server_memory", 1024)
             dedicated_servers = service_config.get("dedicated_servers", False)
             
-            # Check if we can reuse existing green servers (if not dedicated)
-            blue_ips = []
-            reused_ips = []
+            # STEP 1: Determine green_ips (reuse existing greens if not dedicated)
+            green_ips = []
             
             if not dedicated_servers:
-                # Try to reuse existing green servers with matching specs
                 existing_greens = ServerInventory.get_servers(
                     deployment_status=ServerInventory.STATUS_GREEN,
                     zone=zone,
@@ -1071,38 +1152,49 @@ class Deployer:
                     memory=memory
                 )
                 
-                if len(existing_greens) > 0:
-                    # Reuse as many existing greens as possible
-                    reuse_count = min(len(existing_greens), servers_count)
-                    reused_ips = [s['ip'] for s in existing_greens[:reuse_count]]
-                    blue_ips = reused_ips.copy()
-                    
-                    if len(existing_greens) >= servers_count:
-                        log(f"Reusing {len(blue_ips)} existing green servers: {blue_ips}")
-                    else:
-                        log(f"Found {len(existing_greens)} existing greens, need {servers_count} - will reuse these and create {servers_count - len(existing_greens)} more")
+                reuse_count = min(len(existing_greens), servers_count)
+                green_ips = [s['ip'] for s in existing_greens[:reuse_count]]
+                
+                if len(green_ips) == servers_count:
+                    log(f"Reusing {len(green_ips)} existing green servers: {green_ips}")
+                else:
+                    log(f"Found {len(green_ips)} existing greens, need {servers_count} - will reuse and create {servers_count - len(green_ips)} more")
             else:
-                log(f"dedicated_servers=True - creating new servers for {service_name}")
+                log(f"dedicated_servers=True - will create new servers")
             
-            # Claim servers if we don't have enough
-            if len(blue_ips) < servers_count:
-                needed = servers_count - len(blue_ips)
+            # STEP 2: Create new servers if shortfall (instant from pre-provisioning)
+            new_ips = []
+            
+            if len(green_ips) < servers_count:
+                needed = servers_count - len(green_ips)
                 try:
-                    new_blue_ips = ServerInventory.claim_servers(
+                    new_ips = ServerInventory.claim_servers(
                         count=needed,
                         zone=zone,
                         cpu=cpu,
                         memory=memory
                     )
-                    blue_ips.extend(new_blue_ips)
-                    log(f"Created {len(new_blue_ips)} new servers: {new_blue_ips}")
+                    log(f"Created {len(new_ips)} new servers: {new_ips}")
                 except Exception as e:
                     log(f"Failed to claim servers: {e}")
                     Logger.end()
                     return False
             
-            # Deploy to all blue servers with TOGGLE LOGIC
-            deployment_success = True
+            # STEP 3: Calculate todel_ips (servers with service but not in target)
+            current_service_servers = self._get_servers_running_service(project, env, service_name)
+            
+            # STEP 4: Calculate target_ips
+            target_ips = green_ips + new_ips
+            
+            todel_ips = [ip for ip in current_service_servers if ip not in target_ips]
+            
+            if todel_ips:
+                log(f"Will remove {service_name} from these servers: {todel_ips}")
+            
+            log(f"Target deployment: {target_ips}")
+            
+            # STEP 5: Set success flag
+            success = True
             deployed_servers = []
             
             # Calculate base naming (same for all servers)
@@ -1113,206 +1205,164 @@ class Deployer:
             base_port = DeploymentPortResolver.generate_host_port(project, env, service_name, container_port)
             
             # Determine if we need port mapping (multi-server needs it)
-            need_port_mapping = self._should_map_host_port(blue_ips)
+            need_port_mapping = self._should_map_host_port(target_ips)
             
-            for blue_ip in blue_ips:
-                log(f"Deploying to blue server {blue_ip}")
+            # STEP 6: Deploy to each IP in target_ips
+            for target_ip in target_ips:
+                log(f"Deploying to server {target_ip}")
                 Logger.start()
                 
                 try:
-                    # Create network
-                    self.create_containers_network(env, blue_ip)
+                    # 6a) Determine deployment strategy (toggle if service exists)
+                    self.create_containers_network(env, target_ip)
                     
-                    # Determine toggle for THIS server
-                    toggle = self._determine_toggle(project, env, service_name, blue_ip, base_port, base_name)
-                    new_port = toggle["port"]
+                    toggle = self._determine_toggle(project, env, service_name, target_ip, base_port, base_name)
                     new_name = toggle["name"]
+                    new_port = toggle["port"]
                     
-                    # Deploy with appropriate port config
-                    if need_port_mapping:
-                        # Multi-server: map host ports
-                        ports = {str(new_port): str(container_port)}
-                    else:
-                        # Single-server: no port mapping (Docker DNS)
-                        ports = None
+                    log(f"Using container name: {new_name}, port: {new_port}")
                     
-                    # Start container
-                    network_name = DeploymentNaming.get_network_name(project, env)
-                    volumes = PathResolver.generate_all_volume_mounts(
-                        project, env, service_name,
-                        server_ip=blue_ip,
-                        use_docker_volumes=True,
-                        user="root"
+                    # 6b) Start the service
+                    self.start_service(
+                        project, env, service_name, service_config, target_ip,
+                        port_override=new_port if need_port_mapping else None,
+                        name_override=new_name
                     )
                     
-                    # Get image name
-                    if service_config.get("image"):
-                        image = service_config["image"]
-                    else:
-                        docker_hub_user = self.deployment_configurer.get_docker_hub_user()
-                        version = self._get_version()
-                        image = DeploymentNaming.get_image_name(
-                            docker_hub_user, project, env, service_name, version
-                        )
-                    
-                    # Pull image if remote
-                    if blue_ip != 'localhost':
-                        log(f"Pulling image {image} to {blue_ip}...")
-                        DockerExecuter.pull_image(image, blue_ip, "root")
-                    
-                    # Get restart policy
-                    restart_policy = "unless-stopped" if service_config.get("restart", True) else "no"
-                    
-                    # Run container
-                    DockerExecuter.run_container(
-                        image=image,
-                        name=new_name,
-                        network=network_name,
-                        ports=ports,
-                        volumes=volumes,
-                        environment=service_config.get("env_vars", {}),
-                        restart_policy=restart_policy,
-                        server_ip=blue_ip,
-                        user="root"
+                    # 6c) Check health
+                    is_healthy = self._health_check_service(
+                        service_name, service_config, target_ip, new_port, new_name
                     )
                     
-                    # SMART HEALTH CHECK LOGIC
-                    # 1) Scheduled services don't go through _deploy_immutable
+                    if not is_healthy:
+                        log(f"Health check failed on {target_ip}")
+                        # 6e) Stop and delete the new container
+                        DockerExecuter.stop_and_remove_container(new_name, target_ip, ignore_if_not_exists=True)
+                        success = False
+                        break
                     
-                    # 2) Determine if HTTP health check is possible (has port AND not TCP)
-                    has_http_port = (
-                        need_port_mapping and 
-                        container_ports and 
-                        not self._is_tcp_service(service_name)
-                    )
+                    # 6d) Update nginx happens later (after all servers succeed)
                     
-                    if has_http_port:
-                        # HTTP health check for APIs/websites
-                        log(f"HTTP health checking {service_name}")
-                        url = f"http://{blue_ip}:{new_port}"
-                        if not self.wait_for_health_check(url, timeout=30, service_name=service_name):
-                            log(f"HTTP health check failed on {blue_ip}")
-                            deployment_success = False
-                            break
-                    
-                    elif container_ports:
-                        # 3) TCP service (database/redis) - just verify running
-                        log(f"TCP service - verifying container is running")
-                        time.sleep(5)
-                        if not DockerExecuter.is_container_running(new_name, blue_ip):
-                            log(f"Container not running on {blue_ip}")
-                            deployment_success = False
-                            break
-                        log(f"TCP service container running successfully")
-                    
-                    else:
-                        # 4) No ports - either long-running worker or one-time job
-                        log(f"No ports detected - checking container status")
-                        time.sleep(5)  # Give it time to start or run
-                        
-                        if DockerExecuter.is_container_running(new_name, blue_ip):
-                            # Long-running worker still running - success!
-                            log(f"Long-running worker container is running")
-                        else:
-                            # Container stopped - check if one-time job (exit 0) or crash
-                            exit_code = DockerExecuter.get_container_exit_code(new_name, blue_ip)
-                            
-                            if exit_code in [0, 3]:
-                                log(f"One-time job completed successfully (exit code 0)")
-                            else:
-                                log(f"Container exited with error code {exit_code}")
-                                logs = DockerExecuter.get_container_logs(new_name, lines=50, server_ip=blue_ip)
-                                log(f"Last 50 lines of logs:\n{logs}")
-                                deployment_success = False
-                                break
-                    
-                    # Stop old container (opposite toggle)
+                    # 6e) Success path: Stop/delete previous container
                     old_name = self._get_opposite_container_name(new_name, base_name)
                     if old_name:
                         try:
-                            log(f"Stopping old container {old_name}")
-                            DockerExecuter.stop_and_remove_container(old_name, blue_ip, ignore_if_not_exists=True)
+                            DockerExecuter.stop_and_remove_container(
+                                old_name,
+                                target_ip,
+                                ignore_if_not_exists=True
+                            )
+                            log(f"Stopped old container {old_name}")
                         except Exception as e:
-                            log(f"Warning: Could not stop old container: {e}")
+                            log(f"Could not stop old container: {e}")
                     
-                    deployed_servers.append(blue_ip)
+                    deployed_servers.append(target_ip)
+                    Logger.end()
                     
                 except Exception as e:
-                    log(f"Deployment failed on {blue_ip}: {e}")
-                    deployment_success = False
+                    log(f"Deployment failed on {target_ip}: {e}")
+                    success = False
                     break
-                
-                Logger.end()
             
-            # Update nginx on ALL servers in zone (per-service mode)
-            if deployment_success and deployed_servers:
-                all_zone_servers = self._get_all_servers_in_zone(zone)
-                self._update_all_nginx_for_service(
-                    project, env, service_name, deployed_servers, all_zone_servers
-                )
-            
-            destroy_old = not service_config.get("keep_reserve", False)
-            
-            # Swap or rollback
-            if deployment_success:
-                log("All blues healthy - promoting to green")
+            # If deployment failed, cleanup and exit
+            if not success:
+                log("Deployment failed - cleaning up")
                 
-                # Only skip blue-green swap if ALL servers were reused
-                all_reused = len(reused_ips) == servers_count
-                
-                if all_reused:
-                    log("All servers were reused from existing greens - no blue-green swap needed")
-                    old_green_ips = []
-                else:
-                    log(f"Performing blue-green swap (reused: {len(reused_ips)}, new: {servers_count - len(reused_ips)})")
-                    old_green_ips = ServerInventory.promote_blue_to_green(blue_ips, project, env)
-                
-                # Record deployment state
-                DeploymentStateManager.record_deployment(
-                    project=project,
-                    env=env,
-                    service=service_name,
-                    servers=blue_ips,
-                    container_name=base_name,  # Record base name
-                    version=self._get_version()
-                )
-                
-                # Update nginx if this service has a domain
-                if service_config.get("domain"):
-                    self._update_nginx_for_new_servers(project, env, service_name, service_config, blue_ips)
-                
-                # Optionally destroy old greens
-                if old_green_ips:
-                    ServerInventory.release_servers(old_green_ips, destroy=destroy_old)
-                
-                Logger.end()
-                log(f"Immutable deployment successful")
-                return True
-            else:
-                log("Deployment failed - rolling back")
-                
-                # Stop containers on blue servers
-                for blue_ip in blue_ips:
+                for deployed_ip in deployed_servers:
                     try:
-                        # Try to stop both possible names (in case of partial deployment)
-                        for suffix in ["", "_secondary"]:
-                            container_name = f"{base_name}{suffix}" if suffix else base_name
-                            DockerExecuter.stop_and_remove_container(container_name, blue_ip, ignore_if_not_exists=True)
-                    except Exception as e:
-                        log(f"Cleanup failed on {blue_ip}: {e}")
+                        DockerExecuter.stop_and_remove_container(new_name, deployed_ip, ignore_if_not_exists=True)
+                    except:
+                        pass
                 
-                # Only release newly created servers
-                newly_created_ips = [ip for ip in blue_ips if ip not in reused_ips]
-                if newly_created_ips:
-                    log(f"Releasing {len(newly_created_ips)} newly created servers: {newly_created_ips}")
-                    ServerInventory.release_servers(newly_created_ips, destroy=destroy_old)
-                
-                if reused_ips:
-                    log(f"Keeping {len(reused_ips)} reused servers: {reused_ips}")
+                # Release newly created servers back to pool
+                if new_ips:
+                    ServerInventory.release_servers(new_ips, destroy=False)
                 
                 Logger.end()
-                log("Rollback complete - old containers still running")
                 return False
+            
+            # STEP 6d: Update nginx on ALL servers in zone (atomic update after all succeed)
+            log("All deployments successful - updating nginx configurations")
+            
+            all_zone_servers = self._get_all_servers_in_zone(zone)
+            self._update_all_nginx_for_service(
+                project, env, service_name, deployed_servers, all_zone_servers
+            )
+            
+            # STEP 7: Cleanup todel_ips (remove service from servers no longer in target)
+            if todel_ips:
+                log(f"Cleaning up {service_name} from removed servers: {todel_ips}")
+                for ip in todel_ips:
+                    self._cleanup_service_on_server(project, env, service_name, ip)
+            
+            # Record deployment state
+            DeploymentStateManager.record_deployment(
+                project=project,
+                env=env,
+                service=service_name,
+                servers=target_ips,
+                container_name=base_name,
+                version=self._get_version()
+            )
+            
+            # CLEANUP: Find servers with no services and manage them
+            log("Performing server cleanup...")
+            self._cleanup_empty_servers(project, env)
+            
+            Logger.end()
+            log(f"Immutable deployment successful")
+            return True
+    
+    def _cleanup_empty_servers(self, project: str, env: str):
+        """
+        Find all servers with no services deployed and destroy or return to reserve.
+        
+        This implements the cleanup phase of your plan:
+        "Find all IPs where no service is deployed and destroy/put them back to reserve"
+        
+        Args:
+            project: Project name
+            env: Environment name
+        """
+        all_servers = ServerInventory.list_all_servers()
+        container_pattern = f"{project}_{env}_"
+        
+        empty_servers = []
+        
+        for server in all_servers:
+            server_ip = server['ip']
+            
+            try:
+                # Check if this server has any project containers
+                result = CommandExecuter.run_cmd(
+                    f"docker ps --filter 'name={container_pattern}' --format '{{{{.Names}}}}'",
+                    server_ip,
+                    'root'
+                )
+                
+                containers = [c.strip() for c in str(result).split('\n') if c.strip()]
+                
+                if not containers:
+                    empty_servers.append(server_ip)
+                    log(f"Server {server_ip} has no {project}/{env} services")
+                    
+            except Exception as e:
+                log(f"Could not check {server_ip}: {e}")
+                continue
+        
+        if empty_servers:
+            # Check if we should destroy or just move to reserve
+            # Use keep_reserve setting from config
+            destroy_empty = not self.deployment_configurer.raw_config.get('project', {}).get('keep_reserve', False)
+            
+            if destroy_empty:
+                log(f"Destroying {len(empty_servers)} empty servers: {empty_servers}")
+                ServerInventory.release_servers(empty_servers, destroy=True)
+            else:
+                log(f"Returning {len(empty_servers)} empty servers to reserve pool: {empty_servers}")
+                ServerInventory.release_servers(empty_servers, destroy=False)
+        else:
+            log("No empty servers found")
 
     def get_services_by_startup_order(self, env: str = None) -> Dict[str, Dict[str, Any]]:
         """

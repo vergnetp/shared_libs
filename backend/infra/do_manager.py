@@ -648,50 +648,92 @@ class DOManager:
     @staticmethod
     def update_droplet_tags(droplet_id: int, add_tags: List[str] = None, remove_tags: List[str] = None):
         """
-        Update tags for a droplet - FIXED VERSION.
+        Update tags for a droplet using DigitalOcean's tag resource API.
         
-        Instead of complex add/remove operations, just replace all tags at once.
-        This is simpler and avoids all the API errors.
+        DigitalOcean doesn't support updating tags via PUT/PATCH on droplets (returns 405).
+        Instead, we must use POST/DELETE on /tags/{name}/resources endpoints.
         
         Args:
             droplet_id: The droplet ID  
-            add_tags: Tags to add
-            remove_tags: Tags to remove
+            add_tags: Tags to add to the droplet
+            remove_tags: Tags to remove from the droplet
         """
         try:
-            # Get current droplet info to get existing tags
-            droplet_info = DOManager.get_droplet_info(droplet_id)
-            current_tags = droplet_info.get('tags', [])
+            droplet_id_str = str(droplet_id)
             
-            # Calculate new tag set
-            new_tags = set(current_tags)
-            
-            # Remove tags
+            # Step 1: Remove old tags first (if any)
             if remove_tags:
                 for tag in remove_tags:
-                    new_tags.discard(tag)
+                    try:
+                        resource_data = {
+                            "resources": [
+                                {
+                                    "resource_id": droplet_id_str,
+                                    "resource_type": "droplet"
+                                }
+                            ]
+                        }
+                        
+                        # Make the DELETE request - it returns 204 No Content on success
+                        url = f"{DOManager.API_BASE}/tags/{tag}/resources"
+                        headers = DOManager._get_headers()
+                        response = requests.delete(url, headers=headers, json=resource_data, timeout=30)
+                        
+                        if response.status_code in [204, 200]:
+                            log(f"Removed tag '{tag}' from droplet {droplet_id}")
+                        else:
+                            # Try to get error details
+                            try:
+                                error_detail = response.json()
+                                log(f"Warning: Could not remove tag '{tag}': {error_detail}")
+                            except:
+                                log(f"Warning: Could not remove tag '{tag}': HTTP {response.status_code}")
+                                
+                    except Exception as e:
+                        log(f"Warning: Could not remove tag '{tag}' from droplet {droplet_id}: {e}")
             
-            # Add tags
+            # Step 2: Ensure all tags we want to add exist in the account
             if add_tags:
                 for tag in add_tags:
-                    new_tags.add(tag)
+                    try:
+                        DOManager._api_request("POST", "/tags", {"name": tag})
+                        log(f"Created tag '{tag}'")
+                    except Exception as e:
+                        # Tag might already exist (422 status), which is fine
+                        error_str = str(e).lower()
+                        if "422" not in error_str and "already exists" not in error_str:
+                            log(f"Warning: Could not create tag '{tag}': {e}")
             
-            # Ensure all tags exist first
-            for tag in new_tags:
-                try:
-                    DOManager._api_request("POST", "/tags", {"name": tag})
-                except:
-                    pass  # Tag might already exist, that's fine
-            
-            # Use the droplet update endpoint to set all tags at once
-            # This avoids the complex tag resource add/remove operations
-            DOManager._api_request(
-                "PUT", 
-                f"/droplets/{droplet_id}",
-                {"tags": list(new_tags)}
-            )
-            
-            log(f"Updated tags for droplet {droplet_id}")
+            # Step 3: Add new tags to droplet via tag resources endpoint
+            if add_tags:
+                for tag in add_tags:
+                    try:
+                        resource_data = {
+                            "resources": [
+                                {
+                                    "resource_id": droplet_id_str,
+                                    "resource_type": "droplet"
+                                }
+                            ]
+                        }
+                        
+                        # Make the POST request - it returns 204 No Content on success
+                        url = f"{DOManager.API_BASE}/tags/{tag}/resources"
+                        headers = DOManager._get_headers()
+                        response = requests.post(url, headers=headers, json=resource_data, timeout=30)
+                        
+                        if response.status_code in [204, 200]:
+                            log(f"Added tag '{tag}' to droplet {droplet_id}")
+                        else:
+                            # Try to get error details
+                            try:
+                                error_detail = response.json()
+                                log(f"Warning: Could not add tag '{tag}': {error_detail}")
+                            except:
+                                log(f"Warning: Could not add tag '{tag}': HTTP {response.status_code}")
+                                
+                    except Exception as e:
+                        log(f"Warning: Could not add tag '{tag}' to droplet {droplet_id}: {e}")
                 
         except Exception as e:
-            log(f"Warning: Could not update tags for droplet {droplet_id}: {e}")
+            log(f"Error updating tags for droplet {droplet_id}: {e}")

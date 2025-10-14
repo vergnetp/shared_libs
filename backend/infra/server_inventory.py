@@ -18,10 +18,10 @@ class ServerInventory:
     
     # Deployment status stored as droplet tags
     TAG_PREFIX = "Infra"
-    STATUS_RESERVE = "status:reserve"
-    STATUS_BLUE = "status:blue"
-    STATUS_GREEN = "status:green"
-    STATUS_DESTROYING = "status:destroying"
+    STATUS_RESERVE = "reserve"
+    STATUS_BLUE = "blue"
+    STATUS_GREEN = "green"
+    STATUS_DESTROYING = "destroying"
     
     @staticmethod
     def _get_deployment_status(droplet_tags: List[str]) -> str:
@@ -33,20 +33,34 @@ class ServerInventory:
     
     @staticmethod
     def _set_deployment_status(droplet_id: str, status: str):
-        """Set deployment status via droplet tags"""
-        # Remove old status tag
-        old_tags = []
+        """
+        Set deployment status via droplet tags.
+        
+        Args:
+            droplet_id: Droplet ID
+            status: Status value WITHOUT "status:" prefix (e.g., "blue", not "status:blue")
+        """
         info = DOManager.get_droplet_info(droplet_id)
-        for tag in info.get('tags', []):
-            if not tag.startswith("status:"):
-                old_tags.append(tag)
+        current_tags = info.get('tags', [])
         
-        # Add new status tag
-        new_tags = old_tags + [f"status:{status}"]
+        # Find existing status tags to remove
+        old_status_tags = [tag for tag in current_tags if tag.startswith("status:")]
         
-        # Update droplet tags
-        DOManager.update_droplet_tags(droplet_id, add_tags=new_tags, remove_tags=info.get('tags', []))
+        # Keep non-status tags
+        keep_tags = [tag for tag in current_tags if not tag.startswith("status:")]
+        
+        # Create new status tag (add prefix here)
+        new_status_tag = f"status:{status}"
+        
+        # Update droplet tags: remove old status tags, add new one
+        DOManager.update_droplet_tags(
+            droplet_id, 
+            add_tags=[new_status_tag],
+            remove_tags=old_status_tags
+        )
+        
         log(f"Updated droplet {droplet_id} status to {status}")
+
     
     @staticmethod
     def get_servers(
@@ -95,29 +109,35 @@ class ServerInventory:
     def add_servers(droplets_info: List[Dict[str, Any]], deployment_status: str = STATUS_RESERVE):
         """Add deployment status tags to new servers"""
         for droplet in droplets_info:
-            # Add status tag
-            tags = [ServerInventory.TAG_PREFIX, f"status:{deployment_status}"]
+            # Extract just the status value (e.g., "reserve" from "status:reserve")
+            status_value = deployment_status.split(":", 1)[1] if ":" in deployment_status else deployment_status
             
-            # Also tag with zone for easier filtering
-            if 'zone' in droplet:
-                tags.append(f"zone:{droplet['zone']}")
+            # Add base tags
+            tags = [ServerInventory.TAG_PREFIX, f"zone:{droplet['zone']}"]
             
             DOManager.update_droplet_tags(
                 droplet['droplet_id'],
                 add_tags=tags,
                 remove_tags=[]
             )
-            log(f"Tagged server {droplet['ip']} with status {deployment_status}")
-    
+            
+            # Set deployment status separately using the fixed method
+            ServerInventory._set_deployment_status(droplet['droplet_id'], status_value)
+            
+            log(f"Tagged server {droplet['ip']} with status {status_value}")
+
     @staticmethod
     def update_server_status(ips: List[str], new_status: str):
         """Update deployment status for servers by IP"""
+        # Extract status value without prefix
+        status_value = new_status.split(":", 1)[1] if ":" in new_status else new_status
+        
         # Get all droplets
         droplets = DOManager.list_droplets(tags=[ServerInventory.TAG_PREFIX])
         
         for droplet in droplets:
             if droplet['ip'] in ips:
-                ServerInventory._set_deployment_status(droplet['droplet_id'], new_status)
+                ServerInventory._set_deployment_status(droplet['droplet_id'], status_value)
     
     @staticmethod
     def claim_servers(
