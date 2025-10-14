@@ -1,0 +1,26 @@
+{
+  "new_project": {
+    "uat": {
+      "postgres": {
+        "current": {
+          "servers": [
+            "134.209.182.176"
+          ],
+          "container_name": "new_project_uat_postgres",
+          "version": "latest",
+          "deployed_at": "2025-10-15T00:32:17.770474"
+        },
+        "history": [
+          {
+            "servers": [
+              "134.209.182.176"
+            ],
+            "container_name": "new_project_uat_postgres",
+            "version": "latest",
+            "deployed_at": "2025-10-15T00:32:17.770474"
+          }
+        ]
+      }
+    }
+  }
+}

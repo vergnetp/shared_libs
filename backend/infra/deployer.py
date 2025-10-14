@@ -1168,6 +1168,9 @@ class Deployer:
             log(f"Immutable deployment for {service_name}")
             Logger.start()
             
+            green_ips = [] 
+            new_ips = []
+
             # Get server requirements
             zone = service_config.get("server_zone", "lon1")
             
