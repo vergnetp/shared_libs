@@ -927,7 +927,7 @@ class Deployer:
             List of server dicts
         """
         return ServerInventory.get_servers(
-            deployment_status=ServerInventory.STATUS_GREEN,
+            deployment_status=ServerInventory.STATUS_ACTIVE,
             zone=zone
         )
 
@@ -1213,10 +1213,10 @@ class Deployer:
             memory = service_config.get("server_memory", 1024)
             dedicated_servers = service_config.get("dedicated_servers", False)
             
-            # STEP 1: Change this section to look for ACTIVE servers instead of GREEN
+            # STEP 1: 
             if not dedicated_servers:
                 existing_actives = ServerInventory.get_servers(
-                    deployment_status=ServerInventory.STATUS_ACTIVE,  # Changed from STATUS_GREEN
+                    deployment_status=ServerInventory.STATUS_ACTIVE,  
                     zone=zone,
                     cpu=cpu,
                     memory=memory
@@ -2139,7 +2139,7 @@ class Deployer:
             List of server dicts
         """
         return ServerInventory.get_servers(
-            deployment_status=ServerInventory.STATUS_GREEN,
+            deployment_status=ServerInventory.STATUS_ACTIVE,
             zone=zone
         )
 
@@ -2273,7 +2273,7 @@ class Deployer:
             )
             
             existing_greens = ServerInventory.get_servers(
-                deployment_status=ServerInventory.STATUS_GREEN,
+                deployment_status=ServerInventory.STATUS_ACTIVE,
                 zone=zone,
                 cpu=cpu,
                 memory=memory  
