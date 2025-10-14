@@ -1,7 +1,0 @@
-FROM python:3.11-alpine
-WORKDIR /app
-COPY requirements_job.txt .
-RUN pip install --no-cache-dir -r requirements_job.txt
-COPY . .
-EXPOSE 8000
-CMD ["python", "job.py"]

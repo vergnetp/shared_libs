@@ -1,4 +1,4 @@
-# server_inventory_v2.py - Stateless version that doesn't use servers.json
+# server_inventory.py - Simplified version with only RESERVE and ACTIVE statuses
 
 import json
 from typing import List, Dict, Any, Optional
@@ -12,15 +12,21 @@ def log(msg):
 
 class ServerInventory:
     """
-    Stateless server inventory - always queries DigitalOcean directly.
-    No more servers.json file to get out of sync!
+    Simplified stateless server inventory - only RESERVE and ACTIVE statuses.
+    
+    RESERVE: Server is provisioned but not running any services
+    ACTIVE: Server is running one or more services
+    
+    Source of truth for deployments is:
+    - Nginx configs (which containers are routed to)
+    - Running containers (docker ps)
+    - Deployment state (deployments.json)
     """
     
     # Deployment status stored as droplet tags
     TAG_PREFIX = "Infra"
     STATUS_RESERVE = "reserve"
-    STATUS_BLUE = "blue"
-    STATUS_GREEN = "green"
+    STATUS_ACTIVE = "active"
     STATUS_DESTROYING = "destroying"
     
     @staticmethod
@@ -38,16 +44,13 @@ class ServerInventory:
         
         Args:
             droplet_id: Droplet ID
-            status: Status value WITHOUT "status:" prefix (e.g., "blue", not "status:blue")
+            status: Status value WITHOUT "status:" prefix (e.g., "active", not "status:active")
         """
         info = DOManager.get_droplet_info(droplet_id)
         current_tags = info.get('tags', [])
         
         # Find existing status tags to remove
         old_status_tags = [tag for tag in current_tags if tag.startswith("status:")]
-        
-        # Keep non-status tags
-        keep_tags = [tag for tag in current_tags if not tag.startswith("status:")]
         
         # Create new status tag (add prefix here)
         new_status_tag = f"status:{status}"
@@ -61,7 +64,6 @@ class ServerInventory:
         
         log(f"Updated droplet {droplet_id} status to {status}")
 
-    
     @staticmethod
     def get_servers(
         deployment_status: str = None,
@@ -70,7 +72,6 @@ class ServerInventory:
         memory: int = None
     ) -> List[Dict[str, Any]]:
         """Query servers directly from DigitalOcean API"""
-        # Get all droplets with tag
         droplets = DOManager.list_droplets(tags=[ServerInventory.TAG_PREFIX])
         
         servers = []
@@ -86,19 +87,17 @@ class ServerInventory:
                 'zone': droplet['zone'],
                 'cpu': droplet['cpu'],
                 'memory': droplet['memory'],
-                'deployment_status': status,
-                'created': droplet.get('created'),
-                'tags': droplet.get('tags', [])
+                'deployment_status': status
             }
             
             # Apply filters
             if deployment_status and status != deployment_status:
                 continue
-            if zone and server['zone'] != zone:
+            if zone and droplet['zone'] != zone:
                 continue
-            if cpu is not None and server['cpu'] != cpu:
+            if cpu and droplet['cpu'] != cpu:
                 continue
-            if memory is not None and server['memory'] != memory:
+            if memory and droplet['memory'] != memory:
                 continue
             
             servers.append(server)
@@ -106,38 +105,49 @@ class ServerInventory:
         return servers
     
     @staticmethod
-    def add_servers(droplets_info: List[Dict[str, Any]], deployment_status: str = STATUS_RESERVE):
-        """Add deployment status tags to new servers"""
-        for droplet in droplets_info:
-            # Extract just the status value (e.g., "reserve" from "status:reserve")
-            status_value = deployment_status.split(":", 1)[1] if ":" in deployment_status else deployment_status
-            
-            # Add base tags
-            tags = [ServerInventory.TAG_PREFIX, f"zone:{droplet['zone']}"]
-            
-            DOManager.update_droplet_tags(
-                droplet['droplet_id'],
-                add_tags=tags,
-                remove_tags=[]
-            )
-            
-            # Set deployment status separately using the fixed method
-            ServerInventory._set_deployment_status(droplet['droplet_id'], status_value)
-            
-            log(f"Tagged server {droplet['ip']} with status {status_value}")
-
-    @staticmethod
-    def update_server_status(ips: List[str], new_status: str):
-        """Update deployment status for servers by IP"""
-        # Extract status value without prefix
-        status_value = new_status.split(":", 1)[1] if ":" in new_status else new_status
-        
-        # Get all droplets
+    def update_server_status(ips: List[str], status: str):
+        """Update status for multiple servers"""
         droplets = DOManager.list_droplets(tags=[ServerInventory.TAG_PREFIX])
         
         for droplet in droplets:
             if droplet['ip'] in ips:
-                ServerInventory._set_deployment_status(droplet['droplet_id'], status_value)
+                ServerInventory._set_deployment_status(droplet['droplet_id'], status)
+    
+    @staticmethod
+    def add_servers(
+        count: int,
+        zone: str,
+        cpu: int,
+        memory: int,
+        initial_status: str = None
+    ) -> List[str]:
+        """
+        Create new servers and mark them with initial status.
+        
+        Args:
+            count: Number of servers to create
+            zone: Target zone
+            cpu: CPU count
+            memory: Memory in MB
+            initial_status: Initial status (defaults to RESERVE)
+            
+        Returns:
+            List of created server IPs
+        """
+        if initial_status is None:
+            initial_status = ServerInventory.STATUS_RESERVE
+        
+        log(f"Creating {count} new servers ({cpu}CPU/{memory}MB) in {zone}")
+        
+        created_ips = DOManager.create_droplets(
+            count=count,
+            region=zone,
+            cpu=cpu,
+            memory=memory,
+            tags=[ServerInventory.TAG_PREFIX, f"status:{initial_status}"]
+        )
+        
+        return [d['ip'] for d in created_ips]
     
     @staticmethod
     def claim_servers(
@@ -146,67 +156,60 @@ class ServerInventory:
         cpu: int,
         memory: int
     ) -> List[str]:
-        """Claim servers for deployment (reserve → blue)"""
+        """
+        Claim servers from reserve pool or create new ones.
+        Marks claimed servers as ACTIVE.
+        
+        Args:
+            count: Number of servers needed
+            zone: Target zone
+            cpu: CPU requirement
+            memory: Memory requirement
+            
+        Returns:
+            List of server IPs
+        """
         log(f"Claiming {count} servers ({cpu} CPU, {memory}MB RAM) in {zone}")
         Logger.start()
         
-        # Find available reserve servers
-        available = ServerInventory.get_servers(
+        # Try to use existing reserve servers first
+        reserve_servers = ServerInventory.get_servers(
             deployment_status=ServerInventory.STATUS_RESERVE,
             zone=zone,
             cpu=cpu,
             memory=memory
         )
         
-        needed = count - len(available)
+        # Also check for active servers (for shared deployments)
+        active_servers = ServerInventory.get_servers(
+            deployment_status=ServerInventory.STATUS_ACTIVE,
+            zone=zone,
+            cpu=cpu,
+            memory=memory
+        )
         
-        if needed > 0:
-            log(f"Need {needed} more servers, creating...")
-            # Create new servers
-            new_droplets = DOManager.create_droplets(
-                count=needed,
-                region=zone,
-                cpu=cpu,
-                memory=memory,
-                tags=[ServerInventory.TAG_PREFIX, f"zone:{zone}", f"status:{ServerInventory.STATUS_RESERVE}"]
-            )
+        available_ips = [s['ip'] for s in reserve_servers] + [s['ip'] for s in active_servers]
+        
+        if len(available_ips) >= count:
+            # Use existing servers
+            claimed_ips = available_ips[:count]
+            log(f"Using existing servers: {claimed_ips}")
+        else:
+            # Need to create more servers
+            existing_count = len(available_ips)
+            needed = count - existing_count
             
-            # Add to available list
-            for d in new_droplets:
-                available.append({
-                    'ip': d['ip'],
-                    'droplet_id': d['droplet_id']
-                })
+            log(f"Need {needed} more servers, creating...")
+            new_ips = ServerInventory.add_servers(needed, zone, cpu, memory, ServerInventory.STATUS_RESERVE)
+            claimed_ips = available_ips + new_ips
         
-        # Claim required number
-        claimed = available[:count]
-        claimed_ips = [s['ip'] for s in claimed]
-        
-        # Update status to blue
-        ServerInventory.update_server_status(claimed_ips, ServerInventory.STATUS_BLUE)
+        # Mark claimed servers as ACTIVE
+        ServerInventory.update_server_status(claimed_ips, ServerInventory.STATUS_ACTIVE)
         
         Logger.end()
         log(f"Claimed {count} servers: {claimed_ips}")
         
         return claimed_ips
-    
-    @staticmethod
-    def promote_blue_to_green(blue_ips: List[str], project: str = None, env: str = None) -> List[str]:
-        """Promote blue servers to green"""
-        log(f"Promoting blue servers to green: {blue_ips}")
-        
-        # Get current greens (will become reserve)
-        old_greens = ServerInventory.get_servers(deployment_status=ServerInventory.STATUS_GREEN)
-        old_green_ips = [s['ip'] for s in old_greens]
-        
-        # Demote old greens
-        if old_green_ips:
-            ServerInventory.update_server_status(old_green_ips, ServerInventory.STATUS_RESERVE)
-        
-        # Promote blues
-        ServerInventory.update_server_status(blue_ips, ServerInventory.STATUS_GREEN)
-        
-        return old_green_ips
     
     @staticmethod
     def release_servers(ips: List[str], destroy: bool = False):
@@ -241,8 +244,7 @@ class ServerInventory:
         
         summary = {
             ServerInventory.STATUS_RESERVE: 0,
-            ServerInventory.STATUS_BLUE: 0,
-            ServerInventory.STATUS_GREEN: 0,
+            ServerInventory.STATUS_ACTIVE: 0,
             ServerInventory.STATUS_DESTROYING: 0
         }
         
