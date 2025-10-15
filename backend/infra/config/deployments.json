@@ -4,70 +4,62 @@
       "postgres": {
         "current": {
           "servers": [
-            "64.227.47.50"
+            "178.62.79.5"
           ],
           "container_name": "new_project_uat_postgres",
           "version": "latest",
-          "deployed_at": "2025-10-15T00:44:47.422558"
+          "deployed_at": "2025-10-15T08:10:45.455252"
         },
         "history": [
           {
             "servers": [
-              "64.227.47.50"
+              "178.62.79.5"
             ],
             "container_name": "new_project_uat_postgres",
             "version": "latest",
-            "deployed_at": "2025-10-15T00:44:47.422558"
-          },
-          {
-            "servers": [
-              "134.209.182.176"
-            ],
-            "container_name": "new_project_uat_postgres",
-            "version": "latest",
-            "deployed_at": "2025-10-15T00:32:17.770474"
+            "deployed_at": "2025-10-15T08:10:45.455252"
           }
         ]
       },
       "redis": {
         "current": {
           "servers": [
-            "64.227.47.50"
+            "178.62.79.5"
           ],
           "container_name": "new_project_uat_redis",
           "version": "latest",
-          "deployed_at": "2025-10-15T00:46:05.770960"
+          "deployed_at": "2025-10-15T08:11:48.997325"
         },
         "history": [
           {
             "servers": [
-              "64.227.47.50"
+              "178.62.79.5"
             ],
             "container_name": "new_project_uat_redis",
             "version": "latest",
-            "deployed_at": "2025-10-15T00:46:05.770960"
+            "deployed_at": "2025-10-15T08:11:48.997325"
           }
         ]
       },
       "job": {
         "current": {
           "servers": [
-            "64.227.47.50",
-            "138.68.150.144"
+            "178.62.79.5",
+            "46.101.95.54"
           ],
           "container_name": "new_project_uat_job",
           "version": "latest",
-          "deployed_at": "2025-10-15T00:48:23.184901"
+          "deployed_at": "2025-10-15T08:13:48.734659"
         },
         "history": [
           {
             "servers": [
-              "64.227.47.50",
-              "138.68.150.144"
+              "178.62.79.5",
+              "46.101.95.54"
             ],
             "container_name": "new_project_uat_job",
             "version": "latest",
-            "deployed_at": "2025-10-15T00:48:23.184901"
+            "deployed_at": "2025-10-15T08:13:48.734659"
           }
         ]
       }
