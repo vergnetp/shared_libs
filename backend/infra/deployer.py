@@ -1241,42 +1241,17 @@ class Deployer:
                         log(f"[{server_ip}] Container still running - treating as healthy")
                         return True
                     
-                    # Container stopped - check exit code
-                    result = CommandExecuter.run_cmd(
-                        f"docker inspect {container_name} --format '{{{{.State.ExitCode}}}}'",
-                        server_ip, "root"
-                    )
-                    output = result.stdout.strip() if hasattr(result, 'stdout') else str(result).strip()
-                    
-                    # Try to parse exit code
-                    try:
-                        exit_code = int(output)
-                        
-                        if exit_code in [0, 1, 2, 3]:
-                            log(f"[{server_ip}] One-time job completed successfully (exit code {exit_code})")
-                            return True
-                        else:
-                            log(f"[{server_ip}] One-time job failed (exit code {exit_code})")
-                            return False
-                            
-                    except ValueError:
-                        # Could not parse as integer - might be error output
-                        log(f"[{server_ip}] Could not parse exit code from output: {output[:100]}")
-                        
-                        # As last resort, check if container exists and has completed
-                        inspect_result = CommandExecuter.run_cmd(
-                            f"docker inspect {container_name} --format '{{{{.State.Status}}}}'",
-                            server_ip, "root"
-                        )
-                        state = inspect_result.stdout.strip() if hasattr(inspect_result, 'stdout') else str(inspect_result).strip()
-                        
-                        if state == 'exited':
-                            log(f"[{server_ip}] Container exited - checking logs for errors")
-                            # If exited without clear exit code, assume failure
-                            return False
-                        else:
-                            log(f"[{server_ip}] Container state: {state}")
-                            return False
+                    exit_code = DockerExecuter.get_container_exit_code(container_name, server_ip, "root")
+
+                    if exit_code == -1:
+                        log(f"[{server_ip}] Could not determine exit code for {container_name}")
+                        return False
+                    elif exit_code in [0, 1, 2, 3]:
+                        log(f"[{server_ip}] One-time job completed successfully (exit code {exit_code})")
+                        return True
+                    else:
+                        log(f"[{server_ip}] One-time job failed (exit code {exit_code})")
+                        return False
                             
                 except Exception as e:
                     log(f"[{server_ip}] Health check exception: {e}")

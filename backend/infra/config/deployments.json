@@ -4,13 +4,21 @@
       "postgres": {
         "current": {
           "servers": [
-            "64.227.33.100"
+            "209.97.181.41"
           ],
           "container_name": "new_project_uat_postgres",
           "version": "latest",
-          "deployed_at": "2025-10-15T21:19:57.173293"
+          "deployed_at": "2025-10-15T21:48:10.236274"
         },
         "history": [
+          {
+            "servers": [
+              "209.97.181.41"
+            ],
+            "container_name": "new_project_uat_postgres",
+            "version": "latest",
+            "deployed_at": "2025-10-15T21:48:10.236274"
+          },
           {
             "servers": [
               "64.227.33.100"
@@ -48,13 +56,21 @@
       "redis": {
         "current": {
           "servers": [
-            "64.227.33.100"
+            "209.97.181.41"
           ],
           "container_name": "new_project_uat_redis",
           "version": "latest",
-          "deployed_at": "2025-10-15T21:19:52.314401"
+          "deployed_at": "2025-10-15T21:48:02.025412"
         },
         "history": [
+          {
+            "servers": [
+              "209.97.181.41"
+            ],
+            "container_name": "new_project_uat_redis",
+            "version": "latest",
+            "deployed_at": "2025-10-15T21:48:02.025412"
+          },
           {
             "servers": [
               "64.227.33.100"
