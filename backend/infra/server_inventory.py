@@ -139,7 +139,7 @@ class ServerInventory:
         
         log(f"Creating {count} new servers ({cpu}CPU/{memory}MB) in {zone}")
         
-        created_ips = DOManager.create_droplets(
+        created_ips = DOManager.create_servers(
             count=count,
             region=zone,
             cpu=cpu,

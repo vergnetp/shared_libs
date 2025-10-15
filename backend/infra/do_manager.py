@@ -1,3 +1,5 @@
+# do_manager.py - Updated with template/snapshot management
+
 import os
 import time
 import requests
@@ -19,11 +21,19 @@ class DOManager:
     
     _ssh_key_lock = threading.Lock()
     _vpc_lock = threading.Lock()
+    _template_lock = threading.Lock()
 
     # DigitalOcean API base URL
     API_BASE = "https://api.digitalocean.com/v2"
 
-    DROPLET_OS = "ubuntu-22-04-x64"  # Ubuntu 22.04 LTS
+    # Base OS or custom snapshot ID
+    # Override with environment variable: DO_BASE_IMAGE
+    DROPLET_OS = os.getenv("DO_BASE_IMAGE", "ubuntu-22-04-x64")
+    
+    # Template configuration
+    TEMPLATE_NAME = "deployer-docker-base-template"
+    TEMPLATE_SNAPSHOT_PREFIX = "deployer-docker-base"
+    TEMPLATE_TAG = "deployer-template"
     
     # Size mapping: (cpu, memory_mb) -> DO size slug
     SIZE_MAP = {
@@ -70,172 +80,301 @@ class DOManager:
             
             response.raise_for_status()
             
-            # DELETE requests may not return JSON
-            if method == "DELETE":
-                return {"success": True}
+            # Handle 204 No Content
+            if response.status_code == 204:
+                return {}
             
             return response.json()
             
         except requests.exceptions.RequestException as e:
-            log(f"DigitalOcean API error: {e}")
-            if hasattr(e, 'response') and e.response is not None:
-                try:
-                    error_detail = e.response.json()
-                    log(f"Error details: {error_detail}")
-                except:
-                    log(f"Response text: {e.response.text}")
+            log(f"API request failed: {method} {endpoint} - {e}")
             raise
-    
+
     # ========================================
-    # UTILITY / HELPERS
+    # TEMPLATE & SNAPSHOT MANAGEMENT
     # ========================================
     
     @staticmethod
-    def check_api_token() -> bool:
-        """Verify DIGITALOCEAN_API_TOKEN is valid"""
+    def list_snapshots() -> List[Dict[str, Any]]:
+        """List all snapshots"""
+        response = DOManager._api_request("GET", "/snapshots?resource_type=droplet")
+        return response.get('snapshots', [])
+    
+    @staticmethod
+    def find_template_snapshot() -> Optional[str]:
+        """Find existing template snapshot by name prefix"""
+        snapshots = DOManager.list_snapshots()
+        
+        for snapshot in snapshots:
+            if snapshot['name'].startswith(DOManager.TEMPLATE_SNAPSHOT_PREFIX):
+                log(f"Found template snapshot: {snapshot['name']} (ID: {snapshot['id']})")
+                return str(snapshot['id'])
+        
+        return None
+    
+    @staticmethod
+    def create_snapshot_from_droplet(droplet_id: str, snapshot_name: str = None) -> Optional[str]:
+        """
+        Create a snapshot from a droplet.
+        
+        Args:
+            droplet_id: Droplet to snapshot
+            snapshot_name: Optional custom name
+            
+        Returns:
+            Snapshot ID or None if failed
+        """
+        if snapshot_name is None:
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            snapshot_name = f"{DOManager.TEMPLATE_SNAPSHOT_PREFIX}-{timestamp}"
+        
+        log(f"Creating snapshot '{snapshot_name}' from droplet {droplet_id}")
+        log("This may take 5-10 minutes...")
+        
         try:
-            DOManager._api_request("GET", "/account")
+            # Power off droplet first (required for snapshot)
+            log(f"Powering off droplet {droplet_id}...")
+            response = DOManager._api_request("POST", f"/droplets/{droplet_id}/actions", {
+                "type": "power_off"
+            })
+            action_id = response['action']['id']
+            
+            # Wait for power off
+            DOManager._wait_for_action(action_id, timeout=120)
+            
+            # Create snapshot
+            log(f"Creating snapshot...")
+            response = DOManager._api_request("POST", f"/droplets/{droplet_id}/actions", {
+                "type": "snapshot",
+                "name": snapshot_name
+            })
+            action_id = response['action']['id']
+            
+            # Wait for snapshot completion
+            DOManager._wait_for_action(action_id, timeout=600)
+            
+            # Get snapshot ID from droplet's snapshots
+            response = DOManager._api_request("GET", f"/droplets/{droplet_id}/snapshots")
+            snapshots = response.get('snapshots', [])
+            
+            if not snapshots:
+                log("Error: No snapshots found after creation")
+                return None
+            
+            # Find our snapshot by name
+            for snapshot in snapshots:
+                if snapshot['name'] == snapshot_name:
+                    snapshot_id = str(snapshot['id'])
+                    log(f"Snapshot created successfully: {snapshot_name} (ID: {snapshot_id})")
+                    return snapshot_id
+            
+            log("Error: Could not find created snapshot")
+            return None
+            
+        except Exception as e:
+            log(f"Failed to create snapshot: {e}")
+            return None
+    
+    @staticmethod
+    def _wait_for_action(action_id: str, timeout: int = 300) -> bool:
+        """Wait for a DigitalOcean action to complete"""
+        start_time = time.time()
+        
+        while time.time() - start_time < timeout:
+            try:
+                response = DOManager._api_request("GET", f"/actions/{action_id}")
+                status = response['action']['status']
+                
+                if status == "completed":
+                    return True
+                elif status == "errored":
+                    log(f"Action {action_id} failed")
+                    return False
+                
+                time.sleep(5)
+            except Exception as e:
+                log(f"Error checking action status: {e}")
+                time.sleep(5)
+        
+        log(f"Timeout waiting for action {action_id}")
+        return False
+    
+    @staticmethod
+    def delete_snapshot(snapshot_id: str) -> bool:
+        """Delete a snapshot"""
+        try:
+            log(f"Deleting snapshot {snapshot_id}")
+            DOManager._api_request("DELETE", f"/snapshots/{snapshot_id}")
+            log(f"Snapshot {snapshot_id} deleted")
             return True
         except Exception as e:
-            log(f"Invalid DigitalOcean API token: {e}")
+            log(f"Failed to delete snapshot {snapshot_id}: {e}")
             return False
     
     @staticmethod
-    def specs_to_size(cpu: int, memory: int) -> str:
+    def get_or_create_template(region: str = "lon1") -> str:
         """
-        Convert CPU/memory specs to DO size slug.
+        Get existing template snapshot or create a new one.
+        Thread-safe - only one template creation at a time.
         
-        Examples:
-            (2, 4096) -> "s-2vcpu-4gb"
-            (4, 8192) -> "s-4vcpu-8gb"
+        Returns:
+            Snapshot ID to use as base image
         """
-        size = DOManager.SIZE_MAP.get((cpu, memory))
-        if not size:
-            raise ValueError(
-                f"No DO size found for specs: {cpu} CPU, {memory}MB RAM. "
-                f"Available: {list(DOManager.SIZE_MAP.keys())}"
+        with DOManager._template_lock:
+            # Check if we already have a snapshot
+            snapshot_id = DOManager.find_template_snapshot()
+            if snapshot_id:
+                log(f"Using existing template snapshot: {snapshot_id}")
+                return snapshot_id
+            
+            log("No template snapshot found. Creating new template...")
+            
+            # Create template droplet
+            template_id = DOManager._create_raw_droplet(
+                name=DOManager.TEMPLATE_NAME,
+                region=region,
+                cpu=1,
+                memory=1024,
+                tags=[DOManager.TEMPLATE_TAG],
+                use_base_os=True  # Force use of base Ubuntu, not snapshot
             )
-        return size
+            
+            if not template_id:
+                log("Failed to create template droplet")
+                return DOManager.DROPLET_OS  # Fallback to base OS
+            
+            # Wait for droplet to be ready
+            DOManager.wait_for_droplet_active(template_id)
+            info = DOManager.get_droplet_info(template_id)
+            ip = info['ip']
+            
+            # Wait for SSH
+            DOManager.wait_for_ssh_ready(ip)
+            
+            # Install Docker
+            DOManager.install_docker(ip)
+            
+            # Install health monitor
+            from health_monitor_installer import HealthMonitorInstaller
+            HealthMonitorInstaller.install_on_server(ip)
+            
+            # Install basic nginx
+            DOManager._install_basic_nginx(ip)
+            
+            log(f"Template droplet {template_id} fully provisioned")
+            
+            # Create snapshot
+            snapshot_id = DOManager.create_snapshot_from_droplet(template_id)
+            
+            if not snapshot_id:
+                log("Failed to create snapshot from template")
+                DOManager.destroy_droplet(template_id)
+                return DOManager.DROPLET_OS  # Fallback to base OS
+            
+            # Destroy template droplet (save $6/month)
+            log(f"Destroying template droplet {template_id}")
+            DOManager.destroy_droplet(template_id)
+            
+            log(f"Template snapshot ready: {snapshot_id}")
+            return snapshot_id
     
     @staticmethod
-    def size_to_specs(size: str) -> Tuple[int, int]:
+    def delete_template():
         """
-        Parse DO size slug to CPU/memory specs.
-        
-        Examples:
-            "s-2vcpu-4gb" -> (2, 4096)
-            "s-4vcpu-8gb" -> (4, 8192)
+        Delete template snapshot and any template droplets.
+        Use this when you want to rebuild the template from scratch.
         """
-        for (cpu, memory), slug in DOManager.SIZE_MAP.items():
-            if slug == size:
-                return (cpu, memory)
-        
-        # Try to parse if not in map (e.g., "s-2vcpu-4gb")
-        try:
-            parts = size.split('-')
-            cpu_part = [p for p in parts if 'vcpu' in p][0]
-            mem_part = [p for p in parts if 'gb' in p][0]
+        with DOManager._template_lock:
+            log("Deleting template resources...")
             
-            cpu = int(cpu_part.replace('vcpu', ''))
-            memory_gb = int(mem_part.replace('gb', ''))
-            memory = memory_gb * 1024
+            # Delete template droplets
+            droplets = DOManager.list_droplets(tags=[DOManager.TEMPLATE_TAG])
+            for droplet in droplets:
+                DOManager.destroy_droplet(droplet['droplet_id'])
             
-            return (cpu, memory)
-        except Exception:
-            raise ValueError(f"Cannot parse size slug: {size}")
-    
+            # Delete template snapshots
+            snapshots = DOManager.list_snapshots()
+            for snapshot in snapshots:
+                if snapshot['name'].startswith(DOManager.TEMPLATE_SNAPSHOT_PREFIX):
+                    DOManager.delete_snapshot(str(snapshot['id']))
+            
+            log("Template resources deleted")
+
     # ========================================
     # SSH KEY MANAGEMENT
     # ========================================
     
     @staticmethod
-    def list_ssh_keys() -> List[Dict[str, Any]]:
-        """List all SSH keys in DO account"""
-        response = DOManager._api_request("GET", "/account/keys")
-        return response.get("ssh_keys", [])
-    
-    @staticmethod
-    def get_or_create_ssh_key(name: str = "deployer_key") -> int:
-        """
-        Get or create SSH key for deployments (cross-platform via Docker).
-        Thread-safe for parallel droplet creation.
-        
-        Process:
-        1. Check if local key exists (~/.ssh/deployer_id_rsa)
-        2. If not, generate using Docker container (works on Windows/Linux/macOS)
-        3. Check if public key uploaded to DO (by name)
-        4. If not, upload public key to DO
-        
-        Returns:
-            ssh_key_id (int)
-        """
-        with DOManager._ssh_key_lock:  # Thread-safe key generation
-            import platform
+    def get_or_create_ssh_key() -> str:
+        """Get or create SSH key for droplet access (thread-safe)"""
+        with DOManager._ssh_key_lock:
+            ssh_key_name = "deployer_key"
             
-            local_key_path = Path.home() / ".ssh" / "deployer_id_rsa"
-            public_key_path = local_key_path.with_suffix(".pub")
-            
-            # Generate locally if missing
-            if not local_key_path.exists():
-                log(f"Generating SSH key pair at {local_key_path}")
-                local_key_path.parent.mkdir(parents=True, exist_ok=True)
-                
-                system = platform.system()
-                
-                # Convert Windows path to WSL/Docker-compatible format
-                if system == "Windows":
-                    ssh_dir = str(local_key_path.parent).replace("\\", "/")
-                    # Convert C:/ to /c/ for Docker volume mount
-                    if ssh_dir[1] == ":":
-                        ssh_dir = f"/{ssh_dir[0].lower()}{ssh_dir[2:]}"
-                else:
-                    ssh_dir = str(local_key_path.parent)
-                
-                # Use Docker to generate SSH key (works everywhere)
-                docker_cmd = [
-                    "docker", "run", "--rm",
-                    "-v", f"{ssh_dir}:/root/.ssh",
-                    "alpine:latest",
-                    "sh", "-c",
-                    "apk add --no-cache openssh-keygen && "
-                    "ssh-keygen -t rsa -b 4096 -f /root/.ssh/deployer_id_rsa -N '' -C 'deployer@automated'"
-                ]
-                
-                log("Using Docker to generate SSH key...")
-                subprocess.run(docker_cmd, check=True)
-                
-                # Set proper permissions (only on Unix)
-                if system != "Windows":
-                    local_key_path.chmod(0o600)
-                    public_key_path.chmod(0o644)
-            
-            # Read public key
+            # Read public key first
+            public_key_path = Path.home() / ".ssh" / "deployer_id_rsa.pub"
             if not public_key_path.exists():
-                raise FileNotFoundError(
-                    f"Public key not found at {public_key_path}\n"
-                    "SSH key generation failed"
-                )
+                raise FileNotFoundError(f"SSH public key not found: {public_key_path}")
             
             public_key = public_key_path.read_text().strip()
+            
+            # Check if key exists
+            response = DOManager._api_request("GET", "/account/keys")
+            for key in response.get('ssh_keys', []):
+                if key['name'] == ssh_key_name:
+                    log(f"Using existing SSH key: {ssh_key_name}")
+                    return str(key['id'])
+                # Also check by fingerprint (in case name changed)
+                if key.get('public_key') == public_key:
+                    log(f"Using existing SSH key by fingerprint: {key['name']}")
+                    return str(key['id'])
+            
+            # Create new key only if it doesn't exist
+            try:
+                response = DOManager._api_request("POST", "/account/keys", {
+                    "name": ssh_key_name,
+                    "public_key": public_key
+                })
+                log(f"Created new SSH key: {ssh_key_name}")
+                return str(response['ssh_key']['id'])
+            except Exception as e:
+                # If creation fails, try to find it again (race condition)
+                if "422" in str(e) or "Unprocessable Entity" in str(e):
+                    log("SSH key creation returned 422, checking if it exists now...")
+                    response = DOManager._api_request("GET", "/account/keys")
+                    for key in response.get('ssh_keys', []):
+                        if key['name'] == ssh_key_name or key.get('public_key') == public_key:
+                            log(f"Found SSH key after 422: {key['name']}")
+                            return str(key['id'])
+                raise
+
+    # ========================================
+    # SIZE MANAGEMENT
+    # ========================================
+    
+    @staticmethod
+    def specs_to_size(cpu: int, memory: int) -> str:
+        """Convert CPU/memory specs to DigitalOcean size slug"""
+        key = (cpu, memory)
+        if key not in DOManager.SIZE_MAP:
+            raise ValueError(f"Unsupported size: {cpu} CPU, {memory}MB RAM")
+        return DOManager.SIZE_MAP[key]
+    
+    @staticmethod
+    def size_to_specs(size_slug: str) -> Tuple[int, int]:
+        """Convert size slug to (cpu, memory) specs"""
+        for (cpu, memory), slug in DOManager.SIZE_MAP.items():
+            if slug == size_slug:
+                return cpu, memory
         
-        # Check if already in DO (outside lock - API calls are thread-safe)
-        do_keys = DOManager.list_ssh_keys()
-        existing = [k for k in do_keys if k['name'] == name]
-        
-        if existing:
-            log(f"Using existing SSH key '{name}' (ID: {existing[0]['id']})")
-            return existing[0]['id']
-        
-        # Upload to DO
-        log(f"Uploading SSH key '{name}' to DigitalOcean")
-        response = DOManager._api_request("POST", "/account/keys", {
-            "name": name,
-            "public_key": public_key
-        })
-        
-        key_id = response['ssh_key']['id']
-        log(f"SSH key uploaded successfully (ID: {key_id})")
-        return key_id
+        # Fallback parsing from slug format (e.g., "s-2vcpu-4gb")
+        parts = size_slug.split('-')
+        try:
+            cpu = int(parts[1].replace('vcpu', ''))
+            memory_gb = int(parts[2].replace('gb', ''))
+            return cpu, memory_gb * 1024
+        except:
+            return 1, 1024  # Default
 
     # ========================================
     # VPC MANAGEMENT
@@ -254,7 +393,7 @@ class DOManager:
         """Thread-safe VPC creation"""
         vpc_name = f"deployer-vpc-{region}"
         
-        with DOManager._vpc_lock:  # Protect creation
+        with DOManager._vpc_lock:
             # Check existing VPCs
             vpcs = DOManager.list_vpcs()
             existing = [v for v in vpcs if v['name'] == vpc_name and v['region'] == region]
@@ -275,43 +414,44 @@ class DOManager:
             vpc_id = response['vpc']['id']
             log(f"VPC created successfully (ID: {vpc_id})")
             return vpc_id
-    
+
     # ========================================
     # DROPLET LIFECYCLE
     # ========================================
     
     @staticmethod
-    def create_droplet(
+    def _create_raw_droplet(
         name: str,
         region: str,
         cpu: int,
         memory: int,
-        tags: List[str] = None
-    ) -> str:
+        tags: List[str] = None,
+        use_base_os: bool = False
+    ) -> Optional[str]:
         """
-        Create a single droplet and set it up completely.
+        Create a raw droplet via API (no provisioning).
+        Internal method - use create_server() for normal deployments.
         
-        Process:
-        1. Create droplet via API
-        2. Wait for active
-        3. Wait for SSH
-        4. Install Docker
-        5. Install health monitor
-        
-        Returns:
-            droplet_id (str)
+        Args:
+            use_base_os: If True, use base Ubuntu instead of template snapshot
         """
         # Get prerequisites
         ssh_key_id = DOManager.get_or_create_ssh_key()
         vpc_uuid = DOManager.get_or_create_vpc(region)
         size = DOManager.specs_to_size(cpu, memory)
         
+        # Determine image to use
+        if use_base_os:
+            image = "ubuntu-22-04-x64"
+        else:
+            image = DOManager.DROPLET_OS
+        
         # Prepare droplet configuration
         droplet_config = {
             "name": name,
             "region": region,
             "size": size,
-            "image": DOManager.DROPLET_OS,
+            "image": image,
             "ssh_keys": [ssh_key_id],
             "vpc_uuid": vpc_uuid,
             "tags": tags or []
@@ -322,6 +462,37 @@ class DOManager:
         
         droplet_id = str(response['droplet']['id'])
         log(f"Droplet creation initiated (ID: {droplet_id})")
+        
+        return droplet_id
+    
+    @staticmethod
+    def create_droplet(
+        name: str,
+        region: str,
+        cpu: int,
+        memory: int,
+        tags: List[str] = None
+    ) -> str:
+        """
+        Create a single droplet and provision it completely.
+        LEGACY METHOD - Use for creating template droplets.
+        For production servers, use create_server() which uses pre-baked snapshots.
+        
+        Process:
+        1. Create droplet via API
+        2. Wait for active
+        3. Wait for SSH
+        4. Install Docker
+        5. Install health monitor
+        6. Install nginx
+        
+        Returns:
+            droplet_id (str)
+        """
+        droplet_id = DOManager._create_raw_droplet(name, region, cpu, memory, tags, use_base_os=True)
+        
+        if not droplet_id:
+            raise Exception("Failed to create droplet")
         
         # Wait for droplet to become active
         DOManager.wait_for_droplet_active(droplet_id)
@@ -338,16 +509,70 @@ class DOManager:
         
         # Install health monitor
         from health_monitor_installer import HealthMonitorInstaller
-        HealthMonitorInstaller.install_on_server(ip)        
-
-        # Create a minimal project/env context for nginx
-        # Or install nginx without project context
+        HealthMonitorInstaller.install_on_server(ip)
+        
+        # Install basic nginx
         DOManager._install_basic_nginx(ip)
 
         log(f"Droplet {droplet_id} ({ip}) fully provisioned")
         
         return droplet_id
     
+    @staticmethod
+    def create_server(
+        name: str,
+        region: str,
+        cpu: int,
+        memory: int,
+        tags: List[str] = None
+    ) -> str:
+        """
+        Create a server from pre-baked template snapshot (FAST).
+        Use this for all production server creation.
+        
+        Process:
+        1. Ensure template snapshot exists
+        2. Create droplet from snapshot
+        3. Wait for active
+        4. Wait for SSH
+        5. Done! (Docker, nginx, etc. already installed)
+        
+        Returns:
+            droplet_id (str)
+        """
+        # Ensure we have a template snapshot
+        snapshot_id = DOManager.get_or_create_template(region)
+        
+        # Temporarily override DROPLET_OS to use snapshot
+        original_os = DOManager.DROPLET_OS
+        DOManager.DROPLET_OS = snapshot_id
+        
+        try:
+            # Create droplet from snapshot
+            droplet_id = DOManager._create_raw_droplet(name, region, cpu, memory, tags)
+            
+            if not droplet_id:
+                raise Exception("Failed to create server")
+            
+            # Wait for droplet to become active
+            DOManager.wait_for_droplet_active(droplet_id)
+            
+            # Get droplet info
+            info = DOManager.get_droplet_info(droplet_id)
+            ip = info['ip']
+            
+            # Wait for SSH (much faster with snapshot!)
+            DOManager.wait_for_ssh_ready(ip)
+            
+            log(f"Server {droplet_id} ({ip}) ready (from template snapshot)")
+            
+            return droplet_id
+            
+        finally:
+            # Restore original OS setting
+            DOManager.DROPLET_OS = original_os
+    
+    @staticmethod
     def _install_basic_nginx(server_ip: str):
         """Install nginx container with empty config directories"""
         from execute_docker import DockerExecuter
@@ -358,10 +583,10 @@ class DOManager:
         
         # Create basic nginx.conf with stream support
         nginx_conf = """
-    events { worker_connections 1024; }
-    stream { include /etc/nginx/stream.d/*.conf; }
-    http { include /etc/nginx/conf.d/*.conf; }
-    """
+events { worker_connections 1024; }
+stream { include /etc/nginx/stream.d/*.conf; }
+http { include /etc/nginx/conf.d/*.conf; }
+"""
         
         CommandExecuter.run_cmd_with_stdin(
             "cat > /local/nginx/nginx.conf",
@@ -387,6 +612,57 @@ class DOManager:
         log(f"Nginx container installed on {server_ip}")
 
     @staticmethod
+    def create_servers(
+        count: int,
+        region: str,
+        cpu: int,
+        memory: int,
+        tags: List[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Create multiple servers in parallel using template snapshot.
+        
+        Returns:
+            List of dicts: [{droplet_id, ip, private_ip, zone, cpu, memory, created}, ...]
+        """
+        log(f"Creating {count} servers in {region} (parallel execution)")
+        Logger.start()
+        
+        droplet_ids = []
+        
+        # Create servers in parallel
+        with ThreadPoolExecutor(max_workers=min(count, 10)) as executor:
+            futures = []
+            
+            for i in range(count):
+                name = f"server-{region}-{int(time.time())}-{i}"
+                future = executor.submit(
+                    DOManager.create_server,
+                    name, region, cpu, memory, tags
+                )
+                futures.append(future)
+            
+            # Collect results as they complete
+            for future in as_completed(futures):
+                try:
+                    droplet_id = future.result()
+                    droplet_ids.append(droplet_id)
+                    log(f"Progress: {len(droplet_ids)}/{count} servers ready")
+                except Exception as e:
+                    log(f"Failed to create server: {e}")
+        
+        # Gather all server info
+        servers_info = []
+        for droplet_id in droplet_ids:
+            info = DOManager.get_droplet_info(droplet_id)
+            servers_info.append(info)
+        
+        Logger.end()
+        log(f"Successfully created {len(servers_info)}/{count} servers")
+        
+        return servers_info
+    
+    @staticmethod
     def create_droplets(
         count: int,
         region: str,
@@ -395,12 +671,13 @@ class DOManager:
         tags: List[str] = None
     ) -> List[Dict[str, Any]]:
         """
-        Create multiple droplets in parallel.
+        LEGACY: Create multiple droplets in parallel (slow, full provisioning).
+        Use create_servers() instead for production.
         
         Returns:
             List of dicts: [{droplet_id, ip, private_ip, zone, cpu, memory, created}, ...]
         """
-        log(f"Creating {count} droplets in {region} (parallel execution)")
+        log(f"Creating {count} droplets in {region} (parallel execution, LEGACY MODE)")
         Logger.start()
         
         droplet_ids = []
@@ -450,13 +727,98 @@ class DOManager:
             return False
     
     @staticmethod
-    def get_droplet_info(droplet_id: str) -> Dict[str, Any]:
-        """
-        Get droplet details.
+    def wait_for_droplet_active(droplet_id: str, timeout: int = 180) -> bool:
+        """Wait for droplet to reach 'active' status"""
+        log(f"Waiting for droplet {droplet_id} to become active...")
+        start_time = time.time()
         
-        Returns:
-            {droplet_id, name, ip, private_ip, region, size, status, created_at, tags, cpu, memory}
-        """
+        while time.time() - start_time < timeout:
+            info = DOManager.get_droplet_info(droplet_id)
+            status = info['status']
+            
+            if status == 'active':
+                log(f"Droplet {droplet_id} is active")
+                return True
+            
+            time.sleep(5)
+        
+        log(f"Timeout waiting for droplet {droplet_id} to become active")
+        return False
+    
+    @staticmethod
+    def wait_for_ssh_ready(ip: str, timeout: int = 60) -> bool:
+        """Wait for SSH to be available on droplet"""
+        log(f"Waiting for SSH on {ip}...")
+        start_time = time.time()
+        
+        while time.time() - start_time < timeout:
+            try:
+                CommandExecuter.run_cmd("echo 'ready'", ip, "root")
+                log(f"SSH ready on {ip}")
+                return True
+            except Exception:
+                pass
+            
+            time.sleep(5)
+        
+        log(f"Timeout waiting for SSH on {ip}")
+        return False
+
+    # ========================================
+    # DROPLET CONFIGURATION
+    # ========================================
+    
+    @staticmethod
+    def install_docker(ip: str, user: str = "root") -> bool:
+        """SSH to droplet and install Docker using official convenience script"""
+        log(f"Installing Docker on {ip}...")
+        
+        try:
+            # Wait for cloud-init to complete
+            log(f"Waiting for cloud-init to complete on {ip}...")
+            
+            for attempt in range(3):
+                try:
+                    CommandExecuter.run_cmd(
+                        "cloud-init status --wait || timeout 300 bash -c 'while [ ! -f /var/lib/cloud/instance/boot-finished ]; do sleep 5; done'",
+                        ip, user
+                    )
+                    break
+                except Exception as e:
+                    if attempt == 2:
+                        raise
+                    log(f"Cloud-init wait attempt {attempt + 1} failed, retrying...")
+                    time.sleep(10)
+            
+            # Install Docker
+            commands = [
+                "curl -fsSL https://get.docker.com -o get-docker.sh",
+                "sh get-docker.sh",
+                "rm get-docker.sh",
+                "systemctl start docker",
+                "systemctl enable docker",
+                "timeout 30 bash -c 'until docker ps >/dev/null 2>&1; do echo \"Waiting for Docker daemon...\"; sleep 2; done'",
+                "docker --version",
+                "docker ps"
+            ]
+            
+            for cmd in commands:
+                CommandExecuter.run_cmd(cmd, ip, user)
+            
+            log(f"Docker installed and verified on {ip}")
+            return True
+            
+        except Exception as e:
+            log(f"Failed to install Docker on {ip}: {e}")
+            return False
+
+    # ========================================
+    # DROPLET QUERY
+    # ========================================
+    
+    @staticmethod
+    def get_droplet_info(droplet_id: str) -> Dict[str, Any]:
+        """Get droplet details"""
         response = DOManager._api_request("GET", f"/droplets/{droplet_id}")
         droplet = response['droplet']
         
@@ -500,7 +862,6 @@ class DOManager:
         
         endpoint = "/droplets"
         
-        # DigitalOcean API requires tag filtering via query params
         if tags:
             tag_query = "&".join([f"tag_name={tag}" for tag in tags])
             endpoint = f"/droplets?{tag_query}"
@@ -508,232 +869,68 @@ class DOManager:
         response = DOManager._api_request("GET", endpoint)
         droplets = response.get('droplets', [])
         
-        # Double-check filtering (in case API filtering isn't working)
+        # Double-check filtering
         if tags:
             filtered = []
             for d in droplets:
                 droplet_tags = d.get('tags', [])
-                # Check if all required tags are present
                 if all(tag in droplet_tags for tag in tags):
                     filtered.append(d)
             droplets = filtered
         
         return [DOManager.get_droplet_info(str(d['id'])) for d in droplets]
-    
-    @staticmethod
-    def wait_for_droplet_active(droplet_id: str, timeout: int = 180) -> bool:
-        """Wait for droplet to reach 'active' status"""
-        log(f"Waiting for droplet {droplet_id} to become active...")
-        start_time = time.time()
-        
-        while time.time() - start_time < timeout:
-            info = DOManager.get_droplet_info(droplet_id)
-            status = info['status']
-            
-            if status == 'active':
-                log(f"Droplet {droplet_id} is active")
-                return True
-            
-            time.sleep(5)
-        
-        log(f"Timeout waiting for droplet {droplet_id} to become active")
-        return False
-    
-    @staticmethod
-    def wait_for_ssh_ready(ip: str, timeout: int = 60) -> bool:
-        """Wait for SSH to be available on droplet"""
-        log(f"Waiting for SSH on {ip}...")
-        start_time = time.time()
-        
-        while time.time() - start_time < timeout:
-            try:
-                # Use existing CommandExecuter which handles cross-platform SSH
-                CommandExecuter.run_cmd("echo 'ready'", ip, "root")
-                log(f"SSH ready on {ip}")
-                return True
-            except Exception:
-                pass
-            
-            time.sleep(5)
-        
-        log(f"Timeout waiting for SSH on {ip}")
-        return False
-    
-    # ========================================
-    # DROPLET CONFIGURATION
-    # ========================================
-    
-    @staticmethod
-    def install_docker(ip: str, user: str = "root") -> bool:
-        """SSH to droplet and install Docker using official convenience script"""
-        log(f"Installing Docker on {ip}...")
-        
-        try:
-            # Wait for cloud-init to complete (Ubuntu's first-boot initialization)
-            log(f"Waiting for cloud-init to complete on {ip}...")
-            
-            # More robust cloud-init wait with retries
-            for attempt in range(3):
-                try:
-                    CommandExecuter.run_cmd(
-                        "cloud-init status --wait || timeout 300 bash -c 'while [ ! -f /var/lib/cloud/instance/boot-finished ]; do sleep 2; done'",
-                        ip, user
-                    )
-                    log(f"Cloud-init completed on {ip}")
-                    break
-                except Exception as e:
-                    if attempt < 2:
-                        log(f"Waiting for cloud-init (attempt {attempt + 1}/3)...")
-                        time.sleep(30)  # Wait 30 seconds before retry
-                    else:
-                        log(f"Cloud-init wait failed after 3 attempts: {e}")
-                        return False
-            
-            # Additional stabilization wait
-            time.sleep(10)
-            
-            # Rest of the Docker installation code...
-            log(f"Waiting for apt locks to clear on {ip}...")
-            wait_commands = [
-                # Wait up to 10 minutes for dpkg lock
-                "timeout 600 bash -c 'while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do echo \"Waiting for dpkg lock...\"; sleep 5; done'",
-                # Wait for apt lists lock
-                "timeout 600 bash -c 'while fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do echo \"Waiting for apt lists lock...\"; sleep 5; done'",
-                # Kill any stuck processes
-                "pkill -9 unattended-upgrade || true",
-                "pkill -9 apt-get || true",
-                # Final wait
-                "sleep 5"
-            ]
-            
-            for cmd in wait_commands:
-                try:
-                    CommandExecuter.run_cmd(cmd, ip, user)
-                except Exception as e:
-                    log(f"Warning during lock wait: {e}")
-            
-            # Use Docker's official installation script
-            commands = [
-                # Download Docker install script
-                "curl -fsSL https://get.docker.com -o get-docker.sh",
-                
-                # Run installation with retry logic
-                "for i in 1 2 3; do sh get-docker.sh && break || sleep 10; done",
-                
-                # Cleanup
-                "rm get-docker.sh",
-                
-                # Start and enable Docker service
-                "systemctl start docker",
-                "systemctl enable docker",
-                
-                # Wait for Docker daemon
-                "timeout 30 bash -c 'until docker ps >/dev/null 2>&1; do echo \"Waiting for Docker daemon...\"; sleep 2; done'",
-                
-                # Verify
-                "docker --version",
-                "docker ps"
-            ]
-            
-            for cmd in commands:
-                CommandExecuter.run_cmd(cmd, ip, user)
-            
-            log(f"Docker installed and verified on {ip}")
-            return True
-            
-        except Exception as e:
-            log(f"Failed to install Docker on {ip}: {e}")
-            return False
 
     @staticmethod
     def update_droplet_tags(droplet_id: int, add_tags: List[str] = None, remove_tags: List[str] = None):
-        """
-        Update tags for a droplet using DigitalOcean's tag resource API.
-        
-        DigitalOcean doesn't support updating tags via PUT/PATCH on droplets (returns 405).
-        Instead, we must use POST/DELETE on /tags/{name}/resources endpoints.
-        
-        Args:
-            droplet_id: The droplet ID  
-            add_tags: Tags to add to the droplet
-            remove_tags: Tags to remove from the droplet
-        """
+        """Update tags for a droplet using DigitalOcean's tag resource API"""
         try:
             droplet_id_str = str(droplet_id)
             
-            # Step 1: Remove old tags first (if any)
+            # Remove old tags
             if remove_tags:
                 for tag in remove_tags:
                     try:
                         resource_data = {
-                            "resources": [
-                                {
-                                    "resource_id": droplet_id_str,
-                                    "resource_type": "droplet"
-                                }
-                            ]
+                            "resources": [{
+                                "resource_id": droplet_id_str,
+                                "resource_type": "droplet"
+                            }]
                         }
                         
-                        # Make the DELETE request - it returns 204 No Content on success
                         url = f"{DOManager.API_BASE}/tags/{tag}/resources"
                         headers = DOManager._get_headers()
                         response = requests.delete(url, headers=headers, json=resource_data, timeout=30)
                         
                         if response.status_code in [204, 200]:
                             log(f"Removed tag '{tag}' from droplet {droplet_id}")
-                        else:
-                            # Try to get error details
-                            try:
-                                error_detail = response.json()
-                                log(f"Warning: Could not remove tag '{tag}': {error_detail}")
-                            except:
-                                log(f"Warning: Could not remove tag '{tag}': HTTP {response.status_code}")
-                                
                     except Exception as e:
-                        log(f"Warning: Could not remove tag '{tag}' from droplet {droplet_id}: {e}")
+                        log(f"Warning: Could not remove tag '{tag}': {e}")
             
-            # Step 2: Ensure all tags we want to add exist in the account
+            # Add new tags
             if add_tags:
                 for tag in add_tags:
                     try:
+                        # Ensure tag exists
                         DOManager._api_request("POST", "/tags", {"name": tag})
-                        log(f"Created tag '{tag}'")
-                    except Exception as e:
-                        # Tag might already exist (422 status), which is fine
-                        error_str = str(e).lower()
-                        if "422" not in error_str and "already exists" not in error_str:
-                            log(f"Warning: Could not create tag '{tag}': {e}")
-            
-            # Step 3: Add new tags to droplet via tag resources endpoint
-            if add_tags:
-                for tag in add_tags:
+                    except:
+                        pass  # Tag might already exist
+                    
                     try:
                         resource_data = {
-                            "resources": [
-                                {
-                                    "resource_id": droplet_id_str,
-                                    "resource_type": "droplet"
-                                }
-                            ]
+                            "resources": [{
+                                "resource_id": droplet_id_str,
+                                "resource_type": "droplet"
+                            }]
                         }
                         
-                        # Make the POST request - it returns 204 No Content on success
                         url = f"{DOManager.API_BASE}/tags/{tag}/resources"
                         headers = DOManager._get_headers()
                         response = requests.post(url, headers=headers, json=resource_data, timeout=30)
                         
-                        if response.status_code in [204, 200]:
+                        if response.status_code in [201, 204]:
                             log(f"Added tag '{tag}' to droplet {droplet_id}")
-                        else:
-                            # Try to get error details
-                            try:
-                                error_detail = response.json()
-                                log(f"Warning: Could not add tag '{tag}': {error_detail}")
-                            except:
-                                log(f"Warning: Could not add tag '{tag}': HTTP {response.status_code}")
-                                
                     except Exception as e:
-                        log(f"Warning: Could not add tag '{tag}' to droplet {droplet_id}: {e}")
-                
+                        log(f"Warning: Could not add tag '{tag}': {e}")
+                        
         except Exception as e:
-            log(f"Error updating tags for droplet {droplet_id}: {e}")
+            log(f"Failed to update tags for droplet {droplet_id}: {e}")

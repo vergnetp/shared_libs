@@ -260,7 +260,7 @@ class HealthMonitor:
             
             try:
                 # Create replacement with same specs (parallel=False for single server)
-                new_droplets = DOManager.create_droplets(
+                new_droplets = DOManager.create_servers(
                     count=1,
                     region=failed_server['zone'],
                     cpu=failed_server['cpu'],
