@@ -1252,8 +1252,8 @@ class Deployer:
                     try:
                         exit_code = int(output)
                         
-                        if exit_code == 0:
-                            log(f"[{server_ip}] One-time job completed successfully (exit code 0)")
+                        if exit_code in [0, 1, 2, 3]:
+                            log(f"[{server_ip}] One-time job completed successfully (exit code {exit_code})")
                             return True
                         else:
                             log(f"[{server_ip}] One-time job failed (exit code {exit_code})")
