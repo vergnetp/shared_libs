@@ -976,66 +976,94 @@ class Deployer:
     # =============================================================================
 
     def _cleanup_empty_servers(self, project: str, env: str):
-        """
-        Find servers with no services deployed and destroy/release them.
-        
-        This implements the cleanup phase of your plan:
-        "Find all IPs where no service is deployed and destroy/put them back to reserve"
-        
-        Args:
-            project: Project name
-            env: Environment name
-        """
-        all_servers = ServerInventory.list_all_servers()
-        container_pattern = f"{project}_{env}_"
-        
-        empty_servers = []
-        
-        for server in all_servers:
-            server_ip = server['ip']
+            """
+            Find servers with no services deployed and destroy/release them.
             
-            try:
-                # Check if this server has any project containers
-                result = CommandExecuter.run_cmd(
-                    f"docker ps --filter 'name={container_pattern}' --format '{{{{.Names}}}}'",
-                    server_ip,
-                    'root'
-                )
+            This implements the cleanup phase of your plan:
+            "Find all IPs where no service is deployed and destroy/put them back to reserve"
+            
+            A server is considered "empty" only if:
+            1. No running containers for this project/env, AND
+            2. No scheduled cron jobs for this project/env (excluding health_monitor)
+            
+            Args:
+                project: Project name
+                env: Environment name
+            """
+            from cron_manager import CronManager
+            
+            all_servers = ServerInventory.list_all_servers()
+            container_pattern = f"{project}_{env}_"
+            
+            empty_servers = []
+            
+            for server in all_servers:
+                server_ip = server['ip']
                 
-                # Extract container names properly
-                if hasattr(result, 'stdout'):
-                    output = result.stdout.strip()
-                else:
-                    output = str(result).strip()
-                
-                # CRITICAL FIX: Filter out garbage lines
-                containers = [
-                    c.strip() 
-                    for c in output.split('\n') 
-                    if c.strip() and c.strip().startswith(container_pattern)
-                ]
-                
-                if not containers:
-                    empty_servers.append(server_ip)
-                    log(f"Server {server_ip} has no {project}/{env} services")
+                try:
+                    # Check 1: Running containers
+                    result = CommandExecuter.run_cmd(
+                        f"docker ps --filter 'name={container_pattern}' --format '{{{{.Names}}}}'",
+                        server_ip,
+                        'root'
+                    )
                     
-            except Exception as e:
-                log(f"Could not check {server_ip}: {e}")
-                continue
-        
-        if empty_servers:
-            # Check if we should destroy or just move to reserve
-            # Use keep_reserve setting from config
-            destroy_empty = not self.deployment_configurer.raw_config.get('project', {}).get('keep_reserve', False)
+                    # Extract container names properly
+                    if hasattr(result, 'stdout'):
+                        output = result.stdout.strip()
+                    else:
+                        output = str(result).strip()
+                    
+                    # CRITICAL FIX: Filter out garbage lines
+                    containers = [
+                        c.strip() 
+                        for c in output.split('\n') 
+                        if c.strip() and c.strip().startswith(container_pattern)
+                    ]
+                    
+                    if containers:
+                        log(f"Server {server_ip} has {len(containers)} running container(s)")
+                        continue  # Server has containers, keep it
+                    
+                    # Check 2: Scheduled cron jobs (excluding health_monitor)
+                    cron_jobs = CronManager.list_managed_cron_jobs(
+                        project=project,
+                        env=env,
+                        server_ip=server_ip,
+                        user='root'
+                    )
+                    
+                    # Filter out health_monitor jobs (those are system-level, not project-specific)
+                    project_cron_jobs = [
+                        job for job in cron_jobs 
+                        if 'health_monitor' not in job.lower()
+                    ]
+                    
+                    if project_cron_jobs:
+                        log(f"Server {server_ip} has {len(project_cron_jobs)} scheduled job(s) - keeping")
+                        continue  # Server has scheduled jobs, keep it
+                    
+                    # Server is truly empty
+                    empty_servers.append(server_ip)
+                    log(f"Server {server_ip} has no {project}/{env} services (containers or cron jobs)")
+                        
+                except Exception as e:
+                    log(f"Could not check {server_ip}: {e}")
+                    continue
             
-            if destroy_empty:
-                log(f"Destroying {len(empty_servers)} empty servers: {empty_servers}")
-                ServerInventory.release_servers(empty_servers, destroy=True)
+            if empty_servers:
+                # Check if we should destroy or just move to reserve
+                # Use keep_reserve setting from config
+                destroy_empty = not self.deployment_configurer.raw_config.get('project', {}).get('keep_reserve', False)
+                
+                if destroy_empty:
+                    log(f"Destroying {len(empty_servers)} empty servers: {empty_servers}")
+                    ServerInventory.release_servers(empty_servers, destroy=True)
+                else:
+                    log(f"Returning {len(empty_servers)} empty servers to reserve pool: {empty_servers}")
+                    ServerInventory.release_servers(empty_servers, destroy=False)
             else:
-                log(f"Returning {len(empty_servers)} empty servers to reserve pool: {empty_servers}")
-                ServerInventory.release_servers(empty_servers, destroy=False)
-        else:
-            log("No empty servers found")
+                log("No empty servers found")
 
     def _get_servers_running_service(self, project: str, env: str, service_name: str) -> List[str]:
         """
