@@ -37,7 +37,7 @@ def check_deployment_status(project="new_project", env="uat", zone=None):
     
     # Get servers from ServerInventory (source of truth)
     servers = ServerInventory.get_servers(
-        deployment_status=ServerInventory.STATUS_GREEN,
+        deployment_status=ServerInventory.STATUS_ACTIVE,
         zone=zone
     )
     
