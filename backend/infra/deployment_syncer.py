@@ -3,6 +3,7 @@ from execute_cmd import CommandExecuter
 from execute_docker import DockerExecuter
 from pathlib import Path
 from logger import Logger
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import platform
 import os
 
@@ -19,8 +20,8 @@ class DeploymentSyncer:
     PATH GENERATION: Handled by PathResolver (see path_resolver.py).
     
     This class is ONLY for:
-    - Pushing config/secrets/files TO servers
-    - Pulling data/logs/backups FROM servers
+    - Pushing config/secrets/files TO servers (PARALLEL)
+    - Pulling data/logs/backups FROM servers (PARALLEL)
     - Bidirectional sync operations
     
     IMPORTANT: Volume mount generation has been moved to PathResolver.
@@ -75,8 +76,8 @@ class DeploymentSyncer:
     @staticmethod
     def push(project: str, env: str, targets: Union[str, List[str]] = None) -> bool:
         """
-        Push local content (config, secrets, files) to remote servers - OPTIMIZED.
-        Single archive, single transfer per server.
+        Push local content (config, secrets, files) to remote servers - OPTIMIZED & PARALLEL.
+        Single archive, parallel transfer to all servers.
         
         Args:
             project: Project name
@@ -149,9 +150,11 @@ class DeploymentSyncer:
         archive_size_mb = len(tar_data) / 1024 / 1024
         log(f"Archive created: {archive_size_mb:.2f} MB")
         
-        # Push to each server
-        success = True
-        for server_ip in remote_servers:
+        # ========== OPTIMIZATION: Push to all servers in PARALLEL ==========
+        log(f"Pushing to {len(remote_servers)} servers: {remote_servers}")
+        
+        def push_to_server(server_ip):
+            """Push archive to a single server"""
             try:
                 log(f"Pushing to {server_ip}...")
                 
@@ -172,10 +175,21 @@ class DeploymentSyncer:
                 )
                 
                 log(f"  ✓ Successfully pushed to {server_ip}")
+                return (server_ip, True, None)
                 
             except Exception as e:
                 log(f"  ✗ Failed to push to {server_ip}: {e}")
-                success = False
+                return (server_ip, False, str(e))
+        
+        # Push to all servers in parallel
+        success = True
+        with ThreadPoolExecutor(max_workers=min(len(remote_servers), 5)) as executor:
+            futures = [executor.submit(push_to_server, ip) for ip in remote_servers]
+            
+            for future in as_completed(futures):
+                server_ip, server_success, error = future.result()
+                if not server_success:
+                    success = False
         
         Logger.end()
         log(f"Push {'complete' if success else 'completed with errors'}")
@@ -184,7 +198,7 @@ class DeploymentSyncer:
     @staticmethod  
     def pull(project: str, env: str, targets: Union[str, List[str]] = None) -> bool:
         """
-        Pull generated content (data, logs, backups, monitoring) from remote servers/containers.
+        Pull generated content (data, logs, backups, monitoring) from remote servers/containers - PARALLEL.
         
         Args:
             project: Project name
@@ -197,16 +211,29 @@ class DeploymentSyncer:
         log(f"Pulling content for {project}/{env}")
         Logger.start()
         
+        # ========== OPTIMIZATION: Pull all types in PARALLEL ==========
+        def pull_sync_type(sync_type):
+            """Pull a single sync type"""
+            try:
+                DeploymentSyncer._sync_type(project, env, sync_type, targets, direction='pull')
+                return (sync_type, True, None)
+            except Exception as e:
+                return (sync_type, False, str(e))
+        
         success = True
         pull_types = ['data', 'logs', 'backups', 'monitoring']
         
-        for sync_type in pull_types:
-            try:
-                DeploymentSyncer._sync_type(project, env, sync_type, targets, direction='pull')
-                log(f"  ✓ Pulled {sync_type}")
-            except Exception as e:
-                log(f"  ✗ Failed to pull {sync_type}: {e}")
-                success = False
+        # Pull all types in parallel
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = [executor.submit(pull_sync_type, t) for t in pull_types]
+            
+            for future in as_completed(futures):
+                sync_type, type_success, error = future.result()
+                if type_success:
+                    log(f"  ✓ Pulled {sync_type}")
+                else:
+                    log(f"  ✗ Failed to pull {sync_type}: {error}")
+                    success = False
         
         Logger.end()
         log("Pull complete" if success else "Pull completed with errors")
@@ -288,6 +315,29 @@ class DeploymentSyncer:
         # Create local directory
         local_path.mkdir(parents=True, exist_ok=True)
         
+        # ========== OPTIMIZATION: Check if volume exists and has content ==========
+        try:
+            check_cmd = f'docker volume inspect {volume_name}'
+            CommandExecuter.run_cmd(check_cmd)
+            
+            # Quick check if volume is empty
+            check_content = f'docker run --rm -v {volume_name}:/check alpine sh -c "ls -A /check 2>/dev/null | wc -l"'
+            result = CommandExecuter.run_cmd(check_content)
+            file_count_str = result.stdout.strip() if hasattr(result, 'stdout') else str(result).strip()
+            
+            try:
+                file_count = int(file_count_str)
+            except (ValueError, AttributeError):
+                file_count = 0
+            
+            if file_count == 0:
+                log(f"Skipping {sync_type} - volume {volume_name} is empty")
+                return
+                
+        except Exception:
+            log(f"Skipping {sync_type} - volume {volume_name} does not exist")
+            return
+        
         # Handle both global volumes and service-specific volumes
         if '_' in volume_name and len(volume_name.split('_')) >= 3:
             # Service-specific volumes like "project_env_logs_service"
@@ -301,7 +351,7 @@ class DeploymentSyncer:
 
     @staticmethod
     def _sync_service_volumes(project: str, env: str, base_local_path: Path):
-        """Sync all service-specific volumes for a type (e.g., all service logs)"""
+        """Sync all service-specific volumes for a type (e.g., all service logs) - PARALLEL"""
         volume_prefix = DeploymentSyncer.get_volume_prefix(project, env)
         
         # Find all volumes matching our pattern
@@ -313,20 +363,37 @@ class DeploymentSyncer:
         # Find service-specific volumes for this type
         service_volumes = [v for v in all_volumes if v.startswith(f"{volume_prefix}_{volume_type}_")]
         
-        for volume_name in service_volumes:
-            # Extract service name from volume name
-            # e.g., "project_env_logs_worker" -> "worker"
-            parts = volume_name.split('_')
-            if len(parts) >= 4 and parts[-2] == volume_type:
-                service_name = parts[-1]
-                
-                # Create service directory directly under the type directory
-                # e.g., C:/local/project/env/logs/worker (not logs/worker/logs)
-                service_local_path = base_local_path / service_name
-                service_local_path.mkdir(parents=True, exist_ok=True)
-                
-                # Copy directly from volume to service directory
-                DeploymentSyncer._copy_from_docker_volume(volume_name, service_local_path)
+        if not service_volumes:
+            return
+        
+        # ========== OPTIMIZATION: Pull service volumes in PARALLEL ==========
+        def pull_service_volume(volume_name):
+            """Pull volume for a single service"""
+            try:
+                # Extract service name from volume name
+                # e.g., "project_env_logs_worker" -> "worker"
+                parts = volume_name.split('_')
+                if len(parts) >= 4:
+                    service_name = '_'.join(parts[3:])  # Handle service names with underscores
+                    
+                    # Create service directory directly under the type directory
+                    service_local_path = base_local_path / service_name
+                    service_local_path.mkdir(parents=True, exist_ok=True)
+                    
+                    # Copy directly from volume to service directory
+                    DeploymentSyncer._copy_from_docker_volume(volume_name, service_local_path)
+                    return (service_name, True)
+            except Exception as e:
+                log(f"Failed to pull {volume_name}: {e}")
+                return (volume_name, False)
+            return (volume_name, False)
+        
+        with ThreadPoolExecutor(max_workers=min(len(service_volumes), 4)) as executor:
+            futures = [executor.submit(pull_service_volume, vol) for vol in service_volumes]
+            for future in as_completed(futures):
+                service_name, pulled = future.result()
+                if pulled:
+                    log(f"Pulled {volume_type} for {service_name}")
 
     @staticmethod
     def _copy_from_docker_volume(volume_name: str, local_path: Path):

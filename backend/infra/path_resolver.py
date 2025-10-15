@@ -256,78 +256,65 @@ class PathResolver:
             
             return f"{host_path}:{container_path}{ro_flag}"
     
-    @staticmethod
-    def ensure_host_directories(
-        project: str,
-        env: str,
-        service: str,
-        server_ip: str,
-        user: str = "root"
-    ):
-        """
-        Ensure all required host directories exist for a service.
+    def ensure_host_directories(project, env, service, server_ip, user="root"):
+        from concurrent.futures import ThreadPoolExecutor, as_completed
         
-        Creates directories for config, secrets, files that are mounted as host paths.
-        Docker volumes for data/logs are created separately.
-        
-        Args:
-            project: Project name
-            env: Environment name
-            service: Service name
-            server_ip: Target server IP
-            user: SSH user for remote servers
-        """
-        # Only create directories for host-mounted paths (not Docker volumes)
         host_mount_types = ["config", "secrets", "files"]
         
-        for path_type in host_mount_types:
-            host_path = PathResolver.get_volume_host_path(
-                project, env, service, path_type, server_ip
-            )
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            futures = {}
             
-            try:
-                DockerExecuter.mkdir_on_server(host_path, server_ip, user)
-                log(f"Ensured directory exists: {host_path}")
-            except Exception as e:
-                log(f"Warning: Could not create directory {host_path}: {e}")
+            for path_type in host_mount_types:
+                host_path = PathResolver.get_volume_host_path(
+                    project, env, service, path_type, server_ip
+                )
+                future = executor.submit(
+                    DockerExecuter.mkdir_on_server, 
+                    host_path, server_ip, user
+                )
+                futures[future] = host_path
+            
+            # Log as they complete
+            for future in as_completed(futures):
+                host_path = futures[future]
+                try:
+                    future.result()
+                    log(f"Ensured directory exists: {host_path}")
+                except Exception as e:
+                    log(f"Warning: Could not create directory {host_path}: {e}")
     
-    @staticmethod
-    def ensure_docker_volumes(
-        project: str,
-        env: str,
-        service: str,
-        server_ip: str = "localhost",
-        user: str = "root"
-    ):
-        """
-        Ensure required Docker volumes exist for a service.
+    def ensure_docker_volumes(project, env, service, server_ip="localhost", user="root"):
+        from concurrent.futures import ThreadPoolExecutor, as_completed
         
-        Creates named volumes for data/logs that will be used by containers.
-        
-        Args:
-            project: Project name
-            env: Environment name
-            service: Service name
-            server_ip: Target server IP
-            user: SSH user for remote servers
-        """
-        # Only create Docker volumes for these types
         docker_volume_types = ["data", "logs", "backups", "monitoring"]
         
-        for path_type in docker_volume_types:
+        def create_volume_if_needed(path_type):
             volume_name = PathResolver.get_docker_volume_name(
                 project, env, path_type, service
             )
             
-            try:
-                # Check if volume exists
-                if not DockerExecuter.volume_exists(volume_name, server_ip, user):
-                    DockerExecuter.create_volume(volume_name, server_ip, user)
-                    log(f"Created Docker volume: {volume_name}")
-                else:
-                    log(f"Docker volume already exists: {volume_name}")
-            except Exception as e:
-                log(f"Warning: Could not create Docker volume {volume_name}: {e}")
+            if not DockerExecuter.volume_exists(volume_name, server_ip, user):
+                DockerExecuter.create_volume(volume_name, server_ip, user)
+                return (volume_name, "created")
+            else:
+                return (volume_name, "exists")
+        
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = {
+                executor.submit(create_volume_if_needed, path_type): path_type
+                for path_type in docker_volume_types
+            }
+            
+            for future in as_completed(futures):
+                path_type = futures[future]
+                try:
+                    volume_name, status = future.result()
+                    if status == "created":
+                        log(f"Created Docker volume: {volume_name}")
+                    else:
+                        log(f"Docker volume already exists: {volume_name}")
+                except Exception as e:
+                    log(f"Warning: Could not create Docker volume for {path_type}: {e}")
     
     @staticmethod
     def ensure_nginx_cert_directories(

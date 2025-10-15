@@ -1120,14 +1120,22 @@ class Deployer:
                 # Store container name for rollback tracking
                 result['container_name'] = new_name
                 
-                # Create directories for volumes
-                PathResolver.ensure_host_directories(project, env, service_name, target_ip, "root")
-                log(f"[{target_ip}] Directories ready")
-                
-                # Create Docker volumes
-                PathResolver.ensure_docker_volumes(project, env, service_name, target_ip, "root")
-                log(f"[{target_ip}] Volumes ready")
-                
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    dir_future = executor.submit(
+                        PathResolver.ensure_host_directories, 
+                        project, env, service_name, target_ip, "root"
+                    )
+                    vol_future = executor.submit(
+                        PathResolver.ensure_docker_volumes, 
+                        project, env, service_name, target_ip, "root"
+                    )
+                    
+                    # Wait for both to complete
+                    dir_future.result()
+                    vol_future.result()
+
+                log(f"[{target_ip}] Directories and volumes ready")
+                                
                 # Pull image if remote
                 if service_config.get("image"):
                     image = service_config["image"]
@@ -1226,7 +1234,7 @@ class Deployer:
             if not container_ports:
                 # No ports - likely a one-time job
                 log(f"[{server_ip}] No ports detected - checking container status")
-                time.sleep(5)
+                time.sleep(0.5)
                 
                 try:
                     # First check if container is still running
@@ -1260,7 +1268,7 @@ class Deployer:
             else:
                 # TCP service - check if container is running
                 log(f"[{server_ip}] TCP service - verifying container is running")
-                time.sleep(5)
+                time.sleep(1)
                 
                 try:
                     result = CommandExecuter.run_cmd(
