@@ -92,7 +92,7 @@ class CronManager:
         
         # Build complete docker command
         docker_cmd = " ".join(f'"{part}"' if " " in str(part) else str(part) for part in docker_cmd_parts)
-        
+    
         # Create cron entry with logging
         log_file = f"/var/log/cron_{project}_{env}_{service_name}.log"
         cron_entry = f"{schedule} {docker_cmd} >> {log_file} 2>&1"
@@ -116,9 +116,12 @@ class CronManager:
                 volumes = volume_config
         else:
             # Use auto-generated volumes from PathResolver
+            # Don't auto-create dirs since they're already created in parallel by install_scheduled_service
             volumes = PathResolver.generate_all_volume_mounts(
                 project, env, service_name, server_ip,
-                use_docker_volumes=True, user=user
+                use_docker_volumes=True, 
+                user=user,
+                auto_create_dirs=False  # Already created in parallel
             )
         
         return volumes

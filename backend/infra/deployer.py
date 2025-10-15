@@ -1051,8 +1051,18 @@ class Deployer:
                 
                 log(f"[{svc_name}] Installing on {len(target_servers)} servers: {target_servers}")
                 
-                for server_ip in target_servers:
-                    self.install_scheduled_service(project_name, env, svc_name, config, server_ip)
+                with ThreadPoolExecutor(max_workers=min(len(target_servers), 5)) as executor:
+                    futures = []
+                    for server_ip in target_servers:
+                        future = executor.submit(
+                            self.install_scheduled_service,
+                            project_name, env or 'dev', svc_name, config, server_ip
+                        )
+                        futures.append(future)
+                    
+                    # Wait for all to complete
+                    for future in as_completed(futures):
+                        future.result()  # This will raise any exceptions that occurred
                 
                 result['success'] = True
                 
@@ -1857,53 +1867,70 @@ class Deployer:
             return False
 
     def install_scheduled_service(
-            self,
-            project_name: str,
-            env: str,
-            service_name: str,
-            service_config: Dict[str, Any],
-            server_ip: str = 'localhost'
-        ):
-            """Install a scheduled service using CronManager"""
-            schedule = service_config.get("schedule")
-            
-            if not schedule or not CronManager.validate_cron_schedule(schedule):
-                log(f"Invalid schedule for {service_name}: {schedule}")
-                return False
-            
-            # Get image
-            if service_config.get("image"):
-                image = service_config["image"]
-            else:
-                docker_hub_user = self.deployment_configurer.get_docker_hub_user()
-                version = self._get_version()
-                image = DeploymentNaming.get_image_name(
-                    docker_hub_user, project_name, env, service_name, version
+                self,
+                project_name: str,
+                env: str,
+                service_name: str,
+                service_config: Dict[str, Any],
+                server_ip: str = 'localhost'
+            ):
+                """Install a scheduled service using CronManager"""
+                schedule = service_config.get("schedule")
+                
+                if not schedule or not CronManager.validate_cron_schedule(schedule):
+                    log(f"Invalid schedule for {service_name}: {schedule}")
+                    return False
+                
+                # Get image
+                if service_config.get("image"):
+                    image = service_config["image"]
+                else:
+                    docker_hub_user = self.deployment_configurer.get_docker_hub_user()
+                    version = self._get_version()
+                    image = DeploymentNaming.get_image_name(
+                        docker_hub_user, project_name, env, service_name, version
+                    )
+                
+                # Pull image if remote
+                if server_ip != 'localhost':
+                    log(f"Pulling image {image} to {server_ip}...")
+                    DockerExecuter.pull_image(image, server_ip, "root")
+                
+                # Parallel directory and volume creation (like normal services)
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    dir_future = executor.submit(
+                        PathResolver.ensure_host_directories,
+                        project_name, env, service_name, server_ip, "root"
+                    )
+                    vol_future = executor.submit(
+                        PathResolver.ensure_docker_volumes,
+                        project_name, env, service_name, server_ip, "root"
+                    )
+                    
+                    # Wait for both to complete
+                    dir_future.result()
+                    vol_future.result()
+                
+                log(f"[{server_ip}] Directories and volumes ready")
+                
+                # Install via CronManager directly
+                success = CronManager.install_cron_job(
+                    project=project_name,
+                    env=env,
+                    service_name=service_name,
+                    service_config=service_config,
+                    docker_hub_user=self.deployment_configurer.get_docker_hub_user(),
+                    version=self._get_version(),
+                    server_ip=server_ip,
+                    user="root"
                 )
-            
-            # Pull image if remote
-            if server_ip != 'localhost':
-                log(f"Pulling image {image} to {server_ip}...")
-                DockerExecuter.pull_image(image, server_ip, "root")
-            
-            # Install via CronManager directly
-            success = CronManager.install_cron_job(
-                project=project_name,
-                env=env,
-                service_name=service_name,
-                service_config=service_config,
-                docker_hub_user=self.deployment_configurer.get_docker_hub_user(),
-                version=self._get_version(),
-                server_ip=server_ip,
-                user="root"
-            )
-            
-            if success:
-                log(f"Installed scheduled service {service_name} on {server_ip}")
-            else:
-                log(f"Failed to install scheduled service {service_name} on {server_ip}")
-            
-            return success
+                
+                if success:
+                    log(f"Installed scheduled service {service_name} on {server_ip}")
+                else:
+                    log(f"Failed to install scheduled service {service_name} on {server_ip}")
+                
+                return success
 
     def wait_for_health_check(
         self,

@@ -4,13 +4,21 @@
       "postgres": {
         "current": {
           "servers": [
-            "138.68.140.111"
+            "134.209.183.1"
           ],
           "container_name": "new_project_uat_postgres",
           "version": "latest",
-          "deployed_at": "2025-10-15T21:57:23.090833"
+          "deployed_at": "2025-10-15T22:43:45.751486"
         },
         "history": [
+          {
+            "servers": [
+              "134.209.183.1"
+            ],
+            "container_name": "new_project_uat_postgres",
+            "version": "latest",
+            "deployed_at": "2025-10-15T22:43:45.751486"
+          },
           {
             "servers": [
               "138.68.140.111"
@@ -64,13 +72,21 @@
       "redis": {
         "current": {
           "servers": [
-            "138.68.140.111"
+            "134.209.183.1"
           ],
           "container_name": "new_project_uat_redis",
           "version": "latest",
-          "deployed_at": "2025-10-15T21:57:12.785523"
+          "deployed_at": "2025-10-15T22:43:38.401146"
         },
         "history": [
+          {
+            "servers": [
+              "134.209.183.1"
+            ],
+            "container_name": "new_project_uat_redis",
+            "version": "latest",
+            "deployed_at": "2025-10-15T22:43:38.401146"
+          },
           {
             "servers": [
               "138.68.140.111"
@@ -124,14 +140,23 @@
       "job": {
         "current": {
           "servers": [
-            "138.68.140.111",
-            "165.22.114.102"
+            "134.209.183.1",
+            "138.68.186.62"
           ],
           "container_name": "new_project_uat_job",
           "version": "latest",
-          "deployed_at": "2025-10-15T21:58:39.412267"
+          "deployed_at": "2025-10-15T22:44:49.892384"
         },
         "history": [
+          {
+            "servers": [
+              "134.209.183.1",
+              "138.68.186.62"
+            ],
+            "container_name": "new_project_uat_job",
+            "version": "latest",
+            "deployed_at": "2025-10-15T22:44:49.892384"
+          },
           {
             "servers": [
               "138.68.140.111",
