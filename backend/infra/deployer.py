@@ -3153,29 +3153,170 @@ class Deployer:
         backup: Dict[str, Any],
         server_ip: str
     ) -> bool:
-        """Restore Postgres from backup dump"""
-        try:
-            # Use pg_restore to restore the dump
-            volume_name = PathResolver.get_docker_volume_name(project, env, "data", service)
+        """
+        Restore Postgres from backup dump.
+        
+        Process:
+        1. Upload backup file to server
+        2. Stop postgres container
+        3. Create temp restore container with data volume
+        4. Run pg_restore
+        5. Cleanup temp container
+        
+        Args:
+            project: Project name
+            env: Environment name
+            service: Service name (e.g., "postgres")
+            backup: Backup info dict with 'path' and 'filename'
+            server_ip: Target server IP
             
-            # Copy backup to server
-            # Push backup file to server
-            # Run pg_restore in temporary container
+        Returns:
+            True if successful
+        """
+        try:
+            from execute_cmd import CommandExecuter
+            from execute_docker import DockerExecuter
+            from path_resolver import PathResolver
+            from deployment_naming import DeploymentNaming
             
             log(f"Restoring Postgres backup on {server_ip}...")
             
-            # This is complex - need to:
-            # 1. Upload backup file to server
-            # 2. Create temp container with data volume
-            # 3. Run pg_restore
-            # 4. Cleanup
+            # Get service config for credentials
+            services = self.deployment_configurer.get_services(env)
+            service_config = services[service]
+            env_vars = service_config.get("env_vars", {})
             
-            # TODO: Implement detailed restore logic
-            log("Postgres restore: Implementation needed")
+            # Get container and volume names
+            container_name = DeploymentNaming.get_container_name(project, env, service)
+            data_volume = PathResolver.get_docker_volume_name(project, env, "data", service)
+            backups_volume = PathResolver.get_docker_volume_name(project, env, "backups", service)
+            
+            # Get database credentials
+            db_name = env_vars.get("POSTGRES_DB")
+            db_user = env_vars.get("POSTGRES_USER")
+            
+            if not db_name or not db_user:
+                log(f"Error: Missing database credentials in service config")
+                return False
+            
+            # Step 1: Upload backup to server's backup volume
+            log(f"  Uploading backup file: {backup['filename']}")
+            backup_file_path = backup['path']
+            
+            # Read backup file locally
+            with open(backup_file_path, 'rb') as f:
+                backup_data = f.read()
+            
+            # Write to server's backup volume using a temp container
+            temp_upload_container = f"restore_upload_{int(time.time())}"
+            upload_cmd = (
+                f"docker run --rm -i --name {temp_upload_container} "
+                f"-v {backups_volume}:/backups "
+                f"alpine:latest sh -c 'cat > /backups/{backup['filename']}'"
+            )
+            
+            CommandExecuter.run_cmd_with_stdin(
+                upload_cmd, 
+                backup_data, 
+                server_ip, 
+                "root"
+            )
+            log(f"  ✓ Backup uploaded to server")
+            
+            # Step 2: Stop postgres container
+            log(f"  Stopping {service} container...")
+            try:
+                DockerExecuter.stop_container(container_name, server_ip, "root")
+                log(f"  ✓ Container stopped")
+            except Exception as e:
+                log(f"  Warning: Could not stop container (may already be stopped): {e}")
+            
+            # Step 3: Drop and recreate database using temp container
+            log(f"  Recreating database...")
+            
+            # Get network name for postgres connection
+            network = DeploymentNaming.get_network_name(project, env)
+            
+            # Get password file path
+            secrets_volume = PathResolver.get_volume_host_path(
+                project, env, service, "secrets", server_ip
+            )
+            password_file = f"{secrets_volume}/db_password"
+            
+            # Start postgres temporarily to drop/create DB
+            temp_pg_container = f"restore_pg_{int(time.time())}"
+            start_pg_cmd = (
+                f"docker run -d --name {temp_pg_container} "
+                f"-v {data_volume}:/var/lib/postgresql/data "
+                f"-v {secrets_volume}:/run/secrets:ro "
+                f"-e POSTGRES_DB={db_name} "
+                f"-e POSTGRES_USER={db_user} "
+                f"-e POSTGRES_PASSWORD_FILE=/run/secrets/db_password "
+                f"--network {network} "
+                f"postgres:latest"
+            )
+            CommandExecuter.run_cmd(start_pg_cmd, server_ip, "root")
+            
+            # Wait for postgres to be ready
+            log(f"  Waiting for Postgres to start...")
+            time.sleep(5)
+            
+            # Read password
+            password_read_cmd = f"cat {password_file}"
+            db_password = CommandExecuter.run_cmd(password_read_cmd, server_ip, "root").strip()
+            
+            # Drop connections and recreate database
+            drop_db_cmd = (
+                f"docker exec {temp_pg_container} psql "
+                f"-U {db_user} -d postgres "
+                f"-c \"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{db_name}' AND pid <> pg_backend_pid();\""
+            )
+            CommandExecuter.run_cmd(drop_db_cmd, server_ip, "root")
+            
+            drop_cmd = (
+                f"docker exec {temp_pg_container} psql "
+                f"-U {db_user} -d postgres "
+                f"-c 'DROP DATABASE IF EXISTS {db_name};'"
+            )
+            CommandExecuter.run_cmd(drop_cmd, server_ip, "root")
+            
+            create_cmd = (
+                f"docker exec {temp_pg_container} psql "
+                f"-U {db_user} -d postgres "
+                f"-c 'CREATE DATABASE {db_name};'"
+            )
+            CommandExecuter.run_cmd(create_cmd, server_ip, "root")
+            log(f"  ✓ Database recreated")
+            
+            # Step 4: Run pg_restore
+            log(f"  Restoring backup data...")
+            
+            # Create restore container with access to both data and backups volumes
+            temp_restore_container = f"restore_exec_{int(time.time())}"
+            restore_cmd = (
+                f"docker run --rm --name {temp_restore_container} "
+                f"-v {backups_volume}:/backups:ro "
+                f"--network {network} "
+                f"-e PGPASSWORD={db_password} "
+                f"postgres:latest "
+                f"pg_restore -h {temp_pg_container} -U {db_user} -d {db_name} "
+                f"--no-owner --no-acl /backups/{backup['filename']}"
+            )
+            
+            CommandExecuter.run_cmd(restore_cmd, server_ip, "root")
+            log(f"  ✓ Backup restored successfully")
+            
+            # Step 5: Cleanup temp postgres container
+            DockerExecuter.stop_container(temp_pg_container, server_ip, "root")
+            DockerExecuter.remove_container(temp_pg_container, server_ip, "root")
+            log(f"  ✓ Cleanup complete")
+            
             return True
             
         except Exception as e:
             log(f"Failed to restore Postgres: {e}")
+            import traceback
+            log(traceback.format_exc())
             return False
     
     def _rollback_redis(
@@ -3186,17 +3327,104 @@ class Deployer:
         backup: Dict[str, Any],
         server_ip: str
     ) -> bool:
-        """Restore Redis from backup RDB"""
+        """
+        Restore Redis from backup RDB.
+        
+        Process:
+        1. Upload backup RDB to server
+        2. Stop redis container
+        3. Copy RDB to data volume
+        4. Start redis (will load from RDB)
+        
+        Args:
+            project: Project name
+            env: Environment name
+            service: Service name (e.g., "redis")
+            backup: Backup info dict with 'path' and 'filename'
+            server_ip: Target server IP
+            
+        Returns:
+            True if successful
+        """
         try:
-            # Copy backup RDB to data volume
-            volume_name = PathResolver.get_docker_volume_name(project, env, "data", service)
+            from execute_cmd import CommandExecuter
+            from execute_docker import DockerExecuter
+            from path_resolver import PathResolver
+            from deployment_naming import DeploymentNaming
             
             log(f"Restoring Redis backup on {server_ip}...")
             
-            # TODO: Implement detailed restore logic
-            log("Redis restore: Implementation needed")
+            # Get container and volume names
+            container_name = DeploymentNaming.get_container_name(project, env, service)
+            data_volume = PathResolver.get_docker_volume_name(project, env, "data", service)
+            backups_volume = PathResolver.get_docker_volume_name(project, env, "backups", service)
+            
+            # Step 1: Upload backup to server's backup volume
+            log(f"  Uploading backup file: {backup['filename']}")
+            backup_file_path = backup['path']
+            
+            # Read backup file locally
+            with open(backup_file_path, 'rb') as f:
+                backup_data = f.read()
+            
+            # Write to server's backup volume using a temp container
+            temp_upload_container = f"restore_upload_{int(time.time())}"
+            upload_cmd = (
+                f"docker run --rm -i --name {temp_upload_container} "
+                f"-v {backups_volume}:/backups "
+                f"alpine:latest sh -c 'cat > /backups/{backup['filename']}'"
+            )
+            
+            CommandExecuter.run_cmd_with_stdin(
+                upload_cmd, 
+                backup_data, 
+                server_ip, 
+                "root"
+            )
+            log(f"  ✓ Backup uploaded to server")
+            
+            # Step 2: Stop redis container
+            log(f"  Stopping {service} container...")
+            try:
+                DockerExecuter.stop_container(container_name, server_ip, "root")
+                log(f"  ✓ Container stopped")
+            except Exception as e:
+                log(f"  Warning: Could not stop container (may already be stopped): {e}")
+            
+            # Step 3: Copy RDB from backups volume to data volume
+            log(f"  Copying backup to data volume...")
+            
+            temp_copy_container = f"restore_copy_{int(time.time())}"
+            copy_cmd = (
+                f"docker run --rm --name {temp_copy_container} "
+                f"-v {backups_volume}:/backups:ro "
+                f"-v {data_volume}:/data "
+                f"alpine:latest "
+                f"cp /backups/{backup['filename']} /data/dump.rdb"
+            )
+            
+            CommandExecuter.run_cmd(copy_cmd, server_ip, "root")
+            log(f"  ✓ Backup copied to data volume")
+            
+            # Step 4: Set proper permissions on RDB file
+            log(f"  Setting file permissions...")
+            
+            perms_cmd = (
+                f"docker run --rm "
+                f"-v {data_volume}:/data "
+                f"alpine:latest "
+                f"chmod 644 /data/dump.rdb"
+            )
+            
+            CommandExecuter.run_cmd(perms_cmd, server_ip, "root")
+            log(f"  ✓ Permissions set")
+            
+            log(f"  ✓ Redis restore complete (will load on next start)")
+            
             return True
             
         except Exception as e:
             log(f"Failed to restore Redis: {e}")
+            import traceback
+            log(traceback.format_exc())
             return False
