@@ -603,7 +603,7 @@ class Deployer:
                     log(f"Deployment failed in startup_order {order} - aborting")
                     break
             
-            self._deploy_backups_for_startup_order(env, order, services)
+            self._deploy_backups_for_startup_order(env, services)
         
         if not all_success:
             Logger.end()
@@ -2732,85 +2732,102 @@ class Deployer:
         return deployed_servers
     
     def _deploy_backup_service(
-        self,
-        project: str,
-        env: str,
-        parent_service_name: str,
-        parent_service_config: Dict[str, Any],
-        deployed_servers: List[str]
-    ):
-        """
-        Deploy backup service to the same servers as the parent service.
-        This ensures backup can connect via Docker DNS (container name).
-        
-        Args:
-            project: Project name
-            env: Environment name
-            parent_service_name: Parent service name (e.g., "postgres")
-            parent_service_config: Parent service configuration
-            deployed_servers: Exact servers where parent is running
-        """       
-        backup_service_name = f"{parent_service_name}_backup"
-        
-        # Generate backup service config for first server (for path resolution)
-        backup_service_config = BackupManager.generate_backup_service_config(
-            project, env, parent_service_name, parent_service_config, deployed_servers[0]
-        )
-        
-        if not backup_service_config:
-            log(f"[{parent_service_name}] (backup) Could not generate backup config")
-            return
-        
-        # Build image first (only once)
-        log(f"[{parent_service_name}] (backup) Building backup image...")
-        docker_hub_user = self.deployment_configurer.get_docker_hub_user()
-        version = self._get_version()
-        
-        # Generate Dockerfile
-        dockerfile_content = backup_service_config.get("dockerfile_content")
-        if dockerfile_content:
-            temp_dockerfile = f"config/Dockerfile.{project}-{env}-{backup_service_name}.tmp"
-            self._write_dockerfile(temp_dockerfile, dockerfile_content)
+            self,
+            project: str,
+            env: str,
+            parent_service_name: str,
+            parent_service_config: Dict[str, Any],
+            deployed_servers: List[str]
+        ):
+            """
+            Deploy backup service to the same servers as the parent service.
+            This ensures backup can connect via Docker DNS (container name).
             
-            # Build image
-            image_name = DeploymentNaming.get_image_name(
-                docker_hub_user, project, env, backup_service_name, version
+            Args:
+                project: Project name
+                env: Environment name
+                parent_service_name: Parent service name (e.g., "postgres")
+                parent_service_config: Parent service configuration
+                deployed_servers: Exact servers where parent is running
+            """       
+            backup_service_name = f"{parent_service_name}_backup"
+            
+            # Generate backup service config for first server (for path resolution)
+            backup_service_config = BackupManager.generate_backup_service_config(
+                project, env, parent_service_name, parent_service_config, deployed_servers[0]
             )
             
-            self._build_and_push_image(
-                backup_service_name,
-                temp_dockerfile,
-                backup_service_config.get("build_context", "."),
-                image_name,
-                push=len(deployed_servers) > 0 and deployed_servers[0] != 'localhost'
-            )
-        
-        # Deploy to all parent's servers in parallel
-        log(f"[{parent_service_name}] (backup) Installing on {len(deployed_servers)} server(s)...")
-        
-        with ThreadPoolExecutor(max_workers=len(deployed_servers)) as executor:
-            futures = {}
+            if not backup_service_config:
+                log(f"[{parent_service_name}] (backup) Could not generate backup config")
+                return
             
-            for server_ip in deployed_servers:
-                future = executor.submit(
-                    self._install_backup_on_server,
-                    project, env, backup_service_name, backup_service_config,
-                    parent_service_name, server_ip
+            # Build image first (only once)
+            log(f"[{parent_service_name}] (backup) Building backup image...")
+            docker_hub_user = self.deployment_configurer.get_docker_hub_user()
+            version = self._get_version()
+            
+            # Generate Dockerfile
+            dockerfile_content_dict = backup_service_config.get("dockerfile_content")
+            if dockerfile_content_dict:
+                # Convert dict to string content
+                dockerfile_content = self.create_temporary_dockerfile(
+                    dockerfile_content_dict, 
+                    backup_service_name
                 )
-                futures[future] = server_ip
+                
+                # Write to temp file (this method exists and handles injection)
+                temp_dockerfile = self.write_temporary_dockerfile(
+                    dockerfile_content, 
+                    backup_service_name, 
+                    env
+                )
+                
+                # Build image
+                image_name = DeploymentNaming.get_image_name(
+                    docker_hub_user, project, env, backup_service_name, version
+                )
+                
+                build_context = backup_service_config.get("build_context", ".")
+                
+                log(f"[{parent_service_name}] (backup) Building {image_name}...")
+                DockerExecuter.build_image(
+                    dockerfile_path=temp_dockerfile,
+                    tag=image_name,
+                    context_dir=build_context,
+                    progress="plain"
+                )
+                
+                # Push if deploying to remote servers
+                if deployed_servers and deployed_servers[0] != 'localhost':
+                    log(f"[{parent_service_name}] (backup) Pushing {image_name}...")
+                    DockerExecuter.push_image(image_name)
             
-            # Collect results
-            for future in as_completed(futures):
-                server_ip = futures[future]
-                try:
-                    success = future.result()
-                    if success:
-                        log(f"[{parent_service_name}] (backup) ✓ Installed on {server_ip}")
-                    else:
-                        log(f"[{parent_service_name}] (backup) ✗ Failed on {server_ip}")
-                except Exception as e:
-                    log(f"[{parent_service_name}] (backup) ✗ Exception on {server_ip}: {e}")
-    
+            # Deploy to all parent's servers in parallel
+            log(f"[{parent_service_name}] (backup) Installing on {len(deployed_servers)} server(s)...")
+            
+            with ThreadPoolExecutor(max_workers=len(deployed_servers)) as executor:
+                futures = {}
+                
+                for server_ip in deployed_servers:
+                    future = executor.submit(
+                        self._install_backup_on_server,
+                        project, env, backup_service_name, backup_service_config,
+                        parent_service_name, server_ip
+                    )
+                    futures[future] = server_ip
+                
+                # Collect results
+                for future in as_completed(futures):
+                    server_ip = futures[future]
+                    try:
+                        success = future.result()
+                        if success:
+                            log(f"[{parent_service_name}] (backup) ✓ Installed on {server_ip}")
+                        else:
+                            log(f"[{parent_service_name}] (backup) ✗ Failed on {server_ip}")
+                    except Exception as e:
+                        log(f"[{parent_service_name}] (backup) ✗ Exception on {server_ip}: {e}")
+
     def _install_backup_on_server(
         self,
         project: str,
@@ -2841,8 +2858,7 @@ class Deployer:
                 env=env,
                 service_name=backup_service_name,
                 service_config=backup_service_config,
-                server_ip=server_ip,
-                user="root"
+                server_ip=server_ip
             )
             log(f"Installed backup of {parent_service_name} on {server_ip}")
             return success

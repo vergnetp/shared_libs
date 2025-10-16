@@ -160,7 +160,7 @@ class BackupManager:
             service_type: Type of service (postgres, redis, etc.)
             
         Returns:
-            Dict with 'content' key containing Dockerfile string
+            Dict with numbered keys for dockerfile_content (like "1", "2", "3")
         """
         if service_type not in BACKUP_ENABLED_SERVICES:
             raise ValueError(f"Unsupported service type: {service_type}")
@@ -168,22 +168,12 @@ class BackupManager:
         backup_info = BACKUP_ENABLED_SERVICES[service_type]
         script_path = f"scripts/{backup_info['script']}"
         
-        # All service types use the same Dockerfile structure
-        # postgres:latest and redis:latest both use Debian, so apt-get works for both
-        dockerfile = f"""FROM {backup_info['base_image']}
-
-# Install Python for the backup script
-RUN apt-get update && apt-get install -y python3 python3-pip && rm -rf /var/lib/apt/lists/*
-
-# Copy backup script
-COPY {script_path} /usr/local/bin/backup.py
-RUN chmod +x /usr/local/bin/backup.py
-
-# Set working directory
-WORKDIR /backups
-
-# Run backup script
-CMD ["python3", "/usr/local/bin/backup.py"]
-"""
-        
-        return {"content": dockerfile}
+        # Return numbered dict format (required by create_temporary_dockerfile)
+        return {
+            "1": f"FROM {backup_info['base_image']}",
+            "2": "RUN apt-get update && apt-get install -y python3 python3-pip && rm -rf /var/lib/apt/lists/*",
+            "3": f"COPY {script_path} /usr/local/bin/backup.py",
+            "4": "RUN chmod +x /usr/local/bin/backup.py",
+            "5": "WORKDIR /backups",
+            "6": 'CMD ["python3", "/usr/local/bin/backup.py"]'
+        }

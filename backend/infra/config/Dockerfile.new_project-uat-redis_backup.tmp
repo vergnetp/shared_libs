@@ -1,0 +1,11 @@
+FROM redis:latest
+RUN apt-get update && apt-get install -y python3 python3-pip && rm -rf /var/lib/apt/lists/*
+COPY scripts/backup_redis.py /usr/local/bin/backup.py
+RUN chmod +x /usr/local/bin/backup.py
+WORKDIR /backups
+
+# AUTO-GENERATED: Create required directories for volume mounts
+RUN mkdir -p /app/data /app/logs
+# END AUTO-GENERATED
+
+CMD ["python3", "/usr/local/bin/backup.py"]
