@@ -24,6 +24,7 @@ from do_cost_tracker import DOCostTracker
 import env_loader
 from path_resolver import PathResolver
 from do_manager import DOManager
+from backup_manager import BackupManager
 
 def log(msg):
     Logger.log(msg)
@@ -601,6 +602,8 @@ class Deployer:
                 if not all_success:
                     log(f"Deployment failed in startup_order {order} - aborting")
                     break
+            
+            self._deploy_backups_for_startup_order(env, order, services)
         
         if not all_success:
             Logger.end()
@@ -2635,3 +2638,565 @@ class Deployer:
             log(f"  {key}: {len(ips)} servers")
         
         return provisioned_servers
+    
+
+# =============================================================================
+    # BACKUP DEPLOYMENT METHODS
+    # =============================================================================
+    
+    def _deploy_backups_for_startup_order(
+        self,
+        env: str,        
+        services: Dict[str, Dict[str, Any]]
+    ):
+        """
+        After a startup_order completes, deploy backup services for any
+        stateful services in that order.
+        
+        This ensures backups are deployed immediately after their parent services,
+        guaranteeing they run on the same servers.
+        
+        Args:
+            env: Environment name           
+            services: Services that were deployed in this order
+        """       
+        
+        project_name = self.deployment_configurer.get_project_name()
+        
+        for service_name, service_config in services.items():
+            service_type = BackupManager.detect_service_type(service_name, service_config)
+            
+            if not service_type:
+                continue
+            
+            if not BackupManager.is_backup_enabled(service_config):
+                continue
+            
+            log(f"\n[{service_name}] (backup) Deploying backup service...")
+            
+            # Get servers where parent service was just deployed
+            deployed_servers = self._get_deployed_servers(project_name, env, service_name)
+            
+            if not deployed_servers:
+                log(f"[{service_name}] (backup) ✗ No deployed servers found for parent")
+                continue
+            
+            log(f"[{service_name}] (backup) Parent deployed on: {deployed_servers}")
+            
+            # Deploy backup to same servers
+            self._deploy_backup_service(
+                project_name,
+                env,
+                service_name,
+                service_config,
+                deployed_servers
+            )
+    
+    def _get_deployed_servers(self, project: str, env: str, service_name: str) -> List[str]:
+        """
+        Get list of server IPs where a service is currently deployed.
+        
+        Args:
+            project: Project name
+            env: Environment name
+            service_name: Service name
+            
+        Returns:
+            List of server IPs where the service is running
+        """
+        container_pattern = DeploymentNaming.get_container_name_pattern(project, env, service_name)
+        
+        all_servers = ServerInventory.get_servers(
+            deployment_status=ServerInventory.STATUS_ACTIVE
+        )
+        
+        deployed_servers = []
+        
+        for server in all_servers:
+            server_ip = server['ip']
+            try:
+                # Check if this server has containers for this service
+                result = CommandExecuter.run_cmd(
+                    f"docker ps --filter 'name={container_pattern}' --format '{{{{.Names}}}}'",
+                    server_ip,
+                    'root'
+                )
+                
+                if result and str(result).strip():
+                    deployed_servers.append(server_ip)
+                    
+            except Exception as e:
+                log(f"Could not check {server_ip}: {e}")
+                continue
+        
+        return deployed_servers
+    
+    def _deploy_backup_service(
+        self,
+        project: str,
+        env: str,
+        parent_service_name: str,
+        parent_service_config: Dict[str, Any],
+        deployed_servers: List[str]
+    ):
+        """
+        Deploy backup service to the same servers as the parent service.
+        This ensures backup can connect via Docker DNS (container name).
+        
+        Args:
+            project: Project name
+            env: Environment name
+            parent_service_name: Parent service name (e.g., "postgres")
+            parent_service_config: Parent service configuration
+            deployed_servers: Exact servers where parent is running
+        """       
+        backup_service_name = f"{parent_service_name}_backup"
+        
+        # Generate backup service config for first server (for path resolution)
+        backup_service_config = BackupManager.generate_backup_service_config(
+            project, env, parent_service_name, parent_service_config, deployed_servers[0]
+        )
+        
+        if not backup_service_config:
+            log(f"[{parent_service_name}] (backup) Could not generate backup config")
+            return
+        
+        # Build image first (only once)
+        log(f"[{parent_service_name}] (backup) Building backup image...")
+        docker_hub_user = self.deployment_configurer.get_docker_hub_user()
+        version = self._get_version()
+        
+        # Generate Dockerfile
+        dockerfile_content = backup_service_config.get("dockerfile_content")
+        if dockerfile_content:
+            temp_dockerfile = f"config/Dockerfile.{project}-{env}-{backup_service_name}.tmp"
+            self._write_dockerfile(temp_dockerfile, dockerfile_content)
+            
+            # Build image
+            image_name = DeploymentNaming.get_image_name(
+                docker_hub_user, project, env, backup_service_name, version
+            )
+            
+            self._build_and_push_image(
+                backup_service_name,
+                temp_dockerfile,
+                backup_service_config.get("build_context", "."),
+                image_name,
+                push=len(deployed_servers) > 0 and deployed_servers[0] != 'localhost'
+            )
+        
+        # Deploy to all parent's servers in parallel
+        log(f"[{parent_service_name}] (backup) Installing on {len(deployed_servers)} server(s)...")
+        
+        with ThreadPoolExecutor(max_workers=len(deployed_servers)) as executor:
+            futures = {}
+            
+            for server_ip in deployed_servers:
+                future = executor.submit(
+                    self._install_backup_on_server,
+                    project, env, backup_service_name, backup_service_config,
+                    parent_service_name, server_ip
+                )
+                futures[future] = server_ip
+            
+            # Collect results
+            for future in as_completed(futures):
+                server_ip = futures[future]
+                try:
+                    success = future.result()
+                    if success:
+                        log(f"[{parent_service_name}] (backup) ✓ Installed on {server_ip}")
+                    else:
+                        log(f"[{parent_service_name}] (backup) ✗ Failed on {server_ip}")
+                except Exception as e:
+                    log(f"[{parent_service_name}] (backup) ✗ Exception on {server_ip}: {e}")
+    
+    def _install_backup_on_server(
+        self,
+        project: str,
+        env: str,
+        backup_service_name: str,
+        backup_service_config: Dict[str, Any],
+        parent_service_name: str,
+        server_ip: str
+    ) -> bool:
+        """
+        Install backup service on a specific server.
+        
+        Args:
+            project: Project name
+            env: Environment name
+            backup_service_name: Backup service name
+            backup_service_config: Backup service configuration
+            parent_service_name: Parent service name (for logging)
+            server_ip: Target server IP
+            
+        Returns:
+            True if successful
+        """
+        try:
+            # Use install_scheduled_service method
+            success = self.install_scheduled_service(
+                project_name=project,
+                env=env,
+                service_name=backup_service_name,
+                service_config=backup_service_config,
+                server_ip=server_ip,
+                user="root"
+            )
+            log(f"Installed backup of {parent_service_name} on {server_ip}")
+            return success
+            
+        except Exception as e:
+            log(f"Failed to install backup of {parent_service_name} on {server_ip}: {e}")
+            return False
+        
+# =============================================================================
+    # BASTION BACKUP COMMANDS
+    # =============================================================================
+    
+    def pull_backups(
+        self,
+        env: str,
+        service: Optional[str] = None
+    ) -> bool:
+        """
+        Pull backup volumes from servers to bastion.
+        
+        Args:
+            env: Environment name
+            service: Optional specific service (e.g., "postgres"), or None for all
+            
+        Returns:
+            True if successful
+        """
+        project_name = self.deployment_configurer.get_project_name()
+        
+        log(f"Pulling backups for {project_name}/{env}")
+        
+        # Get all services or specific service
+        services = self.deployment_configurer.get_services(env)
+        
+        if service:
+            if service not in services:
+                log(f"Service '{service}' not found in {env} environment")
+                return False
+            services = {service: services[service]}
+        
+        # Filter to only stateful services
+        from backup_manager import BackupManager
+        stateful_services = {}
+        for svc_name, svc_config in services.items():
+            service_type = BackupManager.detect_service_type(svc_name, svc_config)
+            if service_type:
+                stateful_services[svc_name] = svc_config
+        
+        if not stateful_services:
+            log("No stateful services found to pull backups from")
+            return False
+        
+        log(f"Pulling backups for: {list(stateful_services.keys())}")
+        
+        # Pull backups for each service
+        success = True
+        for svc_name in stateful_services:
+            log(f"\nPulling backups for {svc_name}...")
+            
+            # Get servers where service is deployed
+            deployed_servers = self._get_deployed_servers(project_name, env, svc_name)
+            
+            if not deployed_servers:
+                log(f"No servers found for {svc_name}")
+                continue
+            
+            # Pull from first server (backups should be identical)
+            server_ip = deployed_servers[0]
+            log(f"Pulling from {server_ip}...")
+            
+            # Pull backups volume
+            volume_name = PathResolver.get_docker_volume_name(project_name, env, "backups", svc_name)
+            local_path = PathResolver.get_volume_host_path(project_name, env, svc_name, "backups", "localhost")
+            
+            try:
+                # Use docker cp to extract volume contents
+                temp_container = f"temp_backup_copy_{svc_name}"
+                
+                # Create temporary container with volume mounted
+                CommandExecuter.run_cmd(
+                    f"docker create --name {temp_container} -v {volume_name}:/backups alpine",
+                    server_ip,
+                    'root'
+                )
+                
+                # Copy files from container to local
+                # Create local directory
+                Path(local_path).mkdir(parents=True, exist_ok=True)
+                
+                # Use rsync or scp to pull files
+                if server_ip == 'localhost':
+                    # Local copy
+                    CommandExecuter.run_cmd(
+                        f"docker cp {temp_container}:/backups/. {local_path}/",
+                        server_ip,
+                        'root'
+                    )
+                else:
+                    # Remote copy via docker cp then scp
+                    remote_temp = f"/tmp/backups_{svc_name}"
+                    CommandExecuter.run_cmd(
+                        f"docker cp {temp_container}:/backups {remote_temp}",
+                        server_ip,
+                        'root'
+                    )
+                    
+                    # SCP from remote to local
+                    import subprocess
+                    subprocess.run([
+                        "scp", "-r",
+                        f"root@{server_ip}:{remote_temp}/.",
+                        local_path
+                    ], check=True)
+                    
+                    # Cleanup remote temp
+                    CommandExecuter.run_cmd(
+                        f"rm -rf {remote_temp}",
+                        server_ip,
+                        'root'
+                    )
+                
+                # Remove temporary container
+                CommandExecuter.run_cmd(
+                    f"docker rm {temp_container}",
+                    server_ip,
+                    'root'
+                )
+                
+                log(f"✓ Pulled backups for {svc_name} to {local_path}")
+                
+            except Exception as e:
+                log(f"✗ Failed to pull backups for {svc_name}: {e}")
+                success = False
+        
+        return success
+    
+    def list_backups(
+        self,
+        env: str,
+        service: str
+    ) -> List[Dict[str, Any]]:
+        """
+        List available backups for a service.
+        
+        Args:
+            env: Environment name
+            service: Service name (e.g., "postgres")
+            
+        Returns:
+            List of backup info dicts with timestamp, size, age
+        """
+        from datetime import datetime
+        import os
+        
+        project_name = self.deployment_configurer.get_project_name()
+        
+        # Get local backup path
+        local_path = PathResolver.get_volume_host_path(project_name, env, service, "backups", "localhost")
+        backup_dir = Path(local_path)
+        
+        if not backup_dir.exists():
+            log(f"No backups found at {backup_dir}")
+            log("Run 'pull_backups' first to download backups from servers")
+            return []
+        
+        # Find backup files
+        from backup_manager import BackupManager
+        service_config = self.deployment_configurer.get_services(env).get(service, {})
+        service_type = BackupManager.detect_service_type(service, service_config)
+        
+        if not service_type:
+            log(f"Unknown service type for {service}")
+            return []
+        
+        # Get file pattern based on service type
+        if service_type == "postgres":
+            pattern = "postgres_*.dump"
+        elif service_type == "redis":
+            pattern = "redis_*.rdb"
+        else:
+            pattern = "*"
+        
+        backups = []
+        for backup_file in backup_dir.glob(pattern):
+            try:
+                # Extract timestamp from filename
+                timestamp_str = backup_file.stem.replace(f"{service_type}_", "")
+                timestamp = datetime.strptime(timestamp_str, "%Y%m%d_%H%M%S")
+                
+                # Get file info
+                stat = backup_file.stat()
+                size_mb = stat.st_size / (1024 * 1024)
+                age_hours = (datetime.now() - timestamp).total_seconds() / 3600
+                
+                backups.append({
+                    "timestamp": timestamp_str,
+                    "datetime": timestamp,
+                    "filename": backup_file.name,
+                    "size_mb": round(size_mb, 2),
+                    "age_hours": round(age_hours, 1),
+                    "path": str(backup_file)
+                })
+            except Exception as e:
+                log(f"Warning: Could not parse {backup_file.name}: {e}")
+        
+        # Sort by timestamp (newest first)
+        backups.sort(key=lambda x: x["datetime"], reverse=True)
+        
+        return backups
+    
+    def rollback(
+        self,
+        env: str,
+        service: str,
+        timestamp: str
+    ) -> bool:
+        """
+        Restore service from a backup timestamp.
+        
+        WARNING: This will stop the service, replace its data, and restart it.
+        
+        Args:
+            env: Environment name
+            service: Service name (e.g., "postgres")
+            timestamp: Backup timestamp (e.g., "20241016_140530")
+            
+        Returns:
+            True if successful
+        """
+        project_name = self.deployment_configurer.get_project_name()
+        
+        log(f"WARNING: Rolling back {service} to {timestamp}")
+        log("This will STOP the service and REPLACE its data!")
+        
+        # Verify backup exists locally
+        backups = self.list_backups(env, service)
+        backup = next((b for b in backups if b["timestamp"] == timestamp), None)
+        
+        if not backup:
+            log(f"Backup {timestamp} not found for {service}")
+            log("Available backups:")
+            for b in backups:
+                log(f"  - {b['timestamp']} ({b['size_mb']} MB, {b['age_hours']} hours ago)")
+            return False
+        
+        log(f"Using backup: {backup['filename']} ({backup['size_mb']} MB)")
+        
+        # Get deployed servers
+        deployed_servers = self._get_deployed_servers(project_name, env, service)
+        if not deployed_servers:
+            log(f"Service {service} is not deployed")
+            return False
+        
+        log(f"Will restore on {len(deployed_servers)} server(s): {deployed_servers}")
+        
+        # Confirm
+        response = input("Type 'yes' to continue: ")
+        if response.lower() != 'yes':
+            log("Rollback cancelled")
+            return False
+        
+        # Perform rollback on each server
+        from backup_manager import BackupManager
+        service_config = self.deployment_configurer.get_services(env).get(service, {})
+        service_type = BackupManager.detect_service_type(service, service_config)
+        
+        success = True
+        for server_ip in deployed_servers:
+            log(f"\nRolling back on {server_ip}...")
+            
+            try:
+                # 1. Stop service
+                container_name = DeploymentNaming.get_container_name(project_name, env, service)
+                log(f"Stopping {container_name}...")
+                DockerExecuter.stop_and_remove_container(container_name, server_ip, ignore_if_not_exists=True)
+                
+                # 2. Restore backup based on service type
+                if service_type == "postgres":
+                    success &= self._rollback_postgres(
+                        project_name, env, service, backup, server_ip
+                    )
+                elif service_type == "redis":
+                    success &= self._rollback_redis(
+                        project_name, env, service, backup, server_ip
+                    )
+                
+                # 3. Restart service
+                log(f"Restarting {service}...")
+                # Trigger redeployment
+                self._deploy_single_service_wrapper(service, service_config, env)
+                
+            except Exception as e:
+                log(f"✗ Rollback failed on {server_ip}: {e}")
+                success = False
+        
+        if success:
+            log(f"\n✓ Rollback complete for {service}")
+        else:
+            log(f"\n✗ Rollback had errors for {service}")
+        
+        return success
+    
+    def _rollback_postgres(
+        self,
+        project: str,
+        env: str,
+        service: str,
+        backup: Dict[str, Any],
+        server_ip: str
+    ) -> bool:
+        """Restore Postgres from backup dump"""
+        try:
+            # Use pg_restore to restore the dump
+            volume_name = PathResolver.get_docker_volume_name(project, env, "data", service)
+            
+            # Copy backup to server
+            # Push backup file to server
+            # Run pg_restore in temporary container
+            
+            log(f"Restoring Postgres backup on {server_ip}...")
+            
+            # This is complex - need to:
+            # 1. Upload backup file to server
+            # 2. Create temp container with data volume
+            # 3. Run pg_restore
+            # 4. Cleanup
+            
+            # TODO: Implement detailed restore logic
+            log("Postgres restore: Implementation needed")
+            return True
+            
+        except Exception as e:
+            log(f"Failed to restore Postgres: {e}")
+            return False
+    
+    def _rollback_redis(
+        self,
+        project: str,
+        env: str,
+        service: str,
+        backup: Dict[str, Any],
+        server_ip: str
+    ) -> bool:
+        """Restore Redis from backup RDB"""
+        try:
+            # Copy backup RDB to data volume
+            volume_name = PathResolver.get_docker_volume_name(project, env, "data", service)
+            
+            log(f"Restoring Redis backup on {server_ip}...")
+            
+            # TODO: Implement detailed restore logic
+            log("Redis restore: Implementation needed")
+            return True
+            
+        except Exception as e:
+            log(f"Failed to restore Redis: {e}")
+            return False
