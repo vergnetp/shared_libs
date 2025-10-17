@@ -503,6 +503,127 @@ class Deployer:
             log(f"Build error for {service_name}: {e}")
             return (None, False)
 
+    def _batch_prepare_servers(
+        self,
+        project: str,
+        env: str,
+        services: Dict[str, Dict[str, Any]],
+        target_servers: List[str]
+    ):
+        """
+        Prepare all servers for all services in parallel using batched SSH operations.
+        
+        Instead of:
+            For each service:
+                For each server:
+                    SSH: Create 3 directories (3 SSH calls)
+                    SSH: Create 4 volumes (4 SSH calls)
+        
+        Do:
+            For each server (in parallel):
+                SSH ONCE: Create all directories + all volumes for all services
+        
+        This reduces SSH overhead from (services × servers × 7 calls) to (servers × 1 call).
+        
+        Args:
+            project: Project name
+            env: Environment name
+            services: Dictionary of {service_name: service_config} (flat dict from get_services_by_startup_order)
+            target_servers: List of server IPs to prepare
+        """
+        if not services or not target_servers:
+            log("No services or servers to prepare")
+            return
+            
+        log(f"Batch preparing {len(target_servers)} server(s) for {len(services)} service(s)...")
+        Logger.start()
+        
+        def prepare_single_server(server_ip):
+            """Prepare one server for all services in a single SSH session"""
+            try:
+                commands = []
+                services_prepared = []
+                
+                # Collect all directory and volume operations for services that will be deployed to this server
+                for service_name, service_config in services.items():
+                    # Skip localhost services
+                    zone = service_config.get("server_zone", "lon1")
+                    if zone == "localhost":
+                        continue
+                    
+                    # Skip scheduled services (they handle their own directory/volume creation)
+                    if service_config.get("schedule"):
+                        continue
+                    
+                    # Check if this service will be deployed to this server
+                    # (we'll prepare all servers for all services to keep it simple)
+                    services_prepared.append(service_name)
+                    
+                    # Host directories (config, secrets, files)
+                    host_mount_types = ["config", "secrets", "files"]
+                    for path_type in host_mount_types:
+                        host_path = PathResolver.get_volume_host_path(
+                            project, env, service_name, path_type, server_ip
+                        )
+                        commands.append(f"mkdir -p {host_path}")
+                    
+                    # Docker volumes (data, logs, backups, monitoring)
+                    docker_volume_types = ["data", "logs", "backups", "monitoring"]
+                    for path_type in docker_volume_types:
+                        volume_name = PathResolver.get_docker_volume_name(
+                            project, env, path_type, service_name
+                        )
+                        # Use || true to ignore errors if volume already exists
+                        commands.append(f"docker volume create {volume_name} 2>/dev/null || true")
+                
+                if not commands:
+                    log(f"[{server_ip}] No preparation needed (no services for this server)")
+                    return (server_ip, True, 0)
+                
+                # Execute all commands in a single SSH session
+                batch_cmd = " && ".join(commands)
+                
+                log(f"[{server_ip}] Preparing {len(services_prepared)} service(s): {', '.join(services_prepared[:3])}{'...' if len(services_prepared) > 3 else ''}")
+                CommandExecuter.run_cmd(batch_cmd, server_ip, "root")
+                
+                log(f"✓ [{server_ip}] Completed {len(commands)} operations")
+                return (server_ip, True, len(commands))
+                
+            except Exception as e:
+                log(f"✗ [{server_ip}] Preparation failed: {e}")
+                return (server_ip, False, 0)
+        
+        # Prepare all servers in parallel
+        total_operations = 0
+        successful_servers = 0
+        failed_servers = 0
+        
+        with ThreadPoolExecutor(max_workers=min(len(target_servers), 10)) as executor:
+            futures = {
+                executor.submit(prepare_single_server, server_ip): server_ip
+                for server_ip in target_servers
+            }
+            
+            for future in as_completed(futures):
+                server_ip = futures[future]
+                try:
+                    _, success, operations = future.result()
+                    total_operations += operations
+                    if success:
+                        successful_servers += 1
+                    else:
+                        failed_servers += 1
+                except Exception as e:
+                    log(f"✗ Exception preparing {server_ip}: {e}")
+                    failed_servers += 1
+        
+        Logger.end()
+        log(f"Batch preparation complete: {successful_servers} servers prepared, "
+            f"{failed_servers} failed, {total_operations} total operations")
+        
+        if failed_servers > 0:
+            log(f"Warning: {failed_servers} servers failed preparation - deployment may fail")
+
     def deploy(self, env: str = None, service_name: str = None, build: bool = True, target_version: str = None) -> bool:
         """
         Deploy services with immutable infrastructure and parallel execution.
@@ -591,6 +712,25 @@ class Deployer:
                 Logger.end()
                 return False
 
+        # ========== OPTIMIZATION: BATCH PREPARE + PRE-PULL ==========
+        # Get all target servers
+        all_target_servers = set()
+        for svc_name, svc_config in services.items():
+            zone = svc_config.get("server_zone", "lon1")
+            if zone != "localhost":
+                servers_count = svc_config.get("servers_count", 1)
+                all_servers = ServerInventory.list_all_servers()
+                zone_servers = [s['ip'] for s in all_servers if s['zone'] == zone]
+                all_target_servers.update(zone_servers[:servers_count])
+        
+        if all_target_servers:
+            # First: Create all directories and volumes in batch
+            self._batch_prepare_servers(project_name, env or 'dev', services, list(all_target_servers))
+            
+            # Second: Pre-pull all images in parallel
+            self._pre_pull_images_parallel(services, list(all_target_servers), env or 'dev')
+        # ========== END OPTIMIZATIONS ==========
+
         # PARALLEL SERVICE DEPLOYMENT BY STARTUP ORDER
         services_by_order = defaultdict(list)
         for svc_name, config in services.items():
@@ -659,50 +799,135 @@ class Deployer:
                 log(f"Deploying {len(service_group)} services in parallel...")
                 
                 service_futures = {}
-                
                 with ThreadPoolExecutor(max_workers=min(len(service_group), 5)) as executor:
                     for svc_name, config in service_group:
                         future = executor.submit(
-                            self._deploy_single_service,
+                            self._deploy_service_wrapper,
                             project_name, env or 'dev', svc_name, config
                         )
                         service_futures[future] = svc_name
                     
+                    # Wait for all to complete and check results
                     for future in as_completed(service_futures):
                         svc_name = service_futures[future]
                         try:
                             result = future.result()
-                            if result['success']:
-                                log(f"✓ {svc_name} deployed successfully")
-                            else:
-                                log(f"✗ {svc_name} deployment failed: {result.get('error', 'Unknown error')}")
+                            if not result['success']:
+                                log(f"Deployment failed for {svc_name}: {result.get('error', 'Unknown error')}")
                                 all_success = False
                         except Exception as e:
-                            log(f"✗ {svc_name} deployment exception: {e}")
+                            log(f"Deployment exception for {svc_name}: {e}")
                             all_success = False
                 
                 if not all_success:
-                    log(f"Deployment failed in startup_order {order} - aborting")
-                    break            
+                    log("One or more services failed in this startup order - stopping deployment")
+                    break
             
-            services_in_order = {name: config for name, config in service_group}
-            self._deploy_backups_for_startup_order(env, services_in_order)
+            # Deploy backups for this startup_order
+            self._deploy_backups_for_startup_order(env or 'dev', dict(service_group))
         
-        if not all_success:
-            Logger.end()
-            return False
-
-        # CLEANUP: Find servers with no services and manage them
+        # Cleanup empty servers
         log("Performing server cleanup...")
-        self._cleanup_empty_servers(project_name, env)
-
-        # Nginx automation: Setup SSL/DNS for services with domains
+        self._cleanup_empty_servers()
+        
+        # Check for nginx automation
         log("Checking for nginx automation...")
-        self._setup_nginx_automation(env or 'dev', services)
-
+        
         Logger.end()
-        log('Deployment complete')
-        return True
+        
+        if all_success:
+            log("Deployment complete")
+        else:
+            log("Deployment completed with errors")
+        
+        return all_success
+
+    def _pre_pull_images_parallel(self, services: Dict[str, Dict[str, Any]], target_servers: List[str], env: str):
+        """
+        Pre-pull all required images to all target servers in parallel.
+        This dramatically speeds up deployment by pulling images once before deployment starts.
+        
+        Args:
+            services: Dictionary of service configurations
+            target_servers: List of server IPs to pull images to
+            env: Environment name
+        """
+        log(f"Pre-pulling images to {len(target_servers)} server(s) in parallel...")
+        Logger.start()
+        
+        # Collect all unique images that need to be pulled
+        images_to_pull = {}  # service_name -> image
+        
+        for service_name, service_config in services.items():
+            # Skip localhost services
+            zone = service_config.get("server_zone", "lon1")
+            if zone == "localhost":
+                continue
+            
+            # Get image name
+            if service_config.get("image"):
+                image = service_config["image"]
+            else:
+                # Skip if no dockerfile (prebuilt images that don't need pulling)
+                if not service_config.get("dockerfile") and not service_config.get("dockerfile_content"):
+                    continue
+                
+                docker_hub_user = self.deployment_configurer.get_docker_hub_user()
+                version = self._get_version()
+                project_name = self.deployment_configurer.get_project_name()
+                image = DeploymentNaming.get_image_name(
+                    docker_hub_user, project_name, env, service_name, version
+                )
+            
+            images_to_pull[service_name] = image
+        
+        if not images_to_pull:
+            log("No images to pre-pull")
+            Logger.end()
+            return
+        
+        # Create pull tasks (image × server combinations)
+        pull_tasks = []
+        for service_name, image in images_to_pull.items():
+            for server_ip in target_servers:
+                pull_tasks.append({
+                    'image': image,
+                    'server_ip': server_ip,
+                    'service_name': service_name
+                })
+        
+        log(f"Pulling {len(images_to_pull)} unique image(s) to {len(target_servers)} server(s) = {len(pull_tasks)} pull operations")
+        
+        # Pull all images in parallel (limit to 10 concurrent to avoid overwhelming network)
+        successful_pulls = 0
+        failed_pulls = 0
+        
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = {
+                executor.submit(
+                    DockerExecuter.pull_image,
+                    task['image'],
+                    task['server_ip'],
+                    "root"
+                ): task
+                for task in pull_tasks
+            }
+            
+            for future in as_completed(futures):
+                task = futures[future]
+                try:
+                    future.result()
+                    log(f"✓ Pulled {task['service_name']} to {task['server_ip']}")
+                    successful_pulls += 1
+                except Exception as e:
+                    log(f"✗ Failed to pull {task['service_name']} to {task['server_ip']}: {e}")
+                    failed_pulls += 1
+        
+        Logger.end()
+        log(f"Image pre-pull complete: {successful_pulls} succeeded, {failed_pulls} failed")
+        
+        if failed_pulls > 0:
+            log(f"Warning: {failed_pulls} image pulls failed - deployment may be slower")
 
     def _setup_nginx_automation(self, env: str, services: Dict[str, Dict[str, Any]]) -> None:
         """
