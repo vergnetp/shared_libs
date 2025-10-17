@@ -828,10 +828,11 @@ class Deployer:
         
         # Cleanup empty servers
         log("Performing server cleanup...")
-        self._cleanup_empty_servers()
+        self._cleanup_empty_servers(project=project_name, env=env or 'dev')
         
         # Check for nginx automation
         log("Checking for nginx automation...")
+        self._setup_nginx_automation(env or 'dev', services)
         
         Logger.end()
         
