@@ -1,5 +1,6 @@
 import os
 import time
+import json
 import requests
 from typing import Dict, Any, List, Optional
 from uuid import uuid4
@@ -39,16 +40,14 @@ class Deployer:
         id (str): Unique identifier for this deployment instance.
         project_name (str): Name of the project being deployed.
         deployment_configurer (DeploymentConfigurer): Provides configuration access and helper methods.
-        auto_sync (bool): Whether to automatically sync during deployment operations.
     """
 
-    def __init__(self, project_name: str, auto_sync: bool = True):
+    def __init__(self, project_name: str):
         """
         Initialize a Deployer instance for a specific project.
 
         Args:
-            project_name: Name of the project to deploy
-            auto_sync: Whether to automatically push config before and pull data after deployments.
+            project_name: Name of the project to deploy            
             
         Raises:
             ValueError: If project_name not specified
@@ -66,10 +65,8 @@ class Deployer:
         self.id = f'deployment_{uuid4()}'
         self.project_name = project_name
         self.deployment_configurer = DeploymentConfigurer(project_name)
-        self.auto_sync = auto_sync
         
         # Save debug configs
-        import json
         debug_path = constants.get_deployment_files_path(self.id)
         
         with open(debug_path / 'raw_config.json', 'w') as f:
@@ -479,31 +476,29 @@ class Deployer:
 
         self.pre_provision_servers(env, service_name)
 
-        # Auto-sync: Push config before deployment
-        if self.auto_sync:
-            log("Auto-sync: Pushing config, secrets, and files...")
-            environments = [env] if env else self.deployment_configurer.get_environments()
+        log("Auto-sync: Pushing config, secrets, and files...")
+        environments = [env] if env else self.deployment_configurer.get_environments()
+        
+        for environment in environments:
+            # Get all servers that will receive deployments
+            all_servers = ServerInventory.list_all_servers()
             
-            for environment in environments:
-                # Get all servers that will receive deployments
-                all_servers = ServerInventory.list_all_servers()
-                
-                # Filter to servers in zones used by this environment
-                target_ips = []
-                for svc_name, svc_config in self.deployment_configurer.get_services(environment).items():
-                    zone = svc_config.get("server_zone", "lon1")
-                    if zone != "localhost":
-                        zone_servers = [s['ip'] for s in all_servers if s['zone'] == zone]
-                        target_ips.extend(zone_servers)
-                
-                # Remove duplicates
-                target_ips = list(set(target_ips))
-                
-                if target_ips:
-                    log(f"Pushing to {len(target_ips)} servers: {target_ips}")
-                    DeploymentSyncer.push(project_name, environment, targets=target_ips)
-                else:
-                    log("No remote servers found for push")
+            # Filter to servers in zones used by this environment
+            target_ips = []
+            for svc_name, svc_config in self.deployment_configurer.get_services(environment).items():
+                zone = svc_config.get("server_zone", "lon1")
+                if zone != "localhost":
+                    zone_servers = [s['ip'] for s in all_servers if s['zone'] == zone]
+                    target_ips.extend(zone_servers)
+            
+            # Remove duplicates
+            target_ips = list(set(target_ips))
+            
+            if target_ips:
+                log(f"Pushing to {len(target_ips)} servers: {target_ips}")
+                DeploymentSyncer.push(project_name, environment, targets=target_ips)
+            else:
+                log("No remote servers found for push")
 
         # Sync inventory with DigitalOcean before deployment
         log("Syncing server inventory with DigitalOcean...")
@@ -601,9 +596,10 @@ class Deployer:
                 
                 if not all_success:
                     log(f"Deployment failed in startup_order {order} - aborting")
-                    break
+                    break            
             
-            self._deploy_backups_for_startup_order(env, services)
+            services_in_order = {name: config for name, config in service_group}
+            self._deploy_backups_for_startup_order(env, services_in_order)
         
         if not all_success:
             Logger.end()
@@ -616,14 +612,6 @@ class Deployer:
         # Nginx automation: Setup SSL/DNS for services with domains
         log("Checking for nginx automation...")
         self._setup_nginx_automation(env or 'dev', services)
-
-        # Auto-sync: Pull data after deployment
-        if self.auto_sync:
-            log("Auto-sync: Pulling data and logs...")
-            environments = [env] if env else self.deployment_configurer.get_environments()
-            for environment in environments:
-                time.sleep(2)
-                DeploymentSyncer.pull(project_name, environment)
 
         Logger.end()
         log('Deployment complete')

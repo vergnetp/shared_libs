@@ -1,13 +1,16 @@
-# unified_deployer.py - Simple public API for single-zone and multi-zone deployments
-
+import os            
+import json
 from typing import List, Dict, Any, Optional
-from deployment_config import DeploymentConfigurer
 from server_inventory import ServerInventory
 from deployer import Deployer
 from logger import Logger
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import argparse
+
 import env_loader
+from execute_cmd import CommandExecuter
 from rollback_manager import RollbackManager
+from nginx_config_generator import NginxConfigGenerator
 
 def log(msg):
     Logger.log(msg)
@@ -34,17 +37,15 @@ class UnifiedDeployer:
         deployer.build(env="prod", push=True)
     """
     
-    def __init__(self, project: str, auto_sync: bool = True):
+    def __init__(self, project: str):
         """
         Initialize deployer for a project.
         
         Args:
-            project: Project name
-            auto_sync: Whether to auto-sync config/data during deployments
+            project: Project name           
         """
-        self.project = project
-        self.auto_sync = auto_sync
-        self.configurer = DeploymentConfigurer(project)
+        self.project = project        
+        self.deployer = Deployer(project)
         log(f"Initialized global deployer for project: {project}")
     
     # =========================================================================
@@ -66,10 +67,9 @@ class UnifiedDeployer:
             deployer.build(env="prod", push=True)
         """
         log(f"Building images for {self.project}/{env or 'all'}")
-        Logger.start()
+        Logger.start()        
         
-        deployer = Deployer(self.project, auto_sync=False)
-        success = deployer.build_images(environment=env, push_to_registry=push)
+        success = self.deployer.build_images(environment=env, push_to_registry=push)
         
         Logger.end()
         status = "✓ Build complete" if success else "✗ Build failed"
@@ -235,10 +235,9 @@ class UnifiedDeployer:
         service: str,
         build: bool
     ) -> Dict[str, bool]:
-        """Deploy to a single zone using standard Deployer"""
-        deployer = Deployer(self.project, auto_sync=self.auto_sync)
+        """Deploy to a single zone using standard Deployer"""       
         
-        success = deployer.deploy(
+        success = self.deployer.deploy(
             env=env,
             service_name=service,
             build=build
@@ -257,7 +256,6 @@ class UnifiedDeployer:
         """Deploy to multiple zones"""
         
         # Check if Cloudflare LB is available
-        import os
         cloudflare_api_token = os.getenv("CLOUDFLARE_API_TOKEN")
         
         if not cloudflare_api_token:
@@ -369,14 +367,12 @@ class UnifiedDeployer:
                 log(f"No services configured for zone {zone}")
                 return True
             
-            log(f"Deploying {len(services)} service(s) to {zone}")
-            
-            deployer = Deployer(self.project, auto_sync=self.auto_sync)
+            log(f"Deploying {len(services)} service(s) to {zone}") 
             
             for svc_name, svc_config in services.items():
                 log(f"  → {svc_name} in {zone}")
                 
-                success = deployer.deploy(
+                success = self.deployer.deploy(
                     env=env,
                     service_name=svc_name,
                     build=False  # Already built globally
@@ -395,7 +391,7 @@ class UnifiedDeployer:
     def _get_configured_zones(self, env: str, service: Optional[str] = None) -> List[str]:
         """Extract zones from service configurations"""
         zones = set()
-        services = self.configurer.get_services(env)
+        services = self.deployer.deployment_configurer.get_services(env)
         
         for svc_name, svc_config in services.items():
             if service and svc_name != service:
@@ -419,7 +415,7 @@ class UnifiedDeployer:
         service: Optional[str] = None
     ) -> Dict[str, Dict[str, Any]]:
         """Get services for a specific zone"""
-        services = self.configurer.get_services(env)
+        services = self.deployer.deployment_configurer.get_services(env)
         
         filtered = {}
         for svc_name, svc_config in services.items():
@@ -440,8 +436,7 @@ class UnifiedDeployer:
         """
         try:
             # Try to list load balancer pools (requires LB subscription)
-            from execute_cmd import CommandExecuter
-            import json
+
             
             # First get account ID
             cmd = (
@@ -499,11 +494,9 @@ class UnifiedDeployer:
         Setup Cloudflare Load Balancer for multi-zone deployment.
         Only sets up for successfully deployed zones.
         """
-        from nginx_config_generator import NginxConfigGenerator
-        import json
         
         # Get service config
-        services = self.configurer.get_services(env)
+        services = self.deployer.deployment_configurer.get_services(env)
         
         # If specific service, only setup LB for that service
         if service:
@@ -574,9 +567,8 @@ class UnifiedDeployer:
             
         Returns:
             Deployment status dictionary
-        """
-        deployer = Deployer(self.project, auto_sync=False)
-        return deployer.list_deployments(env)
+        """        
+        return self.deployer.list_deployments(env)
 
 
     def print_deployments(self, env: str = None):
@@ -585,9 +577,8 @@ class UnifiedDeployer:
         
         Args:
             env: Filter by environment
-        """
-        deployer = Deployer(self.project, auto_sync=False)
-        deployer.print_deployments(env)
+        """       
+        self.deployer.print_deployments(env)
 
 
     def logs(
@@ -606,9 +597,8 @@ class UnifiedDeployer:
             
         Returns:
             Log output
-        """
-        deployer = Deployer(self.project, auto_sync=False)
-        return deployer.logs(service, env, lines)
+        """        
+        return self.deployer.logs(service, env, lines)
 
 
     def print_logs(
@@ -624,13 +614,11 @@ class UnifiedDeployer:
             service: Service name
             env: Environment  
             lines: Number of lines to tail
-        """
-        deployer = Deployer(self.project, auto_sync=False)
-        deployer.print_logs(service, env, lines)
+        """        
+        self.deployer.print_logs(service, env, lines)
                         
 def main():
-    """Simple CLI for unified deployer"""
-    import argparse
+    """Simple CLI for unified deployer"""   
     
     parser = argparse.ArgumentParser(description='Unified deployment CLI')
     parser.add_argument('--project', required=True, help='Project name')
@@ -687,8 +675,7 @@ def main():
         exit(0 if all(results.values()) else 1)
     
     elif args.command == 'status':
-        if args.json:
-            import json
+        if args.json:            
             status = deployer.list_deployments(
                 env=args.env,
                 include_costs=not args.no_costs

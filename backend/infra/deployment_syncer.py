@@ -319,20 +319,6 @@ class DeploymentSyncer:
         try:
             check_cmd = f'docker volume inspect {volume_name}'
             CommandExecuter.run_cmd(check_cmd)
-            
-            # Quick check if volume is empty
-            check_content = f'docker run --rm -v {volume_name}:/check alpine sh -c "ls -A /check 2>/dev/null | wc -l"'
-            result = CommandExecuter.run_cmd(check_content)
-            file_count_str = result.stdout.strip() if hasattr(result, 'stdout') else str(result).strip()
-            
-            try:
-                file_count = int(file_count_str)
-            except (ValueError, AttributeError):
-                file_count = 0
-            
-            if file_count == 0:
-                log(f"Skipping {sync_type} - volume {volume_name} is empty")
-                return
                 
         except Exception:
             log(f"Skipping {sync_type} - volume {volume_name} does not exist")
