@@ -27,16 +27,22 @@
             },
             "worker": {
                 "dockerfile": "config/Dockerfile.worker",
-                "build_context": "C:\\Users\\vergn\\Desktop\\Projects\\TEST_PROJECT",               
+                "build_context": "C:\\Users\\vergn\\Desktop\\Projects\\TEST_PROJECT",
                 "schedule": "* * * * *",
                 "startup_order": 3,
-                                "server_zone": "lon1",
+                "server_zone": "lon1",
                 "servers_count": 2,
                 "restart": false
             },
             "postgres": {
                 "image": "postgres:15",
-                                "server_zone": "lon1",
+                "server_zone": "lon1",
+                "servers_count": 1,
+                "startup_order": 1
+            },
+            "redis": {
+                "image": "redis:7-alpine",
+                "server_zone": "lon1",
                 "servers_count": 1,
                 "startup_order": 1
             }

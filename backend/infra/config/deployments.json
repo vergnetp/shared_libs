@@ -4,13 +4,29 @@
       "postgres": {
         "current": {
           "servers": [
-            "64.227.38.208"
+            "159.65.53.62"
           ],
           "container_name": "new_project_uat_postgres",
           "version": "latest",
-          "deployed_at": "2025-10-16T21:59:01.907984"
+          "deployed_at": "2025-10-17T09:27:56.300164"
         },
         "history": [
+          {
+            "servers": [
+              "159.65.53.62"
+            ],
+            "container_name": "new_project_uat_postgres",
+            "version": "latest",
+            "deployed_at": "2025-10-17T09:27:56.300164"
+          },
+          {
+            "servers": [
+              "161.35.161.153"
+            ],
+            "container_name": "new_project_uat_postgres",
+            "version": "latest",
+            "deployed_at": "2025-10-17T08:54:56.086326"
+          },
           {
             "servers": [
               "64.227.38.208"
@@ -74,35 +90,27 @@
             "container_name": "new_project_uat_postgres",
             "version": "latest",
             "deployed_at": "2025-10-15T23:24:02.548031"
-          },
-          {
-            "servers": [
-              "134.209.183.1"
-            ],
-            "container_name": "new_project_uat_postgres",
-            "version": "latest",
-            "deployed_at": "2025-10-15T22:43:45.751486"
-          },
-          {
-            "servers": [
-              "138.68.140.111"
-            ],
-            "container_name": "new_project_uat_postgres",
-            "version": "latest",
-            "deployed_at": "2025-10-15T21:57:23.090833"
           }
         ]
       },
       "redis": {
         "current": {
           "servers": [
-            "64.227.38.208"
+            "161.35.161.153"
           ],
           "container_name": "new_project_uat_redis",
           "version": "latest",
-          "deployed_at": "2025-10-16T21:58:54.516855"
+          "deployed_at": "2025-10-17T08:54:47.261377"
         },
         "history": [
+          {
+            "servers": [
+              "161.35.161.153"
+            ],
+            "container_name": "new_project_uat_redis",
+            "version": "latest",
+            "deployed_at": "2025-10-17T08:54:47.261377"
+          },
           {
             "servers": [
               "64.227.38.208"
@@ -174,14 +182,6 @@
             "container_name": "new_project_uat_redis",
             "version": "latest",
             "deployed_at": "2025-10-15T22:43:38.401146"
-          },
-          {
-            "servers": [
-              "138.68.140.111"
-            ],
-            "container_name": "new_project_uat_redis",
-            "version": "latest",
-            "deployed_at": "2025-10-15T21:57:12.785523"
           }
         ]
       },
@@ -237,14 +237,23 @@
       "api": {
         "current": {
           "servers": [
-            "64.227.38.208",
-            "134.122.98.56"
+            "159.65.53.62",
+            "165.232.41.134"
           ],
           "container_name": "new_project_uat_api",
           "version": "latest",
-          "deployed_at": "2025-10-16T22:02:14.087580"
+          "deployed_at": "2025-10-17T09:30:10.081558"
         },
         "history": [
+          {
+            "servers": [
+              "159.65.53.62",
+              "165.232.41.134"
+            ],
+            "container_name": "new_project_uat_api",
+            "version": "latest",
+            "deployed_at": "2025-10-17T09:30:10.081558"
+          },
           {
             "servers": [
               "64.227.38.208",

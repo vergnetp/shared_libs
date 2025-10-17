@@ -5,8 +5,9 @@ WORKDIR /app
 RUN mkdir -p /app/data /app/logs
 # END AUTO-GENERATED
 
-COPY requirements_api.txt .
+COPY TEST_PROJECT/requirements_api.txt .
 RUN pip install --no-cache-dir -r requirements_api.txt
-COPY . .
+COPY shared_libs ./shared_libs
+COPY TEST_PROJECT/api.py .
 EXPOSE 8000
 CMD ["python", "api.py"]

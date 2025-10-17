@@ -552,9 +552,19 @@ class Deployer:
                     target_servers = [s['ip'] for s in existing_servers[:servers_count]]
                     
                     log(f"Installing scheduled service {svc_name} on {len(target_servers)} servers: {target_servers}")
-                    
-                    for server_ip in target_servers:
-                        self.install_scheduled_service(project_name, env or 'dev', svc_name, config, server_ip)
+
+                    with ThreadPoolExecutor(max_workers=min(len(target_servers), 5)) as executor:
+                        futures = []
+                        for server_ip in target_servers:
+                            future = executor.submit(
+                                self.install_scheduled_service,
+                                project_name, env or 'dev', svc_name, config, server_ip
+                            )
+                            futures.append(future)
+                        
+                        # Wait for all to complete
+                        for future in as_completed(futures):
+                            future.result()
                 else:
                     success = self._deploy_immutable(project_name, env or 'dev', svc_name, config)
                     
@@ -1215,78 +1225,159 @@ class Deployer:
             return result
 
     def _verify_container_health(
-            self,
-            service_name: str,
-            service_config: Dict[str, Any],
-            container_name: str,
-            server_ip: str
-        ) -> bool:
-            """
-            Verify container health after deployment.
+        self,
+        service_name: str,
+        service_config: Dict[str, Any],
+        container_name: str,
+        server_ip: str
+    ) -> bool:
+        """
+        Verify container health after deployment.
+        
+        For TCP services (postgres, redis): check if container is running
+        For HTTP services: optionally check health endpoint
+        For one-time jobs: check exit code
+        """
+        # Get ports to determine service type
+        dockerfile = service_config.get("dockerfile")
+        container_ports = DeploymentPortResolver.get_container_ports(service_name, dockerfile)
+        
+        if not container_ports:
+            # No ports - likely a one-time job
+            log(f"[{server_ip}] No ports detected - checking container status")
+            time.sleep(0.5)
             
-            For TCP services (postgres, redis): check if container is running
-            For HTTP services: optionally check health endpoint
-            For one-time jobs: check exit code
-            """
-            # Get ports to determine service type
-            dockerfile = service_config.get("dockerfile")
-            container_ports = DeploymentPortResolver.get_container_ports(service_name, dockerfile)
-            
-            if not container_ports:
-                # No ports - likely a one-time job
-                log(f"[{server_ip}] No ports detected - checking container status")
-                time.sleep(0.5)
+            try:
+                # First check if container is still running
+                status_result = CommandExecuter.run_cmd(
+                    f"docker ps --filter 'name={container_name}' --format '{{{{.Status}}}}'",
+                    server_ip, "root"
+                )
+                status = status_result.stdout.strip() if hasattr(status_result, 'stdout') else str(status_result).strip()
                 
-                try:
-                    # First check if container is still running
-                    status_result = CommandExecuter.run_cmd(
-                        f"docker ps --filter 'name={container_name}' --format '{{{{.Status}}}}'",
-                        server_ip, "root"
-                    )
-                    status = status_result.stdout.strip() if hasattr(status_result, 'stdout') else str(status_result).strip()
-                    
-                    if status and 'Up' in status:
-                        # Container still running - treat as success (long-running job)
-                        log(f"[{server_ip}] Container still running - treating as healthy")
-                        return True
-                    
-                    exit_code = DockerExecuter.get_container_exit_code(container_name, server_ip, "root")
+                if status and 'Up' in status:
+                    # Container still running - treat as success (long-running job)
+                    log(f"[{server_ip}] Container still running - treating as healthy")
+                    return True
+                
+                exit_code = DockerExecuter.get_container_exit_code(container_name, server_ip, "root")
 
-                    if exit_code == -1:
-                        log(f"[{server_ip}] Could not determine exit code for {container_name}")
-                        return False
-                    elif exit_code in [0, 1, 2, 3]:
-                        log(f"[{server_ip}] One-time job completed successfully (exit code {exit_code})")
-                        return True
-                    else:
-                        log(f"[{server_ip}] One-time job failed (exit code {exit_code})")
-                        return False
-                            
-                except Exception as e:
-                    log(f"[{server_ip}] Health check exception: {e}")
+                if exit_code == -1:
+                    log(f"[{server_ip}] Could not determine exit code for {container_name}")
+                    # Get logs to show why
+                    self._log_container_failure(container_name, server_ip)
                     return False
-                    
-            else:
-                # TCP service - check if container is running
-                log(f"[{server_ip}] TCP service - verifying container is running")
-                time.sleep(1)
+                elif exit_code in [0, 1, 2, 3]:
+                    log(f"[{server_ip}] One-time job completed successfully (exit code {exit_code})")
+                    return True
+                else:
+                    log(f"[{server_ip}] One-time job failed (exit code {exit_code})")
+                    # Get logs to show why
+                    self._log_container_failure(container_name, server_ip)
+                    return False
+                        
+            except Exception as e:
+                log(f"[{server_ip}] Health check exception: {e}")
+                return False
                 
-                try:
-                    result = CommandExecuter.run_cmd(
-                        f"docker ps --filter 'name={container_name}' --format '{{{{.Status}}}}'",
-                        server_ip, "root"
-                    )
-                    status = result.stdout.strip() if hasattr(result, 'stdout') else str(result).strip()
-                    
-                    if status and 'Up' in status:
-                        log(f"[{server_ip}] TCP service container running successfully")
-                        return True
-                    else:
-                        log(f"[{server_ip}] Container not running: {status}")
-                        return False
-                except Exception as e:
-                    log(f"[{server_ip}] Could not check container status: {e}")
+        else:
+            # TCP service - check if container is running
+            log(f"[{server_ip}] TCP service - verifying container is running")
+            time.sleep(1)
+            
+            try:
+                result = CommandExecuter.run_cmd(
+                    f"docker ps --filter 'name={container_name}' --format '{{{{.Status}}}}'",
+                    server_ip, "root"
+                )
+                status = result.stdout.strip() if hasattr(result, 'stdout') else str(result).strip()
+                
+                if status and 'Up' in status:
+                    log(f"[{server_ip}] TCP service container running successfully")
+                    return True
+                else:
+                    log(f"[{server_ip}] Container not running - checking why...")
+                    # NEW: Get actual container logs to show the error
+                    self._log_container_failure(container_name, server_ip)
                     return False
+            except Exception as e:
+                log(f"[{server_ip}] Could not check container status: {e}")
+                return False
+
+    def _log_container_failure(self, container_name: str, server_ip: str, lines: int = 30):
+        """
+        Log container failure details including logs and inspect output.
+        
+        Args:
+            container_name: Name of the failed container
+            server_ip: Server IP where container is running
+            lines: Number of log lines to show
+        """
+        log(f"[{server_ip}] ═══════════════════════════════════════════════")
+        log(f"[{server_ip}] Container '{container_name}' failure details:")
+        log(f"[{server_ip}] ═══════════════════════════════════════════════")
+        
+        try:
+            # Get container state
+            inspect_cmd = f"docker inspect {container_name} --format '{{{{json .State}}}}'"
+            inspect_result = CommandExecuter.run_cmd(inspect_cmd, server_ip, "root")
+            
+            if inspect_result:
+                import json
+                state_str = inspect_result.stdout.strip() if hasattr(inspect_result, 'stdout') else str(inspect_result).strip()
+                try:
+                    state = json.loads(state_str)
+                    log(f"[{server_ip}] Status: {state.get('Status', 'unknown')}")
+                    log(f"[{server_ip}] Exit Code: {state.get('ExitCode', 'unknown')}")
+                    if state.get('Error'):
+                        log(f"[{server_ip}] Error: {state.get('Error')}")
+                    if state.get('OOMKilled'):
+                        log(f"[{server_ip}] ⚠ Container was killed by OOM (Out of Memory)")
+                except:
+                    log(f"[{server_ip}] State: {state_str}")
+        except Exception as e:
+            log(f"[{server_ip}] Could not inspect container: {e}")
+        
+        try:
+            # Get container logs
+            log(f"[{server_ip}] Last {lines} lines of logs:")
+            log(f"[{server_ip}] ───────────────────────────────────────────────")
+            
+            logs_result = DockerExecuter.get_container_logs(container_name, lines=lines, server_ip=server_ip, user="root")
+            
+            if logs_result:
+                logs = logs_result.strip() if isinstance(logs_result, str) else str(logs_result).strip()
+                
+                # Filter out noise (Alpine package manager, SSH installation, etc.)
+                filtered_lines = []
+                noise_patterns = [
+                    'fetch https://dl-cdn.alpinelinux.org',
+                    'Installing',
+                    'Executing busybox',
+                    'OK: ',
+                    '/alpine/'
+                ]
+                
+                for line in logs.split('\n'):
+                    # Skip noise lines
+                    if not any(pattern in line for pattern in noise_patterns):
+                        filtered_lines.append(line)
+                
+                # Show filtered logs
+                if filtered_lines:
+                    for line in filtered_lines[-lines:]:  # Last N lines after filtering
+                        log(f"[{server_ip}] {line}")
+                else:
+                    # If everything was filtered, show raw logs
+                    for line in logs.split('\n')[-lines:]:
+                        log(f"[{server_ip}] {line}")
+            else:
+                log(f"[{server_ip}] No logs available")
+                
+        except Exception as e:
+            log(f"[{server_ip}] Could not get container logs: {e}")
+        
+        log(f"[{server_ip}] ═══════════════════════════════════════════════")
 
     def _cleanup_empty_servers(self, project: str, env: str):
             """
@@ -2854,7 +2945,8 @@ class Deployer:
         except Exception as e:
             log(f"Failed to install backup of {parent_service_name} on {server_ip}: {e}")
             return False
-        
+
+      
 # =============================================================================
     # BASTION BACKUP COMMANDS
     # =============================================================================

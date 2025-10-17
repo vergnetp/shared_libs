@@ -1,7 +1,12 @@
 import os
 import hashlib
 from typing import List
-from logger import Logger
+try:
+    # Try relative import (when used as package)
+    from .logger import Logger
+except ImportError:
+    # Fall back to absolute import (when run directly)
+    from logger import Logger
 
 
 def log(msg):
