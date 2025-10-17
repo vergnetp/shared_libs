@@ -1,0 +1,5 @@
+✅ Search the actual code FIRST before any instruction
+✅ Show you the search results I'm using
+✅ Quote exact lines from your codebase
+✅ Verify my instructions match reality
+❌ NO assumptions, "or similar", generalizations

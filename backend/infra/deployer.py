@@ -322,109 +322,186 @@ class Deployer:
         return None
 
     def build_images(self, environment: str = None, push_to_registry: bool = False):
+            """
+            Build Docker images for all enabled services in parallel.
+
+            Logic:
+            1. Check Docker availability.
+            2. Iterate over environments (or a specific one if `environment` is provided).
+            3. Collect all services that need building.
+            4. Build all service images in parallel using ThreadPoolExecutor.
+            5. Push images to registry in parallel if requested.
+
+            Args:
+                environment (str, optional): Environment to build images for. Defaults to all.
+                push_to_registry (bool, optional): Whether to push built images to Docker registry. Defaults to False.
+
+            Returns:
+                bool: True if build process completed successfully.
+
+            Example:
+                build_images(environment="dev", push_to_registry=True)
+            """
+            if not DockerExecuter.check_docker():
+                log("Docker is not available. Please ensure Docker is installed and running.")
+                return False
+
+            log(f"Building images (push={push_to_registry})...")
+            Logger.start()
+
+            # Collect all build tasks
+            build_tasks = []
+            
+            for env in self.deployment_configurer.get_environments():
+                if environment is None or environment == env:
+                    for service_name, service_config in self.deployment_configurer.get_services(env).items():
+                        if service_config.get("disabled", False):
+                            log(f"Skipping disabled service: {service_name}")
+                            continue
+
+                        if service_config.get("skip_build", False):
+                            log(f"Skipping build for service (skip_build=True): {service_name}")
+                            continue
+
+                        # Skip if no dockerfile specified (prebuilt image)
+                        if not service_config.get("dockerfile") and not service_config.get("dockerfile_content"):
+                            log(f"No dockerfile specified for {service_name}, skipping build (using prebuilt image)")
+                            continue
+
+                        # Add to build queue
+                        build_tasks.append({
+                            'env': env,
+                            'service_name': service_name,
+                            'service_config': service_config
+                        })
+
+            if not build_tasks:
+                log("No images to build")
+                Logger.end()
+                return True
+
+            log(f"Building {len(build_tasks)} service(s) in parallel...")
+            
+            # Build all images in parallel
+            build_results = {}
+            with ThreadPoolExecutor(max_workers=min(len(build_tasks), 10)) as executor:
+                futures = {
+                    executor.submit(
+                        self._build_single_image,
+                        task['env'],
+                        task['service_name'],
+                        task['service_config']
+                    ): task['service_name']
+                    for task in build_tasks
+                }
+                
+                for future in as_completed(futures):
+                    service_name = futures[future]
+                    try:
+                        tag, success = future.result()
+                        build_results[service_name] = {'tag': tag, 'success': success}
+                        
+                        if success:
+                            log(f"✓ {service_name} built successfully")
+                        else:
+                            log(f"✗ {service_name} build failed")
+                    except Exception as e:
+                        log(f"✗ {service_name} build exception: {e}")
+                        build_results[service_name] = {'tag': None, 'success': False}
+
+            # Check if any builds failed
+            failed_builds = [name for name, result in build_results.items() if not result['success']]
+            if failed_builds:
+                log(f"Build failed for services: {', '.join(failed_builds)}")
+                Logger.end()
+                return False
+
+            # Push images in parallel if requested
+            if push_to_registry:
+                log(f"Pushing {len(build_results)} image(s) to registry in parallel...")
+                
+                with ThreadPoolExecutor(max_workers=min(len(build_results), 10)) as executor:
+                    push_futures = {
+                        executor.submit(
+                            DockerExecuter.push_image,
+                            result['tag']
+                        ): service_name
+                        for service_name, result in build_results.items()
+                        if result['tag']
+                    }
+                    
+                    for future in as_completed(push_futures):
+                        service_name = push_futures[future]
+                        try:
+                            future.result()
+                            log(f"✓ {service_name} pushed successfully")
+                        except Exception as e:
+                            log(f"✗ {service_name} push failed: {e}")
+
+            Logger.end()
+            log('Images built.')        
+            return True
+
+    def _build_single_image(self, env: str, service_name: str, service_config: Dict[str, Any]) -> tuple:
         """
-        Build Docker images for all enabled services.
-
-        Logic:
-        1. Check Docker availability.
-        2. Iterate over environments (or a specific one if `environment` is provided).
-        3. Iterate over all services in the environment:
-           - Skip if disabled or `skip_build` is True.
-           - Generate or locate Dockerfile.
-           - Build Docker image with tag based on DeploymentNaming.
-           - Optionally push the image to a registry.
-
+        Build a single Docker image.
+        
         Args:
-            environment (str, optional): Environment to build images for. Defaults to all.
-            push_to_registry (bool, optional): Whether to push built images to Docker registry. Defaults to False.
-
+            env: Environment name
+            service_name: Service name
+            service_config: Service configuration
+            
         Returns:
-            bool: True if build process completed successfully.
-
-        Example:
-            build_images(environment="dev", push_to_registry=True)
+            Tuple of (tag, success) where tag is the image tag and success is boolean
         """
-        if not DockerExecuter.check_docker():
-            log("Docker is not available. Please ensure Docker is installed and running.")
-            return False
+        try:
+            # Handle dockerfile_content vs dockerfile
+            dockerfile = None
+            if service_config.get("dockerfile_content"):
+                # Generate dockerfile from content
+                dockerfile_content = self.create_temporary_dockerfile(
+                    service_config["dockerfile_content"], 
+                    service_name
+                )
+                dockerfile = self.write_temporary_dockerfile(dockerfile_content, service_name, env)
+            elif service_config.get("dockerfile"):
+                # Use existing dockerfile path
+                dockerfile = self.generate_dockerfile(service_name, service_config)
+                if dockerfile:
+                    # Still inject app directories for file-based dockerfiles
+                    dockerfile = self.inject_app_directories_to_dockerfile(dockerfile, service_name)
+            
+            if not dockerfile or not os.path.exists(dockerfile):
+                log(f"Error: Could not create/find Dockerfile for {service_name}")
+                return (None, False)
 
-        log(f"Building images (push={push_to_registry})...")
-        Logger.start()
+            docker_hub_user = self.deployment_configurer.get_docker_hub_user()
+            version = self._get_version()
+            project_name = self.deployment_configurer.get_project_name()
 
-        for env in self.deployment_configurer.get_environments():
-            if environment is None or environment == env:
-                for service_name, service_config in self.deployment_configurer.get_services(env).items():
-                    log(f"Service: {service_name}...")
-                    Logger.start()
+            tag = DeploymentNaming.get_image_name(
+                docker_hub_user,
+                project_name,
+                env,
+                service_name,
+                version
+            )
 
-                    if service_config.get("disabled", False):
-                        log(f"Skipping disabled service: {service_name}")
-                        Logger.end()
-                        continue
-
-                    if service_config.get("skip_build", False):
-                        log(f"Skipping build for service (skip_build=True): {service_name}")
-                        Logger.end()
-                        continue
-
-                    # Skip if no dockerfile specified (prebuilt image)
-                    if not service_config.get("dockerfile") and not service_config.get("dockerfile_content"):
-                        log(f"No dockerfile specified for {service_name}, skipping build (using prebuilt image)")
-                        Logger.end()
-                        continue
-
-                    # Handle dockerfile_content vs dockerfile
-                    dockerfile = None
-                    if service_config.get("dockerfile_content"):
-                        # Generate dockerfile from content
-                        dockerfile_content = self.create_temporary_dockerfile(
-                            service_config["dockerfile_content"], 
-                            service_name
-                        )
-                        dockerfile = self.write_temporary_dockerfile(dockerfile_content, service_name, env)
-                    elif service_config.get("dockerfile"):
-                        # Use existing dockerfile path
-                        dockerfile = self.generate_dockerfile(service_name, service_config)
-                        if dockerfile:
-                            # Still inject app directories for file-based dockerfiles
-                            dockerfile = self.inject_app_directories_to_dockerfile(dockerfile, service_name)
-                    
-                    if not dockerfile or not os.path.exists(dockerfile):
-                        log(f"Error: Could not create/find Dockerfile for {service_name}, skipping.")
-                        Logger.end()
-                        continue
-
-                    docker_hub_user = self.deployment_configurer.get_docker_hub_user()
-                    version = self._get_version()
-                    project_name = self.deployment_configurer.get_project_name()
-
-                    tag = DeploymentNaming.get_image_name(
-                        docker_hub_user,
-                        project_name,
-                        env,
-                        service_name,
-                        version
-                    )
-
-                    build_context = service_config.get("build_context", ".")
-                    log(f"Building image {tag} from {dockerfile}...")
-                    
-                    DockerExecuter.build_image(
-                        dockerfile_path=dockerfile,
-                        tag=tag,
-                        context_dir=build_context,
-                        progress="plain"
-                    )
-
-                    if push_to_registry:
-                        log(f"Pushing {tag}...")
-                        DockerExecuter.push_image(tag)
-                    Logger.end()
-                    log(f"{service_name} built.")
-
-        Logger.end()
-        log('Images built.')        
-        return True
+            build_context = service_config.get("build_context", ".")
+            log(f"Building {service_name}: {tag}...")
+            
+            DockerExecuter.build_image(
+                dockerfile_path=dockerfile,
+                tag=tag,
+                context_dir=build_context,
+                progress="plain"
+            )
+            
+            return (tag, True)
+            
+        except Exception as e:
+            log(f"Build error for {service_name}: {e}")
+            return (None, False)
 
     def deploy(self, env: str = None, service_name: str = None, build: bool = True, target_version: str = None) -> bool:
         """
