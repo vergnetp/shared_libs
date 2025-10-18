@@ -579,37 +579,25 @@ class DOManager:
         from execute_cmd import CommandExecuter
         
         # Create nginx directories
-        CommandExecuter.run_cmd("mkdir -p /local/nginx/conf.d /local/nginx/stream.d", server_ip, "root")
+        CommandExecuter.run_cmd("mkdir -p /etc/nginx/conf.d /etc/nginx/stream.d", server_ip, "root")
         
         # Create basic nginx.conf with stream support
-        nginx_conf = """
-events { worker_connections 1024; }
-stream { include /etc/nginx/stream.d/*.conf; }
-http { include /etc/nginx/conf.d/*.conf; }
-"""
+        nginx_conf = """events { worker_connections 1024; }
+    stream { include /etc/nginx/stream.d/*.conf; }
+    http { include /etc/nginx/conf.d/*.conf; }
+    """
         
         CommandExecuter.run_cmd_with_stdin(
-            "cat > /local/nginx/nginx.conf",
+            "cat > /etc/nginx/nginx.conf",
             nginx_conf.encode('utf-8'),
             server_ip, "root"
         )
         
-        # Start nginx container (without project-specific network)
-        DockerExecuter.run_container(
-            image="nginx:alpine",
-            name="nginx",
-            ports={"80": "80", "443": "443"},
-            volumes=[
-                "/local/nginx/nginx.conf:/etc/nginx/nginx.conf:ro",
-                "/local/nginx/conf.d:/etc/nginx/conf.d:ro",
-                "/local/nginx/stream.d:/etc/nginx/stream.d:ro"
-            ],
-            restart_policy="unless-stopped",
-            server_ip=server_ip,
-            user="root"
-        )
+        # DON'T START NGINX IN THE TEMPLATE!
+        # Just create the config files. Nginx will be started by deployer
+        # with the correct project-specific network.
         
-        log(f"Nginx container installed on {server_ip}")
+        log(f"Nginx config directories prepared on {server_ip}")
 
     @staticmethod
     def create_servers(

@@ -614,41 +614,59 @@ class NginxConfigGenerator:
         container_name = NginxConfigGenerator.NGINX_CONTAINER
         network_name = DeploymentNaming.get_network_name(project, env)
         
-        if DockerExecuter.is_container_running(container_name, target_server, user):
-            log(f"Nginx container '{container_name}' already running")
-            return True
+        # Check if container exists
+        check_cmd = "docker ps -a --filter 'name=^nginx$' --format '{{.Names}}'"
+        result = CommandExecuter.run_cmd(check_cmd, target_server, user)
         
+        if result and 'nginx' in str(result):
+            # Container exists - check its network
+            network_cmd = "docker inspect nginx --format '{{.HostConfig.NetworkMode}}'"
+            current_network = CommandExecuter.run_cmd(network_cmd, target_server, user)
+            current_network = current_network.stdout.strip() if hasattr(current_network, 'stdout') else str(current_network).strip()
+            
+            if current_network != network_name:
+                # Wrong network - recreate it!
+                log(f"Nginx on wrong network ({current_network}), expected {network_name} - recreating")
+                CommandExecuter.run_cmd("docker rm -f nginx", target_server, user)
+                # Fall through to creation below
+            elif DockerExecuter.is_container_running(container_name, target_server, user):
+                log(f"Nginx container '{container_name}' already running on correct network")
+                return True
+            else:
+                # Correct network but not running - start it
+                CommandExecuter.run_cmd("docker start nginx", target_server, user)
+                log(f"Started existing nginx container")
+                return True
+        
+        # Create nginx container on the correct network
         log(f"Starting nginx container '{container_name}' on network '{network_name}'")
         
         cert_paths = NginxConfigGenerator._get_cert_paths(target_server)
         target_os = PathResolver.detect_target_os(target_server, user)
         
-        # Get base nginx path as STRING
+        # Get base nginx path
         if target_server == "localhost" or target_server is None:
             if target_os == "windows":
                 nginx_base = "C:/local/nginx"
             else:
                 nginx_base = "/etc/nginx"
         else:
-            # Remote: always Linux
             nginx_base = "/etc/nginx"
         
-        # Build paths as strings (no Path objects for remote!)
+        # Build paths
         main_conf = f"{nginx_base}/nginx.conf"
         conf_dir = f"{nginx_base}/conf.d"
         stream_dir = f"{nginx_base}/stream.d"
         
-        # For localhost, create directories using Path
+        # For localhost, create directories
         if target_server == "localhost" or target_server is None:
             from pathlib import Path
             Path(conf_dir).mkdir(parents=True, exist_ok=True)
             Path(stream_dir).mkdir(parents=True, exist_ok=True)
             
-            # Ensure main nginx.conf exists
             if not Path(main_conf).exists():
                 NginxConfigGenerator._ensure_main_nginx_local(target_os)
         
-        # Build volume list with string paths
         volumes = [
             f"{main_conf}:/etc/nginx/nginx.conf:ro",
             f"{conf_dir}:/etc/nginx/conf.d:ro",
@@ -667,14 +685,14 @@ class NginxConfigGenerator:
             DockerExecuter.run_container(
                 image="nginx:alpine",
                 name=container_name,
-                network=network_name,
+                network=network_name,  # ← This is already correct
                 ports=ports,
                 volumes=volumes,
                 restart_policy="unless-stopped",
                 server_ip=target_server,
                 user=user
             )
-            log(f"Started nginx container '{container_name}'")
+            log(f"Started nginx container '{container_name}' on network '{network_name}'")
             return True
         except Exception as e:
             log(f"Failed to start nginx container: {e}")

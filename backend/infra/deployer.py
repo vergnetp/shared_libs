@@ -503,6 +503,7 @@ class Deployer:
             log(f"Build error for {service_name}: {e}")
             return (None, False)
 
+
     def _batch_prepare_servers(
         self,
         project: str,
@@ -553,30 +554,6 @@ class Deployer:
                     # Create nginx directories
                     "mkdir -p /etc/nginx/stream.d",
                     "mkdir -p /etc/nginx/conf.d",
-                    
-                    # Create nginx.conf if it doesn't exist
-                    """cat > /etc/nginx/nginx.conf << 'NGINX_EOF'
-    user nginx;
-    worker_processes auto;
-    error_log /var/log/nginx/error.log warn;
-    pid /var/run/nginx.pid;
-
-    events {
-        worker_connections 1024;
-    }
-
-    stream {
-        include /etc/nginx/stream.d/*.conf;
-    }
-
-    http {
-        include /etc/nginx/mime.types;
-        default_type application/octet-stream;
-        sendfile on;
-        keepalive_timeout 65;
-        include /etc/nginx/conf.d/*.conf;
-    }
-    NGINX_EOF""",
                 ]
                 
                 commands.extend(nginx_commands)
@@ -628,6 +605,41 @@ class Deployer:
                 
                 log(f"[{server_ip}] Preparing {len(services_prepared)} service(s): {', '.join(services_prepared[:3])}{'...' if len(services_prepared) > 3 else ''}")
                 CommandExecuter.run_cmd(batch_cmd, server_ip, "root")
+                
+                # ========================================
+                # STEP 3.5: CREATE NGINX.CONF SEPARATELY (FIX!)
+                # ========================================
+                # Write nginx.conf using run_cmd_with_stdin to avoid heredoc issues
+                nginx_conf_content = """user nginx;
+    worker_processes auto;
+    error_log /var/log/nginx/error.log warn;
+    pid /var/run/nginx.pid;
+
+    events {
+        worker_connections 1024;
+    }
+
+    stream {
+        include /etc/nginx/stream.d/*.conf;
+    }
+
+    http {
+        include /etc/nginx/mime.types;
+        default_type application/octet-stream;
+        sendfile on;
+        keepalive_timeout 65;
+        include /etc/nginx/conf.d/*.conf;
+    }"""
+                
+                try:
+                    CommandExecuter.run_cmd_with_stdin(
+                        "cat > /etc/nginx/nginx.conf",
+                        nginx_conf_content.encode('utf-8'),
+                        server_ip,
+                        "root"
+                    )
+                except Exception as e:
+                    log(f"[{server_ip}] Warning: Could not create nginx.conf: {e}")
                 
                 # ========================================
                 # STEP 4: START NGINX CONTAINER
@@ -691,6 +703,8 @@ class Deployer:
         
         if failed_servers > 0:
             log(f"Warning: {failed_servers} servers failed preparation - deployment may fail")
+
+
 
     def deploy(self, env: str = None, service_name: str = None, build: bool = True, target_version: str = None) -> bool:
         """
@@ -1459,147 +1473,172 @@ class Deployer:
         return result
 
     def _deploy_to_single_server(
-        self,
-        project: str,
-        env: str,
-        service_name: str,
-        service_config: Dict[str, Any],
-        target_ip: str,
-        base_name: str,
-        base_port: int,
-        need_port_mapping: bool
-    ) -> Dict[str, Any]:
-        """
-        Deploy service to a single server (called in parallel for each server).
-        
-        NOTE: Directories and volumes are already created by _batch_prepare_servers()
-        NOTE: Images are already pulled by _pre_pull_images_parallel()
-        
-        This method now only handles:
-        1. Network setup
-        2. Container deployment
-        3. Health check
-        4. Old container cleanup
-        
-        Args:
-            project: Project name
-            env: Environment name
-            service_name: Service name
-            service_config: Service configuration
-            target_ip: Target server IP
-            base_name: Base container name
-            base_port: Base host port
-            need_port_mapping: Whether to map host ports
+            self,
+            project: str,
+            env: str,
+            service_name: str,
+            service_config: Dict[str, Any],
+            target_ip: str,
+            base_name: str,
+            base_port: int,
+            need_port_mapping: bool
+        ) -> Dict[str, Any]:
+            """
+            Deploy service to a single server (called in parallel for each server).
             
-        Returns:
-            Dict with 'success' (bool), 'new_container_name' (str), and optional 'error' (str)
-        """
-        result = {
-            'success': False,
-            'new_container_name': None,
-            'error': None
-        }
-        
-        try:
-            log(f"[{target_ip}] Starting deployment")
+            NOTE: Directories and volumes are already created by _batch_prepare_servers()
+            NOTE: Images are already pulled by _pre_pull_images_parallel()
             
-            # STEP 1: Create network (quick operation)
-            self.create_containers_network(env, target_ip, "root")
-            network_name = DeploymentNaming.get_network_name(project, env)
-            log(f"[{target_ip}] Network ready")
+            This method now only handles:
+            1. Network setup
+            2. Container deployment
+            3. Health check
+            4. Old container cleanup
             
-            # STEP 2: Determine toggle (which container name/port to use)
-            # FIX: Use _determine_toggle instead of non-existent list_containers
-            toggle = self._determine_toggle(project, env, service_name, target_ip, base_port, base_name)
-            new_name = toggle["name"]
-            new_port = toggle["port"]
+            Args:
+                project: Project name
+                env: Environment name
+                service_name: Service name
+                service_config: Service configuration
+                target_ip: Target server IP
+                base_name: Base container name
+                base_port: Base host port
+                need_port_mapping: Whether to map host ports
+                
+            Returns:
+                Dict with 'success' (bool), 'new_container_name' (str), and optional 'error' (str)
+            """
+            result = {
+                'success': False,
+                'new_container_name': None,
+                'error': None
+            }
             
-            if new_name == base_name:
-                log(f"[{target_ip}] First deployment of {service_name} - using base")
-            else:
-                log(f"[{target_ip}] Toggle deployment - using {'base' if new_port == base_port else 'secondary'}")
-            
-            log(f"[{target_ip}] Using container name: {new_name}, port: {new_port}")
-            
-            result['new_container_name'] = new_name
-            
-            # STEP 3: Get volumes (directories already created by _batch_prepare_servers)
-            volumes = PathResolver.generate_all_volume_mounts(
-                project, env, service_name, target_ip,
-                use_docker_volumes=True, user="root",
-                auto_create_dirs=False  # Already created in batch!
-            )
-            
-            # STEP 4: Get image (already pulled by _pre_pull_images_parallel)
-            if service_config.get("image"):
-                image = service_config["image"]
-            else:
-                docker_hub_user = self.deployment_configurer.get_docker_hub_user()
-                version = self._get_version()
-                image = DeploymentNaming.get_image_name(
-                    docker_hub_user, project, env, service_name, version
+            try:
+                log(f"[{target_ip}] Starting deployment")
+                
+                # STEP 1: Create network (quick operation)
+                self.create_containers_network(env, target_ip, "root")
+                network_name = DeploymentNaming.get_network_name(project, env)
+                log(f"[{target_ip}] Network ready")
+                
+                # STEP 2: Determine toggle (which container name/port to use)
+                toggle = self._determine_toggle(project, env, service_name, target_ip, base_port, base_name)
+                new_name = toggle["name"]
+                new_port = toggle["port"]
+                
+                # CRITICAL FIX: Clean up opposite container BEFORE deploying
+                old_name = self._get_opposite_container_name(new_name, base_name)
+                if old_name:
+                    log(f"[{target_ip}] Checking for old container: {old_name}")
+                    try:
+                        # Check if opposite container exists
+                        check_cmd = f"docker ps -aq --filter 'name=^{old_name}$'"
+                        check_result = CommandExecuter.run_cmd(check_cmd, target_ip, 'root')
+                        
+                        if hasattr(check_result, 'stdout'):
+                            existing_id = check_result.stdout.strip()
+                        else:
+                            existing_id = str(check_result).strip()
+                        
+                        if existing_id:
+                            log(f"[{target_ip}] Force removing old container: {old_name}")
+                            CommandExecuter.run_cmd(f"docker rm -f {old_name}", target_ip, 'root')
+                            log(f"[{target_ip}] Successfully removed {old_name}")
+                    except Exception as e:
+                        log(f"[{target_ip}] Note: Could not remove old container {old_name}: {e}")
+                
+                if new_name == base_name:
+                    log(f"[{target_ip}] First deployment of {service_name} - using base")
+                else:
+                    log(f"[{target_ip}] Toggle deployment - using {'base' if new_port == base_port else 'secondary'}")
+                
+                log(f"[{target_ip}] Using container name: {new_name}, port: {new_port}")
+                
+                result['new_container_name'] = new_name
+                
+                # STEP 3: Get volumes (directories already created by _batch_prepare_servers)
+                volumes = PathResolver.generate_all_volume_mounts(
+                    project, env, service_name, target_ip,
+                    use_docker_volumes=True, user="root",
+                    auto_create_dirs=False  # Already created in batch!
                 )
-            
-            # Image already pulled by _pre_pull_images_parallel - skip pulling
-            
-            # STEP 5: Prepare container configuration
-            env_vars = service_config.get("env_vars", {})
-            restart_policy = "unless-stopped" if service_config.get("restart", True) else "no"
-            
-            # Port mapping
-            dockerfile = service_config.get("dockerfile")
-            container_ports = DeploymentPortResolver.get_container_ports(service_name, dockerfile)
-            container_port = container_ports[0] if container_ports else "8000"
-            
-            ports = None
-            if need_port_mapping:
-                ports = {str(new_port): str(container_port)}
-            
-            # STEP 6: Start new container
-            DockerExecuter.run_container(
-                image=image,
-                name=new_name,
-                network=network_name,
-                ports=ports,
-                volumes=volumes,
-                environment=env_vars,
-                restart_policy=restart_policy,
-                server_ip=target_ip,
-                user="root"
-            )
-            
-            log(f"[{target_ip}] Started {new_name}")
-            
-            # STEP 7: Health check
-            health_check_passed = self._verify_container_health(
-                service_name, service_config, new_name, target_ip
-            )
-            
-            if not health_check_passed:
-                log(f"[{target_ip}] Health check failed - rolling back")
-                DockerExecuter.stop_and_remove_container(new_name, target_ip, ignore_if_not_exists=True)
-                result['error'] = 'Health check failed'
-                return result
-            
-            log(f"[{target_ip}] Health check passed")
-            
-            # STEP 8: Stop old container
-            # FIX: Use _get_opposite_container_name for safety
-            old_name = self._get_opposite_container_name(new_name, base_name)
-            if old_name:
-                DockerExecuter.stop_and_remove_container(
-                    old_name, target_ip, ignore_if_not_exists=True
+                
+                # STEP 4: Get environment variables
+                env_vars = service_config.get("env_vars", {})
+                
+                # STEP 5: Build image name
+                image = service_config.get("image")
+                if not image:
+                    docker_hub_user = self.deployment_configurer.get_docker_hub_user()
+                    version = self._get_version()
+                    image = DeploymentNaming.get_image_name(
+                        docker_hub_user, project, env, service_name, version
+                    )
+                
+                # STEP 6: Get ports configuration
+                if need_port_mapping:
+                    # Multi-server: use toggle port
+                    ports_config = service_config.get("ports", [])
+                    if not ports_config:
+                        # Use DeploymentPortResolver to get conventional ports
+                        dockerfile = service_config.get("dockerfile")
+                        container_ports = DeploymentPortResolver.get_container_ports(service_name, dockerfile)
+                        ports_config = container_ports if container_ports else ["8000"]
+                    
+                    # Map internal port to toggle port
+                    port_mappings = {}
+                    for internal_port in ports_config:
+                        port_mappings[str(new_port)] = str(internal_port)
+                else:
+                    # Single-server: no port mapping
+                    port_mappings = {}
+                
+                # STEP 7: Start container
+                DockerExecuter.run_container(
+                    name=new_name,
+                    image=image,
+                    ports=port_mappings if port_mappings else None,
+                    volumes=volumes,
+                    environment=env_vars,
+                    network=network_name,
+                    server_ip=target_ip,
+                    user='root',
+                    restart_policy='always' if service_config.get('restart', False) else 'no'
                 )
-                log(f"[{target_ip}] Stopped old container {old_name}")
+                
+                log(f"[{target_ip}] Container {new_name} started successfully")
+                
+                # STEP 8: Health check (if applicable)
+                health_check_enabled = service_config.get('health_check', True)
+                if health_check_enabled:
+                    log(f"[{target_ip}] Running health check...")
+                    health_ok = self._verify_container_health(
+                        service_name, service_config, new_name, target_ip
+                    )
+                    if not health_ok:
+                        raise Exception("Health check failed")
+                    log(f"[{target_ip}] Health check passed")
+                
+                result['success'] = True
+                log(f"[{target_ip}] Deployment successful")
+                
+            except Exception as e:
+                result['error'] = str(e)
+                log(f"[{target_ip}] Deployment failed: {e}")
+                
+                # Cleanup on failure
+                if result.get('new_container_name'):
+                    try:
+                        DockerExecuter.stop_and_remove_container(
+                            result['new_container_name'],
+                            target_ip,
+                            ignore_if_not_exists=True
+                        )
+                    except:
+                        pass
             
-            result['success'] = True
-            log(f"[{target_ip}] Deployment complete")
-            
-        except Exception as e:
-            log(f"[{target_ip}] Deployment failed: {e}")
-            result['error'] = str(e)
-        
-        return result
+            return result
 
     def _verify_container_health(
         self,
