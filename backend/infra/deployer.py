@@ -1162,32 +1162,41 @@ class Deployer:
         project: str,
         env: str,
         service: str,
-        deployed_servers: List[str]
+        deployed_servers: List[str],
+        current_server: str  # NEW: which server's nginx are we configuring?
     ) -> str:
         """
-        Determine nginx backend mode FOR THIS SPECIFIC SERVICE.
+        Determine nginx backend mode FOR THIS SPECIFIC SERVER.
         
-        CRITICAL: This is per-service, not global!
+        CRITICAL: Mode is PER-SERVER, not global!
         
         Decision:
-        - Service on 1 server → "single_server" (use container names, no port mapping)
-        - Service on 2+ servers → "multi_server" (use IPs + host ports)
+        - Service deployed on THIS server → "single_server" (use container names via Docker DNS)
+        - Service deployed on OTHER servers → "multi_server" (use remote IP:internal_port)
+        
+        Example:
+            Postgres on Server A only
+            Current server = A → "single_server" (use postgres container name)
+            Current server = B → "multi_server" (use Server A IP:5228)
         
         Args:
             project: Project name
             env: Environment
             service: Service name
-            deployed_servers: Servers where THIS SERVICE is deployed
+            deployed_servers: All servers where THIS SERVICE is deployed
+            current_server: The server whose nginx we're configuring
             
         Returns:
             "single_server" or "multi_server"
         """
-        if len(deployed_servers) == 1:
-            log(f"Backend mode for {service}: single_server (deployed on {deployed_servers[0]} only)")
+        # Is the service deployed on THIS server?
+        if current_server in deployed_servers:
+            log(f"[{current_server}] Backend mode for {service}: single_server (service is local)")
             return "single_server"
         else:
-            log(f"Backend mode for {service}: multi_server (deployed on {len(deployed_servers)} servers)")
+            log(f"[{current_server}] Backend mode for {service}: multi_server (service is remote)")
             return "multi_server"
+
 
     def _generate_nginx_backends(
         self,
@@ -1195,26 +1204,29 @@ class Deployer:
         project: str,
         env: str,
         service: str,
-        deployed_servers: List[str]
+        deployed_servers: List[str],
+        current_server: str  # NEW: which server's nginx are we configuring?
     ) -> List[Dict[str, Any]]:
         """
         Generate backend list for nginx based on deployment mode.
+        
+        CRITICAL: Backends are different per server!
         
         Args:
             mode: "single_server" or "multi_server"
             project: Project name
             env: Environment
             service: Service name
-            deployed_servers: Servers where THIS SERVICE is deployed
+            deployed_servers: All servers where service is deployed
+            current_server: The server whose nginx we're configuring
             
         Returns:
             Single-server: [{"container_name": "...", "port": "5432"}, ...]
-            Multi-server: [{"ip": "...", "port": 8357}, ...]
+            Multi-server: [{"ip": "...", "port": 5228}, ...]  # Internal port!
         """
         if mode == "single_server":
-            # Use container names (Docker DNS)
+            # Use container names (Docker DNS) - service is on THIS server
             backends = []
-            server_ip = deployed_servers[0]
             
             # Get both primary and secondary containers if they exist
             for suffix in ["", "_secondary"]:
@@ -1222,13 +1234,13 @@ class Deployer:
                 if suffix:
                     container_name = f"{container_name}{suffix}"
                 
-                # Check if container exists
-                if DockerExecuter.container_exists(container_name, server_ip):
+                # Check if container exists on THIS server
+                if DockerExecuter.container_exists(container_name, current_server):
                     # Get container port (not host port!)
                     service_config = self.deployment_configurer.get_services(env)[service]
                     dockerfile = service_config.get("dockerfile")
                     container_ports = DeploymentPortResolver.get_container_ports(service, dockerfile)
-                    container_port = container_ports[0] if container_ports else "8000"
+                    container_port = container_ports[0] if container_ports else "5432"
                     
                     backends.append({
                         "container_name": container_name,
@@ -1238,37 +1250,21 @@ class Deployer:
             return backends
         
         else:  # multi_server
-            # Use IP + host ports
+            # Use remote server IP + INTERNAL PORT (nginx port, not container port!)
             backends = []
             
+            # Calculate the internal port that nginx listens on
+            internal_port = DeploymentPortResolver.get_internal_port(project, env, service)
+            
             for server_ip in deployed_servers:
-                # Find what's actually running on this server
-                base_name = DeploymentNaming.get_container_name(project, env, service)
-                
-                # Check for both primary and secondary
-                for suffix in ["", "_secondary"]:
-                    container_name = f"{base_name}{suffix}" if suffix else base_name
-                    
-                    if DockerExecuter.container_exists(container_name, server_ip):
-                        # Get published host port
-                        port_map = DockerExecuter.get_published_ports(container_name, server_ip)
-                        
-                        # Find the host port (format: "5432/tcp" -> "8357")
-                        service_config = self.deployment_configurer.get_services(env)[service]
-                        dockerfile = service_config.get("dockerfile")
-                        container_ports = DeploymentPortResolver.get_container_ports(service, dockerfile)
-                        container_port = container_ports[0] if container_ports else "8000"
-                        
-                        port_key = f"{container_port}/tcp"
-                        if port_key in port_map:
-                            host_port = port_map[port_key]
-                            
-                            backends.append({
-                                "ip": server_ip,
-                                "port": host_port  # Host port (8357 or 18357)
-                            })
+                # Point to the remote server's nginx internal port
+                backends.append({
+                    "ip": server_ip,
+                    "port": internal_port  # Internal port (5228), not host port!
+                })
             
             return backends
+
 
     def _update_all_nginx_for_service(
         self,
@@ -1281,10 +1277,21 @@ class Deployer:
         """
         Update nginx stream config on all servers in zone FOR THIS SERVICE.
         
-        CRITICAL: Mode is determined per-service, not globally!
+        CRITICAL: Each server gets a DIFFERENT config based on whether service is local or remote!
         
-        This allows mixed deployments where some services are single-server
-        and others are multi-server within the same zone.
+        Example:
+            Postgres deployed on Server A only
+            API deployed on Server A and Server B
+            
+            Server A nginx config:
+                upstream new_project_uat_postgres {
+                    server new_project_uat_postgres:5432;  # Local via Docker DNS
+                }
+            
+            Server B nginx config:
+                upstream new_project_uat_postgres {
+                    server 161.35.164.134:5228;  # Remote via IP:internal_port
+                }
         
         Args:
             project: Project name
@@ -1297,35 +1304,40 @@ class Deployer:
             log(f"Skipping nginx stream config for {service} (not a TCP service)")
             return
         
-        # Determine mode FOR THIS SPECIFIC SERVICE
-        mode = self._determine_backend_mode_for_service(
-            project, env, service, deployed_servers
-        )
-        
-        log(f"Updating nginx stream config for {service} (mode: {mode})")
-        
-        # Generate backends based on THIS SERVICE's deployment
-        backends = self._generate_nginx_backends(
-            mode, project, env, service, deployed_servers
-        )
-        
-        if not backends:
-            log(f"No backends found for {service}")
-            return
+        log(f"Updating nginx stream config for {service} on {len(all_zone_servers)} servers")
         
         # Calculate internal port (stable for this service)
         internal_port = DeploymentPortResolver.get_internal_port(project, env, service)
         log(f"Internal port for {service}: {internal_port}")
         
-        # Update nginx on EVERY server in the zone
-        # (Even servers that don't run this service need the config)
+        # Update nginx on EVERY server in the zone (each gets different config!)
         for server in all_zone_servers:
+            server_ip = server['ip']
+            
             try:
-                NginxConfigGenerator.update_stream_config_on_server(
-                    server['ip'], project, env, service, backends, internal_port, mode
+                # Determine mode FOR THIS SPECIFIC SERVER
+                mode = self._determine_backend_mode_for_service(
+                    project, env, service, deployed_servers, server_ip
                 )
+                
+                # Generate backends FOR THIS SPECIFIC SERVER
+                backends = self._generate_nginx_backends(
+                    mode, project, env, service, deployed_servers, server_ip
+                )
+                
+                if not backends:
+                    log(f"[{server_ip}] No backends found for {service}")
+                    continue
+                
+                # Update nginx config on this server with its specific backends
+                NginxConfigGenerator.update_stream_config_on_server(
+                    server_ip, project, env, service, backends, internal_port, mode
+                )
+                
+                log(f"[{server_ip}] Updated nginx config for {service} (mode: {mode}, backends: {len(backends)})")
+                
             except Exception as e:
-                log(f"Warning: Failed to update nginx on {server['ip']}: {e}")
+                log(f"Warning: Failed to update nginx on {server_ip}: {e}")
 
     def _is_tcp_service(self, service_name: str) -> bool:
         """
@@ -2689,226 +2701,6 @@ class Deployer:
         
         logs = self.logs(service, env, lines)
         print(logs)
-
-
-    def _determine_backend_mode_for_service(
-        self,
-        project: str,
-        env: str,
-        service: str,
-        deployed_servers: List[str]
-    ) -> str:
-        """
-        Determine nginx backend mode FOR THIS SPECIFIC SERVICE.
-        
-        CRITICAL: This is per-service, not global!
-        
-        Decision:
-        - Service on 1 server → "single_server" (use container names, no port mapping)
-        - Service on 2+ servers → "multi_server" (use IPs + host ports)
-        
-        Args:
-            project: Project name
-            env: Environment
-            service: Service name
-            deployed_servers: Servers where THIS SERVICE is deployed
-            
-        Returns:
-            "single_server" or "multi_server"
-        """
-        if len(deployed_servers) == 1:
-            log(f"Backend mode for {service}: single_server (deployed on {deployed_servers[0]} only)")
-            return "single_server"
-        else:
-            log(f"Backend mode for {service}: multi_server (deployed on {len(deployed_servers)} servers)")
-            return "multi_server"
-
-
-    def _generate_nginx_backends(
-        self,
-        mode: str,
-        project: str,
-        env: str,
-        service: str,
-        deployed_servers: List[str]
-    ) -> List[Dict[str, Any]]:
-        """
-        Generate backend list for nginx based on deployment mode.
-        
-        Args:
-            mode: "single_server" or "multi_server"
-            project: Project name
-            env: Environment
-            service: Service name
-            deployed_servers: Servers where THIS SERVICE is deployed
-            
-        Returns:
-            Single-server: [{"container_name": "...", "port": "5432"}, ...]
-            Multi-server: [{"ip": "...", "port": 8357}, ...]
-        """
-        if mode == "single_server":
-            # Use container names (Docker DNS)
-            backends = []
-            server_ip = deployed_servers[0]
-            
-            # Get both primary and secondary containers if they exist
-            for suffix in ["", "_secondary"]:
-                container_name = DeploymentNaming.get_container_name(project, env, service)
-                if suffix:
-                    container_name = f"{container_name}{suffix}"
-                
-                # Check if container exists
-                if DockerExecuter.container_exists(container_name, server_ip):
-                    # Get container port (not host port!)
-                    service_config = self.deployment_configurer.get_services(env)[service]
-                    dockerfile = service_config.get("dockerfile")
-                    container_ports = DeploymentPortResolver.get_container_ports(service, dockerfile)
-                    container_port = container_ports[0] if container_ports else "8000"
-                    
-                    backends.append({
-                        "container_name": container_name,
-                        "port": container_port  # Container port (5432, not 8357)
-                    })
-            
-            return backends
-        
-        else:  # multi_server
-            # Use IP + host ports
-            backends = []
-            
-            for server_ip in deployed_servers:
-                # Find what's actually running on this server
-                base_name = DeploymentNaming.get_container_name(project, env, service)
-                
-                # Check for both primary and secondary
-                for suffix in ["", "_secondary"]:
-                    container_name = f"{base_name}{suffix}" if suffix else base_name
-                    
-                    if DockerExecuter.container_exists(container_name, server_ip):
-                        # Get published host port
-                        port_map = DockerExecuter.get_published_ports(container_name, server_ip)
-                        
-                        # Find the host port (format: "5432/tcp" -> "8357")
-                        service_config = self.deployment_configurer.get_services(env)[service]
-                        dockerfile = service_config.get("dockerfile")
-                        container_ports = DeploymentPortResolver.get_container_ports(service, dockerfile)
-                        container_port = container_ports[0] if container_ports else "8000"
-                        
-                        port_key = f"{container_port}/tcp"
-                        if port_key in port_map:
-                            host_port = port_map[port_key]
-                            
-                            backends.append({
-                                "ip": server_ip,
-                                "port": host_port  # Host port (8357 or 18357)
-                            })
-            
-            return backends
-
-
-    def _update_all_nginx_for_service(
-        self,
-        project: str,
-        env: str,
-        service: str,
-        deployed_servers: List[str],
-        all_zone_servers: List[Dict[str, Any]]
-    ) -> None:
-        """
-        Update nginx stream config on all servers in zone FOR THIS SERVICE.
-        
-        CRITICAL: Mode is determined per-service, not globally!
-        
-        This allows mixed deployments where some services are single-server
-        and others are multi-server within the same zone.
-        
-        Args:
-            project: Project name
-            env: Environment
-            service: Service name
-            deployed_servers: Servers where THIS SERVICE is deployed
-            all_zone_servers: All servers in the zone (for nginx updates)
-        """
-        if not self._is_tcp_service(service):
-            log(f"Skipping nginx stream config for {service} (not a TCP service)")
-            return
-        
-        # Determine mode FOR THIS SPECIFIC SERVICE
-        mode = self._determine_backend_mode_for_service(
-            project, env, service, deployed_servers
-        )
-        
-        log(f"Updating nginx stream config for {service} (mode: {mode})")
-        
-        # Generate backends based on THIS SERVICE's deployment
-        backends = self._generate_nginx_backends(
-            mode, project, env, service, deployed_servers
-        )
-        
-        if not backends:
-            log(f"No backends found for {service}")
-            return
-        
-        # Calculate internal port (stable for this service)
-        internal_port = DeploymentPortResolver.get_internal_port(project, env, service)
-        log(f"Internal port for {service}: {internal_port}")
-        
-        # Update nginx on EVERY server in the zone
-        # (Even servers that don't run this service need the config)
-        for server in all_zone_servers:
-            try:
-                NginxConfigGenerator.update_stream_config_on_server(
-                    server['ip'], project, env, service, backends, internal_port, mode
-                )
-            except Exception as e:
-                log(f"Warning: Failed to update nginx on {server['ip']}: {e}")
-
-
-    def _is_tcp_service(self, service_name: str) -> bool:
-        """
-        Check if service needs TCP proxying (nginx stream).
-        
-        Args:
-            service_name: Service name
-            
-        Returns:
-            True if service needs TCP stream proxying
-        """
-        tcp_services = ["postgres", "redis", "mongo", "mysql", "rabbitmq", "kafka", "opensearch", "elasticsearch"]
-        return service_name.lower() in tcp_services
-
-
-    def _get_all_servers_in_zone(self, zone: str) -> List[Dict[str, Any]]:
-        """
-        Get all green servers in a zone.
-        
-        Args:
-            zone: Zone name
-            
-        Returns:
-            List of server dicts
-        """
-        return ServerInventory.get_servers(
-            deployment_status=ServerInventory.STATUS_ACTIVE,
-            zone=zone
-        )
-
-
-    def _should_map_host_port(self, deployed_servers: List[str]) -> bool:
-        """
-        Determine if service needs host port mapping.
-        
-        Single-server deployment: NO port mapping (use Docker DNS)
-        Multi-server deployment: YES port mapping (cross-network communication)
-        
-        Args:
-            deployed_servers: Servers where THIS SERVICE is deployed
-            
-        Returns:
-            True if host port mapping needed
-        """
-        return len(deployed_servers) > 1
-
 
     def _get_opposite_container_name(self, current_name: str, base_name: str) -> Optional[str]:
         """
