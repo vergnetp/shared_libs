@@ -620,7 +620,7 @@ class NginxConfigGenerator:
         
         if result and 'nginx' in str(result):
             # Container exists - check its network
-            network_cmd = "docker inspect nginx --format '{{.HostConfig.NetworkMode}}'"
+            network_cmd = "timeout 5 docker inspect nginx --format '{{.HostConfig.NetworkMode}}' 2>/dev/null || echo 'bridge'"
             current_network = CommandExecuter.run_cmd(network_cmd, target_server, user)
             current_network = current_network.stdout.strip() if hasattr(current_network, 'stdout') else str(current_network).strip()
             

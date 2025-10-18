@@ -2034,15 +2034,21 @@ class Deployer:
                     base_port = DeploymentPortResolver.generate_host_port(project, env, service_name, container_port)
                     
                     toggle = self._determine_toggle(project, env, service_name, 'localhost', base_port, base_name)
-                    new_name = toggle["name"]
+                    new_name = toggle["name"]   
                     
                     old_name = self._get_opposite_container_name(new_name, base_name)
                     if old_name:
                         try:
-                            DockerExecuter.stop_and_remove_container(old_name, 'localhost', ignore_if_not_exists=True)
-                        except Exception as e:
-                            log(f"Note: Could not remove old container: {e}")
-                    
+                            DockerExecuter.stop_and_remove_container(old_name, target_ip, ignore_if_not_exists=True)
+                        except:
+                            pass
+
+                    # Also remove target container if it exists (from failed previous deployment)
+                    try:
+                        DockerExecuter.stop_and_remove_container(new_name, target_ip, ignore_if_not_exists=True)
+                    except:
+                        pass
+
                     try:
                         self.start_service(project, env, service_name, service_config, 'localhost')
                         all_zone_servers = [{'ip': 'localhost'}]

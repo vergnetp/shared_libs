@@ -6,6 +6,7 @@ from logger import Logger
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import platform
 import os
+import shutil
 
 BASE = "local"
 
@@ -69,6 +70,108 @@ class DeploymentSyncer:
         """Convert IP address to filesystem-safe folder name"""
         return server_ip.replace('.', '_')
 
+    @staticmethod
+    def _copy_stateful_secrets_to_consumers(project: str, env: str, services: Dict[str, Dict[str, Any]]):
+        """
+        Copy secrets from stateful services (postgres, redis, mongo) to all consumer services.
+        
+        This allows services to read database passwords from their own /app/secrets directory
+        without mounting the entire secrets folder, improving security isolation.
+        
+        Logic:
+        1. Use BackupManager.detect_service_type() to identify stateful services
+        2. Find all secret files in stateful service directories
+        3. Copy each secret file to all non-stateful (consumer) service directories
+        4. Preserves file metadata and overwrites existing files
+        
+        Example:
+            Before:
+                secrets/
+                ├── postgres/
+                │   └── db_password
+                ├── redis/
+                │   └── redis_password
+                └── api/
+                    └── jwt_secret
+            
+            After (before push):
+                secrets/
+                ├── postgres/
+                │   └── db_password
+                ├── redis/
+                │   └── redis_password
+                └── api/
+                    ├── db_password      ← Copied from postgres
+                    ├── redis_password   ← Copied from redis
+                    └── jwt_secret       ← Original
+        
+        Args:
+            project: Project name
+            env: Environment name
+            services: Dictionary of all services in the environment
+        """
+        from backup_manager import BackupManager
+        
+        local_base = DeploymentSyncer.get_local_base(project, env)
+        secrets_base = local_base / "secrets"
+        
+        if not secrets_base.exists():
+            log("No secrets directory found - skipping stateful secrets distribution")
+            return
+        
+        # Find all stateful services using BackupManager
+        stateful_services = []
+        for service_name, service_config in services.items():
+            service_type = BackupManager.detect_service_type(service_name, service_config)
+            if service_type:  # postgres, redis, mongo, mysql, etc.
+                stateful_services.append(service_name)
+        
+        if not stateful_services:
+            log("No stateful services found - skipping secrets distribution")
+            return
+        
+        log(f"Distributing secrets from stateful services: {stateful_services}")
+        
+        # Find all consumer services (non-stateful)
+        consumer_services = [s for s in services.keys() if s not in stateful_services]
+        
+        if not consumer_services:
+            log("No consumer services found - skipping secrets distribution")
+            return
+        
+        # Copy each stateful service's secrets to all consumers
+        copied_count = 0
+        for stateful_service in stateful_services:
+            stateful_secrets_dir = secrets_base / stateful_service
+            
+            if not stateful_secrets_dir.exists():
+                log(f"  No secrets directory for {stateful_service} - skipping")
+                continue
+            
+            # Get all secret files from this stateful service
+            secret_files = [f for f in stateful_secrets_dir.iterdir() if f.is_file()]
+            
+            if not secret_files:
+                log(f"  No secret files in {stateful_service} - skipping")
+                continue
+            
+            # Copy to all consumer services
+            for secret_file in secret_files:
+                for consumer_service in consumer_services:
+                    consumer_secrets_dir = secrets_base / consumer_service
+                    consumer_secrets_dir.mkdir(parents=True, exist_ok=True)
+                    
+                    dest_file = consumer_secrets_dir / secret_file.name
+                    
+                    # Copy (overwrite if exists)
+                    shutil.copy2(secret_file, dest_file)
+                    copied_count += 1
+                    
+                    log(f"  ✓ {stateful_service}/{secret_file.name} → {consumer_service}/{secret_file.name}")
+        
+        if copied_count > 0:
+            log(f"Distributed {copied_count} secret file(s) to {len(consumer_services)} consumer service(s)")
+
     # =============================================================================
     # PUBLIC API - Clean push/pull/sync interface
     # =============================================================================
@@ -99,6 +202,14 @@ class DeploymentSyncer:
         for dir_name in push_dirs:
             dir_path = local_base / dir_name
             dir_path.mkdir(parents=True, exist_ok=True)
+
+        try:
+            from deployment_config import DeploymentConfigurer
+            configurer = DeploymentConfigurer(project)
+            services = configurer.get_services(env)
+            DeploymentSyncer._copy_stateful_secrets_to_consumers(project, env, services)
+        except Exception as e:
+            log(f"Warning: Could not distribute stateful secrets: {e}")
         
         # Get target servers and filter localhost
         target_servers = DeploymentSyncer._resolve_targets(targets, ['localhost'])
