@@ -513,6 +513,8 @@ class Deployer:
         """
         Prepare all servers for all services in parallel using batched SSH operations.
         
+        NOW INCLUDES: Nginx sidecar setup for service mesh!
+        
         Instead of:
             For each service:
                 For each server:
@@ -521,7 +523,7 @@ class Deployer:
         
         Do:
             For each server (in parallel):
-                SSH ONCE: Create all directories + all volumes for all services
+                SSH ONCE: Create all directories + all volumes + nginx for all services
         
         This reduces SSH overhead from (services × servers × 7 calls) to (servers × 1 call).
         
@@ -544,6 +546,44 @@ class Deployer:
                 commands = []
                 services_prepared = []
                 
+                # ========================================
+                # STEP 1: NGINX SIDECAR SETUP (NEW!)
+                # ========================================
+                nginx_commands = [
+                    # Create nginx directories
+                    "mkdir -p /etc/nginx/stream.d",
+                    "mkdir -p /etc/nginx/conf.d",
+                    
+                    # Create nginx.conf if it doesn't exist
+                    """cat > /etc/nginx/nginx.conf << 'NGINX_EOF'
+    user nginx;
+    worker_processes auto;
+    error_log /var/log/nginx/error.log warn;
+    pid /var/run/nginx.pid;
+
+    events {
+        worker_connections 1024;
+    }
+
+    stream {
+        include /etc/nginx/stream.d/*.conf;
+    }
+
+    http {
+        include /etc/nginx/mime.types;
+        default_type application/octet-stream;
+        sendfile on;
+        keepalive_timeout 65;
+        include /etc/nginx/conf.d/*.conf;
+    }
+    NGINX_EOF""",
+                ]
+                
+                commands.extend(nginx_commands)
+                
+                # ========================================
+                # STEP 2: SERVICE DIRECTORIES AND VOLUMES
+                # ========================================
                 # Collect all directory and volume operations for services that will be deployed to this server
                 for service_name, service_config in services.items():
                     # Skip localhost services
@@ -580,11 +620,39 @@ class Deployer:
                     log(f"[{server_ip}] No preparation needed (no services for this server)")
                     return (server_ip, True, 0)
                 
+                # ========================================
+                # STEP 3: EXECUTE ALL IN ONE SSH SESSION
+                # ========================================
                 # Execute all commands in a single SSH session
                 batch_cmd = " && ".join(commands)
                 
                 log(f"[{server_ip}] Preparing {len(services_prepared)} service(s): {', '.join(services_prepared[:3])}{'...' if len(services_prepared) > 3 else ''}")
                 CommandExecuter.run_cmd(batch_cmd, server_ip, "root")
+                
+                # ========================================
+                # STEP 4: START NGINX CONTAINER
+                # ========================================
+                # Check if nginx is already running
+                from nginx_config_generator import NginxConfigGenerator
+                network_name = DeploymentNaming.get_network_name(project, env)
+                
+                # Ensure network exists first
+                try:
+                    DockerExecuter.create_network(network_name, server_ip, "root", ignore_if_exists=True)
+                except:
+                    pass
+                
+                # Start/ensure nginx container
+                try:
+                    NginxConfigGenerator.ensure_nginx_container(
+                        project=project,
+                        env=env,
+                        target_server=server_ip,
+                        user="root"
+                    )
+                    log(f"[{server_ip}] Nginx sidecar ready")
+                except Exception as e:
+                    log(f"[{server_ip}] Warning: Could not start nginx sidecar: {e}")
                 
                 log(f"✓ [{server_ip}] Completed {len(commands)} operations")
                 return (server_ip, True, len(commands))

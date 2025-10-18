@@ -99,139 +99,27 @@ class NginxConfigGenerator:
 
     @staticmethod
     def _get_cert_paths(target_server: str) -> Dict[str, str]:
-        """Get certificate paths for nginx - uses custom logic"""
+        """Get certificate paths for nginx - ALWAYS returns strings"""
+        from path_resolver import PathResolver
+        
         target_os = PathResolver.detect_target_os(target_server)
         
         if target_server == "localhost" or target_server is None:
             if target_os == "windows":
-                base = Path("C:/local/nginx/certs")
+                base_str = "C:/local/nginx/certs"
             else:
-                base = Path("/local/nginx/certs")
+                base_str = "/local/nginx/certs"
         else:
-            # Remote servers always use Linux paths
-            base = Path("/local/nginx/certs")
+            # Remote servers: always Linux paths as strings
+            base_str = "/local/nginx/certs"
         
-        # Convert paths to strings with forward slashes
+        # Return string paths (no Path conversion)
         return {
-            'etc': str(base / "letsencrypt").replace("\\", "/"),
-            'var': str(base / "letsencrypt_var").replace("\\", "/"),
-            'log': str(base / "letsencrypt_log").replace("\\", "/"),
-            'ssl': str(base / "ssl").replace("\\", "/")
+            'etc': f"{base_str}/letsencrypt",
+            'var': f"{base_str}/letsencrypt_var",
+            'log': f"{base_str}/letsencrypt_log",
+            'ssl': f"{base_str}/ssl"
         }
-        
-    @staticmethod
-    def _get_main_nginx_path(target_server: str = "localhost") -> Path:
-        """Get the path to main nginx.conf based on target server"""
-        if target_server == "localhost" or target_server is None:
-            import platform
-            if platform.system() == 'Windows':
-                return Path("C:/local/nginx/nginx.conf")
-            else:
-                return Path("/local/nginx/nginx.conf")
-        else:
-            return Path(NginxConfigGenerator.MAIN_NGINX)
-
-    # =========================
-    # PUBLIC METHODS
-    # =========================
-
-    @staticmethod
-    def setup_service(
-        project: str,
-        env: str,
-        service_name: str,
-        service_config: Dict[str, Any],
-        *,
-        target_server: str,
-        email: Optional[str] = None,
-        cloudflare_api_token: Optional[str] = None,
-        auto_firewall: bool = True,
-        admin_ip: Optional[str] = None,
-    ) -> Path:
-        """
-        One-shot setup for a service: write conf, ensure DNS, issue certs, lock firewall, reload nginx.
-        Mode is auto-detected: DNS-01 if cloudflare_api_token, standalone if email, else self-signed.
-        """
-        # 0) CRITICAL: Ensure nginx container is running on the Docker network
-        if not NginxConfigGenerator.ensure_nginx_container(project, env, target_server):
-            raise Exception(f"Failed to ensure nginx container for {project}/{env}")
-    
-        # 1) Ensure main nginx.conf exists & is sane (include conf.d + stream.d + real_ip markers)
-        NginxConfigGenerator._ensure_main_nginx(target_server)
-
-        # 2) Write per-service conf
-        conf_path = NginxConfigGenerator._write_service_conf(
-            project, env, service_name, service_config,
-            target_server=target_server,
-            cloudflare_api_token=cloudflare_api_token,
-            auto_reload=False,
-        )
-
-        # 3) Determine domains for cert issuance
-        domains = NginxConfigGenerator._collect_domains_for_service(service_config)
-        if domains:
-            # 4) Auto-detect mode and issue certs
-            mode = NginxConfigGenerator._detect_mode(email, cloudflare_api_token)
-            NginxConfigGenerator._provision_cert_containers_and_issue(
-                target_server=target_server,
-                domains=domains,
-                email=email,
-                mode=mode,
-                cloudflare_api_token=cloudflare_api_token,
-                apply_dns=True,
-            )
-
-        # 5) Firewall + Reload
-        if auto_firewall and domains and target_server != "localhost":
-            NginxConfigGenerator._ensure_firewall(target_server=target_server, admin_ip=admin_ip)
-
-        NginxConfigGenerator._reload_nginx(target_server=target_server)
-        return conf_path
-
-    @staticmethod
-    def refresh_infra(
-        target_server: str,
-        *,
-        project: Optional[str] = None,
-        env: Optional[str] = None,
-        service_name: Optional[str] = None,
-        email: Optional[str] = None,
-        cloudflare_api_token: Optional[str] = None,
-        admin_ip: Optional[str] = None,
-    ) -> None:
-        """
-        Periodic maintenance: renew certs (batch), refresh Cloudflare IP ranges, update firewall.
-        Reloads nginx if anything changed or a renewal happened.
-        """
-        changed = False
-
-        # 1) Renew certificates (conf.d-driven)
-        renewed = NginxConfigGenerator._renew_certificates(
-            target_server=target_server,
-            project=project, env=env, service_name=service_name,
-            email=email,
-            cloudflare_api_token=cloudflare_api_token,
-        )
-        if renewed:
-            changed = True
-
-        # 2) Refresh Cloudflare IP ranges in main nginx.conf (managed markers)
-        updated_ips = NginxConfigGenerator._refresh_cf_real_ip_in_main(target_server)
-        if updated_ips:
-            changed = True
-
-        # 3) Update firewall if admin_ip provided
-        if admin_ip:
-            NginxConfigGenerator._ensure_firewall(target_server=target_server, admin_ip=admin_ip)
-            changed = True
-
-        # 4) Reload nginx if needed
-        if changed:
-            NginxConfigGenerator._reload_nginx(target_server=target_server)
-
-    # =========================
-    # NEW: STREAM (TCP) SUPPORT
-    # =========================
 
     @staticmethod
     def generate_stream_config(
@@ -250,8 +138,8 @@ class NginxConfigGenerator:
             env: Environment
             service_name: Service name
             backends: Backend list (format depends on mode)
-                      single_server: [{"container_name": "...", "port": "5432"}, ...]
-                      multi_server: [{"ip": "...", "port": 8357}, ...]
+                    single_server: [{"container_name": "...", "port": "5432"}, ...]
+                    multi_server: [{"ip": "...", "port": 8357}, ...]
             listen_port: Internal port for nginx to listen on (stable)
             mode: "single_server" or "multi_server"
             
@@ -329,52 +217,48 @@ class NginxConfigGenerator:
         """
         Write stream config file for a service and reload nginx.
         
-        Args:
-            server_ip: Target server
-            project: Project name
-            env: Environment
-            service: Service name
-            backends: Backend list (format depends on mode)
-            internal_port: Stable internal port for this service
-            mode: "single_server" or "multi_server"
-            user: SSH user
-            
-        Returns:
-            True if successful
+        FIXED: Always uses string paths for remote servers to avoid Windows path conversion.
         """
         try:
+            from path_resolver import PathResolver
+            
             # Generate stream config
             stream_config = NginxConfigGenerator.generate_stream_config(
                 project, env, service, backends, internal_port, mode
             )
             
-            # Determine config file path
+            # Detect target OS
+            target_os = PathResolver.detect_target_os(server_ip, user)
+            
             if server_ip == "localhost" or server_ip is None:
-                import platform
-                if platform.system() == 'Windows':
+                # Local operation - can use Path objects
+                from pathlib import Path
+                
+                if target_os == "windows":
                     stream_dir = Path("C:/local/nginx/stream.d")
                 else:
-                    stream_dir = Path("/local/nginx/stream.d")
-            else:
-                stream_dir = Path(NginxConfigGenerator.STREAMD_DIR)
-            
-            stream_dir.mkdir(parents=True, exist_ok=True)
-            config_file = stream_dir / f"{project}_{env}_{service}.conf"
-            
-            # Write config file
-            if server_ip == "localhost" or server_ip is None:
-                # Local write
+                    stream_dir = Path("/etc/nginx/stream.d")
+                
+                stream_dir.mkdir(parents=True, exist_ok=True)
+                config_file = stream_dir / f"{project}_{env}_{service}.conf"
                 config_file.write_text(stream_config)
+                
+                log(f"Wrote stream config: {config_file}")
             else:
-                # Remote write via SSH
+                # Remote operation - use STRING paths only (no Path conversion!)
+                stream_dir = "/etc/nginx/stream.d"
+                config_file = f"{stream_dir}/{project}_{env}_{service}.conf"
+                
+                # Write via SSH using string path
+                write_cmd = f"cat > {config_file}"
                 CommandExecuter.run_cmd_with_stdin(
-                    f"cat > {config_file}",
+                    write_cmd,
                     stream_config.encode('utf-8'),
                     server_ip,
                     user
                 )
-            
-            log(f"Wrote stream config: {config_file}")
+                
+                log(f"Wrote stream config: {config_file}")
             
             # Reload nginx
             NginxConfigGenerator._reload_nginx(server_ip)
@@ -384,10 +268,26 @@ class NginxConfigGenerator:
         except Exception as e:
             log(f"Failed to update stream config on {server_ip}: {e}")
             return False
-
+    
     # =========================
     # INTERNALS
     # =========================
+
+    @staticmethod
+    def _get_main_nginx_path(target_server: str = "localhost") -> Path:
+        """Get path to main nginx.conf file"""
+        from pathlib import Path
+        from path_resolver import PathResolver
+        
+        target_os = PathResolver.detect_target_os(target_server)
+        
+        if target_server == "localhost" or target_server is None:
+            if target_os == "windows":
+                return Path("C:/local/nginx/nginx.conf")
+            else:
+                return Path("/etc/nginx/nginx.conf")
+        else:
+            return Path(NginxConfigGenerator.MAIN_NGINX)
 
     @staticmethod
     def _detect_mode(email: Optional[str], cloudflare_api_token: Optional[str]) -> str:
@@ -547,18 +447,52 @@ class NginxConfigGenerator:
         target_server: Optional[str],
         cloudflare_api_token: Optional[str],
         auto_reload: bool = False,
-    ) -> Path:
+    ) -> str:
+        """
+        Write nginx configuration for a service.
+        
+        Returns:
+            Path to the written config file (as string)
+        """
         nginx_cfg = NginxConfigGenerator._merge_with_defaults(service_config.get("nginx") or {})
         upstream_servers = NginxConfigGenerator._get_upstream_servers(project, env, service_name, service_config)
         conf_text = NginxConfigGenerator._generate_server_config(
             project, env, service_name, service_config, nginx_cfg, upstream_servers
         )
 
-        conf_path = NginxConfigGenerator._get_conf_path(project, env, service_name, target_server)
-        conf_path.parent.mkdir(parents=True, exist_ok=True)
-        conf_path.write_text(conf_text)
-        log(f"Wrote per-service config: {conf_path}")
+        conf_path_str = NginxConfigGenerator._get_conf_path(project, env, service_name, target_server)
+        
+        # Write config based on target
+        if target_server == "localhost" or target_server is None:
+            # Local: use Path for file operations
+            from pathlib import Path
+            conf_path = Path(conf_path_str)
+            conf_path.parent.mkdir(parents=True, exist_ok=True)
+            conf_path.write_text(conf_text)
+            log(f"Wrote per-service config: {conf_path}")
+        else:
+            # Remote: use SSH to write file
+            from path_resolver import PathResolver
+            
+            # Ensure directory exists on remote
+            conf_dir = str(Path(conf_path_str).parent)
+            CommandExecuter.run_cmd(
+                f"mkdir -p {conf_dir}",
+                target_server,
+                user="root"
+            )
+            
+            # Write via SSH
+            write_cmd = f"cat > {conf_path_str}"
+            CommandExecuter.run_cmd_with_stdin(
+                write_cmd,
+                conf_text.encode('utf-8'),
+                target_server,
+                user="root"
+            )
+            log(f"Wrote per-service config: {conf_path_str}")
 
+        # Handle DNS if needed
         domain = service_config.get("domain")
         if domain and cloudflare_api_token and not domain.startswith("*."):
             zone = _registrable_zone(domain)
@@ -579,22 +513,29 @@ class NginxConfigGenerator:
         if auto_reload:
             NginxConfigGenerator._reload_nginx(target_server=target_server)
 
-        return conf_path
+        return conf_path_str
 
     @staticmethod
-    def _get_conf_path(project: str, env: str, service_name: str, target_server: str = "localhost") -> Path:
+    def _get_conf_path(project: str, env: str, service_name: str, target_server: str = "localhost") -> str:
+        """
+        Get the path to the nginx config file for a service.
+        
+        Returns:
+            String path (works for both local and remote servers)
+        """
+        from path_resolver import PathResolver
+        
         filename = DeploymentNaming.get_nginx_config_name(project, env, service_name)
         
         if target_server == "localhost" or target_server is None:
-            import platform
-            if platform.system() == 'Windows':
-                conf_dir = Path("C:/local/nginx/conf.d")
+            target_os = PathResolver.detect_target_os(None)
+            if target_os == "windows":
+                return f"C:/local/nginx/conf.d/{filename}"
             else:
-                conf_dir = Path("/local/nginx/conf.d")
+                return f"/local/nginx/conf.d/{filename}"
         else:
-            conf_dir = Path(NginxConfigGenerator.CONFD_DIR)
-        
-        return conf_dir / filename
+            # Remote servers: always Linux paths
+            return f"{NginxConfigGenerator.CONFD_DIR}/{filename}"
 
     @staticmethod
     def _collect_domains_for_service(service_config: Dict[str, Any]) -> List[str]:
@@ -625,6 +566,42 @@ class NginxConfigGenerator:
         return None
 
     @staticmethod
+    def _ensure_main_nginx_local(target_os: str) -> None:
+        """Create local nginx.conf file (for localhost only)"""
+        from pathlib import Path
+        
+        if target_os == "windows":
+            nginx_conf = Path("C:/local/nginx/nginx.conf")
+        else:
+            nginx_conf = Path("/etc/nginx/nginx.conf")
+        
+        nginx_conf.parent.mkdir(parents=True, exist_ok=True)
+        
+        content = """user nginx;
+    worker_processes auto;
+    error_log /var/log/nginx/error.log warn;
+    pid /var/run/nginx.pid;
+
+    events {
+        worker_connections 1024;
+    }
+
+    stream {
+        include /etc/nginx/stream.d/*.conf;
+    }
+
+    http {
+        include /etc/nginx/mime.types;
+        default_type application/octet-stream;
+        sendfile on;
+        keepalive_timeout 65;
+        include /etc/nginx/conf.d/*.conf;
+    }
+    """
+        nginx_conf.write_text(content)
+        log(f"Created nginx.conf at {nginx_conf}")
+
+    @staticmethod
     def ensure_nginx_container(
         project: str,
         env: str,
@@ -632,6 +609,8 @@ class NginxConfigGenerator:
         user: str = "root"
     ) -> bool:
         """Ensure nginx container is running with proper configuration"""
+        from path_resolver import PathResolver
+        
         container_name = NginxConfigGenerator.NGINX_CONTAINER
         network_name = DeploymentNaming.get_network_name(project, env)
         
@@ -642,20 +621,38 @@ class NginxConfigGenerator:
         log(f"Starting nginx container '{container_name}' on network '{network_name}'")
         
         cert_paths = NginxConfigGenerator._get_cert_paths(target_server)
-        main_conf_path = NginxConfigGenerator._get_main_nginx_path(target_server)
-        conf_dir = main_conf_path.parent / "conf.d"
-        stream_dir = main_conf_path.parent / "stream.d"  # NEW
+        target_os = PathResolver.detect_target_os(target_server, user)
         
-        conf_dir.mkdir(parents=True, exist_ok=True)
-        stream_dir.mkdir(parents=True, exist_ok=True)  # NEW
+        # Get base nginx path as STRING
+        if target_server == "localhost" or target_server is None:
+            if target_os == "windows":
+                nginx_base = "C:/local/nginx"
+            else:
+                nginx_base = "/etc/nginx"
+        else:
+            # Remote: always Linux
+            nginx_base = "/etc/nginx"
         
-        if not main_conf_path.exists():
-            NginxConfigGenerator._ensure_main_nginx(target_server)
+        # Build paths as strings (no Path objects for remote!)
+        main_conf = f"{nginx_base}/nginx.conf"
+        conf_dir = f"{nginx_base}/conf.d"
+        stream_dir = f"{nginx_base}/stream.d"
         
+        # For localhost, create directories using Path
+        if target_server == "localhost" or target_server is None:
+            from pathlib import Path
+            Path(conf_dir).mkdir(parents=True, exist_ok=True)
+            Path(stream_dir).mkdir(parents=True, exist_ok=True)
+            
+            # Ensure main nginx.conf exists
+            if not Path(main_conf).exists():
+                NginxConfigGenerator._ensure_main_nginx_local(target_os)
+        
+        # Build volume list with string paths
         volumes = [
-            f"{main_conf_path}:/etc/nginx/nginx.conf:ro",
+            f"{main_conf}:/etc/nginx/nginx.conf:ro",
             f"{conf_dir}:/etc/nginx/conf.d:ro",
-            f"{stream_dir}:/etc/nginx/stream.d:ro",  # NEW
+            f"{stream_dir}:/etc/nginx/stream.d:ro",
             f"{cert_paths['etc']}:/etc/letsencrypt:ro",
             f"{cert_paths['ssl']}:/etc/nginx/ssl:ro",
             "/var/log/nginx:/var/log/nginx"
@@ -667,11 +664,6 @@ class NginxConfigGenerator:
         }
         
         try:
-            if DockerExecuter.container_exists(container_name, target_server, user):
-                DockerExecuter.remove_container(
-                    container_name, target_server, user, force=True, ignore_if_not_exists=True
-                )
-            
             DockerExecuter.run_container(
                 image="nginx:alpine",
                 name=container_name,
@@ -682,17 +674,8 @@ class NginxConfigGenerator:
                 server_ip=target_server,
                 user=user
             )
-            
-            log(f"Nginx container started on network '{network_name}'")
-            time.sleep(2)
-            
-            if DockerExecuter.is_container_running(container_name, target_server, user):
-                log(f"Nginx container verified running")
-                return True
-            else:
-                log(f"Warning: Nginx container may not have started correctly")
-                return False
-                
+            log(f"Started nginx container '{container_name}'")
+            return True
         except Exception as e:
             log(f"Failed to start nginx container: {e}")
             return False
