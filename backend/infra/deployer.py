@@ -1354,7 +1354,7 @@ class Deployer:
 
     def _get_all_servers_in_zone(self, zone: str) -> List[Dict[str, Any]]:
         """
-        Get all green servers in a zone.
+        Get all servers in a zone (both active and reserve).
         
         Args:
             zone: Zone name
@@ -1362,10 +1362,20 @@ class Deployer:
         Returns:
             List of server dicts
         """
-        return ServerInventory.get_servers(
+        # Get both active AND reserve servers in the zone
+        active = ServerInventory.get_servers(
             deployment_status=ServerInventory.STATUS_ACTIVE,
             zone=zone
         )
+        
+        reserve = ServerInventory.get_servers(
+            deployment_status=ServerInventory.STATUS_RESERVE,
+            zone=zone
+        )
+        
+        # Combine and deduplicate by IP
+        all_servers = {s['ip']: s for s in (active + reserve)}
+        return list(all_servers.values())
 
     def _should_map_host_port(self, deployed_servers: List[str]) -> bool:
         """
