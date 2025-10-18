@@ -2066,13 +2066,19 @@ class Deployer:
                 # STEP 4: Calculate target_ips
                 target_ips = green_ips + new_ips
 
+                project_name = project  # same variable scope
+                try:
+                    self._batch_prepare_servers(project_name, env, {service_name: service_config}, target_ips)
+                except Exception as e:
+                    log(f"Warning: batch prepare on target_ips failed: {e}")
+
                 # Check if we have any servers
                 if not target_ips:
                     log(f"ERROR: No servers available for {service_name} deployment")
                     Logger.end()
                     return False
 
-                todel_ips = [ip for ip in current_service_servers if ip not in target_ip]
+                todel_ips = [ip for ip in current_service_servers if ip not in target_ips]
                 
                 if todel_ips:
                     log(f"Will remove {service_name} from these servers: {todel_ips}")
