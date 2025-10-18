@@ -1441,30 +1441,15 @@ class Deployer:
             log(f"[{target_ip}] Network ready")
             
             # STEP 2: Determine toggle (which container name/port to use)
-            existing_containers = DockerExecuter.list_containers(
-                filter_name=base_name, server_ip=target_ip, user="root"
-            )
+            # FIX: Use _determine_toggle instead of non-existent list_containers
+            toggle = self._determine_toggle(project, env, service_name, target_ip, base_port, base_name)
+            new_name = toggle["name"]
+            new_port = toggle["port"]
             
-            # Check if we have a secondary container
-            secondary_name = f"{base_name}_secondary"
-            has_base = any(base_name == c.get('name') for c in existing_containers)
-            has_secondary = any(secondary_name == c.get('name') for c in existing_containers)
-            
-            if has_secondary:
-                # Secondary exists, deploy to base
-                new_name = base_name
-                new_port = base_port
-                log(f"[{target_ip}] Secondary exists - deploying to base")
-            elif has_base:
-                # Base exists, deploy to secondary
-                new_name = secondary_name
-                new_port = base_port + 10000
-                log(f"[{target_ip}] Base exists - deploying to secondary")
+            if new_name == base_name:
+                log(f"[{target_ip}] First deployment of {service_name} - using base")
             else:
-                # First deployment - use base
-                new_name = base_name
-                new_port = base_port
-                log(f"[{target_ip}] First deployment - using base")
+                log(f"[{target_ip}] Toggle deployment - using {'base' if new_port == base_port else 'secondary'}")
             
             log(f"[{target_ip}] Using container name: {new_name}, port: {new_port}")
             
@@ -1474,7 +1459,7 @@ class Deployer:
             volumes = PathResolver.generate_all_volume_mounts(
                 project, env, service_name, target_ip,
                 use_docker_volumes=True, user="root",
-                auto_create_dirs=False  # ⭐ Already created in batch!
+                auto_create_dirs=False  # Already created in batch!
             )
             
             # STEP 4: Get image (already pulled by _pre_pull_images_parallel)
@@ -1487,9 +1472,7 @@ class Deployer:
                     docker_hub_user, project, env, service_name, version
                 )
             
-            # Skip pulling - already done!
-            # log(f"[{target_ip}] Pulling image {image}...")  # ⭐ REMOVED
-            # DockerExecuter.pull_image(image, target_ip, "root")  # ⭐ REMOVED
+            # Image already pulled by _pre_pull_images_parallel - skip pulling
             
             # STEP 5: Prepare container configuration
             env_vars = service_config.get("env_vars", {})
@@ -1533,11 +1516,13 @@ class Deployer:
             log(f"[{target_ip}] Health check passed")
             
             # STEP 8: Stop old container
-            old_name = secondary_name if new_name == base_name else base_name
-            DockerExecuter.stop_and_remove_container(
-                old_name, target_ip, ignore_if_not_exists=True
-            )
-            log(f"[{target_ip}] Stopped old container {old_name}")
+            # FIX: Use _get_opposite_container_name for safety
+            old_name = self._get_opposite_container_name(new_name, base_name)
+            if old_name:
+                DockerExecuter.stop_and_remove_container(
+                    old_name, target_ip, ignore_if_not_exists=True
+                )
+                log(f"[{target_ip}] Stopped old container {old_name}")
             
             result['success'] = True
             log(f"[{target_ip}] Deployment complete")
@@ -2585,53 +2570,6 @@ class Deployer:
         
         logs = self.logs(service, env, lines)
         print(logs)
-
-
-    def _determine_toggle(
-        self,
-        project: str,
-        env: str,
-        service: str,
-        server_ip: str,
-        base_port: int,
-        base_name: str
-    ) -> Dict[str, Any]:
-        """
-        Determine which port/name to use based on what's currently running.
-        
-        Toggle logic:
-        - If nothing running → use base (port 8357, name "base")
-        - If base running → use secondary (port 18357, name "base_secondary")
-        - If secondary running → use base (port 8357, name "base")
-        
-        Args:
-            project: Project name
-            env: Environment
-            service: Service name
-            server_ip: Target server IP
-            base_port: Base host port (e.g., 8357)
-            base_name: Base container name
-            
-        Returns:
-            {"port": 8357, "name": "base_name"} or
-            {"port": 18357, "name": "base_name_secondary"}
-        """
-        existing = DockerExecuter.find_service_container(project, env, service, server_ip)
-        
-        if not existing:
-            # First deployment - use base
-            log(f"First deployment of {service} on {server_ip} - using base")
-            return {"port": base_port, "name": base_name}
-        
-        # Toggle logic based on what's currently running
-        if existing.get("port") == base_port or existing.get("port") is None:
-            # Currently on base (or no port mapping) - toggle to secondary
-            log(f"Toggle: {service} on {server_ip} currently on base → deploying secondary")
-            return {"port": base_port + 10000, "name": f"{base_name}_secondary"}
-        else:
-            # Currently on secondary - toggle back to base
-            log(f"Toggle: {service} on {server_ip} currently on secondary → deploying base")
-            return {"port": base_port, "name": base_name}
 
 
     def _determine_backend_mode_for_service(
