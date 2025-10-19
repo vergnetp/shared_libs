@@ -654,12 +654,17 @@ class Deployer:
                 except:
                     pass
                 
+                # Get ALL services for this env (not just ones being deployed)
+                from deployment_config import DeploymentConfigurer
+                configurer = DeploymentConfigurer(project)
+                all_services = configurer.get_services(env)
+
                 # Start/ensure nginx container
                 try:
                     NginxConfigGenerator.ensure_nginx_container(
                         project=project,
                         env=env,
-                        services=services,
+                        services=all_services,
                         target_server=server_ip,
                         user="root"
                     )

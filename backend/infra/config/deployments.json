@@ -4,13 +4,29 @@
       "postgres": {
         "current": {
           "servers": [
-            "167.172.54.176"
+            "167.99.194.185"
           ],
           "container_name": "new_project_uat_postgres",
           "version": "latest",
-          "deployed_at": "2025-10-18T21:18:10.473340"
+          "deployed_at": "2025-10-19T08:38:42.439879"
         },
         "history": [
+          {
+            "servers": [
+              "167.99.194.185"
+            ],
+            "container_name": "new_project_uat_postgres",
+            "version": "latest",
+            "deployed_at": "2025-10-19T08:38:42.439879"
+          },
+          {
+            "servers": [
+              "178.128.32.128"
+            ],
+            "container_name": "new_project_uat_postgres",
+            "version": "latest",
+            "deployed_at": "2025-10-19T08:12:34.782886"
+          },
           {
             "servers": [
               "167.172.54.176"
@@ -74,22 +90,6 @@
             "container_name": "new_project_uat_postgres",
             "version": "latest",
             "deployed_at": "2025-10-18T11:07:44.108205"
-          },
-          {
-            "servers": [
-              "139.59.188.237"
-            ],
-            "container_name": "new_project_uat_postgres",
-            "version": "latest",
-            "deployed_at": "2025-10-18T10:02:56.588501"
-          },
-          {
-            "servers": [
-              "159.65.80.217"
-            ],
-            "container_name": "new_project_uat_postgres",
-            "version": "latest",
-            "deployed_at": "2025-10-18T09:24:29.624479"
           }
         ]
       },
@@ -237,14 +237,32 @@
       "api": {
         "current": {
           "servers": [
-            "167.172.54.176",
-            "159.65.28.164"
+            "167.99.194.185",
+            "46.101.80.167"
           ],
           "container_name": "new_project_uat_api",
           "version": "latest",
-          "deployed_at": "2025-10-18T21:20:31.906024"
+          "deployed_at": "2025-10-19T08:41:06.195069"
         },
         "history": [
+          {
+            "servers": [
+              "167.99.194.185",
+              "46.101.80.167"
+            ],
+            "container_name": "new_project_uat_api",
+            "version": "latest",
+            "deployed_at": "2025-10-19T08:41:06.195069"
+          },
+          {
+            "servers": [
+              "178.128.32.128",
+              "159.65.80.9"
+            ],
+            "container_name": "new_project_uat_api",
+            "version": "latest",
+            "deployed_at": "2025-10-19T08:15:18.713960"
+          },
           {
             "servers": [
               "167.172.54.176",
@@ -316,24 +334,6 @@
             "container_name": "new_project_uat_api",
             "version": "latest",
             "deployed_at": "2025-10-18T11:10:32.961649"
-          },
-          {
-            "servers": [
-              "139.59.188.237",
-              "209.38.167.50"
-            ],
-            "container_name": "new_project_uat_api",
-            "version": "latest",
-            "deployed_at": "2025-10-18T11:00:47.535134"
-          },
-          {
-            "servers": [
-              "139.59.188.237",
-              "209.38.167.50"
-            ],
-            "container_name": "new_project_uat_api",
-            "version": "latest",
-            "deployed_at": "2025-10-18T10:05:08.344256"
           }
         ]
       }
