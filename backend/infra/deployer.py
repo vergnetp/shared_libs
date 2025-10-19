@@ -659,6 +659,7 @@ class Deployer:
                     NginxConfigGenerator.ensure_nginx_container(
                         project=project,
                         env=env,
+                        services=services,
                         target_server=server_ip,
                         user="root"
                     )

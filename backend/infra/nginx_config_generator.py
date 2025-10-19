@@ -605,6 +605,7 @@ class NginxConfigGenerator:
     def ensure_nginx_container(
         project: str,
         env: str,
+        services: Dict[str, Dict[str, Any]], 
         target_server: str = "localhost",
         user: str = "root"
     ) -> bool:
@@ -681,6 +682,11 @@ class NginxConfigGenerator:
             "443": "443"
         }
         
+        # Expose internal port for every service
+        for service_name in services.keys():
+            internal_port = DeploymentPortResolver.get_internal_port(project, env, service_name)
+            ports[str(internal_port)] = str(internal_port)
+
         try:
             DockerExecuter.run_container(
                 image="nginx:alpine",
