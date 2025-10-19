@@ -321,7 +321,7 @@ class Deployer:
             return dockerfile_path
         return None
 
-    def build_images(self, environment: str = None, push_to_registry: bool = False):
+    def build_images(self, environment: str = None, push_to_registry: bool = False, service_name: str = None):
             """
             Build Docker images for all enabled services in parallel.
 
@@ -335,6 +335,7 @@ class Deployer:
             Args:
                 environment (str, optional): Environment to build images for. Defaults to all.
                 push_to_registry (bool, optional): Whether to push built images to Docker registry. Defaults to False.
+                service_name (str, optional): The service to build. Defaults to all.
 
             Returns:
                 bool: True if build process completed successfully.
@@ -354,24 +355,27 @@ class Deployer:
             
             for env in self.deployment_configurer.get_environments():
                 if environment is None or environment == env:
-                    for service_name, service_config in self.deployment_configurer.get_services(env).items():
+                    for sn, service_config in self.deployment_configurer.get_services(env).items():
+                        if service_name and service_name!=sn:
+                            continue
+
                         if service_config.get("disabled", False):
-                            log(f"Skipping disabled service: {service_name}")
+                            log(f"Skipping disabled service: {sn}")
                             continue
 
                         if service_config.get("skip_build", False):
-                            log(f"Skipping build for service (skip_build=True): {service_name}")
+                            log(f"Skipping build for service (skip_build=True): {sn}")
                             continue
 
                         # Skip if no dockerfile specified (prebuilt image)
                         if not service_config.get("dockerfile") and not service_config.get("dockerfile_content"):
-                            log(f"No dockerfile specified for {service_name}, skipping build (using prebuilt image)")
+                            log(f"No dockerfile specified for {sn}, skipping build (using prebuilt image)")
                             continue
 
                         # Add to build queue
                         build_tasks.append({
                             'env': env,
-                            'service_name': service_name,
+                            'service_name': sn,
                             'service_config': service_config
                         })
 
@@ -396,18 +400,18 @@ class Deployer:
                 }
                 
                 for future in as_completed(futures):
-                    service_name = futures[future]
+                    sn = futures[future]
                     try:
                         tag, success = future.result()
-                        build_results[service_name] = {'tag': tag, 'success': success}
+                        build_results[sn] = {'tag': tag, 'success': success}
                         
                         if success:
-                            log(f"✓ {service_name} built successfully")
+                            log(f"✓ {sn} built successfully")
                         else:
-                            log(f"✗ {service_name} build failed")
+                            log(f"✗ {sn} build failed")
                     except Exception as e:
-                        log(f"✗ {service_name} build exception: {e}")
-                        build_results[service_name] = {'tag': None, 'success': False}
+                        log(f"✗ {sn} build exception: {e}")
+                        build_results[sn] = {'tag': None, 'success': False}
 
             # Check if any builds failed
             failed_builds = [name for name, result in build_results.items() if not result['success']]
@@ -431,12 +435,12 @@ class Deployer:
                     }
                     
                     for future in as_completed(push_futures):
-                        service_name = push_futures[future]
+                        sn = push_futures[future]
                         try:
                             future.result()
-                            log(f"✓ {service_name} pushed successfully")
+                            log(f"✓ {sn} pushed successfully")
                         except Exception as e:
-                            log(f"✗ {service_name} push failed: {e}")
+                            log(f"✗ {sn} push failed: {e}")
 
             Logger.end()
             log('Images built.')        
@@ -748,7 +752,7 @@ class Deployer:
             if is_remote:
                 log("Remote servers detected - images will be pushed to registry")
             
-            build_success = self.build_images(environment=env, push_to_registry=is_remote)
+            build_success = self.build_images(environment=env, push_to_registry=is_remote, service_name=service_name)
             Logger.end()
             
             if not build_success:
@@ -1585,6 +1589,13 @@ class Deployer:
                 
                 result['new_container_name'] = new_name
                 
+                # Also remove target container if it exists (from failed previous deployment)
+                try:
+                    DockerExecuter.stop_and_remove_container(new_name, target_ip, ignore_if_not_exists=True)
+                    log(f"[{target_ip}] Removed existing {new_name} if present")
+                except:
+                    pass
+
                 # STEP 3: Get volumes (directories already created by _batch_prepare_servers)
                 volumes = PathResolver.generate_all_volume_mounts(
                     project, env, service_name, target_ip,
