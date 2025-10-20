@@ -492,7 +492,18 @@ class UnifiedDeployer:
     ):
         """
         Setup Cloudflare Load Balancer for multi-zone deployment.
-        Only sets up for successfully deployed zones.
+        
+        FIXED: Now collects ALL server IPs in each zone for proper intra-zone load balancing.
+        
+        Creates one origin pool per zone containing ALL servers in that zone.
+        Cloudflare geo-routes to the nearest pool, and each pool load balances across
+        all servers within that zone.
+        
+        Example for zones=["lon1", "sgp1"] with servers_count=3:
+          Pool 1 (London): [1.2.3.4, 1.2.3.5, 1.2.3.6]
+          Pool 2 (Singapore): [9.10.11.12, 9.10.11.13, 9.10.11.14]
+          
+        Cloudflare geo-routes user to nearest pool, then pool distributes across all servers.
         """
         
         # Get service config
@@ -512,40 +523,47 @@ class UnifiedDeployer:
             if len(service_zones) <= 1:
                 continue
             
-            # Collect nginx IPs from successfully deployed zones
-            nginx_ips = []
+            # Collect ALL server IPs from each successfully deployed zone
+            # FIXED: Changed from collecting servers[0]['ip'] to collecting ALL server IPs per zone
+            zone_to_ips = {}  # Map of zone -> list of IPs
+            
             for zone in zones:
                 if not deployment_results.get(zone):
                     log(f"Skipping {zone} for LB (deployment failed)")
                     continue
                 
-                # Get nginx IP for this zone
+                # Get ALL active servers in this zone
                 servers = ServerInventory.get_servers(
-                    deployment_status=ServerInventory.STATUS_GREEN,
+                    deployment_status=ServerInventory.STATUS_ACTIVE,  # FIXED: was STATUS_GREEN
                     zone=zone
                 )
                 
                 if servers:
-                    nginx_ips.append(servers[0]['ip'])
+                    # FIXED: Collect ALL server IPs, not just servers[0]
+                    zone_ips = [s['ip'] for s in servers]
+                    zone_to_ips[zone] = zone_ips
+                    log(f"Zone {zone}: {len(zone_ips)} servers - {zone_ips}")
             
-            if len(nginx_ips) < 2:
+            if len(zone_to_ips) < 2:
                 log(f"Not enough zones deployed successfully for {domain} LB")
                 continue
             
             log(f"Setting up Cloudflare Load Balancer for {domain}")
-            log(f"  Origin IPs: {nginx_ips}")
+            log(f"  Total zones: {len(zone_to_ips)}")
+            for zone, ips in zone_to_ips.items():
+                log(f"  {zone}: {len(ips)} origin(s) - {ips}")
             
             try:
-                NginxConfigGenerator.setup_cloudflare_load_balancer(
+                NginxConfigGenerator.setup_cloudflare_load_balancer_with_zones(
                     domain=domain,
-                    origin_ips=nginx_ips,
+                    zone_to_ips=zone_to_ips,
                     cloudflare_api_token=cloudflare_api_token,
                     geo_steering=True
                 )
                 log(f"✓ Load Balancer configured for {domain}")
             except Exception as e:
                 log(f"✗ Failed to setup Load Balancer for {domain}: {e}")
-    
+
     def _print_deployment_summary(self, results: Dict[str, bool]):
         """Print deployment summary"""
         successful = [z for z, success in results.items() if success]

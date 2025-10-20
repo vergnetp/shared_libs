@@ -334,7 +334,7 @@ class HealthMonitor:
                         log(f"Replacement {new_server['ip']} is healthy with all containers running")
                         
                         # Promote to green
-                        ServerInventory.update_server_status([new_server['ip']], ServerInventory.STATUS_GREEN)
+                        ServerInventory.update_server_status([new_server['ip']], ServerInventory.STATUS_ACTIVE)
                         
                         # Update deployment state
                         log("Updating deployment state...")
@@ -424,11 +424,11 @@ class HealthMonitor:
         except Exception as e:
             log(f"Warning: Could not sync with DigitalOcean: {e}")
         
-        # Get all green servers
-        all_servers = ServerInventory.get_servers(deployment_status=ServerInventory.STATUS_GREEN)
+        # Get all active servers
+        all_servers = ServerInventory.get_servers(deployment_status=ServerInventory.STATUS_ACTIVE)
         
         if not all_servers:
-            log("No green servers in inventory")
+            log("No active servers in inventory")
             return
         
         # Check health of each server

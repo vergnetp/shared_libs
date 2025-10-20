@@ -1581,3 +1581,175 @@ http {{
         log(f"  Health checks: Every 60s on /health")
         
         return True
+    
+
+    @staticmethod
+    def setup_cloudflare_load_balancer_with_zones(
+        domain: str,
+        zone_to_ips: Dict[str, List[str]],
+        cloudflare_api_token: str,
+        geo_steering: bool = True
+    ) -> bool:
+        """
+        Create Cloudflare Load Balancer with proper intra-zone load balancing.
+        
+        Creates one origin pool per zone, with ALL servers in that zone as origins.
+        This provides:
+        - Inter-zone routing via Cloudflare geo-steering
+        - Intra-zone load balancing across all servers within each zone
+        
+        Args:
+            domain: Domain to load balance (e.g., 'api.example.com')
+            zone_to_ips: Dict mapping zone name to list of server IPs
+                        e.g., {"lon1": ["1.2.3.4", "1.2.3.5"], "sgp1": ["9.10.11.12"]}
+            cloudflare_api_token: Cloudflare API token
+            geo_steering: Enable geo-routing (routes users to nearest zone)
+            
+        Returns:
+            True if successful
+            
+        Example:
+            zone_to_ips = {
+                "lon1": ["1.2.3.4", "1.2.3.5", "1.2.3.6"],
+                "sgp1": ["9.10.11.12", "9.10.11.13", "9.10.11.14"]
+            }
+            setup_cloudflare_load_balancer_with_zones("api.example.com", zone_to_ips, token)
+        """
+        import json
+        
+        zone_name = _registrable_zone(domain)
+        
+        # Get zone ID
+        zone_id = NginxConfigGenerator._cf_get_zone_id("localhost", cloudflare_api_token, zone_name)
+        if not zone_id:
+            log(f"Zone {zone_name} not found in Cloudflare")
+            return False
+        
+        # Get account ID
+        cmd = (
+            f'curl -sS -X GET "https://api.cloudflare.com/client/v4/zones/{zone_id}" '
+            f'-H "Authorization: Bearer {cloudflare_api_token}"'
+        )
+        result = CommandExecuter.run_cmd(cmd, "localhost")
+        data = json.loads(str(result))
+        account_id = data['result']['account']['id']
+        
+        log(f"Creating Cloudflare Load Balancer for {domain} with intra-zone balancing")
+        
+        # 1. Create health monitor (one for all pools)
+        monitor_data = {
+            "type": "https",
+            "description": f"Health check for {domain}",
+            "method": "GET",
+            "path": "/health",
+            "port": 443,
+            "interval": 60,
+            "retries": 2,
+            "timeout": 5,
+            "expected_codes": "200"
+        }
+        
+        cmd = (
+            f'curl -sS -X POST "https://api.cloudflare.com/client/v4/accounts/{account_id}/load_balancers/monitors" '
+            f'-H "Authorization: Bearer {cloudflare_api_token}" '
+            f'-H "Content-Type: application/json" '
+            f"--data '{json.dumps(monitor_data)}'"
+        )
+        
+        result = CommandExecuter.run_cmd(cmd, "localhost")
+        monitor_id = json.loads(str(result))['result']['id']
+        log(f"  Created health monitor: {monitor_id}")
+        
+        # 2. Create one origin pool per zone, with ALL servers in that zone
+        pool_ids = []
+        
+        for zone_name_do, ips in zone_to_ips.items():
+            domain_safe = domain.replace('.', '_')
+            zone_safe = zone_name_do.replace('-', '_')
+            
+            # Build origins list for this zone (ALL servers)
+            origins = []
+            for ip in ips:
+                ip_safe = ip.replace('.', '_')
+                origins.append({
+                    "name": f"origin_{zone_safe}_{ip_safe}",
+                    "address": ip,
+                    "enabled": True,
+                    "weight": 1  # Equal weight for all servers in the zone
+                })
+            
+            pool_data = {
+                "name": f"{domain_safe}_pool_{zone_safe}",
+                "description": f"Pool for {zone_name_do} zone with {len(ips)} server(s)",
+                "enabled": True,
+                "monitor": monitor_id,
+                "origins": origins,
+                # Intra-zone load balancing settings
+                "notification_email": "",
+                "load_shedding": {
+                    "default_percent": 0,
+                    "default_policy": "random",
+                    "session_percent": 0,
+                    "session_policy": "hash"
+                }
+            }
+            
+            cmd = (
+                f'curl -sS -X POST "https://api.cloudflare.com/client/v4/accounts/{account_id}/load_balancers/pools" '
+                f'-H "Authorization: Bearer {cloudflare_api_token}" '
+                f'-H "Content-Type: application/json" '
+                f"--data '{json.dumps(pool_data)}'"
+            )
+            
+            result = CommandExecuter.run_cmd(cmd, "localhost")
+            pool_result = json.loads(str(result))
+            
+            if not pool_result.get("success"):
+                log(f"Failed to create pool for {zone_name_do}: {pool_result}")
+                continue
+                
+            pool_id = pool_result['result']['id']
+            pool_ids.append(pool_id)
+            log(f"  Created pool for {zone_name_do} ({len(ips)} origins): {pool_id}")
+        
+        if not pool_ids:
+            log("Failed to create any origin pools")
+            return False
+        
+        # 3. Create load balancer with all pools
+        lb_data = {
+            "name": domain,
+            "description": f"Multi-zone LB with intra-zone balancing ({len(zone_to_ips)} zones)",
+            "enabled": True,
+            "ttl": 30,
+            "steering_policy": "geo" if geo_steering else "random",
+            "proxied": True,
+            "default_pools": pool_ids,
+            "fallback_pool": pool_ids[0],
+            "session_affinity": "none",  # Can be "cookie" or "ip_cookie" for sticky sessions
+            "session_affinity_ttl": 1800
+        }
+        
+        cmd = (
+            f'curl -sS -X POST "https://api.cloudflare.com/client/v4/zones/{zone_id}/load_balancers" '
+            f'-H "Authorization: Bearer {cloudflare_api_token}" '
+            f'-H "Content-Type: application/json" '
+            f"--data '{json.dumps(lb_data)}'"
+        )
+        
+        result = CommandExecuter.run_cmd(cmd, "localhost")
+        data = json.loads(str(result))
+        
+        if not data.get("success"):
+            log(f"Failed to create load balancer: {data}")
+            return False
+        
+        log(f"  ✓ Load Balancer configured")
+        log(f"  Total zones: {len(zone_to_ips)}")
+        total_origins = sum(len(ips) for ips in zone_to_ips.values())
+        log(f"  Total origins: {total_origins}")
+        log(f"  Strategy: {'Geo-routing to nearest zone' if geo_steering else 'Random zone selection'}")
+        log(f"  Intra-zone: Round-robin across all servers in selected zone")
+        log(f"  Health checks: HTTPS /health every 60s on port 443")
+        
+        return True
