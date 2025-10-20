@@ -5,6 +5,9 @@ Postgres Backup Script with Verification
 Runs as a scheduled container to backup Postgres database.
 Connects to parent Postgres container via Docker DNS.
 Verifies backup integrity after creation.
+
+IMPORTANT: This script does NOT import ResourceResolver or any infra libraries.
+It relies purely on environment variables injected by BackupManager.
 """
 
 import os
@@ -17,7 +20,13 @@ from pathlib import Path
 HOST = os.environ.get("HOST", "localhost")  # Container name
 POSTGRES_DB = os.environ.get("POSTGRES_DB")
 POSTGRES_USER = os.environ.get("POSTGRES_USER")
-POSTGRES_PASSWORD_FILE = os.environ.get("POSTGRES_PASSWORD_FILE", "/run/secrets/db_password")
+
+# CRITICAL: Generic PASSWORD_FILE injected by BackupManager
+# This is the same for all services - no need for POSTGRES_PASSWORD_FILE
+PASSWORD_FILE = os.environ.get("PASSWORD_FILE", "/run/secrets/postgres_password")
+
+# Fallback for backward compatibility with old deployments
+POSTGRES_PASSWORD_FILE = os.environ.get("POSTGRES_PASSWORD_FILE", PASSWORD_FILE)
 
 # Backup-specific env vars
 RETENTION_DAYS = int(os.environ.get("RETENTION_DAYS", 7))
@@ -30,7 +39,10 @@ def get_db_password():
     """Read password from mounted secret file"""
     password_file = Path(POSTGRES_PASSWORD_FILE)
     if not password_file.exists():
-        raise FileNotFoundError(f"Password file not found: {POSTGRES_PASSWORD_FILE}")
+        raise FileNotFoundError(
+            f"Password file not found: {POSTGRES_PASSWORD_FILE}\n"
+            f"Ensure the secrets volume is mounted and PASSWORD_FILE env var is set correctly."
+        )
     return password_file.read_text().strip()
 
 
@@ -103,16 +115,19 @@ def backup():
     print("=" * 60)
     print(f"  Project: {PROJECT}")
     print(f"  Environment: {ENV}")
+    print(f"  Service: {SERVICE_NAME}")
     print(f"  Timestamp: {timestamp}")
     print(f"  Host: {HOST}")
     print(f"  Database: {POSTGRES_DB}")
     print(f"  User: {POSTGRES_USER}")
+    print(f"  Password File: {POSTGRES_PASSWORD_FILE}")
     print(f"  Output: {backup_file}")
     print()
     
     # Get password
     try:
         password = get_db_password()
+        print("✓ Password file found and read successfully")
     except FileNotFoundError as e:
         print(f"ERROR: {e}")
         sys.exit(1)
@@ -155,60 +170,61 @@ def backup():
             sys.exit(1)
         
         print()
-        print("Cleaning up old backups...")
-        cleanup_old_backups()
-        
-        print()
         print("=" * 60)
-        print("Backup completed successfully")
+        print("✓ Backup completed successfully")
         print("=" * 60)
-        sys.exit(0)
         
     except subprocess.CalledProcessError as e:
-        print()
-        print("=" * 60)
-        print("ERROR: Backup failed")
-        print("=" * 60)
-        print(f"  Command: {' '.join(cmd)}")
+        print(f"✗ Backup failed:")
         print(f"  Return code: {e.returncode}")
         if e.stderr:
-            print(f"  stderr:")
+            print(f"  Error output:")
             print(e.stderr)
         sys.exit(1)
 
 
 def cleanup_old_backups():
-    """Remove backups older than retention period"""
-    cutoff_date = datetime.now() - timedelta(days=RETENTION_DAYS)
+    """Remove backups older than RETENTION_DAYS"""
     backup_dir = Path("/backups")
     
     if not backup_dir.exists():
-        print("Warning: Backup directory does not exist")
+        print("Backup directory doesn't exist, skipping cleanup")
         return
     
+    cutoff_date = datetime.now() - timedelta(days=RETENTION_DAYS)
     removed_count = 0
-    kept_count = 0
+    
+    print()
+    print(f"Cleaning up backups older than {RETENTION_DAYS} days...")
     
     for backup_file in backup_dir.glob("postgres_*.dump"):
         try:
-            # Extract timestamp from filename: postgres_20240315_143022.dump
+            # Extract timestamp from filename
             timestamp_str = backup_file.stem.replace("postgres_", "")
             file_date = datetime.strptime(timestamp_str, "%Y%m%d_%H%M%S")
             
             if file_date < cutoff_date:
-                size_mb = backup_file.stat().st_size / (1024 * 1024)
                 backup_file.unlink()
                 removed_count += 1
-                print(f"  Removed old backup: {backup_file.name} ({size_mb:.2f} MB)")
-            else:
-                kept_count += 1
-                
+                print(f"  Removed: {backup_file.name}")
         except Exception as e:
             print(f"  Warning: Could not process {backup_file.name}: {e}")
     
-    print(f"  Cleanup complete: {removed_count} removed, {kept_count} kept")
-    print(f"  Retention policy: {RETENTION_DAYS} days")
+    if removed_count > 0:
+        print(f"✓ Removed {removed_count} old backup(s)")
+    else:
+        print("  No old backups to remove")
 
 
 if __name__ == "__main__":
-    backup()
+    try:
+        backup()
+        cleanup_old_backups()
+    except KeyboardInterrupt:
+        print("\nBackup interrupted")
+        sys.exit(1)
+    except Exception as e:
+        print(f"Unexpected error: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)

@@ -6,8 +6,6 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from server_inventory import ServerInventory
 from do_manager import DOManager
-from deployment_naming import DeploymentNaming
-from execute_docker import DockerExecuter
 from execute_cmd import CommandExecuter
 from logger import Logger
 import env_loader

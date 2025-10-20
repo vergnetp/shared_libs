@@ -6,13 +6,11 @@ import time
 from typing import Dict, Any, List, Optional
 from pathlib import Path
 
-from deployment_naming import DeploymentNaming
-from deployment_port_resolver import DeploymentPortResolver
 from execute_cmd import CommandExecuter
 from execute_docker import DockerExecuter
 from logger import Logger
 import env_loader
-from path_resolver import PathResolver
+from resource_resolver import ResourceResolver
 
 # Optional: precise zone parsing for Cloudflare zones
 try:
@@ -100,9 +98,7 @@ class NginxConfigGenerator:
     @staticmethod
     def _get_cert_paths(target_server: str) -> Dict[str, str]:
         """Get certificate paths for nginx - ALWAYS returns strings"""
-        from path_resolver import PathResolver
-        
-        target_os = PathResolver.detect_target_os(target_server)
+        target_os = ResourceResolver.detect_target_os(target_server)
         
         if target_server == "localhost" or target_server is None:
             if target_os == "windows":
@@ -220,7 +216,7 @@ class NginxConfigGenerator:
         FIXED: Always uses string paths for remote servers to avoid Windows path conversion.
         """
         try:
-            from path_resolver import PathResolver
+            from path_resolver import ResourceResolver
             
             # Generate stream config
             stream_config = NginxConfigGenerator.generate_stream_config(
@@ -228,7 +224,7 @@ class NginxConfigGenerator:
             )
             
             # Detect target OS
-            target_os = PathResolver.detect_target_os(server_ip, user)
+            target_os = ResourceResolver.detect_target_os(server_ip, user)
             
             if server_ip == "localhost" or server_ip is None:
                 # Local operation - can use Path objects
@@ -277,9 +273,9 @@ class NginxConfigGenerator:
     def _get_main_nginx_path(target_server: str = "localhost") -> Path:
         """Get path to main nginx.conf file"""
         from pathlib import Path
-        from path_resolver import PathResolver
+        from path_resolver import ResourceResolver
         
-        target_os = PathResolver.detect_target_os(target_server)
+        target_os = ResourceResolver.detect_target_os(target_server)
         
         if target_server == "localhost" or target_server is None:
             if target_os == "windows":
@@ -472,7 +468,7 @@ class NginxConfigGenerator:
             log(f"Wrote per-service config: {conf_path}")
         else:
             # Remote: use SSH to write file
-            from path_resolver import PathResolver
+            from path_resolver import ResourceResolver
             
             # Ensure directory exists on remote
             conf_dir = str(Path(conf_path_str).parent)
@@ -523,12 +519,12 @@ class NginxConfigGenerator:
         Returns:
             String path (works for both local and remote servers)
         """
-        from path_resolver import PathResolver
+        from path_resolver import ResourceResolver
         
-        filename = DeploymentNaming.get_nginx_config_name(project, env, service_name)
+        filename = ResourceResolver.get_nginx_config_name(project, env, service_name)
         
         if target_server == "localhost" or target_server is None:
-            target_os = PathResolver.detect_target_os(None)
+            target_os = ResourceResolver.detect_target_os(None)
             if target_os == "windows":
                 return f"C:/local/nginx/conf.d/{filename}"
             else:
@@ -610,10 +606,10 @@ class NginxConfigGenerator:
         user: str = "root"
     ) -> bool:
         """Ensure nginx container is running with proper configuration"""
-        from path_resolver import PathResolver
+        from path_resolver import ResourceResolver
         
         container_name = NginxConfigGenerator.NGINX_CONTAINER
-        network_name = DeploymentNaming.get_network_name(project, env)
+        network_name = ResourceResolver.get_network_name(project, env)
         
         # Check if container exists
         check_cmd = "docker ps -a --filter 'name=^nginx$' --format '{{.Names}}'"
@@ -643,7 +639,7 @@ class NginxConfigGenerator:
         log(f"Starting nginx container '{container_name}' on network '{network_name}'")
         
         cert_paths = NginxConfigGenerator._get_cert_paths(target_server)
-        target_os = PathResolver.detect_target_os(target_server, user)
+        target_os = ResourceResolver.detect_target_os(target_server, user)
         
         # Get base nginx path
         if target_server == "localhost" or target_server is None:
@@ -684,7 +680,7 @@ class NginxConfigGenerator:
         
         # Expose internal port for every service
         for service_name in services.keys():
-            internal_port = DeploymentPortResolver.get_internal_port(project, env, service_name)
+            internal_port = ResourceResolver.get_internal_port(project, env, service_name)
             ports[str(internal_port)] = str(internal_port)
 
         try:
@@ -818,7 +814,7 @@ class NginxConfigGenerator:
             raise ValueError("mode must be 'letsencrypt_dns_cloudflare' | 'letsencrypt_standalone' | 'selfsigned'")
 
         cert_paths = NginxConfigGenerator._get_cert_paths(target_server)
-        PathResolver.ensure_nginx_cert_directories(target_server, user="root")
+        ResourceResolver.ensure_nginx_cert_directories(target_server, user="root")
 
         if apply_dns and cloudflare_api_token:
             lb_ipv4 = NginxConfigGenerator._detect_public_ipv4(target_server)
@@ -1229,12 +1225,12 @@ class NginxConfigGenerator:
             server_ips = ["localhost"]
         
         dockerfile = service_config.get("dockerfile")
-        container_ports = DeploymentPortResolver.get_container_ports(service_name, dockerfile)
+        container_ports = ResourceResolver.get_container_ports(service_name, dockerfile)
         container_port = container_ports[0] if container_ports else "8000"
 
         if len(server_ips) > 1:
             for server_ip in server_ips:
-                host_port = DeploymentPortResolver.generate_host_port(project, env, service_name, container_port)
+                host_port = ResourceResolver.generate_host_port(project, env, service_name, container_port)
                 servers.append({
                     "host": server_ip,
                     "port": host_port,
@@ -1243,7 +1239,7 @@ class NginxConfigGenerator:
                     "fail_timeout": "30s",
                 })
         else:
-            container_name = DeploymentNaming.get_container_name(project, env, service_name)
+            container_name = ResourceResolver.get_container_name(project, env, service_name)
             servers.append({"host": container_name, "port": container_port, "weight": 1})
         
         return servers

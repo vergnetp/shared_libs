@@ -1,15 +1,12 @@
 import secrets
 import string
-import hashlib
 import shutil
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional
-from deployment_syncer import DeploymentSyncer
 from execute_docker import DockerExecuter
-from deployment_naming import DeploymentNaming
+from resource_resolver import ResourceResolver
 from logger import Logger
-from path_resolver import PathResolver
 
 def log(msg):
     Logger.log(msg)
@@ -43,10 +40,12 @@ class SecretsRotator:
     def rotate_postgres_password(self, service_name: str = "postgres") -> bool:
         """Rotate PostgreSQL password"""
         try:
-            secrets_dir = PathResolver.get_volume_host_path(
+            secrets_dir = ResourceResolver.get_volume_host_path(
                 self.project, self.env, service_name, "secrets", "localhost"
             )
-            password_file = secrets_dir / "db_password"
+            # Use ResourceResolver to get the correct secret filename
+            secret_filename = ResourceResolver._get_secret_filename(service_name)
+            password_file = Path(secrets_dir) / secret_filename
             
             # Backup existing password
             backup_path = self._backup_secret(password_file)
@@ -55,13 +54,13 @@ class SecretsRotator:
             new_password = self._generate_password()
             
             # Write new password
-            secrets_dir.mkdir(parents=True, exist_ok=True)
+            Path(secrets_dir).mkdir(parents=True, exist_ok=True)
             password_file.write_text(new_password, encoding='utf-8')
             
             log(f"Generated new PostgreSQL password for {service_name}")
             
             # Restart container to pick up new password
-            container_name = DeploymentNaming.get_container_name(self.project, self.env, service_name)
+            container_name = ResourceResolver.get_container_name(self.project, self.env, service_name)
             
             if DockerExecuter.container_exists(container_name):
                 log(f"Restarting container {container_name} to apply new password...")
@@ -77,8 +76,12 @@ class SecretsRotator:
     def rotate_redis_password(self, service_name: str = "redis") -> bool:
         """Rotate Redis password"""
         try:
-            secrets_dir = Path(self.local_base) / "secrets" / service_name
-            password_file = secrets_dir / "redis_password"
+            secrets_dir = ResourceResolver.get_volume_host_path(
+                self.project, self.env, service_name, "secrets", "localhost"
+            )
+            # Use ResourceResolver to get the correct secret filename
+            secret_filename = ResourceResolver._get_secret_filename(service_name)
+            password_file = Path(secrets_dir) / secret_filename
             
             # Backup existing password
             backup_path = self._backup_secret(password_file)
@@ -87,13 +90,13 @@ class SecretsRotator:
             new_password = self._generate_password()
             
             # Write new password
-            secrets_dir.mkdir(parents=True, exist_ok=True)
+            Path(secrets_dir).mkdir(parents=True, exist_ok=True)
             password_file.write_text(new_password, encoding='utf-8')
             
             log(f"Generated new Redis password for {service_name}")
             
             # Restart container
-            container_name = DeploymentNaming.get_container_name(self.project, self.env, service_name)
+            container_name = ResourceResolver.get_container_name(self.project, self.env, service_name)
             
             if DockerExecuter.container_exists(container_name):
                 log(f"Restarting container {container_name} to apply new password...")
@@ -109,8 +112,12 @@ class SecretsRotator:
     def rotate_opensearch_password(self, service_name: str = "opensearch") -> bool:
         """Rotate OpenSearch admin password"""
         try:
-            secrets_dir = Path(self.local_base) / "secrets" / service_name
-            password_file = secrets_dir / "admin_password"
+            secrets_dir = ResourceResolver.get_volume_host_path(
+                self.project, self.env, service_name, "secrets", "localhost"
+            )
+            # Use ResourceResolver to get the correct secret filename
+            secret_filename = ResourceResolver._get_secret_filename(service_name)
+            password_file = Path(secrets_dir) / secret_filename
             
             # Backup existing password
             backup_path = self._backup_secret(password_file)
@@ -119,13 +126,13 @@ class SecretsRotator:
             new_password = self._generate_password(length=16)  # Shorter for OpenSearch
             
             # Write new password
-            secrets_dir.mkdir(parents=True, exist_ok=True)
+            Path(secrets_dir).mkdir(parents=True, exist_ok=True)
             password_file.write_text(new_password, encoding='utf-8')
             
             log(f"Generated new OpenSearch admin password for {service_name}")
             
             # Restart container
-            container_name = DeploymentNaming.get_container_name(self.project, self.env, service_name)
+            container_name = ResourceResolver.get_container_name(self.project, self.env, service_name)
             
             if DockerExecuter.container_exists(container_name):
                 log(f"Restarting container {container_name} to apply new password...")
@@ -141,8 +148,10 @@ class SecretsRotator:
     def rotate_service_secret(self, service_name: str, secret_name: str, length: int = 32) -> bool:
         """Rotate a generic service secret"""
         try:
-            secrets_dir = Path(self.local_base) / "secrets" / service_name
-            secret_file = secrets_dir / secret_name
+            secrets_dir = ResourceResolver.get_volume_host_path(
+                self.project, self.env, service_name, "secrets", "localhost"
+            )
+            secret_file = Path(secrets_dir) / secret_name
             
             # Backup existing secret
             backup_path = self._backup_secret(secret_file)
@@ -151,7 +160,7 @@ class SecretsRotator:
             new_secret = self._generate_password(length)
             
             # Write new secret
-            secrets_dir.mkdir(parents=True, exist_ok=True)
+            Path(secrets_dir).mkdir(parents=True, exist_ok=True)
             secret_file.write_text(new_secret, encoding='utf-8')
             
             log(f"Generated new secret '{secret_name}' for {service_name}")
@@ -191,14 +200,16 @@ class SecretsRotator:
     
     def list_secrets(self) -> Dict[str, List[str]]:
         """List all secrets for the project/environment"""
-        secrets_base = Path(self.local_base) / "secrets"
+        secrets_base = ResourceResolver.get_volume_host_path(
+            self.project, self.env, "", "secrets", "localhost"
+        ).parent  # Go up one level to get the secrets base directory
         
-        if not secrets_base.exists():
+        if not Path(secrets_base).exists():
             return {}
         
         secrets_map = {}
         
-        for service_dir in secrets_base.iterdir():
+        for service_dir in Path(secrets_base).iterdir():
             if service_dir.is_dir():
                 secret_files = []
                 for secret_file in service_dir.iterdir():
@@ -215,15 +226,17 @@ class SecretsRotator:
     
     def cleanup_old_backups(self, days_to_keep: int = 30):
         """Clean up secret backups older than specified days"""
-        secrets_base = Path(self.local_base) / "secrets"
+        secrets_base = ResourceResolver.get_volume_host_path(
+            self.project, self.env, "", "secrets", "localhost"
+        ).parent  # Go up one level to get the secrets base directory
         
-        if not secrets_base.exists():
+        if not Path(secrets_base).exists():
             return
         
         removed_count = 0
         cutoff_time = datetime.now().timestamp() - (days_to_keep * 24 * 60 * 60)
         
-        for service_dir in secrets_base.iterdir():
+        for service_dir in Path(secrets_base).iterdir():
             if not service_dir.is_dir():
                 continue
                 

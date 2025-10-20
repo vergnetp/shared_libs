@@ -2,11 +2,9 @@ import platform
 import subprocess
 from typing import Dict, Any, List, Optional, Tuple
 from execute_cmd import CommandExecuter
-from deployment_naming import DeploymentNaming
-from deployment_syncer import DeploymentSyncer
 from logger import Logger
 from pathlib import Path
-from path_resolver import PathResolver
+from resource_resolver import ResourceResolver
 
 def log(msg):
     Logger.log(msg)
@@ -437,13 +435,13 @@ class WindowsTaskScheduler:
         if service_config.get("image"):
             image = service_config["image"]
         else:
-            image = DeploymentNaming.get_image_name(
+            image = ResourceResolver.get_image_name(
                 docker_hub_user, project, env, service_name, version
             )
         
         # Build Docker command
         container_name = f"{project}_{env}_{service_name}_%RANDOM%"
-        network_name = DeploymentNaming.get_network_name(project, env)
+        network_name = ResourceResolver.get_network_name(project, env)
         
         docker_parts = [
             "docker", "run", "--rm",
@@ -452,7 +450,7 @@ class WindowsTaskScheduler:
         ]
         
         # Add volumes (directories auto-created)
-        volumes = PathResolver.generate_all_volume_mounts(
+        volumes = ResourceResolver.generate_all_volume_mounts(
             project, env, service_name,
             server_ip="localhost",  # Windows tasks run locally
             use_docker_volumes=True,

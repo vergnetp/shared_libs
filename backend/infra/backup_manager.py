@@ -9,8 +9,7 @@ This module provides:
 
 import hashlib
 from typing import Dict, Any, Optional
-from deployment_naming import DeploymentNaming
-from path_resolver import PathResolver
+from resource_resolver import ResourceResolver
 
 
 # Service types that support automatic backups
@@ -27,6 +26,13 @@ BACKUP_ENABLED_SERVICES = {
         "base_image": "redis:latest",  # Changed to redis image for redis-cli
         "packages": [],  # No extra packages needed, redis-cli included
         "default_schedule": "0 3 * * *",  # 3 AM daily
+        "default_retention": 7
+    },
+    "opensearch": {
+        "script": "backup_opensearch.py",
+        "base_image": "python:3.11-slim",  # Python image for requests library
+        "packages": ["requests"],  # Need requests for OpenSearch API
+        "default_schedule": "0 4 * * *",  # 4 AM daily
         "default_retention": 7
     }
 }
@@ -71,6 +77,7 @@ class BackupManager:
     def is_backup_enabled(service_config: Dict[str, Any]) -> bool:
         """
         Check if backup is enabled for this service.
+        
         Default: True (backups enabled by default)
         
         Args:
@@ -116,10 +123,15 @@ class BackupManager:
         backup_config = service_config.get("backup", {})
         
         # Get parent container name for Docker DNS
-        parent_container_name = DeploymentNaming.get_container_name(project, env, service_name)
+        parent_container_name = ResourceResolver.get_container_name(project, env, service_name)
         
         # Copy parent's env vars (includes POSTGRES_DB, POSTGRES_USER, etc.)
         parent_env_vars = service_config.get("env_vars", {}).copy()
+        
+        # CRITICAL: Inject the correct secret filename path using ResourceResolver
+        # This way the backup script doesn't need to import ResourceResolver
+        secret_filename = ResourceResolver._get_secret_filename(service_name)
+        container_secrets_path = ResourceResolver.get_volume_container_path(service_name, "secrets")
         
         # Add backup-specific env vars
         backup_env_vars = {
@@ -132,7 +144,12 @@ class BackupManager:
         }
         
         # Add host override for Docker DNS
-        backup_env_vars["HOST"] = parent_container_name        
+        backup_env_vars["HOST"] = parent_container_name
+        
+        # GENERIC: Inject PASSWORD_FILE for all services
+        # This way all backup scripts can use the same environment variable pattern
+        if "PASSWORD_FILE" not in backup_env_vars:
+            backup_env_vars["PASSWORD_FILE"] = f"{container_secrets_path}/{secret_filename}"
         
         # Generate backup service config
         return {
@@ -142,13 +159,13 @@ class BackupManager:
             "env_vars": backup_env_vars,
             "volumes": {
                 # Data volume (read-only)
-                PathResolver.get_docker_volume_name(project, env, "data", service_name): "/data:ro",
+                ResourceResolver.get_docker_volume_name(project, env, "data", service_name): "/data:ro",
                 # Secrets (read-only host mount)
-                PathResolver.get_volume_host_path(project, env, service_name, "secrets", server_ip): "/run/secrets:ro",
+                ResourceResolver.get_volume_host_path(project, env, service_name, "secrets", server_ip): "/run/secrets:ro",
                 # Backups volume (write)
-                PathResolver.get_docker_volume_name(project, env, "backups", service_name): "/backups"
+                ResourceResolver.get_docker_volume_name(project, env, "backups", service_name): "/backups"
             },
-            "network": DeploymentNaming.get_network_name(project, env)
+            "network": ResourceResolver.get_network_name(project, env)
         }
     
     @staticmethod
@@ -157,7 +174,7 @@ class BackupManager:
         Generate Dockerfile content for backup service with verification support.
         
         Args:
-            service_type: Type of service (postgres, redis, etc.)
+            service_type: Type of service (postgres, redis, opensearch, etc.)
             
         Returns:
             Dict with numbered keys for dockerfile_content (like "1", "2", "3")
@@ -168,12 +185,23 @@ class BackupManager:
         backup_info = BACKUP_ENABLED_SERVICES[service_type]
         script_path = f"scripts/{backup_info['script']}"
         
-        # Return numbered dict format (required by create_temporary_dockerfile)
-        return {
+        # Build Dockerfile lines
+        dockerfile = {
             "1": f"FROM {backup_info['base_image']}",
-            "2": "RUN apt-get update && apt-get install -y python3 python3-pip && rm -rf /var/lib/apt/lists/*",
-            "3": f"COPY {script_path} /usr/local/bin/backup.py",
-            "4": "RUN chmod +x /usr/local/bin/backup.py",
-            "5": "WORKDIR /backups",
-            "6": 'CMD ["python3", "/usr/local/bin/backup.py"]'
+            "2": "RUN apt-get update && apt-get install -y python3 python3-pip && rm -rf /var/lib/apt/lists/*"
         }
+        
+        # Install additional packages if needed (e.g., requests for OpenSearch)
+        line_num = 3
+        if backup_info.get("packages"):
+            packages = " ".join(backup_info["packages"])
+            dockerfile[str(line_num)] = f"RUN pip3 install --no-cache-dir {packages}"
+            line_num += 1
+        
+        # Add script and run command
+        dockerfile[str(line_num)] = f"COPY {script_path} /usr/local/bin/backup.py"
+        dockerfile[str(line_num + 1)] = "RUN chmod +x /usr/local/bin/backup.py"
+        dockerfile[str(line_num + 2)] = "WORKDIR /backups"
+        dockerfile[str(line_num + 3)] = 'CMD ["python3", "/usr/local/bin/backup.py"]'
+        
+        return dockerfile

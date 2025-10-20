@@ -1,9 +1,7 @@
 from typing import Dict, Any, List, Optional
 from execute_cmd import CommandExecuter
-from deployment_naming import DeploymentNaming
-from deployment_syncer import DeploymentSyncer
 from logger import Logger
-from path_resolver import PathResolver
+from resource_resolver import ResourceResolver
 
 def log(msg):
     Logger.log(msg)
@@ -47,7 +45,7 @@ class CronManager:
         if service_config.get("image"):
             image = service_config["image"]
         else:
-            image = DeploymentNaming.get_image_name(
+            image = ResourceResolver.get_image_name(
                 docker_hub_user,
                 project,
                 env,
@@ -56,11 +54,11 @@ class CronManager:
             )
         
         # Generate unique container name with timestamp to avoid conflicts
-        base_container_name = DeploymentNaming.get_container_name(project, env, service_name)
+        base_container_name = ResourceResolver.get_container_name(project, env, service_name)
         container_name = f"{base_container_name}_$(date +%Y%m%d_%H%M%S)"
         
         # Get network name
-        network_name = DeploymentNaming.get_network_name(project, env)
+        network_name = ResourceResolver.get_network_name(project, env)
         
         # Build docker run command
         docker_cmd_parts = ["docker", "run", "--rm", "--name", container_name]
@@ -115,9 +113,9 @@ class CronManager:
             elif isinstance(volume_config, list):
                 volumes = volume_config
         else:
-            # Use auto-generated volumes from PathResolver
+            # Use auto-generated volumes from ResourceResolver
             # Don't auto-create dirs since they're already created in parallel by install_scheduled_service
-            volumes = PathResolver.generate_all_volume_mounts(
+            volumes = ResourceResolver.generate_all_volume_mounts(
                 project, env, service_name, server_ip,
                 use_docker_volumes=True, 
                 user=user,
@@ -268,7 +266,7 @@ class CronManager:
     ) -> None:
         """Clean up old scheduled containers that may not have been removed"""
         try:
-            base_name = DeploymentNaming.get_container_name(project, env, service_name)
+            base_name = ResourceResolver.get_container_name(project, env, service_name)
             
             # Find containers with our naming pattern
             cmd = f'docker ps -a --filter "name={base_name}_" --format "{{{{.Names}}}}"'
