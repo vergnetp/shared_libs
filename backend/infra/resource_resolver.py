@@ -305,7 +305,7 @@ class ResourceResolver:
         """
         Get service host for application connections (GENERIC for all services).
         
-        Always returns "localhost" as applications connect via nginx proxy
+        Always returns "nginx" as applications connect via nginx proxy
         on the internal service discovery port.
         
         Args:
@@ -318,11 +318,11 @@ class ResourceResolver:
         
         Examples:
             >>> ResourceResolver.get_service_host("myapp", "prod", "postgres")
-            'localhost'
+            'nginx'
             >>> ResourceResolver.get_service_host("myapp", "prod", "opensearch")
-            'localhost'
+            'nginx'
         """
-        return "localhost"
+        return "nginx"
     
     # ========================================
     # DATABASE-SPECIFIC RESOURCES
