@@ -1026,6 +1026,78 @@ project.deploy(env="prod", build=False)
 
 ---
 
+## File Synchronization
+
+### Quick Sync with Batch Scripts
+
+**Windows users can use convenience scripts:**
+
+```bash
+# Push config/secrets to all servers
+push.bat
+
+# Pull logs/data/backups from all servers
+pull.bat
+```
+
+Both scripts automatically discover servers and prompt for project name.
+
+### Manual Sync Operations
+
+```python
+from backend.infra.deployer import Deployer
+
+deployer = Deployer("myapp")
+
+# Push local files to servers
+deployer.push_config(env="prod")
+
+# Pull server data to local
+deployer.pull_data(env="prod")
+
+# Full bidirectional sync
+deployer.full_sync(env="prod")
+```
+
+### Directory Structure
+
+**Local (Windows: `C:/local/{project}/{env}/`, Linux: `/local/{project}/{env}/`):**
+
+```
+├── config/     # Service configs (PUSH →)
+├── secrets/    # Passwords, certs (PUSH →)
+├── files/      # Static assets (PUSH →)
+├── data/       # Database files (← PULL, per-server)
+├── logs/       # App logs (← PULL, per-server)
+├── backups/    # DB backups (← PULL, per-server)
+└── monitoring/ # Metrics (← PULL, per-server)
+```
+
+**Sync Behavior:**
+
+- **Push**: Single archive, parallel to all servers, auto-distributes secrets
+- **Pull**: Server-separated (e.g., `logs/192_168_1_100/`), parallel retrieval
+- **Automatic**: Secrets from databases copied to all consumer services
+
+### Common Workflows
+
+```python
+# 1. Config change workflow
+# Edit: C:/local/myapp/prod/config/api/settings.json
+deployer.push_config(env="prod")
+project.deploy(env="prod", service="api", build=False)
+
+# 2. Retrieve backups
+deployer.pull_data(env="prod")
+# Backups in: C:/local/myapp/prod/backups/{server_ip}/
+
+# 3. Analyze logs
+deployer.pull_data(env="prod")
+# Logs in: C:/local/myapp/prod/logs/{server_ip}/
+```
+
+---
+
 ## Troubleshooting
 
 ### Common Issues

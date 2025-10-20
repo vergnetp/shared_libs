@@ -1230,7 +1230,7 @@ class NginxConfigGenerator:
 
         if len(server_ips) > 1:
             for server_ip in server_ips:
-                host_port = ResourceResolver.generate_host_port(project, env, service_name, container_port)
+                host_port = ResourceResolver.get_host_port(project, env, service_name, container_port)
                 servers.append({
                     "host": server_ip,
                     "port": host_port,

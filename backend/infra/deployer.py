@@ -2069,7 +2069,7 @@ class Deployer:
                     dockerfile = service_config.get("dockerfile")
                     container_ports = ResourceResolver.get_container_ports(service_name, dockerfile)
                     container_port = container_ports[0] if container_ports else "8000"
-                    base_port = ResourceResolver.generate_host_port(project, env, service_name, container_port)
+                    base_port = ResourceResolver.get_host_port(project, env, service_name, container_port)
                     
                     toggle = self._determine_toggle(project, env, service_name, 'localhost', base_port, base_name)
                     new_name = toggle["name"]   
@@ -2177,7 +2177,7 @@ class Deployer:
                 dockerfile = service_config.get("dockerfile")
                 container_ports = ResourceResolver.get_container_ports(service_name, dockerfile)
                 container_port = container_ports[0] if container_ports else "8000"
-                base_port = ResourceResolver.generate_host_port(project, env, service_name, container_port)
+                base_port = ResourceResolver.get_host_port(project, env, service_name, container_port)
                 
                 # Determine if we need port mapping (multi-server needs it)
                 need_port_mapping = self._should_map_host_port(target_ips)
