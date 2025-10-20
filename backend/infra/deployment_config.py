@@ -72,8 +72,7 @@ def prepare_raw_config(config):
 def provision_standard_service(project: str, env: str, service: str, existing_config: Dict[str, Any]) -> Dict[str, Any]:
     """Auto-generate configuration for standard services, respecting existing config"""
     from deployment_syncer import DeploymentSyncer
-    
-    local_base = DeploymentSyncer.get_local_base(project, env)
+
     safe_chars = string.ascii_letters + string.digits  # Only safe ASCII characters
     
     def merge_config(default_config: Dict[str, Any]) -> Dict[str, Any]:
@@ -96,96 +95,60 @@ def provision_standard_service(project: str, env: str, service: str, existing_co
             if key not in result:
                 result[key] = value
         
-        return result
+        return result       
+
+    secrets_path = ResourceResolver.get_volume_host_path(project, env, service, "secrets", "localhost")
+    Path(secrets_path).mkdir(parents=True, exist_ok=True)
+    secret_filename = ResourceResolver._get_secret_filename(service)
+    password_file = Path(secrets_path) / secret_filename    
+    if not password_file.exists():
+        password = ''.join(secrets.choice(safe_chars) for _ in range(32))
+        password_file.write_text(password, encoding='utf-8')
+    container_secrets_path = ResourceResolver.get_volume_container_path(service, "secrets")
     
     if service == "postgres":
-        # Generate secure password only if not already exists
-        secrets_dir = Path(local_base) / "secrets" / "postgres"
-        secrets_dir.mkdir(parents=True, exist_ok=True)
-        password_file = secrets_dir / "db_password"
-        
-        if not password_file.exists():
-            password = ''.join(secrets.choice(safe_chars) for _ in range(32))
-            password_file.write_text(password, encoding='utf-8')
-        
-        # Generate database name and user from project/env
-        hash_input = f"{project}_{env}_postgres"
-        db_suffix = hashlib.md5(hash_input.encode()).hexdigest()[:8]
         
         default_config = {
             "image": "postgres:15",
             "env_vars": {
-                "POSTGRES_DB": f"{project}_{db_suffix}",
-                "POSTGRES_USER": f"{project}_user",
-                "POSTGRES_PASSWORD_FILE": "/run/secrets/db_password"
+                "POSTGRES_DB": ResourceResolver.get_db_name(project, env, service),
+                "POSTGRES_USER": ResourceResolver.get_db_user(project, service),
+                "POSTGRES_PASSWORD_FILE": f"{container_secrets_path}/{secret_filename}"
             },
             "startup_order": 1
         }
-        
-        result = merge_config(default_config)
-        print(f"Provisioned PostgreSQL for {project}/{env}: image={result['image']}, startup_order={result['startup_order']}")
-        return result
-    
-    elif service == "redis":
-        # Generate Redis auth password
-        secrets_dir = Path(local_base) / "secrets" / "redis"
-        secrets_dir.mkdir(parents=True, exist_ok=True)
-        password_file = secrets_dir / "redis_password"
-        
-        if not password_file.exists():
-            password = ''.join(secrets.choice(safe_chars) for _ in range(32))
-            password_file.write_text(password, encoding='utf-8')
-        
+    elif service == "redis":   
         default_config = {
             "image": "redis:7-alpine",
-            "command": ["redis-server", "--requirepass", "$(cat /run/secrets/redis_password)"],
+            "command": ["redis-server", "--requirepass", f"$(cat {container_secrets_path})"],
             "startup_order": 1
         }
-        
-        result = merge_config(default_config)
-        print(f"Provisioned Redis for {project}/{env}: image={result['image']}, startup_order={result['startup_order']}")
-        return result
-    
-    elif service == "opensearch":
-        # Generate admin password
-        secrets_dir = Path(local_base) / "secrets" / "opensearch"
-        secrets_dir.mkdir(parents=True, exist_ok=True)
-        password_file = secrets_dir / "admin_password"
-        
-        if not password_file.exists():
-            password = ''.join(secrets.choice(safe_chars) for _ in range(32))
-            password_file.write_text(password, encoding='utf-8')
-        
+    elif service == "opensearch":  
         default_config = {
             "image": "opensearchproject/opensearch:2",
             "env_vars": {
                 "discovery.type": "single-node",
-                "OPENSEARCH_INITIAL_ADMIN_PASSWORD": "$(cat /run/secrets/admin_password)"
+                "OPENSEARCH_INITIAL_ADMIN_PASSWORD": "$(cat {container_secrets_path})"
             },
             "startup_order": 1
         }
-        
-        result = merge_config(default_config)
-        print(f"Provisioned OpenSearch for {project}/{env}: image={result['image']}, startup_order={result['startup_order']}")
-        return result
-    
     elif service == "nginx":
+        raise ("nginx should be auto-handled, not in config...")
         # Generate basic auth password if needed
-        secrets_dir = Path(local_base) / "secrets" / "nginx"
-        secrets_dir.mkdir(parents=True, exist_ok=True)
+        #secrets_dir = Path(local_base) / "secrets" / "nginx"
+        #secrets_dir.mkdir(parents=True, exist_ok=True)
         
-        default_config = {
-            "image": "nginx:alpine",
-            "startup_order": 10  # Usually starts after backend services
-        }
-        
-        result = merge_config(default_config)
-        print(f"Provisioned Nginx for {project}/{env}: image={result['image']}, startup_order={result['startup_order']}")
-        return result
-    
+        #default_config = {
+            #"image": "nginx:alpine",
+            #"startup_order": 10  # Usually starts after backend services
+        #}   
     else:
         # Unknown service, return as-is
         return existing_config
+    
+    result = merge_config(default_config)
+    print(f"Provisioned {service} for {project}/{env}: image={result['image']}, startup_order={result['startup_order']}")
+    return result
 
 class DeploymentConfigurer:
     """
