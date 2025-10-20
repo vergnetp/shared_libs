@@ -1,7 +1,7 @@
 import json
 from typing import Dict, Any, List
 import constants
-from deployment_syncer import DeploymentSyncer
+from resource_resolver import ResourceResolver
 import secrets
 import string
 import hashlib
