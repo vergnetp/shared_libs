@@ -1,0 +1,3 @@
+Project: new_project
+Config File: C:\Users\vergn\Desktop\Projects\shared_libs\backend\infra\config\projects\new_project.json
+Deployment ID: deployment_5a4cc145-12ee-44c6-9d7c-d28c964e8862

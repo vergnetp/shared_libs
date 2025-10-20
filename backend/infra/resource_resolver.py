@@ -512,6 +512,43 @@ class ResourceResolver:
         """
         return PathResolver.get_docker_volume_name(project, env, path_type, service)
     
+    @staticmethod
+    def generate_all_volume_mounts(
+        project: str,
+        env: str,
+        service: str,
+        server_ip: str,
+        use_docker_volumes: bool = True,
+        user: str = "root",
+        auto_create_dirs: bool = True
+    ) -> list:
+        """
+        Generate all volume mounts for a service (facade for PathResolver).
+        
+        Automatically ensures host directories and Docker volumes exist before
+        returning volume mounts.
+        
+        Args:
+            project: Project name
+            env: Environment name
+            service: Service name
+            server_ip: Target server IP (REQUIRED)
+            use_docker_volumes: Use Docker volumes for data/logs (default: True)
+            user: SSH user for remote servers (default: "root")
+            auto_create_dirs: Auto-create directories (default: True)
+        
+        Returns:
+            List of volume mount strings ready for docker run
+        
+        Examples:
+            >>> ResourceResolver.generate_all_volume_mounts("myapp", "prod", "api", "10.0.0.5")
+            ['C:/local/myapp/prod/config/api:/app/config:ro', ...]
+        """
+        return PathResolver.generate_all_volume_mounts(
+            project, env, service, server_ip,
+            use_docker_volumes, user, auto_create_dirs
+        )
+
     # ========================================
     # PORT RESOLUTION
     # ========================================

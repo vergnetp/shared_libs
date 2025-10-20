@@ -216,8 +216,7 @@ class NginxConfigGenerator:
         FIXED: Always uses string paths for remote servers to avoid Windows path conversion.
         """
         try:
-            from path_resolver import ResourceResolver
-            
+                    
             # Generate stream config
             stream_config = NginxConfigGenerator.generate_stream_config(
                 project, env, service, backends, internal_port, mode
@@ -228,7 +227,7 @@ class NginxConfigGenerator:
             
             if server_ip == "localhost" or server_ip is None:
                 # Local operation - can use Path objects
-                from pathlib import Path
+               
                 
                 if target_os == "windows":
                     stream_dir = Path("C:/local/nginx/stream.d")
@@ -272,8 +271,7 @@ class NginxConfigGenerator:
     @staticmethod
     def _get_main_nginx_path(target_server: str = "localhost") -> Path:
         """Get path to main nginx.conf file"""
-        from pathlib import Path
-        from path_resolver import ResourceResolver
+      
         
         target_os = ResourceResolver.detect_target_os(target_server)
         
@@ -461,15 +459,14 @@ class NginxConfigGenerator:
         # Write config based on target
         if target_server == "localhost" or target_server is None:
             # Local: use Path for file operations
-            from pathlib import Path
+           
             conf_path = Path(conf_path_str)
             conf_path.parent.mkdir(parents=True, exist_ok=True)
             conf_path.write_text(conf_text)
             log(f"Wrote per-service config: {conf_path}")
         else:
             # Remote: use SSH to write file
-            from path_resolver import ResourceResolver
-            
+                     
             # Ensure directory exists on remote
             conf_dir = str(Path(conf_path_str).parent)
             CommandExecuter.run_cmd(
@@ -519,8 +516,7 @@ class NginxConfigGenerator:
         Returns:
             String path (works for both local and remote servers)
         """
-        from path_resolver import ResourceResolver
-        
+            
         filename = ResourceResolver.get_nginx_config_name(project, env, service_name)
         
         if target_server == "localhost" or target_server is None:
@@ -564,7 +560,7 @@ class NginxConfigGenerator:
     @staticmethod
     def _ensure_main_nginx_local(target_os: str) -> None:
         """Create local nginx.conf file (for localhost only)"""
-        from pathlib import Path
+       
         
         if target_os == "windows":
             nginx_conf = Path("C:/local/nginx/nginx.conf")
@@ -606,8 +602,7 @@ class NginxConfigGenerator:
         user: str = "root"
     ) -> bool:
         """Ensure nginx container is running with proper configuration"""
-        from path_resolver import ResourceResolver
-        
+     
         container_name = NginxConfigGenerator.NGINX_CONTAINER
         network_name = ResourceResolver.get_network_name(project, env)
         
@@ -657,7 +652,7 @@ class NginxConfigGenerator:
         
         # For localhost, create directories
         if target_server == "localhost" or target_server is None:
-            from pathlib import Path
+          
             Path(conf_dir).mkdir(parents=True, exist_ok=True)
             Path(stream_dir).mkdir(parents=True, exist_ok=True)
             
