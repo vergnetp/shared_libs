@@ -137,17 +137,52 @@ class ProjectDeployer:
     # SERVICE MANAGEMENT - Generic
     # =========================================================================
     
+    def _calculate_startup_order(self, depends_on: List[str]) -> int:
+        """
+        Calculate startup_order based on dependencies.
+        
+        Args:
+            depends_on: List of service names this service depends on
+            
+        Returns:
+            Calculated startup_order (max of dependencies + 1)
+        """
+        from deployment_config import DeploymentConfigurer
+        from logger import Logger
+        
+        def log(msg):
+            Logger.log(msg)
+        
+        try:
+            config = DeploymentConfigurer(self.project_name)
+            services = config.raw_config.get("project", {}).get("services", {})
+            
+            max_order = 0
+            for dep_service in depends_on:
+                if dep_service in services:
+                    dep_order = services[dep_service].get("startup_order", 1)
+                    max_order = max(max_order, dep_order)
+                else:
+                    log(f"Warning: Dependency '{dep_service}' not found, assuming startup_order=1")
+                    max_order = max(max_order, 1)
+            
+            return max_order + 1
+            
+        except Exception as e:
+            log(f"Warning: Could not calculate startup_order from dependencies: {e}")
+            return 2  # Safe default
+    
     def add_service(
         self,
         service_name: str,
-        startup_order: int = 1,
+        depends_on: Optional[List[str]] = None,
         server_zone: str = "lon1",
         servers_count: int = 1,
         dockerfile: Optional[str] = None,
         dockerfile_content: Optional[Dict[str, str]] = None,
         image: Optional[str] = None,
         build_context: Optional[str] = None,
-        git_repo: Optional[str] = None,  # ADD THIS
+        git_repo: Optional[str] = None,
         auto_scaling: Optional[bool | Dict[str, Any]] = None,
         **other_config
     ) -> 'ProjectDeployer':
@@ -156,52 +191,30 @@ class ProjectDeployer:
         
         Args:
             service_name: Service name
-            startup_order: Startup order (lower starts first)
-            server_zone: DigitalOcean zone (e.g., "lon1", "nyc3")
+            depends_on: List of service names this service depends on
+                Automatically calculates startup_order to be higher than dependencies
+            server_zone: DigitalOcean zone
             servers_count: Number of servers/replicas
-            dockerfile: Path to Dockerfile (relative to build_context)
-            dockerfile_content: Inline Dockerfile as dict {"1": "FROM...", "2": "WORKDIR..."}
-            image: Pre-built image (e.g., "nginx:alpine")
-            build_context: Build context path (will be overridden if git_repo specified)
-            git_repo: Git repository URL with optional ref:
-                - "https://github.com/user/repo.git" (default branch)
-                - "https://github.com/user/repo.git@develop" (branch)
-                - "https://github.com/user/repo.git@v1.2.3" (tag)
-                - "https://github.com/user/repo.git@abc123" (commit)
-                - "git@github.com:user/private-repo.git@main" (SSH)
-            auto_scaling: Enable auto-scaling. Can be:
-                - True: Enable both vertical and horizontal with defaults
-                - False/None: Disable (default)
-                - Dict: Custom config with "vertical" and/or "horizontal" keys
-            **other_config: Additional service config (env_vars, volumes, etc.)
+            dockerfile: Path to Dockerfile
+            dockerfile_content: Inline Dockerfile
+            image: Pre-built image
+            build_context: Build context path
+            git_repo: Git repository URL
+            auto_scaling: Enable auto-scaling
+            **other_config: Additional config (can include 'startup_order' to override)
             
         Returns:
             Self for chaining
-            
-        Example:
-            # From Git repository
-            project.add_service(
-                "api",
-                git_repo="https://github.com/user/myapp.git@develop",
-                dockerfile="Dockerfile",
-                servers_count=3,
-                domain="api.example.com"
-            )
-            
-            # From inline Dockerfile (existing)
-            project.add_service(
-                "api",
-                dockerfile_content={
-                    "1": "FROM python:3.11",
-                    "2": "WORKDIR /app",
-                    "3": "COPY . .",
-                    "4": "CMD ['python', 'app.py']"
-                },
-                build_context="/path/to/code",
-                servers_count=3
-            )
         """
-        # Store git config if provided
+        # Calculate startup_order from dependencies or use explicit override
+        if 'startup_order' in other_config:
+            startup_order = other_config.pop('startup_order')
+        elif depends_on:
+            startup_order = self._calculate_startup_order(depends_on)
+            other_config['depends_on'] = depends_on
+        else:
+            startup_order = 1  # Default for generic services
+        
         if git_repo:
             other_config['git_repo'] = git_repo
         
@@ -270,12 +283,623 @@ class ProjectDeployer:
     # SERVICE MANAGEMENT - Convenience Methods
     # =========================================================================
     
+    def add_python_service(
+        self,
+        service_name: str,
+        python_version: str = "3.11",
+        depends_on: Optional[List[str]] = None,
+        server_zone: str = "lon1",
+        servers_count: int = 1,
+        requirements_files: Optional[List[str]] = None,
+        command: Optional[str] = None,
+        port: Optional[int] = None,
+        build_context: Optional[str] = None,
+        git_repo: Optional[str] = None,
+        auto_scaling: Optional[bool | Dict[str, Any]] = None,
+        **other_config
+    ) -> 'ProjectDeployer':
+        """
+        Add Python service with automatic Dockerfile generation (fluent API).
+        
+        Automatically generates optimized Dockerfile for Python applications.
+        You can override by providing dockerfile or dockerfile_content.
+        
+        Args:
+            service_name: Service name
+            python_version: Python version (default: "3.11")
+            depends_on: List of service names this service depends on
+            server_zone: DigitalOcean zone
+            servers_count: Number of servers/replicas
+            requirements_files: List of requirements files to install (default: ["requirements.txt"])
+                **IMPORTANT: These files must exist in your build_context or git_repo**
+                Example: ["requirements.txt", "requirements-prod.txt"]
+                Paths are relative to build context root
+            command: Command to run (default: "python {service_name}.py")
+                Example: "python app.py", "gunicorn app:app", "uvicorn main:app --host 0.0.0.0"
+            port: Port to expose (optional, for web services)
+            build_context: Build context path (must contain requirements files)
+            git_repo: Git repository URL with optional ref (must contain requirements files)
+            auto_scaling: Enable auto-scaling
+            **other_config: Additional config (env_vars, volumes, domain, etc.)
+                Can include 'dockerfile_content' to override auto-generation
+            
+        Returns:
+            Self for chaining
+            
+        Example:
+            # Simple API with requirements.txt in repo root
+            project.add_python_service(
+                "api",
+                requirements_files=["requirements.txt"],
+                command="python api.py",
+                port=8000,
+                build_context="/path/to/code",  # Must contain requirements.txt
+                servers_count=3
+            )
+            
+            # Multiple requirements files
+            project.add_python_service(
+                "api",
+                requirements_files=["requirements.txt", "requirements-prod.txt"],
+                command="gunicorn app:app --bind 0.0.0.0:8000",
+                port=8000,
+                build_context="/path/to/code",  # Must contain both files
+                servers_count=3
+            )
+            
+            # From Git repo (requirements.txt must be in repo)
+            project.add_python_service(
+                "api",
+                git_repo="https://github.com/user/myapp.git@main",
+                requirements_files=["requirements.txt"],
+                command="python api.py",
+                port=8000,
+                servers_count=3
+            )
+            
+            # Requirements in subdirectory
+            project.add_python_service(
+                "api",
+                requirements_files=["docker/requirements.txt"],  # Relative to build context
+                command="python api.py",
+                port=8000,
+                build_context="/path/to/code",
+                servers_count=3
+            )
+            
+            # Worker service (no port, no requirements files needed)
+            project.add_python_service(
+                "worker",
+                requirements_files=[],  # Empty list = no pip install
+                command="python worker.py",
+                build_context="/path/to/code",
+                servers_count=2
+            )            
+        
+        Dockerfile Structure:
+            The generated Dockerfile will:
+            1. FROM python:{version}-slim
+            2. WORKDIR /app
+            3. COPY each requirements file
+            4. RUN pip install for each requirements file
+            5. COPY . .
+            6. EXPOSE {port} (if specified)
+            7. CMD {command}
+            
+        File Requirements:
+            - All requirements_files must exist in build_context or git_repo
+            - Paths are relative to the root of build_context/git_repo
+            - If files don't exist, Docker build will fail with clear error
+        """
+        # If user provided custom dockerfile or dockerfile_content, use regular add_service
+        if 'dockerfile' in other_config or 'dockerfile_content' in other_config:
+            return self.add_service(
+                service_name,
+                depends_on=depends_on,
+                server_zone=server_zone,
+                servers_count=servers_count,
+                build_context=build_context,
+                git_repo=git_repo,
+                auto_scaling=auto_scaling,
+                **other_config
+            )
+        
+        # Generate Dockerfile content
+        dockerfile_lines = {}
+        line_num = 1
+        
+        # Base image
+        dockerfile_lines[str(line_num)] = f"FROM python:{python_version}-slim"
+        line_num += 1
+        
+        # Working directory
+        dockerfile_lines[str(line_num)] = "WORKDIR /app"
+        line_num += 1
+        
+        # Copy and install requirements
+        if not requirements_files:
+            requirements_files = ["requirements.txt"]
+        
+        for req_file in requirements_files:
+            dockerfile_lines[str(line_num)] = f"COPY {req_file} ."
+            line_num += 1
+        
+        for req_file in requirements_files:
+            dockerfile_lines[str(line_num)] = f"RUN pip install --no-cache-dir -r {req_file}"
+            line_num += 1
+        
+        # Copy application code
+        dockerfile_lines[str(line_num)] = "COPY . ."
+        line_num += 1
+        
+        # Expose port if specified
+        if port:
+            dockerfile_lines[str(line_num)] = f"EXPOSE {port}"
+            line_num += 1
+        
+        # Command
+        if not command:
+            command = f"python {service_name}.py"
+        
+        # Parse command into CMD format
+        cmd_parts = command.split()
+        cmd_json = '["' + '", "'.join(cmd_parts) + '"]'
+        dockerfile_lines[str(line_num)] = f"CMD {cmd_json}"
+        
+        # Add generated dockerfile_content to other_config
+        other_config['dockerfile_content'] = dockerfile_lines
+        
+        # Call regular add_service with generated Dockerfile
+        return self.add_service(
+            service_name,
+            depends_on=depends_on,
+            server_zone=server_zone,
+            servers_count=servers_count,
+            build_context=build_context,
+            git_repo=git_repo,
+            auto_scaling=auto_scaling,
+            **other_config
+        )
+
+    def add_nodejs_service(
+        self,
+        service_name: str,
+        node_version: str = "20",
+        depends_on: Optional[List[str]] = None,
+        server_zone: str = "lon1",
+        servers_count: int = 1,
+        package_manager: str = "npm",
+        install_command: Optional[str] = None,
+        build_command: Optional[str] = None,
+        command: Optional[str] = None,
+        port: Optional[int] = None,
+        build_context: Optional[str] = None,
+        git_repo: Optional[str] = None,
+        auto_scaling: Optional[bool | Dict[str, Any]] = None,
+        **other_config
+    ) -> 'ProjectDeployer':
+        """
+        Add Node.js service with automatic Dockerfile generation (fluent API).
+        
+        Automatically generates optimized Dockerfile for Node.js applications.
+        You can override by providing dockerfile or dockerfile_content.
+        
+        Args:
+            service_name: Service name
+            node_version: Node.js version (default: "20")
+            depends_on: List of service names this service depends on
+            server_zone: DigitalOcean zone
+            servers_count: Number of servers/replicas
+            package_manager: Package manager - "npm", "yarn", or "pnpm" (default: "npm")
+            install_command: Custom install command (default: based on package_manager)
+                - npm: "npm ci --only=production"
+                - yarn: "yarn install --frozen-lockfile --production"
+                - pnpm: "pnpm install --frozen-lockfile --prod"
+            build_command: Build command if needed (e.g., "npm run build", "yarn build")
+            command: Command to run (default: "npm start")
+                Example: "node app.js", "npm start", "yarn start", "node dist/main.js"
+            port: Port to expose (optional, for web services)
+            build_context: Build context path (or use git_repo)
+            git_repo: Git repository URL with optional ref
+            auto_scaling: Enable auto-scaling
+            **other_config: Additional config (env_vars, volumes, domain, etc.)
+                Can include 'dockerfile_content' to override auto-generation
+            
+        Returns:
+            Self for chaining
+
+        File Requirements:
+            **IMPORTANT: Your build_context or git_repo must contain:**
+            - package.json (required)
+            - package-lock.json (for npm)
+            - yarn.lock (for yarn)
+            - pnpm-lock.yaml (for pnpm)
+            
+            If these files don't exist, Docker build will fail.
+            
+        Example:
+            # Express API (must have package.json in /path/to/code)
+            project.add_nodejs_service(
+                "api",
+                command="node app.js",
+                port=3000,
+                build_context="/path/to/code",
+                servers_count=3
+            
+            # Next.js app with build step
+            project.add_nodejs_service(
+                "web",
+                build_command="npm run build",
+                command="npm start",
+                port=3000,
+                servers_count=3
+            )
+            
+            # TypeScript project
+            project.add_nodejs_service(
+                "api",
+                build_command="npm run build",
+                command="node dist/main.js",
+                port=3000,
+                servers_count=3
+            )
+            
+            # From Git with yarn
+            project.add_nodejs_service(
+                "api",
+                git_repo="https://github.com/user/myapp.git@main",
+                package_manager="yarn",
+                command="yarn start",
+                port=3000,
+                servers_count=3
+            )
+            
+            # Worker (no port)
+            project.add_nodejs_service(
+                "worker",
+                command="node worker.js",
+                servers_count=2
+            )
+        """
+        # If user provided custom dockerfile or dockerfile_content, use regular add_service
+        if 'dockerfile' in other_config or 'dockerfile_content' in other_config:
+            return self.add_service(
+                service_name,
+                depends_on=depends_on,
+                server_zone=server_zone,
+                servers_count=servers_count,
+                build_context=build_context,
+                git_repo=git_repo,
+                auto_scaling=auto_scaling,
+                **other_config
+            )
+        
+        # Determine install command based on package manager
+        if not install_command:
+            if package_manager == "yarn":
+                install_command = "yarn install --frozen-lockfile --production"
+            elif package_manager == "pnpm":
+                install_command = "pnpm install --frozen-lockfile --prod"
+            else:  # npm
+                install_command = "npm ci --only=production"
+        
+        # Default command
+        if not command:
+            if package_manager == "yarn":
+                command = "yarn start"
+            elif package_manager == "pnpm":
+                command = "pnpm start"
+            else:
+                command = "npm start"
+        
+        # Generate Dockerfile content
+        dockerfile_lines = {}
+        line_num = 1
+        
+        # Base image
+        dockerfile_lines[str(line_num)] = f"FROM node:{node_version}-alpine"
+        line_num += 1
+        
+        # Working directory
+        dockerfile_lines[str(line_num)] = "WORKDIR /app"
+        line_num += 1
+        
+        # Copy package files
+        if package_manager == "yarn":
+            dockerfile_lines[str(line_num)] = "COPY package.json yarn.lock ./"
+        elif package_manager == "pnpm":
+            dockerfile_lines[str(line_num)] = "COPY package.json pnpm-lock.yaml ./"
+        else:  # npm
+            dockerfile_lines[str(line_num)] = "COPY package*.json ./"
+        line_num += 1
+        
+        # Install dependencies
+        dockerfile_lines[str(line_num)] = f"RUN {install_command}"
+        line_num += 1
+        
+        # Copy application code
+        dockerfile_lines[str(line_num)] = "COPY . ."
+        line_num += 1
+        
+        # Build step if specified
+        if build_command:
+            dockerfile_lines[str(line_num)] = f"RUN {build_command}"
+            line_num += 1
+        
+        # Expose port if specified
+        if port:
+            dockerfile_lines[str(line_num)] = f"EXPOSE {port}"
+            line_num += 1
+        
+        # Command
+        cmd_parts = command.split()
+        cmd_json = '["' + '", "'.join(cmd_parts) + '"]'
+        dockerfile_lines[str(line_num)] = f"CMD {cmd_json}"
+        
+        # Add generated dockerfile_content to other_config
+        other_config['dockerfile_content'] = dockerfile_lines
+        
+        # Call regular add_service with generated Dockerfile
+        return self.add_service(
+            service_name,
+            depends_on=depends_on,
+            server_zone=server_zone,
+            servers_count=servers_count,
+            build_context=build_context,
+            git_repo=git_repo,
+            auto_scaling=auto_scaling,
+            **other_config
+        )
+
+    def add_react_service(
+        self,
+        service_name: str = "web",
+        node_version: str = "20",
+        depends_on: Optional[List[str]] = None,
+        server_zone: str = "lon1",
+        servers_count: int = 1,
+        package_manager: str = "npm",
+        build_command: str = "npm run build",
+        build_dir: str = "build",
+        nginx_config: Optional[str] = None,
+        port: int = 80,
+        build_context: Optional[str] = None,
+        git_repo: Optional[str] = None,
+        auto_scaling: Optional[bool | Dict[str, Any]] = None,
+        **other_config
+    ) -> 'ProjectDeployer':
+        """
+        Add React/Vue/Angular/Svelte static website with Nginx (fluent API).
+        
+        Automatically generates optimized multi-stage Dockerfile that:
+        1. Builds the app with Node.js
+        2. Serves static files with Nginx
+        
+        You can override by providing dockerfile or dockerfile_content.
+        
+        Args:
+            service_name: Service name (default: "web")
+            node_version: Node.js version for build stage (default: "20")
+            depends_on: List of service names this service depends on
+            server_zone: DigitalOcean zone
+            servers_count: Number of servers/replicas
+            package_manager: Package manager - "npm", "yarn", or "pnpm" (default: "npm")
+            build_command: Build command (default: "npm run build")
+                - React: "npm run build"
+                - Vue: "npm run build"
+                - Angular: "npm run build"
+                - Svelte: "npm run build"
+                - Next.js (static export): "npm run build && npm run export"
+            build_dir: Output directory name (default: "build")
+                - React (CRA): "build"
+                - Vue: "dist"
+                - Angular: "dist/{project_name}"
+                - Svelte: "public/build" or "build"
+                - Next.js: "out"
+            nginx_config: Custom nginx.conf content (optional)
+                If not provided, uses default SPA config with history fallback
+            port: Port to expose (default: 80)
+            build_context: Build context path (or use git_repo)
+            git_repo: Git repository URL with optional ref
+            auto_scaling: Enable auto-scaling
+            **other_config: Additional config (env_vars, volumes, domain, etc.)
+                Can include 'dockerfile_content' to override auto-generation
+            
+        Returns:
+            Self for chaining
+            
+        File Requirements:
+            **IMPORTANT: Your build_context or git_repo must contain:**
+            - package.json with build script (required)
+            - package-lock.json / yarn.lock / pnpm-lock.yaml (required)
+            - Source code (src/, public/, etc.)
+            - The build_command must output to the specified build_dir
+            
+            If these don't exist or build fails, Docker build will fail.
+            
+        SSL & Domain:
+            - Use `domain="www.example.com"` parameter
+            - SSL is handled by nginx sidecar (service mesh layer)
+            - This container serves HTTP on port 80
+            - Nginx sidecar handles HTTPS (443) with Let's Encrypt certificates
+            
+        Example:
+            # React app (must have package.json with "build" script)
+            project.add_react_service(
+                "web",
+                build_context="/path/to/react-app",
+                domain="www.example.com",  # SSL handled by nginx sidecar
+                servers_count=3
+            )
+
+            # Vue app
+            project.add_react_service(
+                "web",
+                build_dir="dist",
+                build_context="/path/to/vue-app",
+                domain="www.example.com"
+            )
+            
+            # Angular app
+            project.add_react_service(
+                "web",
+                build_dir="dist/myapp",
+                build_context="/path/to/angular-app",
+                domain="www.example.com"
+            )
+            
+            # From Git repo
+            project.add_react_service(
+                "web",
+                git_repo="https://github.com/user/myapp.git@main",
+                domain="www.example.com",
+                servers_count=3
+            )
+            
+            # With custom nginx config
+            project.add_react_service(
+                "web",
+                nginx_config='''
+                    server {
+                        listen 80;
+                        location / {
+                            root /usr/share/nginx/html;
+                            try_files $uri $uri/ /index.html;
+                        }
+                        location /api {
+                            proxy_pass http://api:3000;
+                        }
+                    }
+                ''',
+                build_context="/path/to/react-app"
+            )
+        """
+        # If user provided custom dockerfile or dockerfile_content, use regular add_service
+        if 'dockerfile' in other_config or 'dockerfile_content' in other_config:
+            return self.add_service(
+                service_name,
+                depends_on=depends_on,
+                server_zone=server_zone,
+                servers_count=servers_count,
+                build_context=build_context,
+                git_repo=git_repo,
+                auto_scaling=auto_scaling,
+                **other_config
+            )
+        
+        # Determine install command based on package manager
+        if package_manager == "yarn":
+            install_command = "yarn install --frozen-lockfile"
+        elif package_manager == "pnpm":
+            install_command = "pnpm install --frozen-lockfile"
+        else:  # npm
+            install_command = "npm ci"
+        
+        # Default nginx config for SPAs
+        if not nginx_config:
+            nginx_config = """server {
+        listen 80;
+        server_name _;
+        
+        root /usr/share/nginx/html;
+        index index.html;
+        
+        # Gzip compression
+        gzip on;
+        gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript;
+        
+        # SPA routing - fallback to index.html
+        location / {
+            try_files $uri $uri/ /index.html;
+        }
+        
+        # Cache static assets
+        location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
+            expires 1y;
+            add_header Cache-Control "public, immutable";
+        }
+        
+        # Security headers
+        add_header X-Frame-Options "SAMEORIGIN" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-XSS-Protection "1; mode=block" always;
+    }"""
+        
+        # Generate Dockerfile content (multi-stage build)
+        dockerfile_lines = {}
+        line_num = 1
+        
+        # Stage 1: Build
+        dockerfile_lines[str(line_num)] = f"FROM node:{node_version}-alpine AS builder"
+        line_num += 1
+        
+        dockerfile_lines[str(line_num)] = "WORKDIR /app"
+        line_num += 1
+        
+        # Copy package files
+        if package_manager == "yarn":
+            dockerfile_lines[str(line_num)] = "COPY package.json yarn.lock ./"
+        elif package_manager == "pnpm":
+            dockerfile_lines[str(line_num)] = "COPY package.json pnpm-lock.yaml ./"
+        else:  # npm
+            dockerfile_lines[str(line_num)] = "COPY package*.json ./"
+        line_num += 1
+        
+        # Install dependencies
+        dockerfile_lines[str(line_num)] = f"RUN {install_command}"
+        line_num += 1
+        
+        # Copy source and build
+        dockerfile_lines[str(line_num)] = "COPY . ."
+        line_num += 1
+        
+        dockerfile_lines[str(line_num)] = f"RUN {build_command}"
+        line_num += 1
+        
+        # Stage 2: Production (Nginx)
+        dockerfile_lines[str(line_num)] = "FROM nginx:alpine"
+        line_num += 1
+        
+        # Copy built files
+        dockerfile_lines[str(line_num)] = f"COPY --from=builder /app/{build_dir} /usr/share/nginx/html"
+        line_num += 1
+        
+        # Copy custom nginx config
+        dockerfile_lines[str(line_num)] = "RUN rm /etc/nginx/conf.d/default.conf"
+        line_num += 1
+        
+        # Create nginx config file inline
+        dockerfile_lines[str(line_num)] = f"RUN echo '{nginx_config}' > /etc/nginx/conf.d/default.conf"
+        line_num += 1
+        
+        # Expose port
+        dockerfile_lines[str(line_num)] = f"EXPOSE {port}"
+        line_num += 1
+        
+        # Start nginx
+        dockerfile_lines[str(line_num)] = 'CMD ["nginx", "-g", "daemon off;"]'
+        
+        # Add generated dockerfile_content to other_config
+        other_config['dockerfile_content'] = dockerfile_lines
+        
+        # Call regular add_service with generated Dockerfile
+        return self.add_service(
+            service_name,
+            depends_on=depends_on,
+            server_zone=server_zone,
+            servers_count=servers_count,
+            build_context=build_context,
+            git_repo=git_repo,
+            auto_scaling=auto_scaling,
+            **other_config
+        )
+
     def add_postgres(
         self,
         version: str = "15",
         server_zone: str = "lon1",
         servers_count: int = 1,
-        startup_order: int = 1,
+        depends_on: Optional[List[str]] = None,
         **other_config
     ) -> 'ProjectDeployer':
         """
@@ -285,7 +909,7 @@ class ProjectDeployer:
             version: PostgreSQL version (default: "15")
             server_zone: DigitalOcean zone
             servers_count: Number of replicas
-            startup_order: Startup order (default: 1 - starts first)
+            depends_on: List of service names this service depends on
             **other_config: Additional config (env_vars, etc.)
             
         Returns:
@@ -299,7 +923,7 @@ class ProjectDeployer:
             version,
             server_zone,
             servers_count,
-            startup_order,
+            depends_on,
             **other_config
         )
         return self
@@ -309,7 +933,7 @@ class ProjectDeployer:
         version: str = "7-alpine",
         server_zone: str = "lon1",
         servers_count: int = 1,
-        startup_order: int = 1,
+        depends_on: Optional[List[str]] = None,
         **other_config
     ) -> 'ProjectDeployer':
         """
@@ -319,7 +943,7 @@ class ProjectDeployer:
             version: Redis version (default: "7-alpine")
             server_zone: DigitalOcean zone
             servers_count: Number of replicas
-            startup_order: Startup order (default: 1 - starts first)
+            depends_on: List of service names this service depends on
             **other_config: Additional config (env_vars, etc.)
             
         Returns:
@@ -333,7 +957,7 @@ class ProjectDeployer:
             version,
             server_zone,
             servers_count,
-            startup_order,
+            depends_on,
             **other_config
         )
         return self
@@ -343,7 +967,7 @@ class ProjectDeployer:
         version: str = "2",
         server_zone: str = "lon1",
         servers_count: int = 1,
-        startup_order: int = 1,
+        depends_on: Optional[List[str]] = None,
         **other_config
     ) -> 'ProjectDeployer':
         """
@@ -353,7 +977,7 @@ class ProjectDeployer:
             version: OpenSearch version (default: "2")
             server_zone: DigitalOcean zone
             servers_count: Number of replicas
-            startup_order: Startup order (default: 1 - starts first)
+            depends_on: List of service names this service depends on
             **other_config: Additional config (env_vars, etc.)
             
         Returns:
@@ -367,7 +991,7 @@ class ProjectDeployer:
             version,
             server_zone,
             servers_count,
-            startup_order,
+            depends_on,
             **other_config
         )
         return self
@@ -377,7 +1001,7 @@ class ProjectDeployer:
         version: str = "alpine",
         server_zone: str = "lon1",
         servers_count: int = 1,
-        startup_order: int = 10,
+        depends_on: Optional[List[str]] = None,
         **other_config
     ) -> 'ProjectDeployer':
         """
@@ -387,7 +1011,7 @@ class ProjectDeployer:
             version: Nginx version (default: "alpine")
             server_zone: DigitalOcean zone
             servers_count: Number of replicas
-            startup_order: Startup order (default: 10 - starts after backends)
+            depends_on: List of service names this service depends on
             **other_config: Additional config (env_vars, etc.)
             
         Returns:
@@ -401,7 +1025,7 @@ class ProjectDeployer:
             version,
             server_zone,
             servers_count,
-            startup_order,
+            depends_on,
             **other_config
         )
         return self
