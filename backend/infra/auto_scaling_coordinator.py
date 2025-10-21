@@ -136,80 +136,99 @@ class AutoScalingCoordinator:
             log(f"Error in auto-scaling check: {e}")
     
     def _check_service_scaling(
-        self,
-        project: str,
-        env: str,
-        service: str,
-        service_config: Dict[str, Any],
-        scaler: AutoScaler
-    ) -> None:
-        """
-        Check and scale a single service.
-        
-        Args:
-            project: Project name
-            env: Environment
-            service: Service name
-            service_config: Service configuration dict
-            scaler: AutoScaler instance for this project
-        """
-        # Check if auto-scaling is enabled
-        auto_scale_config = service_config.get("auto_scaling", {})
-        if not auto_scale_config.get("enabled", False):
-            return
-        
-        # Check if enough time has passed since last check
-        check_key = f"{project}_{env}_{service}"
-        if not self._should_check_now(check_key):
-            return
-        
-        # Get current deployment
-        from deployment_state_manager import DeploymentStateManager
-        deployment = DeploymentStateManager.get_current_deployment(project, env, service)
-        
-        if not deployment:
-            return
-        
-        servers = deployment.get("servers", [])
-        if not servers:
-            return
-        
-        log(f"Auto-scaling check for {project}/{env}/{service} ({len(servers)} servers)")
-        
-        # Collect and average metrics from all servers
-        aggregated_metrics = self._aggregate_metrics(
-            project, env, service, servers
-        )
-        
-        if not aggregated_metrics:
-            log(f"  No metrics available for {service}, skipping")
-            return
-        
-        log(f"  Metrics: CPU={aggregated_metrics['avg_cpu']:.1f}% "
-            f"Memory={aggregated_metrics['avg_memory']:.1f}% "
-            f"RPS={aggregated_metrics.get('avg_rps', 0):.1f}")
-        
-        # Get thresholds
-        vertical_thresholds = self._get_vertical_thresholds(auto_scale_config)
-        horizontal_thresholds = self._get_horizontal_thresholds(auto_scale_config)
-        
-        # PRIORITY 1: Check vertical scaling (resource-based)
-        if auto_scale_config.get("type") in ["vertical", "both"]:
-            if self._try_vertical_scaling(
-                project, env, service, service_config,
-                aggregated_metrics, vertical_thresholds, scaler
-            ):
-                self._record_check(check_key)
-                return  # Don't check horizontal in same cycle
-        
-        # PRIORITY 2: Check horizontal scaling (traffic-based)
-        if auto_scale_config.get("type") in ["horizontal", "both"]:
-            if self._try_horizontal_scaling(
-                project, env, service, servers,
-                aggregated_metrics, horizontal_thresholds, scaler
-            ):
-                self._record_check(check_key)
-    
+            self,
+            project: str,
+            env: str,
+            service: str,
+            service_config: Dict[str, Any],
+            scaler: AutoScaler
+        ) -> None:
+            """
+            Check and scale a single service.
+            
+            Args:
+                project: Project name
+                env: Environment
+                service: Service name
+                service_config: Service configuration dict
+                scaler: AutoScaler instance for this project
+            """
+            # Get auto_scaling config
+            auto_scale_config = service_config.get("auto_scaling")
+            
+            # Check if enabled
+            if not auto_scale_config:
+                return
+            
+            # Normalize config
+            if auto_scale_config is True:
+                # Enable both with defaults
+                auto_scale_config = {"enabled": True}
+            elif isinstance(auto_scale_config, dict):
+                auto_scale_config["enabled"] = True
+            else:
+                return
+            
+            # Infer type from config
+            has_vertical = "vertical" in auto_scale_config and auto_scale_config["vertical"]
+            has_horizontal = "horizontal" in auto_scale_config and auto_scale_config["horizontal"]
+            
+            # If neither specified, enable both (defaults)
+            if not has_vertical and not has_horizontal:
+                has_vertical = has_horizontal = True
+            
+            # Check if enough time has passed since last check
+            check_key = f"{project}_{env}_{service}"
+            if not self._should_check_now(check_key):
+                return
+            
+            # Get current deployment
+            from deployment_state_manager import DeploymentStateManager
+            deployment = DeploymentStateManager.get_current_deployment(project, env, service)
+            
+            if not deployment:
+                return
+            
+            servers = deployment.get("servers", [])
+            if not servers:
+                return
+            
+            log(f"Auto-scaling check for {project}/{env}/{service} ({len(servers)} servers)")
+            
+            # Collect and average metrics from all servers
+            aggregated_metrics = self._aggregate_metrics(
+                project, env, service, servers
+            )
+            
+            if not aggregated_metrics:
+                log(f"  No metrics available for {service}, skipping")
+                return
+            
+            log(f"  Metrics: CPU={aggregated_metrics['avg_cpu']:.1f}% "
+                f"Memory={aggregated_metrics['avg_memory']:.1f}% "
+                f"RPS={aggregated_metrics.get('avg_rps', 0):.1f}")
+            
+            # Get thresholds
+            vertical_thresholds = self._get_vertical_thresholds(auto_scale_config) if has_vertical else None
+            horizontal_thresholds = self._get_horizontal_thresholds(auto_scale_config) if has_horizontal else None
+            
+            # PRIORITY 1: Check vertical scaling (resource-based)
+            if has_vertical:
+                if self._try_vertical_scaling(
+                    project, env, service, service_config,
+                    aggregated_metrics, vertical_thresholds, scaler
+                ):
+                    self._record_check(check_key)
+                    return  # Don't check horizontal in same cycle
+            
+            # PRIORITY 2: Check horizontal scaling (traffic-based)
+            if has_horizontal:
+                if self._try_horizontal_scaling(
+                    project, env, service, servers,
+                    aggregated_metrics, horizontal_thresholds, scaler
+                ):
+                    self._record_check(check_key)
+
     # ========================================
     # METRICS AGGREGATION
     # ========================================

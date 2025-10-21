@@ -1098,6 +1098,262 @@ deployer.pull_data(env="prod")
 
 ---
 
+## Auto-Scaling
+
+The system provides intelligent auto-scaling capabilities that automatically adjust your infrastructure based on real-time metrics.
+
+### Overview
+
+Auto-scaling monitors your services and can:
+
+- **Vertical Scaling**: Upgrade/downgrade server specs (CPU/Memory) based on resource usage
+- **Horizontal Scaling**: Add/remove servers based on request traffic (RPS)
+
+**Key Features:**
+
+- ✅ Automatic metric collection (CPU, Memory, RPS)
+- ✅ Configurable thresholds per service
+- ✅ Cooldown periods to prevent flapping
+- ✅ Smart averaging over 10-minute windows
+- ✅ Priority-based scaling (vertical first, then horizontal)
+
+### Enabling Auto-Scaling
+
+**Enable with defaults (both vertical and horizontal):**
+
+```python
+project.add_service(
+    "api",
+    dockerfile_content={...},
+    servers_count=2,
+    auto_scaling=True  # Enables both with default thresholds
+)
+```
+
+**Custom thresholds:**
+
+```python
+project.add_service(
+    "api",
+    dockerfile_content={...},
+    servers_count=2,
+    auto_scaling={
+        "vertical": {
+            "cpu_scale_up": 80,      # Scale up when CPU > 80%
+            "cpu_scale_down": 25,    # Scale down when CPU < 25%
+            "memory_scale_up": 85,   # Scale up when Memory > 85%
+            "memory_scale_down": 30  # Scale down when Memory < 30%
+        },
+        "horizontal": {
+            "rps_scale_up": 1000,    # Add server when RPS > 1000
+            "rps_scale_down": 100    # Remove server when RPS < 100
+        }
+    }
+)
+```
+
+**Only vertical scaling:**
+
+```python
+project.add_service(
+    "api",
+    auto_scaling={
+        "vertical": {
+            "cpu_scale_up": 75,
+            "memory_scale_up": 80
+        }
+    }
+)
+```
+
+**Only horizontal scaling:**
+
+```python
+project.add_service(
+    "api",
+    auto_scaling={
+        "horizontal": {
+            "rps_scale_up": 500,
+            "rps_scale_down": 50
+        }
+    }
+)
+```
+
+### Default Thresholds
+
+When `auto_scaling=True` or thresholds not specified:
+
+**Vertical Scaling (Resource-based):**
+
+- CPU scale up: 75%
+- CPU scale down: 20%
+- Memory scale up: 80%
+- Memory scale down: 30%
+
+**Horizontal Scaling (Traffic-based):**
+
+- RPS scale up: 500 requests/second
+- RPS scale down: 50 requests/second
+
+### How It Works
+
+**Architecture:**
+
+1. **Metrics Collection** (Every 60 seconds):
+
+   - All servers collect their own metrics
+   - Metrics stored in rolling 10-minute window
+   - CPU, Memory, and RPS tracked per service
+
+2. **Scaling Decisions** (Every 5 minutes):
+
+   - Leader server analyzes aggregated metrics
+   - Averages across all servers running the service
+   - Compares against configured thresholds
+   - Makes scaling decision if needed
+
+3. **Scaling Execution**:
+   - Vertical: Updates server specs, redeploys service
+   - Horizontal: Adds/removes servers, zero-downtime deployment
+
+**Scaling Priority:**
+
+Vertical scaling (resource optimization) takes priority over horizontal scaling (traffic handling). If both are needed, vertical scaling happens first, then horizontal on the next check cycle.
+
+**Cooldown Periods:**
+
+- Scale up: 5 minutes (react quickly to load spikes)
+- Scale down: 10 minutes (be conservative to avoid flapping)
+
+**Constraints:**
+
+- Minimum servers: 1
+- Maximum servers: 20
+- Server size tiers follow DigitalOcean's available sizes (1-32 vCPU, 1GB-64GB RAM)
+
+### Monitoring Auto-Scaling
+
+**Check auto-scaling status:**
+
+```python
+from backend.infra.auto_scaling_coordinator import AutoScalingCoordinator
+
+coordinator = AutoScalingCoordinator()
+
+# Collect current metrics (happens automatically every minute)
+coordinator.collect_all_metrics()
+
+# Manual scaling check (happens automatically every 5 minutes via leader)
+coordinator.check_and_scale_all_services()
+```
+
+**View scaling history in logs:**
+
+```python
+project.logs(service="api", env="prod", lines=200)
+# Look for entries like:
+# "Auto-scaling check for myapp/prod/api (3 servers)"
+# "Metrics: CPU=82.3% Memory=65.1% RPS=723.4"
+# "Triggering vertical scaling for api"
+# "✓ Vertical scaling completed for api"
+```
+
+### Example Scenarios
+
+**Scenario 1: High CPU usage**
+
+```
+Current: 2 servers, 2 vCPU each, CPU at 85%
+Action: Vertical scale up to 4 vCPU per server
+Result: 2 servers, 4 vCPU each, CPU drops to ~42%
+```
+
+**Scenario 2: Traffic spike**
+
+```
+Current: 3 servers, RPS at 650 per server (1950 total)
+Action: Horizontal scale up, add 1 server
+Result: 4 servers, RPS ~487 per server (1950 total distributed)
+```
+
+**Scenario 3: Low utilization**
+
+```
+Current: 5 servers, 4 vCPU each, CPU at 15%, RPS at 30 per server
+Actions (over time):
+1. Horizontal scale down: 5 → 4 servers (wait 10 min)
+2. Horizontal scale down: 4 → 3 servers (wait 10 min)
+3. Vertical scale down: 4 vCPU → 2 vCPU per server
+```
+
+### Cost Optimization
+
+Auto-scaling helps optimize costs by:
+
+- ✅ Scaling down during low-traffic periods
+- ✅ Right-sizing server specs to actual usage
+- ✅ Avoiding over-provisioning
+
+**Example monthly savings:**
+
+```
+Without auto-scaling:
+- 5 servers × 4 vCPU/8GB × $48/month = $240/month
+
+With auto-scaling (average):
+- 3 servers × 2 vCPU/4GB × $24/month = $72/month
+- Scales up to 5×4vCPU during peak hours only
+- Savings: ~$168/month (70%)
+```
+
+### Disabling Auto-Scaling
+
+```python
+# Remove auto-scaling from existing service
+project.update_service("api", auto_scaling=False)
+project.deploy(env="prod", service="api")
+```
+
+### Best Practices
+
+**✅ Do:**
+
+- Start with default thresholds and adjust based on observation
+- Use vertical scaling for predictable workloads
+- Use horizontal scaling for variable traffic patterns
+- Monitor scaling decisions via logs
+- Set reasonable min/max server counts for cost control
+
+**❌ Don't:**
+
+- Set thresholds too tight (causes flapping)
+- Enable auto-scaling without monitoring
+- Scale down too aggressively (can cause service degradation)
+- Use auto-scaling for databases (use vertical scaling only if needed)
+
+### Troubleshooting
+
+**"Auto-scaling not triggering"**
+
+- Check if service has `auto_scaling` enabled in config
+- Verify metrics are being collected: check logs for "Auto-scaling check"
+- Ensure leader server is healthy (oldest server becomes leader)
+- Check if cooldown period is still active
+
+**"Too many scale events"**
+
+- Increase cooldown periods in `AutoScaler` class
+- Widen threshold gaps (e.g., scale_up=80, scale_down=20 instead of 75/30)
+- Increase metrics averaging window (default: 10 minutes)
+
+**"Scaling in wrong direction"**
+
+- Check metric collection: `coordinator.collect_all_metrics()`
+- Review aggregated metrics in logs
+- Verify thresholds are correctly configured
+- Check if multiple services competing for resources
+
 ## Troubleshooting
 
 ### Common Issues

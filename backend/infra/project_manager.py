@@ -85,21 +85,12 @@ class ProjectManager:
         dockerfile_content: Optional[Dict[str, str]] = None,
         image: Optional[str] = None,
         build_context: Optional[str] = None,
+        auto_scaling: Optional[bool | Dict[str, Any]] = None,
         **other_config
     ) -> bool:
         """Adds service to project config"""
-        # Try to load, or create if doesn't exist
-        try:
-            config = DeploymentConfigurer(project_name)
-        except FileNotFoundError:
-            ProjectManager.create_project(project_name)
-            config = DeploymentConfigurer(project_name)
+        config = DeploymentConfigurer(project_name)
         
-        # Validate service doesn't exist
-        if service_name in config.raw_config["project"]["services"]:
-            raise ValueError(f"Service '{service_name}' already exists")
-        
-        # Build service config
         service_config = {
             "startup_order": startup_order,
             "server_zone": server_zone,
@@ -115,6 +106,8 @@ class ProjectManager:
             service_config["image"] = image
         if build_context:
             service_config["build_context"] = build_context
+        if auto_scaling is not None:
+            service_config["auto_scaling"] = auto_scaling
         
         config.raw_config["project"]["services"][service_name] = service_config
         config.save_config()
