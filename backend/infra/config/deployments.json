@@ -4,13 +4,21 @@
       "postgres": {
         "current": {
           "servers": [
-            "165.232.34.136"
+            "157.245.32.116"
           ],
           "container_name": "new_project_uat_postgres",
           "version": "latest",
-          "deployed_at": "2025-10-20T22:38:24.104591"
+          "deployed_at": "2025-10-20T22:51:29.265141"
         },
         "history": [
+          {
+            "servers": [
+              "157.245.32.116"
+            ],
+            "container_name": "new_project_uat_postgres",
+            "version": "latest",
+            "deployed_at": "2025-10-20T22:51:29.265141"
+          },
           {
             "servers": [
               "165.232.34.136"
@@ -82,14 +90,6 @@
             "container_name": "new_project_uat_postgres",
             "version": "latest",
             "deployed_at": "2025-10-18T13:40:03.768081"
-          },
-          {
-            "servers": [
-              "144.126.234.79"
-            ],
-            "container_name": "new_project_uat_postgres",
-            "version": "latest",
-            "deployed_at": "2025-10-18T12:12:44.232448"
           }
         ]
       },
@@ -237,14 +237,23 @@
       "api": {
         "current": {
           "servers": [
-            "46.101.24.227",
-            "138.68.170.241"
+            "157.245.32.116",
+            "209.97.187.7"
           ],
           "container_name": "new_project_uat_api",
           "version": "latest",
-          "deployed_at": "2025-10-20T22:28:56.055196"
+          "deployed_at": "2025-10-20T22:53:53.888565"
         },
         "history": [
+          {
+            "servers": [
+              "157.245.32.116",
+              "209.97.187.7"
+            ],
+            "container_name": "new_project_uat_api",
+            "version": "latest",
+            "deployed_at": "2025-10-20T22:53:53.888565"
+          },
           {
             "servers": [
               "46.101.24.227",
@@ -325,15 +334,6 @@
             "container_name": "new_project_uat_api",
             "version": "latest",
             "deployed_at": "2025-10-18T15:12:22.980913"
-          },
-          {
-            "servers": [
-              "165.232.110.198",
-              "167.71.130.144"
-            ],
-            "container_name": "new_project_uat_api",
-            "version": "latest",
-            "deployed_at": "2025-10-18T13:43:15.849956"
           }
         ]
       }

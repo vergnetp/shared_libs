@@ -32,7 +32,226 @@ class HealthMonitor:
     
     # Email alert configuration
     ALERT_EMAIL = None  # Set via environment variable ALERT_EMAIL
+
+    ############################ Auto scaler #########################
+    from metrics_collector import MetricsCollector
+    from auto_scaler import AutoScaler
+
+    AUTO_SCALE_ENABLED = True
     
+    # Class-level instances (reused across calls)
+    _metrics_collector = None
+    _auto_scaler = None
+    _last_autoscale_check = {}  # {project_env_service: timestamp}
+    
+    @staticmethod
+    def get_metrics_collector():
+        """Get or create metrics collector singleton"""
+        if HealthMonitor._metrics_collector is None:
+            HealthMonitor._metrics_collector = MetricsCollector()
+        return HealthMonitor._metrics_collector
+    
+    @staticmethod
+    def get_auto_scaler(project: str):
+        """Get or create auto scaler for project"""
+        if HealthMonitor._auto_scaler is None:
+            HealthMonitor._auto_scaler = {}
+        
+        if project not in HealthMonitor._auto_scaler:
+            HealthMonitor._auto_scaler[project] = AutoScaler(project)
+        
+        return HealthMonitor._auto_scaler[project]
+    
+
+    @staticmethod
+    def collect_all_metrics():
+        """
+        Collect metrics from all servers and services.
+        Called by all servers, but only leader uses the data.
+        """
+        from deployment_state_manager import DeploymentStateManager
+        
+        collector = HealthMonitor.get_metrics_collector()
+        
+        # Get all active servers
+        all_servers = ServerInventory.get_servers(
+            deployment_status=ServerInventory.STATUS_ACTIVE
+        )
+        
+        # Collect server-level metrics
+        for server in all_servers:
+            server_ip = server['ip']
+            metrics = collector.collect_server_metrics(server_ip)
+            
+            if metrics:
+                collector.store_metrics(server_ip, metrics)
+                log(f"Collected metrics from {server_ip}: "
+                    f"CPU={metrics['cpu_percent']:.1f}% "
+                    f"Memory={metrics['memory_percent']:.1f}%")
+        
+        # Collect service-level metrics
+        # Get all deployments to find services
+        try:
+            all_deployments = DeploymentStateManager.get_all_deployments()
+            
+            for project in all_deployments:
+                for env in all_deployments[project]:
+                    for service in all_deployments[project][env]:
+                        deployment = all_deployments[project][env][service]
+                        servers = deployment.get('servers', [])
+                        
+                        for server_ip in servers:
+                            service_metrics = collector.collect_service_metrics(
+                                project, env, service, server_ip
+                            )
+                            if service_metrics:
+                                # Store with service-specific key
+                                key = f"{server_ip}_{project}_{env}_{service}"
+                                collector.store_metrics(key, service_metrics)
+        except Exception as e:
+            log(f"Error collecting service metrics: {e}")
+    
+    @staticmethod
+    def check_and_scale_services():
+        """
+        Check all services and perform auto-scaling if needed.
+        Only called by leader server.
+        """
+        from deployment_state_manager import DeploymentStateManager
+        from deployment_config import DeploymentConfigurer
+        
+        if not HealthMonitor.AUTO_SCALE_ENABLED:
+            return
+        
+        log("Checking auto-scaling for all services...")
+        
+        try:
+            all_deployments = DeploymentStateManager.get_all_deployments()
+            
+            for project in all_deployments:
+                # Load project config to check auto-scaling settings
+                try:
+                    config = DeploymentConfigurer(project)
+                except:
+                    continue
+                
+                scaler = HealthMonitor.get_auto_scaler(project)
+                collector = HealthMonitor.get_metrics_collector()
+                
+                for env in all_deployments[project]:
+                    services = config.get_services(env)
+                    
+                    for service_name, service_config in services.items():
+                        HealthMonitor._check_service_scaling(
+                            project, env, service_name,
+                            service_config, scaler, collector
+                        )
+        
+        except Exception as e:
+            log(f"Error in auto-scaling check: {e}")
+    
+    @staticmethod
+    def _check_service_scaling(
+        project: str,
+        env: str,
+        service: str,
+        service_config: Dict[str, Any],
+        scaler: AutoScaler,
+        collector: MetricsCollector
+    ):
+        """Check and scale a single service"""
+        
+        # Check if auto-scaling is enabled for this service
+        auto_scale_config = service_config.get("auto_scaling", {})
+        if not auto_scale_config.get("enabled", False):
+            return
+        
+        # Check if enough time has passed since last check
+        check_key = f"{project}_{env}_{service}"
+        now = datetime.now()
+        
+        if check_key in HealthMonitor._last_autoscale_check:
+            last_check = HealthMonitor._last_autoscale_check[check_key]
+            elapsed = (now - last_check).total_seconds()
+            
+            if elapsed < HealthMonitor.AUTO_SCALE_CHECK_INTERVAL:
+                return  # Skip, checked too recently
+        
+        # Get current deployment
+        from deployment_state_manager import DeploymentStateManager
+        deployment = DeploymentStateManager.get_current_deployment(project, env, service)
+        
+        if not deployment:
+            return
+        
+        servers = deployment.get("servers", [])
+        if not servers:
+            return
+        
+        log(f"Auto-scaling check for {project}/{env}/{service} ({len(servers)} servers)")
+        
+        # Collect metrics from all servers running this service
+        all_metrics = []
+        for server_ip in servers:
+            key = f"{server_ip}_{project}_{env}_{service}"
+            avg_metrics = collector.get_average_metrics(key, window_minutes=5)
+            
+            if avg_metrics:
+                all_metrics.append(avg_metrics)
+        
+        if not all_metrics:
+            log(f"No metrics available for {service}, skipping")
+            return
+        
+        # Calculate overall averages
+        avg_cpu = sum(m['avg_cpu'] for m in all_metrics) / len(all_metrics)
+        avg_memory = sum(m['avg_memory'] for m in all_metrics) / len(all_metrics)
+        
+        aggregated_metrics = {
+            'avg_cpu': avg_cpu,
+            'avg_memory': avg_memory,
+            'avg_disk': 0
+        }
+        
+        log(f"  Metrics: CPU={avg_cpu:.1f}% Memory={avg_memory:.1f}%")
+        
+        # Get thresholds
+        thresholds = auto_scale_config.get("thresholds", MetricsCollector.DEFAULT_THRESHOLDS)
+        
+        # Check horizontal scaling
+        if auto_scale_config.get("type") in ["horizontal", "both"]:
+            action = scaler.should_scale_horizontally(
+                service, env, len(servers), aggregated_metrics, thresholds
+            )
+            
+            if action:
+                log(f"  Triggering horizontal {action} for {service}")
+                success = scaler.execute_horizontal_scale(
+                    service, env, action, len(servers)
+                )
+                
+                if success:
+                    HealthMonitor._last_autoscale_check[check_key] = now
+                    return  # Don't check vertical if horizontal scaled
+        
+        # Check vertical scaling
+        if auto_scale_config.get("type") in ["vertical", "both"]:
+            current_cpu = service_config.get("server_cpu", 1)
+            current_memory = service_config.get("server_memory", 1024)
+            
+            new_specs = scaler.should_scale_vertically(
+                service, env, current_cpu, current_memory,
+                aggregated_metrics, thresholds
+            )
+            
+            if new_specs:
+                log(f"  Triggering vertical scaling for {service}")
+                success = scaler.execute_vertical_scale(service, env, new_specs)
+                
+                if success:
+                    HealthMonitor._last_autoscale_check[check_key] = now
+    ###################################################################
+
     @staticmethod
     def get_my_ip() -> str:
         """Get this server's IP address"""
@@ -418,6 +637,8 @@ class HealthMonitor:
         """
         log("Running health check...")
         
+        HealthMonitor.collect_all_metrics()
+
         # Sync inventory with DigitalOcean to get fresh state
         try:
             ServerInventory.sync_with_digitalocean()
@@ -485,6 +706,8 @@ class HealthMonitor:
                     log(f"Failed to replace {failed_server['ip']} - stopping replacements")
                     break
     
+        HealthMonitor.check_and_scale_services()
+
     @staticmethod
     def start_monitoring_daemon():
         """
