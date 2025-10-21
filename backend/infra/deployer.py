@@ -28,6 +28,8 @@ import env_loader
 from path_resolver import PathResolver
 from do_manager import DOManager
 from backup_manager import BackupManager
+from encryption import Encryption
+
 
 
 from resource_resolver import ResourceResolver
@@ -469,13 +471,28 @@ class Deployer:
             
             if service_config.get("git_repo"):
                 from git_manager import GitManager
+                from encryption import Encryption  # ADD THIS IMPORT
                 
                 log(f"Checking out Git repository for {service_name}...")
+                
+                # Get git_token from service config or environment
+                git_token = service_config.get("git_token", os.getenv('GIT_TOKEN'))
+                
+                # Decrypt token if it exists
+                if git_token:
+                    try:
+                        git_token = Encryption.decrypt(git_token)  # DECRYPT HERE
+                    except Exception as e:
+                        log(f"Warning: Could not decrypt git_token, trying as plain text: {e}")
+                        # If decryption fails, try using it as-is (backward compatibility)
+                
+                
                 checkout_path = GitManager.checkout_repo(
                     repo_url=service_config["git_repo"],
                     project_name=self.deployment_configurer.get_project_name(),
                     service_name=service_name,
-                    env=env
+                    env=env,
+                    git_token=git_token  # Pass token here
                 )
                 
                 if not checkout_path:
@@ -486,7 +503,7 @@ class Deployer:
                 build_context = checkout_path
                 log(f"✓ Using Git checkout: {build_context}")
             
-            # Handle dockerfile_content vs dockerfile
+            # Handle dockerfile_content vs dockerfile (EXISTING LOGIC - NO CHANGES)
             dockerfile = None
             if service_config.get("dockerfile_content"):
                 # Generate dockerfile from content
@@ -517,10 +534,11 @@ class Deployer:
                 service_name,
                 version
             )
+
             log(f"Building {service_name}: {tag}")
             log(f"  Build context: {build_context}")
             log(f"  Dockerfile: {dockerfile}")
-                        
+            
             DockerExecuter.build_image(
                 dockerfile_path=dockerfile,
                 tag=tag,
@@ -533,8 +551,7 @@ class Deployer:
         except Exception as e:
             log(f"Build error for {service_name}: {e}")
             return (None, False)
-
-
+    
     def _batch_prepare_servers(
         self,
         project: str,

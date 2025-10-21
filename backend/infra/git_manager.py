@@ -1,8 +1,11 @@
+# backend/infra/git_manager.py
+
 import os
 import subprocess
 from pathlib import Path
 from typing import Optional
 from logger import Logger
+from encryption import Encryption
 
 def log(msg):
     Logger.log(msg)
@@ -34,7 +37,8 @@ class GitManager:
         repo_url: str,
         project_name: str,
         service_name: str,
-        env: str
+        env: str,
+        git_token: Optional[str] = None
     ) -> Optional[str]:
         """
         Clone or update a git repository and return the checkout path.
@@ -44,14 +48,18 @@ class GitManager:
             - https://github.com/user/repo.git@branch-name
             - https://github.com/user/repo.git@v1.2.3
             - https://github.com/user/repo.git@abc123
-            - git@github.com:user/repo.git@main
+        
+        Authentication:
+            - Public repos: No authentication needed
+            - Private repos: Pass git_token parameter or set GIT_TOKEN env var
         
         Args:
             repo_url: Git repository URL (with optional @ref)
             project_name: Project name for organizing checkouts
             service_name: Service name for organizing checkouts
             env: Environment name for organizing checkouts
-            
+            git_token: Personal access token for private repos (optional)
+                
         Returns:
             Path to checked out repository, or None if failed
             
@@ -60,7 +68,8 @@ class GitManager:
                 "https://github.com/user/myapp.git@develop",
                 "myapp",
                 "api",
-                "prod"
+                "prod",
+                git_token="ghp_xxxxxxxxxxxx"
             )
             # Returns: C:/local/git_checkouts/myapp/prod/api
         """
@@ -74,9 +83,36 @@ class GitManager:
                 # URL with ref: https://github.com/user/repo.git@branch
                 url, ref = repo_url.rsplit('@', 1)
             else:
-                # Just URL: https://github.com/user/repo.git or git@github.com:user/repo.git
+                # Just URL: https://github.com/user/repo.git
                 url = repo_url
                 ref = None
+            
+            # Inject token for HTTPS private repos
+            original_url = url  # Keep original for logging
+            if url.startswith('https://'):
+                # Try provided token first, then fallback to environment variable
+                token = git_token or os.getenv('GIT_TOKEN')
+                
+                if token:
+                    # Support multiple Git platforms
+                    if 'github.com' in url:
+                        # GitHub: https://TOKEN@github.com/user/repo.git
+                        url = url.replace('https://', f'https://{token}@')
+                        log(f"Using Git token for GitHub authentication")
+                    elif 'gitlab.com' in url:
+                        # GitLab: https://oauth2:TOKEN@gitlab.com/user/repo.git
+                        url = url.replace('https://', f'https://oauth2:{token}@')
+                        log(f"Using Git token for GitLab authentication")
+                    elif 'bitbucket.org' in url:
+                        # Bitbucket: https://x-token-auth:TOKEN@bitbucket.org/user/repo.git
+                        url = url.replace('https://', f'https://x-token-auth:{token}@')
+                        log(f"Using Git token for Bitbucket authentication")
+                    else:
+                        # Generic: https://TOKEN@git-server.com/user/repo.git
+                        url = url.replace('https://', f'https://{token}@')
+                        log(f"Using Git token for authentication")
+                else:
+                    log(f"No Git token provided, attempting public repository access")
             
             # Determine checkout directory (includes env)
             checkout_dir = GitManager.GIT_CHECKOUT_BASE / project_name / env / service_name
@@ -86,12 +122,25 @@ class GitManager:
             if checkout_dir.exists():
                 log(f"Repository exists, updating: {checkout_dir}")
                 
+                # Update remote URL with token (for subsequent operations)
+                if git_token or os.getenv('GIT_TOKEN'):
+                    try:
+                        subprocess.run(
+                            ["git", "remote", "set-url", "origin", url],
+                            cwd=checkout_dir,
+                            check=True,
+                            capture_output=True
+                        )
+                    except:
+                        pass  # Ignore errors, not critical
+                
                 # Fetch latest
                 subprocess.run(
                     ["git", "fetch", "--all", "--tags"],
                     cwd=checkout_dir,
                     check=True,
-                    capture_output=True
+                    capture_output=True,
+                    timeout=120
                 )
                 
                 # Checkout ref
@@ -109,19 +158,29 @@ class GitManager:
                     )
                 else:
                     # Default branch
-                    subprocess.run(
+                    result = subprocess.run(
                         ["git", "checkout", "main"],
                         cwd=checkout_dir,
                         capture_output=True
                     )
-                    if subprocess.run(["git", "branch", "--show-current"], cwd=checkout_dir, capture_output=True).returncode != 0:
-                        subprocess.run(["git", "checkout", "master"], cwd=checkout_dir, check=True, capture_output=True)
-                    subprocess.run(["git", "pull"], cwd=checkout_dir, check=True, capture_output=True)
+                    if result.returncode != 0:
+                        subprocess.run(
+                            ["git", "checkout", "master"],
+                            cwd=checkout_dir,
+                            check=True,
+                            capture_output=True
+                        )
+                    subprocess.run(
+                        ["git", "pull"],
+                        cwd=checkout_dir,
+                        check=True,
+                        capture_output=True
+                    )
                 
                 log(f"✓ Updated repository: {ref or 'default branch'}")
                 
             else:
-                log(f"Cloning repository: {url}")
+                log(f"Cloning repository from {original_url}")
                 
                 # Clone
                 subprocess.run(
@@ -145,10 +204,16 @@ class GitManager:
             return str(checkout_dir)
             
         except subprocess.TimeoutExpired:
-            log(f"Error: Git operation timed out for {repo_url}")
+            log(f"Error: Git operation timed out")
             return None
         except subprocess.CalledProcessError as e:
-            log(f"Error: Git command failed: {e.stderr.decode() if e.stderr else str(e)}")
+            error_msg = e.stderr.decode() if e.stderr else str(e)
+            log(f"Error: Git command failed: {error_msg}")
+            
+            # Check for authentication errors
+            if any(phrase in error_msg.lower() for phrase in ['authentication failed', 'permission denied', 'invalid credentials', 'could not read', '403']):
+                log("Authentication failed. Please check your Git token or ensure the repository is public.")
+            
             return None
         except Exception as e:
             log(f"Error checking out repository: {e}")

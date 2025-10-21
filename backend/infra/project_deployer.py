@@ -183,6 +183,7 @@ class ProjectDeployer:
         image: Optional[str] = None,
         build_context: Optional[str] = None,
         git_repo: Optional[str] = None,
+        git_token: Optional[str] = None,
         auto_scaling: Optional[bool | Dict[str, Any]] = None,
         **other_config
     ) -> 'ProjectDeployer':
@@ -200,6 +201,7 @@ class ProjectDeployer:
             image: Pre-built image
             build_context: Build context path
             git_repo: Git repository URL
+            git_token: Personal access token for private Git repositories
             auto_scaling: Enable auto-scaling
             **other_config: Additional config (can include 'startup_order' to override)
             
@@ -217,7 +219,10 @@ class ProjectDeployer:
         
         if git_repo:
             other_config['git_repo'] = git_repo
-        
+        if git_token:
+            from encryption import Encryption
+            other_config['git_token'] = Encryption.encode(git_token)
+
         ProjectManager.add_service(
             self.project_name,
             service_name,
@@ -295,6 +300,7 @@ class ProjectDeployer:
         port: Optional[int] = None,
         build_context: Optional[str] = None,
         git_repo: Optional[str] = None,
+        git_token: Optional[str] = None,
         auto_scaling: Optional[bool | Dict[str, Any]] = None,
         **other_config
     ) -> 'ProjectDeployer':
@@ -319,6 +325,7 @@ class ProjectDeployer:
             port: Port to expose (optional, for web services)
             build_context: Build context path (must contain requirements files)
             git_repo: Git repository URL with optional ref (must contain requirements files)
+            git_token: Personal access token for private Git repositories
             auto_scaling: Enable auto-scaling
             **other_config: Additional config (env_vars, volumes, domain, etc.)
                 Can include 'dockerfile_content' to override auto-generation
@@ -400,6 +407,7 @@ class ProjectDeployer:
                 servers_count=servers_count,
                 build_context=build_context,
                 git_repo=git_repo,
+                git_token=git_token,
                 auto_scaling=auto_scaling,
                 **other_config
             )
@@ -457,6 +465,7 @@ class ProjectDeployer:
             servers_count=servers_count,
             build_context=build_context,
             git_repo=git_repo,
+            git_token=git_token,
             auto_scaling=auto_scaling,
             **other_config
         )
@@ -475,6 +484,7 @@ class ProjectDeployer:
         port: Optional[int] = None,
         build_context: Optional[str] = None,
         git_repo: Optional[str] = None,
+        git_token: Optional[str] = None,
         auto_scaling: Optional[bool | Dict[str, Any]] = None,
         **other_config
     ) -> 'ProjectDeployer':
@@ -501,6 +511,7 @@ class ProjectDeployer:
             port: Port to expose (optional, for web services)
             build_context: Build context path (or use git_repo)
             git_repo: Git repository URL with optional ref
+            git_token: Personal access token for private Git repositories
             auto_scaling: Enable auto-scaling
             **other_config: Additional config (env_vars, volumes, domain, etc.)
                 Can include 'dockerfile_content' to override auto-generation
@@ -570,6 +581,7 @@ class ProjectDeployer:
                 servers_count=servers_count,
                 build_context=build_context,
                 git_repo=git_repo,
+                git_token=git_token,
                 auto_scaling=auto_scaling,
                 **other_config
             )
@@ -647,6 +659,7 @@ class ProjectDeployer:
             servers_count=servers_count,
             build_context=build_context,
             git_repo=git_repo,
+            git_token=git_token,
             auto_scaling=auto_scaling,
             **other_config
         )
@@ -665,6 +678,7 @@ class ProjectDeployer:
         port: int = 80,
         build_context: Optional[str] = None,
         git_repo: Optional[str] = None,
+        git_token: Optional[str] = None,
         auto_scaling: Optional[bool | Dict[str, Any]] = None,
         **other_config
     ) -> 'ProjectDeployer':
@@ -701,6 +715,7 @@ class ProjectDeployer:
             port: Port to expose (default: 80)
             build_context: Build context path (or use git_repo)
             git_repo: Git repository URL with optional ref
+            git_token: Personal access token for private Git repositories
             auto_scaling: Enable auto-scaling
             **other_config: Additional config (env_vars, volumes, domain, etc.)
                 Can include 'dockerfile_content' to override auto-generation
@@ -783,6 +798,7 @@ class ProjectDeployer:
                 servers_count=servers_count,
                 build_context=build_context,
                 git_repo=git_repo,
+                git_token=git_token,
                 auto_scaling=auto_scaling,
                 **other_config
             )
@@ -890,6 +906,7 @@ class ProjectDeployer:
             servers_count=servers_count,
             build_context=build_context,
             git_repo=git_repo,
+            git_token=git_token,
             auto_scaling=auto_scaling,
             **other_config
         )
