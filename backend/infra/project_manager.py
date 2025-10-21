@@ -1,12 +1,14 @@
-import os
-import json
-from typing import Optional, Dict
-
-import constants
+from typing import Optional, Dict, List, Any
 from deployment_config import DeploymentConfigurer
 
+
 class ProjectManager:
-    """High-level API for managing project configurations"""
+    """
+    Manages project configuration files - create, update, delete projects and services.
+    
+    This class handles the configuration layer only (JSON files).
+    For deployment operations, use ProjectDeployer or UnifiedDeployer.
+    """
     
     @staticmethod
     def create_project(
@@ -15,21 +17,21 @@ class ProjectManager:
         version: str = "latest",
         default_server_ip: str = "localhost"
     ) -> bool:
-        """Creates new project config"""
-        # Check if already exists
-        try:
-            DeploymentConfigurer(name)
-            raise ValueError(f"Project '{name}' already exists")
-        except FileNotFoundError:
-            pass  # Good, doesn't exist
+        """
+        Create new project configuration.
         
-        docker_hub_user = docker_hub_user or os.getenv("DOCKER_HUB_USER", "default_user")
+        Args:
+            name: Project name
+            docker_hub_user: Docker Hub username
+            version: Default version tag
+            default_server_ip: Default server IP
+            
+        Returns:
+            True if created successfully
+        """
+        config = DeploymentConfigurer(name, create_if_missing=True)
         
-        # Create minimal config file directly
-        config_path = constants.get_project_config_path(name)
-        config_path.parent.mkdir(exist_ok=True, parents=True)
-        
-        raw_config = {
+        config.raw_config = {
             "project": {
                 "name": name,
                 "docker_hub_user": docker_hub_user,
@@ -39,9 +41,7 @@ class ProjectManager:
             }
         }
         
-        with config_path.open("w") as f:
-            json.dump(raw_config, f, indent=4)
-        
+        config.save_config()
         return True
     
     @staticmethod
@@ -51,14 +51,14 @@ class ProjectManager:
         version: Optional[str] = None,
         default_server_ip: Optional[str] = None
     ) -> bool:
-        """Updates project-level config"""
+        """Update project-level configuration"""
         config = DeploymentConfigurer(name)
         
-        if docker_hub_user is not None:
+        if docker_hub_user:
             config.raw_config["project"]["docker_hub_user"] = docker_hub_user
-        if version is not None:
+        if version:
             config.raw_config["project"]["version"] = version
-        if default_server_ip is not None:
+        if default_server_ip:
             config.raw_config["project"]["default_server_ip"] = default_server_ip
         
         config.save_config()
@@ -66,13 +66,46 @@ class ProjectManager:
     
     @staticmethod
     def delete_project(name: str) -> bool:
-        """Deletes project config file"""
-        config_path = constants.get_project_config_path(name)
-        if not config_path.exists():
-            raise FileNotFoundError(f"Project '{name}' does not exist")
-        
-        config_path.unlink()
+        """Delete project configuration"""
+        config = DeploymentConfigurer(name)
+        config.config_file.unlink()
         return True
+    
+    @staticmethod
+    def _calculate_startup_order(project_name: str, depends_on: List[str]) -> int:
+        """
+        Calculate startup_order based on dependencies.
+        
+        Args:
+            project_name: Project name
+            depends_on: List of service names this service depends on
+            
+        Returns:
+            Calculated startup_order (max of dependencies + 1)
+        """
+        from logger import Logger
+        
+        def log(msg):
+            Logger.log(msg)
+        
+        try:
+            config = DeploymentConfigurer(project_name)
+            services = config.raw_config.get("project", {}).get("services", {})
+            
+            max_order = 0
+            for dep_service in depends_on:
+                if dep_service in services:
+                    dep_order = services[dep_service].get("startup_order", 1)
+                    max_order = max(max_order, dep_order)
+                else:
+                    log(f"Warning: Dependency '{dep_service}' not found, assuming startup_order=1")
+                    max_order = max(max_order, 1)
+            
+            return max_order + 1
+            
+        except Exception as e:
+            log(f"Warning: Could not calculate startup_order from dependencies: {e}")
+            return 2  # Safe default
     
     @staticmethod
     def add_service(
@@ -150,7 +183,7 @@ class ProjectManager:
         version: str = "15",
         server_zone: str = "lon1",
         servers_count: int = 1,
-        startup_order: int = 1,
+        depends_on: Optional[List[str]] = None,
         **other_config
     ) -> bool:
         """Adds PostgreSQL service to project"""
@@ -160,14 +193,25 @@ class ProjectManager:
             ProjectManager.create_project(project_name)
             config = DeploymentConfigurer(project_name)
         
-        if "postgres" in config.raw_config["project"]["services"]:
-            raise ValueError(f"Service 'postgres' already exists")
+        # Calculate startup_order
+        if 'startup_order' in other_config:
+            startup_order = other_config.pop('startup_order')
+        elif depends_on:
+            startup_order = ProjectManager._calculate_startup_order(project_name, depends_on)
+            other_config['depends_on'] = depends_on
+        else:
+            startup_order = 1  # Default for databases
         
         service_config = {
             "image": f"postgres:{version}",
+            "env_vars": {
+                "POSTGRES_DB": f"{project_name}_{{hash}}",
+                "POSTGRES_USER": f"{project_name}_user",
+                "POSTGRES_PASSWORD_FILE": "/run/secrets/db_password"
+            },
+            "startup_order": startup_order,
             "server_zone": server_zone,
             "servers_count": servers_count,
-            "startup_order": startup_order,
             **other_config
         }
         
@@ -175,14 +219,13 @@ class ProjectManager:
         config.save_config()
         return True
     
-
     @staticmethod
     def add_redis(
         project_name: str,
         version: str = "7-alpine",
         server_zone: str = "lon1",
         servers_count: int = 1,
-        startup_order: int = 1,
+        depends_on: Optional[List[str]] = None,
         **other_config
     ) -> bool:
         """Adds Redis service to project"""
@@ -192,14 +235,21 @@ class ProjectManager:
             ProjectManager.create_project(project_name)
             config = DeploymentConfigurer(project_name)
         
-        if "redis" in config.raw_config["project"]["services"]:
-            raise ValueError(f"Service 'redis' already exists")
+        # Calculate startup_order
+        if 'startup_order' in other_config:
+            startup_order = other_config.pop('startup_order')
+        elif depends_on:
+            startup_order = ProjectManager._calculate_startup_order(project_name, depends_on)
+            other_config['depends_on'] = depends_on
+        else:
+            startup_order = 1
         
         service_config = {
             "image": f"redis:{version}",
+            "command": ["redis-server", "--requirepass", "$(cat /run/secrets/redis_password)"],
+            "startup_order": startup_order,
             "server_zone": server_zone,
             "servers_count": servers_count,
-            "startup_order": startup_order,
             **other_config
         }
         
@@ -213,7 +263,7 @@ class ProjectManager:
         version: str = "2",
         server_zone: str = "lon1",
         servers_count: int = 1,
-        startup_order: int = 1,
+        depends_on: Optional[List[str]] = None,
         **other_config
     ) -> bool:
         """Adds OpenSearch service to project"""
@@ -223,14 +273,24 @@ class ProjectManager:
             ProjectManager.create_project(project_name)
             config = DeploymentConfigurer(project_name)
         
-        if "opensearch" in config.raw_config["project"]["services"]:
-            raise ValueError(f"Service 'opensearch' already exists")
+        # Calculate startup_order
+        if 'startup_order' in other_config:
+            startup_order = other_config.pop('startup_order')
+        elif depends_on:
+            startup_order = ProjectManager._calculate_startup_order(project_name, depends_on)
+            other_config['depends_on'] = depends_on
+        else:
+            startup_order = 1
         
         service_config = {
             "image": f"opensearchproject/opensearch:{version}",
+            "env_vars": {
+                "discovery.type": "single-node",
+                "OPENSEARCH_INITIAL_ADMIN_PASSWORD": "$(cat /run/secrets/opensearch_password)"
+            },
+            "startup_order": startup_order,
             "server_zone": server_zone,
             "servers_count": servers_count,
-            "startup_order": startup_order,
             **other_config
         }
         
@@ -244,7 +304,7 @@ class ProjectManager:
         version: str = "alpine",
         server_zone: str = "lon1",
         servers_count: int = 1,
-        startup_order: int = 10,
+        depends_on: Optional[List[str]] = None,
         **other_config
     ) -> bool:
         """Adds Nginx service to project"""
@@ -254,14 +314,20 @@ class ProjectManager:
             ProjectManager.create_project(project_name)
             config = DeploymentConfigurer(project_name)
         
-        if "nginx" in config.raw_config["project"]["services"]:
-            raise ValueError(f"Service 'nginx' already exists")
+        # Calculate startup_order
+        if 'startup_order' in other_config:
+            startup_order = other_config.pop('startup_order')
+        elif depends_on:
+            startup_order = ProjectManager._calculate_startup_order(project_name, depends_on)
+            other_config['depends_on'] = depends_on
+        else:
+            startup_order = 10  # Nginx typically starts last
         
         service_config = {
             "image": f"nginx:{version}",
+            "startup_order": startup_order,
             "server_zone": server_zone,
             "servers_count": servers_count,
-            "startup_order": startup_order,
             **other_config
         }
         
