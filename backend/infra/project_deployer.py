@@ -138,68 +138,88 @@ class ProjectDeployer:
     # =========================================================================
     
     def add_service(
-            self,
-            service_name: str,
-            startup_order: int = 1,
-            server_zone: str = "lon1",
-            servers_count: int = 1,
-            dockerfile: Optional[str] = None,
-            dockerfile_content: Optional[Dict[str, str]] = None,
-            image: Optional[str] = None,
-            build_context: Optional[str] = None,
-            auto_scaling: Optional[bool | Dict[str, Any]] = None,
-            **other_config
-        ) -> 'ProjectDeployer':
-            """
-            Add generic service to project (fluent API).
+        self,
+        service_name: str,
+        startup_order: int = 1,
+        server_zone: str = "lon1",
+        servers_count: int = 1,
+        dockerfile: Optional[str] = None,
+        dockerfile_content: Optional[Dict[str, str]] = None,
+        image: Optional[str] = None,
+        build_context: Optional[str] = None,
+        git_repo: Optional[str] = None,  # ADD THIS
+        auto_scaling: Optional[bool | Dict[str, Any]] = None,
+        **other_config
+    ) -> 'ProjectDeployer':
+        """
+        Add generic service to project (fluent API).
+        
+        Args:
+            service_name: Service name
+            startup_order: Startup order (lower starts first)
+            server_zone: DigitalOcean zone (e.g., "lon1", "nyc3")
+            servers_count: Number of servers/replicas
+            dockerfile: Path to Dockerfile (relative to build_context)
+            dockerfile_content: Inline Dockerfile as dict {"1": "FROM...", "2": "WORKDIR..."}
+            image: Pre-built image (e.g., "nginx:alpine")
+            build_context: Build context path (will be overridden if git_repo specified)
+            git_repo: Git repository URL with optional ref:
+                - "https://github.com/user/repo.git" (default branch)
+                - "https://github.com/user/repo.git@develop" (branch)
+                - "https://github.com/user/repo.git@v1.2.3" (tag)
+                - "https://github.com/user/repo.git@abc123" (commit)
+                - "git@github.com:user/private-repo.git@main" (SSH)
+            auto_scaling: Enable auto-scaling. Can be:
+                - True: Enable both vertical and horizontal with defaults
+                - False/None: Disable (default)
+                - Dict: Custom config with "vertical" and/or "horizontal" keys
+            **other_config: Additional service config (env_vars, volumes, etc.)
             
-            Args:
-                service_name: Service name
-                startup_order: Startup order (lower starts first)
-                server_zone: DigitalOcean zone (e.g., "lon1", "nyc3")
-                servers_count: Number of servers/replicas
-                dockerfile: Path to Dockerfile (relative to build_context)
-                dockerfile_content: Inline Dockerfile as dict {"1": "FROM...", "2": "WORKDIR..."}
-                image: Pre-built image (e.g., "nginx:alpine")
-                build_context: Build context path
-                auto_scaling: Enable auto-scaling. Can be:
-                    - True: Enable both vertical and horizontal with defaults
-                    - False/None: Disable (default)
-                    - Dict: Custom config with "vertical" and/or "horizontal" keys
-                    Example: {"vertical": {"cpu_scale_up": 80}, "horizontal": {"rps_scale_up": 1000}}
-                **other_config: Additional service config (env_vars, volumes, etc.)
-                
-            Returns:
-                Self for chaining
-                
-            Example:
-                # Enable with defaults
-                project.add_service("api", auto_scaling=True)
-                
-                # Custom thresholds
-                project.add_service("api", auto_scaling={
-                    "vertical": {"cpu_scale_up": 80, "cpu_scale_down": 25},
-                    "horizontal": {"rps_scale_up": 1000}
-                })
-                
-                # Only horizontal scaling
-                project.add_service("api", auto_scaling={"horizontal": {}})
-            """
-            ProjectManager.add_service(
-                self.project_name,
-                service_name,
-                startup_order,
-                server_zone,
-                servers_count,
-                dockerfile,
-                dockerfile_content,
-                image,
-                build_context,
-                auto_scaling=auto_scaling,
-                **other_config
+        Returns:
+            Self for chaining
+            
+        Example:
+            # From Git repository
+            project.add_service(
+                "api",
+                git_repo="https://github.com/user/myapp.git@develop",
+                dockerfile="Dockerfile",
+                servers_count=3,
+                domain="api.example.com"
             )
-            return self
-    
+            
+            # From inline Dockerfile (existing)
+            project.add_service(
+                "api",
+                dockerfile_content={
+                    "1": "FROM python:3.11",
+                    "2": "WORKDIR /app",
+                    "3": "COPY . .",
+                    "4": "CMD ['python', 'app.py']"
+                },
+                build_context="/path/to/code",
+                servers_count=3
+            )
+        """
+        # Store git config if provided
+        if git_repo:
+            other_config['git_repo'] = git_repo
+        
+        ProjectManager.add_service(
+            self.project_name,
+            service_name,
+            startup_order,
+            server_zone,
+            servers_count,
+            dockerfile,
+            dockerfile_content,
+            image,
+            build_context,
+            auto_scaling=auto_scaling,
+            **other_config
+        )
+        return self
+
     def update_service(
         self,
         service_name: str,
@@ -236,6 +256,16 @@ class ProjectDeployer:
         """
         return ProjectManager.delete_service(self.project_name, service_name)
     
+    def cleanup_git_checkouts(self) -> None:
+        """
+        Clean up all git checkouts for this project.
+        
+        Example:
+            project.cleanup_git_checkouts()
+        """
+        from git_manager import GitManager
+        GitManager.cleanup_checkouts(self.project_name)
+
     # =========================================================================
     # SERVICE MANAGEMENT - Convenience Methods
     # =========================================================================

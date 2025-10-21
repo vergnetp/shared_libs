@@ -464,6 +464,28 @@ class Deployer:
             Tuple of (tag, success) where tag is the image tag and success is boolean
         """
         try:
+            # Handle git checkout if git_repo specified
+            build_context = service_config.get("build_context", ".")
+            
+            if service_config.get("git_repo"):
+                from git_manager import GitManager
+                
+                log(f"Checking out Git repository for {service_name}...")
+                checkout_path = GitManager.checkout_repo(
+                    repo_url=service_config["git_repo"],
+                    project_name=self.deployment_configurer.get_project_name(),
+                    service_name=service_name,
+                    env=env
+                )
+                
+                if not checkout_path:
+                    log(f"Error: Failed to checkout repository for {service_name}")
+                    return (None, False)
+                
+                # Override build_context to use the checkout path
+                build_context = checkout_path
+                log(f"✓ Using Git checkout: {build_context}")
+            
             # Handle dockerfile_content vs dockerfile
             dockerfile = None
             if service_config.get("dockerfile_content"):
@@ -495,10 +517,10 @@ class Deployer:
                 service_name,
                 version
             )
-
-            build_context = service_config.get("build_context", ".")
-            log(f"Building {service_name}: {tag}...")
-            
+            log(f"Building {service_name}: {tag}")
+            log(f"  Build context: {build_context}")
+            log(f"  Dockerfile: {dockerfile}")
+                        
             DockerExecuter.build_image(
                 dockerfile_path=dockerfile,
                 tag=tag,

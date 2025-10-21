@@ -189,6 +189,57 @@ project.add_service(
 )
 ```
 
+**Services from Git Repositories:**
+
+```python
+# From public GitHub repo (default branch)
+project.add_service(
+    "api",
+    git_repo="https://github.com/user/myapp.git",
+    dockerfile="Dockerfile",
+    servers_count=3
+)
+
+# From specific branch
+project.add_service(
+    "api",
+    git_repo="https://github.com/user/myapp.git@develop",
+    dockerfile="Dockerfile",
+    servers_count=3
+)
+
+# From specific tag (release)
+project.add_service(
+    "api",
+    git_repo="https://github.com/user/myapp.git@v1.2.3",
+    dockerfile="Dockerfile",
+    servers_count=3
+)
+
+# From specific commit
+project.add_service(
+    "api",
+    git_repo="https://github.com/user/myapp.git@abc123def",
+    dockerfile="Dockerfile",
+    servers_count=3
+)
+
+# From private repo (SSH)
+project.add_service(
+    "api",
+    git_repo="git@github.com:user/private-repo.git@main",
+    dockerfile="Dockerfile",
+    servers_count=3
+)
+```
+
+**Git Checkout Behavior:**
+
+- First build: Clones repository to `C:/local/git_checkouts/{project}/{env}/{service}/`
+- Subsequent builds: Fetches updates and checks out specified ref
+- Different environments can use different branches/tags
+- Cleanup: `project.cleanup_git_checkouts()`
+
 **Scheduled Services (Cron Jobs):**
 
 ```python
