@@ -1,0 +1,398 @@
+"""
+Auto-Scaling Coordinator - Manages auto-scaling logic for HealthMonitor.
+
+This module separates auto-scaling concerns from health monitoring,
+providing a clean interface for metrics collection and scaling decisions.
+"""
+
+from typing import Dict, Any, Optional
+from datetime import datetime, timedelta
+from metrics_collector import MetricsCollector
+from auto_scaler import AutoScaler
+from logger import Logger
+
+def log(msg):
+    Logger.log(msg)
+
+
+class AutoScalingCoordinator:
+    """
+    Coordinates auto-scaling operations for all services.
+    
+    Responsibilities:
+    - Collect metrics from all deployed services
+    - Check if services need scaling
+    - Execute scaling decisions via AutoScaler
+    - Maintain cooldowns and check intervals
+    
+    Used by HealthMonitor's leader server to manage auto-scaling.
+    """
+    
+    # Check scaling every 5 minutes (not every monitor cycle)
+    AUTO_SCALE_CHECK_INTERVAL = 300  # 5 minutes
+    
+    # Averaging window for stable scaling decisions
+    METRICS_WINDOW_MINUTES = 10  # 10 minutes
+    
+    # Threshold key names (short form)
+    DEFAULT_THRESHOLDS = {
+        "cpu_scale_up": 75,
+        "cpu_scale_down": 20,
+        "memory_scale_up": 80,
+        "memory_scale_down": 30,
+        "rps_scale_up": 500,
+        "rps_scale_down": 50,
+    }
+    
+    def __init__(self):
+        """Initialize coordinator with singleton collectors"""
+        self._metrics_collector = MetricsCollector()
+        self._auto_scalers = {}  # {project: AutoScaler}
+        self._last_check = {}  # {project_env_service: timestamp}
+    
+    # ========================================
+    # METRICS COLLECTION
+    # ========================================
+    
+    def collect_all_metrics(self) -> None:
+        """
+        Collect metrics from all deployed services across all servers.
+        
+        This should be called every monitor cycle (every 60s) to maintain
+        a continuous history of metrics for averaging.
+        
+        Called by: All servers (leader and followers)
+        """
+        from deployment_state_manager import DeploymentStateManager
+        
+        try:
+            all_deployments = DeploymentStateManager.get_all_deployments()
+            
+            for project in all_deployments:
+                for env in all_deployments[project]:
+                    for service_name, deployment in all_deployments[project][env].items():
+                        servers = deployment.get("servers", [])
+                        
+                        for server_ip in servers:
+                            # Collect service-specific metrics
+                            metrics = MetricsCollector.collect_service_metrics(
+                                project, env, service_name, server_ip
+                            )
+                            
+                            if metrics:
+                                # Store with unique key
+                                key = f"{server_ip}_{project}_{env}_{service_name}"
+                                self._metrics_collector.store_metrics(key, metrics)
+        
+        except Exception as e:
+            log(f"Error collecting metrics: {e}")
+    
+    # ========================================
+    # SCALING ORCHESTRATION
+    # ========================================
+    
+    def check_and_scale_all_services(self) -> None:
+        """
+        Check all services and perform auto-scaling if needed.
+        
+        Called by: Leader server only
+        
+        Process:
+        1. Iterate through all deployed services
+        2. Check if auto-scaling is enabled
+        3. Collect and average metrics
+        4. Make scaling decisions
+        5. Execute scaling if needed
+        """
+        from deployment_state_manager import DeploymentStateManager
+        from deployment_config import DeploymentConfigurer
+        
+        log("Checking auto-scaling for all services...")
+        
+        try:
+            all_deployments = DeploymentStateManager.get_all_deployments()
+            
+            for project in all_deployments:
+                # Load project config
+                try:
+                    config = DeploymentConfigurer(project)
+                except Exception as e:
+                    log(f"Could not load config for project {project}: {e}")
+                    continue
+                
+                # Get or create AutoScaler for this project
+                scaler = self._get_auto_scaler(project)
+                
+                for env in all_deployments[project]:
+                    services = config.get_services(env)
+                    
+                    for service_name, service_config in services.items():
+                        self._check_service_scaling(
+                            project, env, service_name,
+                            service_config, scaler
+                        )
+        
+        except Exception as e:
+            log(f"Error in auto-scaling check: {e}")
+    
+    def _check_service_scaling(
+        self,
+        project: str,
+        env: str,
+        service: str,
+        service_config: Dict[str, Any],
+        scaler: AutoScaler
+    ) -> None:
+        """
+        Check and scale a single service.
+        
+        Args:
+            project: Project name
+            env: Environment
+            service: Service name
+            service_config: Service configuration dict
+            scaler: AutoScaler instance for this project
+        """
+        # Check if auto-scaling is enabled
+        auto_scale_config = service_config.get("auto_scaling", {})
+        if not auto_scale_config.get("enabled", False):
+            return
+        
+        # Check if enough time has passed since last check
+        check_key = f"{project}_{env}_{service}"
+        if not self._should_check_now(check_key):
+            return
+        
+        # Get current deployment
+        from deployment_state_manager import DeploymentStateManager
+        deployment = DeploymentStateManager.get_current_deployment(project, env, service)
+        
+        if not deployment:
+            return
+        
+        servers = deployment.get("servers", [])
+        if not servers:
+            return
+        
+        log(f"Auto-scaling check for {project}/{env}/{service} ({len(servers)} servers)")
+        
+        # Collect and average metrics from all servers
+        aggregated_metrics = self._aggregate_metrics(
+            project, env, service, servers
+        )
+        
+        if not aggregated_metrics:
+            log(f"  No metrics available for {service}, skipping")
+            return
+        
+        log(f"  Metrics: CPU={aggregated_metrics['avg_cpu']:.1f}% "
+            f"Memory={aggregated_metrics['avg_memory']:.1f}% "
+            f"RPS={aggregated_metrics.get('avg_rps', 0):.1f}")
+        
+        # Get thresholds
+        vertical_thresholds = self._get_vertical_thresholds(auto_scale_config)
+        horizontal_thresholds = self._get_horizontal_thresholds(auto_scale_config)
+        
+        # PRIORITY 1: Check vertical scaling (resource-based)
+        if auto_scale_config.get("type") in ["vertical", "both"]:
+            if self._try_vertical_scaling(
+                project, env, service, service_config,
+                aggregated_metrics, vertical_thresholds, scaler
+            ):
+                self._record_check(check_key)
+                return  # Don't check horizontal in same cycle
+        
+        # PRIORITY 2: Check horizontal scaling (traffic-based)
+        if auto_scale_config.get("type") in ["horizontal", "both"]:
+            if self._try_horizontal_scaling(
+                project, env, service, servers,
+                aggregated_metrics, horizontal_thresholds, scaler
+            ):
+                self._record_check(check_key)
+    
+    # ========================================
+    # METRICS AGGREGATION
+    # ========================================
+    
+    def _aggregate_metrics(
+        self,
+        project: str,
+        env: str,
+        service: str,
+        servers: list
+    ) -> Optional[Dict[str, float]]:
+        """
+        Aggregate metrics from all servers running a service.
+        
+        Args:
+            project: Project name
+            env: Environment
+            service: Service name
+            servers: List of server IPs
+            
+        Returns:
+            Aggregated metrics dict or None if insufficient data
+        """
+        all_metrics = []
+        
+        for server_ip in servers:
+            key = f"{server_ip}_{project}_{env}_{service}"
+            avg_metrics = self._metrics_collector.get_average_metrics(
+                key, 
+                window_minutes=self.METRICS_WINDOW_MINUTES
+            )
+            
+            if avg_metrics:
+                all_metrics.append(avg_metrics)
+        
+        if not all_metrics:
+            return None
+        
+        # Calculate overall averages
+        return {
+            'avg_cpu': sum(m['avg_cpu'] for m in all_metrics) / len(all_metrics),
+            'avg_memory': sum(m['avg_memory'] for m in all_metrics) / len(all_metrics),
+            'avg_rps': sum(m['avg_rps'] for m in all_metrics) / len(all_metrics),
+        }
+    
+    # ========================================
+    # SCALING EXECUTION
+    # ========================================
+    
+    def _try_vertical_scaling(
+        self,
+        project: str,
+        env: str,
+        service: str,
+        service_config: Dict[str, Any],
+        metrics: Dict[str, float],
+        thresholds: Dict[str, float],
+        scaler: AutoScaler
+    ) -> bool:
+        """
+        Try vertical scaling if needed.
+        
+        Returns:
+            True if scaling was executed (success or failure)
+        """
+        current_cpu = service_config.get("server_cpu", 1)
+        current_memory = service_config.get("server_memory", 1024)
+        
+        new_specs = scaler.should_scale_vertically(
+            service, env, current_cpu, current_memory,
+            metrics, thresholds
+        )
+        
+        if not new_specs:
+            return False
+        
+        log(f"  Triggering vertical scaling for {service}")
+        success = scaler.execute_vertical_scale(service, env, new_specs)
+        
+        if success:
+            log(f"  ✓ Vertical scaling completed for {service}")
+        else:
+            log(f"  ✗ Vertical scaling failed for {service}")
+        
+        return True  # Attempted scaling
+    
+    def _try_horizontal_scaling(
+        self,
+        project: str,
+        env: str,
+        service: str,
+        servers: list,
+        metrics: Dict[str, float],
+        thresholds: Dict[str, float],
+        scaler: AutoScaler
+    ) -> bool:
+        """
+        Try horizontal scaling if needed.
+        
+        Returns:
+            True if scaling was executed (success or failure)
+        """
+        action = scaler.should_scale_horizontally(
+            service, env, len(servers),
+            metrics, thresholds
+        )
+        
+        if not action:
+            return False
+        
+        log(f"  Triggering horizontal {action} for {service}")
+        success = scaler.execute_horizontal_scale(
+            service, env, action, len(servers)
+        )
+        
+        if success:
+            log(f"  ✓ Horizontal scaling completed for {service}")
+        else:
+            log(f"  ✗ Horizontal scaling failed for {service}")
+        
+        return True  # Attempted scaling
+    
+    # ========================================
+    # THRESHOLD MANAGEMENT
+    # ========================================
+    
+    def _get_vertical_thresholds(self, auto_scale_config: Dict[str, Any]) -> Dict[str, float]:
+        """Get vertical scaling thresholds with defaults"""
+        config_thresholds = auto_scale_config.get("vertical", {})
+        
+        # Only merge CPU/Memory defaults
+        defaults = {
+            k: v for k, v in self.DEFAULT_THRESHOLDS.items()
+            if 'cpu' in k or 'memory' in k
+        }
+        
+        return {**defaults, **config_thresholds}
+    
+    def _get_horizontal_thresholds(self, auto_scale_config: Dict[str, Any]) -> Dict[str, float]:
+        """Get horizontal scaling thresholds with defaults"""
+        config_thresholds = auto_scale_config.get("horizontal", {})
+        
+        # Only merge RPS defaults
+        defaults = {
+            k: v for k, v in self.DEFAULT_THRESHOLDS.items()
+            if 'rps' in k
+        }
+        
+        return {**defaults, **config_thresholds}
+    
+    # ========================================
+    # CHECK INTERVAL MANAGEMENT
+    # ========================================
+    
+    def _should_check_now(self, check_key: str) -> bool:
+        """
+        Check if enough time has passed since last scaling check.
+        
+        Args:
+            check_key: Unique key for service (project_env_service)
+            
+        Returns:
+            True if should check now
+        """
+        if check_key not in self._last_check:
+            return True
+        
+        last_check = self._last_check[check_key]
+        elapsed = (datetime.now() - last_check).total_seconds()
+        
+        return elapsed >= self.AUTO_SCALE_CHECK_INTERVAL
+    
+    def _record_check(self, check_key: str) -> None:
+        """Record that we checked this service"""
+        self._last_check[check_key] = datetime.now()
+    
+    # ========================================
+    # AUTO_SCALER MANAGEMENT
+    # ========================================
+    
+    def _get_auto_scaler(self, project: str) -> AutoScaler:
+        """Get or create AutoScaler for a project"""
+        if project not in self._auto_scalers:
+            self._auto_scalers[project] = AutoScaler(project)
+        
+        return self._auto_scalers[project]

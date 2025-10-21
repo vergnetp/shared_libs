@@ -92,32 +92,45 @@ class MetricsCollector:
         user: str = "root"
     ) -> Dict[str, Any]:
         """
-        Collect metrics for a specific service container.
+        Collect metrics for a specific service container including RPS from Nginx.
+        
+        IMPORTANT: CPU is normalized to 0-100% regardless of host CPU count.
+        Docker stats shows CPU as % of total host CPU (e.g., 300% on 8-CPU host = 37.5% utilization).
+        We normalize this to make thresholds consistent across different host specs.
         
         Returns:
             {
                 'timestamp': datetime,
-                'cpu_percent': float,
+                'cpu_percent': float,  # Normalized 0-100% (not raw docker stats)
                 'memory_mb': float,
                 'memory_percent': float,
-                'network_rx_bytes': int,
-                'network_tx_bytes': int
+                'rps': float,
+                'internal_port': int
             }
         """
         from resource_resolver import ResourceResolver
+        from deployment_config import DeploymentConfigurer
         
         container_name = ResourceResolver.get_container_name(project, env, service)
         
         try:
+            # Get host CPU count for normalization
+            host_cpu_count = MetricsCollector._get_host_cpu_count(server_ip, user)
+            
             # Get container stats
-            stats_cmd = f"docker stats {container_name} --no-stream --format '{{{{.CPUPerc}}}}|{{{{.MemPerc}}}}|{{{{.MemUsage}}}}|{{{{.NetIO}}}}'"
+            stats_cmd = f"docker stats {container_name} --no-stream --format '{{{{.CPUPerc}}}}|{{{{.MemPerc}}}}|{{{{.MemUsage}}}}'"
             result = CommandExecuter.run_cmd(stats_cmd, server_ip, user).strip()
             
-            # Parse: "45.67%|23.45%|1.234GiB / 8GiB|1.2MB / 3.4MB"
+            # Parse: "45.67%|23.45%|1.234GiB / 8GiB"
             parts = result.split('|')
             
-            cpu_percent = float(parts[0].replace('%', ''))
+            raw_cpu_percent = float(parts[0].replace('%', ''))
             memory_percent = float(parts[1].replace('%', ''))
+            
+            # Normalize CPU: docker stats shows % of total host CPU
+            # On 8-CPU host: 300% means using 3 CPUs = 37.5% utilization
+            # We normalize to 0-100% scale for consistent thresholds
+            cpu_percent = (raw_cpu_percent / (host_cpu_count * 100)) * 100
             
             # Parse memory usage (e.g., "1.234GiB / 8GiB")
             mem_parts = parts[2].split('/')
@@ -131,17 +144,103 @@ class MetricsCollector:
             else:
                 memory_mb = 0
             
+            # Get internal port for this service
+            internal_port = ResourceResolver.get_internal_port(project, env, service)
+            
+            # Collect RPS from Nginx logs - only if service has exposed ports
+            rps = 0.0
+            
+            # Get service config to check for ports
+            try:
+                config = DeploymentConfigurer(project)
+                service_config = config.get_service_config(env, service)
+                dockerfile = service_config.get("dockerfile")
+                
+                # Check if service has container ports
+                container_ports = ResourceResolver.get_container_ports(service, dockerfile)
+                
+                # Only collect RPS if service has ports (is a network service)
+                if container_ports:
+                    rps = MetricsCollector._collect_nginx_rps_by_port(server_ip, user, internal_port)
+                    
+            except Exception as e:
+                log(f"Could not determine if {service} has ports, skipping RPS collection: {e}")
+            
             return {
                 'timestamp': datetime.now(),
-                'cpu_percent': cpu_percent,
+                'cpu_percent': cpu_percent,  # Normalized 0-100%
                 'memory_mb': memory_mb,
                 'memory_percent': memory_percent,
-                'container_name': container_name
+                'rps': rps,
+                'internal_port': internal_port,
+                'container_name': container_name,
+                'host_cpu_count': host_cpu_count,  # For debugging
+                'raw_cpu_percent': raw_cpu_percent  # For debugging
             }
             
         except Exception as e:
             log(f"Failed to collect service metrics for {service} on {server_ip}: {e}")
             return None
+    
+    @staticmethod
+    def _get_host_cpu_count(server_ip: str, user: str = "root") -> int:
+        """
+        Get number of CPUs on host server.
+        
+        Args:
+            server_ip: Server IP
+            user: SSH user
+            
+        Returns:
+            Number of CPUs (e.g., 8 for 8-CPU host)
+        """
+        try:
+            if server_ip == "localhost":
+                import os
+                return os.cpu_count() or 1
+            else:
+                # Remote server via SSH
+                cmd = "nproc"
+                result = CommandExecuter.run_cmd(cmd, server_ip, user)
+                return int(result.strip() or 1)
+        except Exception as e:
+            log(f"Failed to get CPU count from {server_ip}, defaulting to 1: {e}")
+            return 1  # Safe default
+    
+    @staticmethod
+    def _collect_nginx_rps_by_port(server_ip: str, user: str, port: int) -> float:
+        """
+        Calculate RPS for a service by filtering Nginx logs by internal port.
+        
+        Args:
+            server_ip: Server IP
+            user: SSH user
+            port: Internal port that Nginx listens on (e.g., 5234)
+            
+        Returns:
+            Requests per second for this port
+        """
+        try:
+            # Count requests to this port in last 60 seconds
+            # Assumes nginx log format includes "port:$server_port"
+            cmd = f"""
+            tail -n 50000 /var/log/nginx/access.log 2>/dev/null | \
+            awk -v date="$(date --date='1 minute ago' '+%d/%b/%Y:%H:%M:%S')" \
+            '$4 > "["date' | \
+            grep 'port:{port}' | \
+            wc -l
+            """
+            
+            result = CommandExecuter.run_cmd(cmd, server_ip, user)
+            count = int(result.strip() or 0)
+            
+            # Convert to requests per second
+            rps = count / 60.0
+            return rps
+            
+        except Exception as e:
+            log(f"Failed to collect RPS for port {port} from {server_ip}: {e}")
+            return 0.0
     
     def store_metrics(self, server_ip: str, metrics: Dict[str, Any]):
         """Store metrics in memory with size limit"""
@@ -158,16 +257,23 @@ class MetricsCollector:
         """
         Calculate average metrics over a time window.
         
+        IMPORTANT: Requires minimum samples to ensure reliable averages.
+        Since metrics are collected every 60s, we need at least 'window_minutes'
+        samples before returning averages (cold start protection).
+        
         Args:
-            server_ip: Server to analyze
+            server_ip: Server to analyze (can be server_ip or server_ip_service key)
             window_minutes: Time window in minutes
             
         Returns:
             {
                 'avg_cpu': float,
                 'avg_memory': float,
-                'avg_disk': float
+                'avg_disk': float,
+                'avg_rps': float,
+                'sample_count': int
             }
+            or None if insufficient samples
         """
         if server_ip not in self._metrics_history:
             return None
@@ -181,9 +287,18 @@ class MetricsCollector:
         if not recent_metrics:
             return None
         
+        # Cold start protection: require minimum samples for reliable average
+        # If collecting every 60s, need at least 'window_minutes' samples
+        min_samples = window_minutes
+        if len(recent_metrics) < min_samples:
+            log(f"Insufficient samples for {server_ip}: {len(recent_metrics)}/{min_samples} "
+                f"(need {min_samples} minutes of data for {window_minutes}-minute average)")
+            return None
+        
         return {
             'avg_cpu': sum(m['cpu_percent'] for m in recent_metrics) / len(recent_metrics),
             'avg_memory': sum(m['memory_percent'] for m in recent_metrics) / len(recent_metrics),
             'avg_disk': sum(m.get('disk_percent', 0) for m in recent_metrics) / len(recent_metrics),
+            'avg_rps': sum(m.get('rps', 0) for m in recent_metrics) / len(recent_metrics),
             'sample_count': len(recent_metrics)
         }
