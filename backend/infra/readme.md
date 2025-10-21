@@ -38,6 +38,7 @@ project.add_postgres() \
            "api",
            depends_on=["postgres", "redis"],
            git_repo="https://github.com/user/api.git@main",
+           git_token="tk8787",
            command="uvicorn main:app --host 0.0.0.0",
            port=8000,
            servers_count=3,
@@ -48,6 +49,7 @@ project.add_postgres() \
            "web",
            depends_on=["api"],
            git_repo="https://github.com/user/web.git@main",
+           git_token="tk8787",
            domain="www.example.com",
            servers_count=3,
            auto_scaling=True
@@ -118,6 +120,7 @@ project.add_postgres() \
            "api",
            depends_on=["postgres", "redis"],
            git_repo="https://github.com/user/api.git@main",
+           git_token="tk8787",
            command="uvicorn main:app --host 0.0.0.0",
            port=8000,
            servers_count=3,
@@ -128,6 +131,7 @@ project.add_postgres() \
            "web",
            depends_on=["api"],
            git_repo="https://github.com/user/web.git@main",
+           git_token="tk8787",
            domain="www.example.com",
            servers_count=3,
            auto_scaling=True
@@ -236,6 +240,7 @@ project.add_python_service(
     command="uvicorn main:app --host 0.0.0.0",
     port=8000,
     git_repo="https://github.com/user/myapp.git@main",
+    git_token="tk8787",
     servers_count=3,
     domain="api.example.com",
     auto_scaling=True
@@ -272,6 +277,7 @@ project.add_nodejs_service(
     command="node server.js",
     port=3000,
     git_repo="https://github.com/user/api.git@main",
+    git_token="tk8787",
     servers_count=3,
     domain="api.example.com"
 )
@@ -284,6 +290,7 @@ project.add_nodejs_service(
     command="node dist/main.js",
     port=3000,
     git_repo="https://github.com/user/api.git@main",
+    git_token="tk8787",
     servers_count=3
 )
 
@@ -294,6 +301,7 @@ project.add_nodejs_service(
     command="npm start",
     port=3000,
     git_repo="https://github.com/user/web.git@main",
+    git_token="tk8787",
     servers_count=3
 )
 
@@ -316,6 +324,7 @@ project.add_react_service(
     "web",
     depends_on=["api"],
     git_repo="https://github.com/user/web.git@main",
+    git_token="tk8787",
     domain="www.example.com",
     servers_count=3,
     auto_scaling=True
@@ -326,6 +335,7 @@ project.add_react_service(
     "web",
     build_dir="dist",  # Vue outputs to dist/
     git_repo="https://github.com/user/vue-app.git@main",
+    git_token="tk8787",
     domain="www.example.com",
     servers_count=3
 )
@@ -350,6 +360,7 @@ project.add_react_service(
         }
     ''',
     git_repo="https://github.com/user/web.git@main",
+    git_token="tk8787",
     domain="www.example.com"
 )
 ```
@@ -361,6 +372,7 @@ project.add_react_service(
 project.add_service(
     "api",
     git_repo="https://github.com/user/myapp.git",
+    git_token="tk8787",
     dockerfile="Dockerfile",
     servers_count=3
 )
@@ -369,6 +381,7 @@ project.add_service(
 project.add_service(
     "api",
     git_repo="https://github.com/user/myapp.git@develop",
+    git_token="tk8787",
     dockerfile="Dockerfile",
     servers_count=3
 )
@@ -377,6 +390,7 @@ project.add_service(
 project.add_service(
     "api",
     git_repo="https://github.com/user/myapp.git@v1.2.3",
+    git_token="tk8787",
     dockerfile="Dockerfile",
     servers_count=3
 )
@@ -385,6 +399,7 @@ project.add_service(
 project.add_service(
     "api",
     git_repo="https://github.com/user/myapp.git@abc123def",
+    git_token="tk8787",
     dockerfile="Dockerfile",
     servers_count=3
 )
@@ -393,6 +408,7 @@ project.add_service(
 project.add_service(
     "api",
     git_repo="git@github.com:user/private-repo.git@main",
+    git_token="tk8787",
     dockerfile="Dockerfile",
     servers_count=3
 )
@@ -569,6 +585,7 @@ Deploy your application across multiple geographic regions with automatic load b
 project.add_python_service(
     "api",
     git_repo="https://github.com/user/api.git@main",
+    git_token="tk8787",
     command="uvicorn main:app",
     port=8000,
     domain="api.example.com",
@@ -579,6 +596,7 @@ project.add_python_service(
 project.add_python_service(
     "api-us",
     git_repo="https://github.com/user/api.git@main",
+    git_token="tk8787",
     command="uvicorn main:app",
     port=8000,
     domain="api.example.com",  # Same domain
