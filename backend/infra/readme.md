@@ -5,6 +5,7 @@ A Python-based deployment system that automates Docker container orchestration a
 ## Table of Contents
 
 - [Quick Start](#quick-start)
+- [Simplified Service Creation](#simplified-service-creation)
 - [Prerequisites](#prerequisites)
 - [Basic Usage](#basic-usage)
 - [Architecture Overview](#architecture-overview)
@@ -15,6 +16,7 @@ A Python-based deployment system that automates Docker container orchestration a
 - [Backups & Restore](#backups--restore)
 - [Health Monitoring](#health-monitoring)
 - [Secrets Management](#secrets-management)
+- [Auto-Scaling](#auto-scaling)
 - [Advanced Features](#advanced-features)
 
 ---
@@ -30,21 +32,26 @@ from backend.infra.project_deployer import ProjectDeployer
 project = ProjectDeployer.create("myapp", docker_hub_user="myusername")
 
 # Add services with fluent API
-project.add_postgres(version="15") \
+project.add_postgres() \
        .add_redis() \
-       .add_service("api",
-                   dockerfile_content={
-                       "1": "FROM python:3.11-slim",
-                       "2": "WORKDIR /app",
-                       "3": "COPY requirements.txt .",
-                       "4": "RUN pip install -r requirements.txt",
-                       "5": "COPY . .",
-                       "6": "EXPOSE 8000",
-                       "7": "CMD ['python', 'app.py']"
-                   },
-                   build_context="C:\\user\\myapp\\api",
-                   servers_count=3,
-                   domain="api.example.com")
+       .add_python_service(
+           "api",
+           depends_on=["postgres", "redis"],
+           git_repo="https://github.com/user/api.git@main",
+           command="uvicorn main:app --host 0.0.0.0",
+           port=8000,
+           servers_count=3,
+           domain="api.example.com",
+           auto_scaling=True
+       ) \
+       .add_react_service(
+           "web",
+           depends_on=["api"],
+           git_repo="https://github.com/user/web.git@main",
+           domain="www.example.com",
+           servers_count=3,
+           auto_scaling=True
+       )
 
 # Deploy to production
 project.deploy(env="prod")
@@ -64,6 +71,68 @@ project.logs(service="api", env="prod", lines=100)
 
 # Rollback if needed
 project.rollback(env="prod", service="api")
+```
+
+---
+
+## Simplified Service Creation
+
+The deployer includes convenience methods that automatically generate optimized Dockerfiles:
+
+**Python Services** - `add_python_service()`
+
+- Automatically handles requirements.txt installation
+- Supports multiple requirements files
+- Best practices (pip --no-cache-dir, slim images)
+
+**Node.js Services** - `add_nodejs_service()`
+
+- Supports npm, yarn, or pnpm
+- Optional build step for TypeScript/Next.js
+- Production-optimized dependencies
+
+**React/SPA Services** - `add_react_service()`
+
+- Multi-stage build (Node.js build + Nginx serve)
+- Works with React, Vue, Angular, Svelte
+- Automatic gzip, caching, SPA routing
+
+**All Methods Support:**
+
+- ✅ Git repository integration (clone from GitHub/GitLab)
+- ✅ Automatic dependency management (`depends_on`)
+- ✅ Auto-scaling configuration
+- ✅ Service dependency tracking
+- ✅ Custom Dockerfile override
+
+**Example - Complete Stack in 20 Lines:**
+
+```python
+from backend.infra.project_deployer import ProjectDeployer
+
+project = ProjectDeployer.create("myapp")
+
+project.add_postgres() \
+       .add_redis() \
+       .add_python_service(
+           "api",
+           depends_on=["postgres", "redis"],
+           git_repo="https://github.com/user/api.git@main",
+           command="uvicorn main:app --host 0.0.0.0",
+           port=8000,
+           servers_count=3,
+           domain="api.example.com",
+           auto_scaling=True
+       ) \
+       .add_react_service(
+           "web",
+           depends_on=["api"],
+           git_repo="https://github.com/user/web.git@main",
+           domain="www.example.com",
+           servers_count=3,
+           auto_scaling=True
+       ) \
+       .deploy(env="prod")
 ```
 
 ---
@@ -93,6 +162,7 @@ GMAIL_APP_PASSWORD=your_gmail_app_password
 - **Python 3.8+** with required packages
 - **DigitalOcean Account** (for remote deployments)
 - **Cloudflare Account** (optional, for multi-zone & advanced SSL)
+- **Git** (optional, for git_repo feature)
 
 ### What Gets Automated
 
@@ -106,6 +176,8 @@ The deployer handles:
 - ✅ SSL certificates (Let's Encrypt or self-signed)
 - ✅ Health monitoring installation
 - ✅ Nginx sidecar for service mesh
+- ✅ Git repository cloning and checkout
+- ✅ Automatic Dockerfile generation
 
 ---
 
@@ -138,8 +210,7 @@ project = ProjectDeployer.create(
 project.add_postgres(
     version="15",
     server_zone="lon1",
-    servers_count=1,
-    startup_order=1
+    servers_count=1
 )
 
 # Redis
@@ -155,37 +226,131 @@ project.add_opensearch(
 )
 ```
 
-**Custom Services:**
+**Python Services (Auto-Generated Dockerfile):**
 
 ```python
-# From Dockerfile content
-project.add_service(
+# Simple Flask/FastAPI app
+project.add_python_service(
     "api",
-    dockerfile_content={
-        "1": "FROM python:3.11-slim",
-        "2": "WORKDIR /app",
-        # ... more lines
-    },
-    build_context="/path/to/code",
+    depends_on=["postgres", "redis"],  # Automatic startup order
+    command="uvicorn main:app --host 0.0.0.0",
+    port=8000,
+    git_repo="https://github.com/user/myapp.git@main",
     servers_count=3,
     domain="api.example.com",
-    startup_order=2
+    auto_scaling=True
 )
 
-# From existing Dockerfile
-project.add_service(
+# Worker service with multiple requirements files
+project.add_python_service(
     "worker",
-    dockerfile="config/Dockerfile.worker",
+    depends_on=["redis"],
+    command="python worker.py",
+    requirements_files=["requirements.txt", "requirements-worker.txt"],
     build_context="/path/to/code",
-    servers_count=2,
-    startup_order=3
+    servers_count=2
 )
 
-# From Docker image
-project.add_service(
-    "nginx",
-    image="nginx:alpine",
-    servers_count=1
+# Gunicorn production setup
+project.add_python_service(
+    "api",
+    python_version="3.11",
+    command="gunicorn app:app --bind 0.0.0.0:8000 --workers 4",
+    port=8000,
+    build_context="/path/to/code",
+    servers_count=3
+)
+```
+
+**Node.js Services (Auto-Generated Dockerfile):**
+
+```python
+# Express API
+project.add_nodejs_service(
+    "api",
+    depends_on=["postgres"],
+    command="node server.js",
+    port=3000,
+    git_repo="https://github.com/user/api.git@main",
+    servers_count=3,
+    domain="api.example.com"
+)
+
+# TypeScript app with build step
+project.add_nodejs_service(
+    "api",
+    depends_on=["postgres"],
+    build_command="npm run build",
+    command="node dist/main.js",
+    port=3000,
+    git_repo="https://github.com/user/api.git@main",
+    servers_count=3
+)
+
+# Next.js application
+project.add_nodejs_service(
+    "web",
+    build_command="npm run build",
+    command="npm start",
+    port=3000,
+    git_repo="https://github.com/user/web.git@main",
+    servers_count=3
+)
+
+# Yarn-based project
+project.add_nodejs_service(
+    "api",
+    package_manager="yarn",
+    command="yarn start",
+    port=3000,
+    build_context="/path/to/code",
+    servers_count=3
+)
+```
+
+**React/Vue/Angular Websites (Auto-Generated Dockerfile):**
+
+```python
+# React SPA
+project.add_react_service(
+    "web",
+    depends_on=["api"],
+    git_repo="https://github.com/user/web.git@main",
+    domain="www.example.com",
+    servers_count=3,
+    auto_scaling=True
+)
+
+# Vue app
+project.add_react_service(
+    "web",
+    build_dir="dist",  # Vue outputs to dist/
+    git_repo="https://github.com/user/vue-app.git@main",
+    domain="www.example.com",
+    servers_count=3
+)
+
+# Angular app
+project.add_react_service(
+    "web",
+    build_dir="dist/myapp",  # Angular outputs to dist/project-name/
+    build_command="npm run build -- --configuration production",
+    domain="www.example.com"
+)
+
+# With custom nginx config (API proxy)
+project.add_react_service(
+    "web",
+    nginx_config='''
+        server {
+            listen 80;
+            root /usr/share/nginx/html;
+            location / { try_files $uri $uri/ /index.html; }
+            location /api { proxy_pass http://api:3000; }
+        }
+    ''',
+    git_repo="https://github.com/user/web.git@main",
+    domain="www.example.com"
 )
 ```
 
@@ -240,15 +405,51 @@ project.add_service(
 - Different environments can use different branches/tags
 - Cleanup: `project.cleanup_git_checkouts()`
 
+**Custom Services (Manual Dockerfile):**
+
+```python
+# From Dockerfile content
+project.add_service(
+    "api",
+    dockerfile_content={
+        "1": "FROM python:3.11-slim",
+        "2": "WORKDIR /app",
+        "3": "COPY requirements.txt .",
+        "4": "RUN pip install -r requirements.txt",
+        "5": "COPY . .",
+        "6": "EXPOSE 8000",
+        "7": "CMD ['python', 'app.py']"
+    },
+    build_context="/path/to/code",
+    servers_count=3,
+    domain="api.example.com"
+)
+
+# From existing Dockerfile
+project.add_service(
+    "worker",
+    dockerfile="config/Dockerfile.worker",
+    build_context="/path/to/code",
+    servers_count=2
+)
+
+# From Docker image
+project.add_service(
+    "nginx",
+    image="nginx:alpine",
+    servers_count=1
+)
+```
+
 **Scheduled Services (Cron Jobs):**
 
 ```python
-project.add_service(
+project.add_python_service(
     "cleanup_job",
-    dockerfile_content={"1": "FROM python:3.11-slim", ...},
+    command="python cleanup.py",
     build_context="/path/to/code",
     schedule="0 2 * * *",  # 2 AM daily
-    startup_order=5
+    servers_count=1
 )
 ```
 
@@ -365,17 +566,21 @@ Deploy your application across multiple geographic regions with automatic load b
 **Option 1: Specify zones per service**
 
 ```python
-project.add_service(
+project.add_python_service(
     "api",
-    dockerfile_content={...},
+    git_repo="https://github.com/user/api.git@main",
+    command="uvicorn main:app",
+    port=8000,
     domain="api.example.com",
     server_zone="lon1",  # This service in London
     servers_count=3
 )
 
-project.add_service(
+project.add_python_service(
     "api-us",
-    dockerfile_content={...},
+    git_repo="https://github.com/user/api.git@main",
+    command="uvicorn main:app",
+    port=8000,
     domain="api.example.com",  # Same domain
     server_zone="nyc3",  # Different zone
     servers_count=3
@@ -426,33 +631,64 @@ If Cloudflare LB is not available or CLOUDFLARE_API_TOKEN is missing, the system
 
 ## Service Configuration
 
-### Startup Order
+### Service Dependencies
 
-Control service dependencies with `startup_order`:
+Control service startup order automatically using `depends_on`:
 
 ```python
-# Databases start first (order 1)
-project.add_postgres(startup_order=1)
-project.add_redis(startup_order=1)
+# Create project
+project = ProjectDeployer.create("myapp")
 
-# Application services after databases (order 2)
-project.add_service("api", startup_order=2, ...)
+# Databases start first (no dependencies)
+project.add_postgres() \
+       .add_redis()
 
-# Background jobs last (order 3)
-project.add_service("worker", startup_order=3, ...)
+# API depends on databases (automatically gets startup_order=2)
+project.add_python_service(
+    "api",
+    depends_on=["postgres", "redis"],
+    command="uvicorn main:app",
+    port=8000,
+    servers_count=3
+)
 
-# Nginx load balancer (order 10)
-project.add_nginx(startup_order=10)
+# Worker depends on API (automatically gets startup_order=3)
+project.add_python_service(
+    "worker",
+    depends_on=["api", "redis"],
+    command="python worker.py",
+    servers_count=2
+)
+
+# Frontend depends on API (automatically gets startup_order=3)
+project.add_react_service(
+    "web",
+    depends_on=["api"],
+    domain="www.example.com"
+)
 ```
 
-**Services with the same startup_order deploy in parallel.**
+**How it works:**
+
+- Services with no dependencies default to `startup_order=1`
+- When using `depends_on`, startup order is automatically calculated as max(dependencies) + 1
+- Services with the same startup_order deploy in parallel
+- You can still manually override with `startup_order` parameter if needed
+
+**Manual startup_order (legacy, still supported):**
+
+```python
+project.add_postgres(startup_order=1)
+project.add_service("api", startup_order=2, ...)
+project.add_service("worker", startup_order=3, ...)
+```
 
 ### Server Resources
 
 Control server size per service:
 
 ```python
-project.add_service(
+project.add_python_service(
     "api",
     server_cpu=2,      # 2 vCPU cores
     server_memory=4096, # 4GB RAM
@@ -469,27 +705,25 @@ project.add_service(
 ### Environment Variables
 
 ```python
-project.add_service(
+project.add_python_service(
     "api",
     env_vars={
         "API_KEY": "secret",
         "DEBUG": "false",
         "DATABASE_URL": "auto"  # Auto-resolved via ResourceResolver
-    },
-    ...
+    }
 )
 ```
 
 ### Volumes
 
 ```python
-project.add_service(
+project.add_python_service(
     "api",
     volumes={
         "/local/myapp/prod/config/api": "/app/config:ro",  # Read-only
         "/local/myapp/prod/data/api": "/app/data"          # Read-write
-    },
-    ...
+    }
 )
 ```
 
@@ -938,6 +1172,266 @@ rotator.cleanup_old_backups(days_to_keep=30)
 
 ---
 
+## Auto-Scaling
+
+The system provides intelligent auto-scaling capabilities that automatically adjust your infrastructure based on real-time metrics.
+
+### Overview
+
+Auto-scaling monitors your services and can:
+
+- **Vertical Scaling**: Upgrade/downgrade server specs (CPU/Memory) based on resource usage
+- **Horizontal Scaling**: Add/remove servers based on request traffic (RPS)
+
+**Key Features:**
+
+- ✅ Automatic metric collection (CPU, Memory, RPS)
+- ✅ Configurable thresholds per service
+- ✅ Cooldown periods to prevent flapping
+- ✅ Smart averaging over 10-minute windows
+- ✅ Priority-based scaling (vertical first, then horizontal)
+
+### Enabling Auto-Scaling
+
+**Enable with defaults (both vertical and horizontal):**
+
+```python
+project.add_python_service(
+    "api",
+    command="uvicorn main:app",
+    port=8000,
+    servers_count=2,
+    auto_scaling=True  # Enables both with default thresholds
+)
+```
+
+**Custom thresholds:**
+
+```python
+project.add_python_service(
+    "api",
+    command="uvicorn main:app",
+    port=8000,
+    servers_count=2,
+    auto_scaling={
+        "vertical": {
+            "cpu_scale_up": 80,      # Scale up when CPU > 80%
+            "cpu_scale_down": 25,    # Scale down when CPU < 25%
+            "memory_scale_up": 85,   # Scale up when Memory > 85%
+            "memory_scale_down": 30  # Scale down when Memory < 30%
+        },
+        "horizontal": {
+            "rps_scale_up": 1000,    # Add server when RPS > 1000
+            "rps_scale_down": 100    # Remove server when RPS < 100
+        }
+    }
+)
+```
+
+**Only vertical scaling:**
+
+```python
+project.add_python_service(
+    "api",
+    auto_scaling={
+        "vertical": {
+            "cpu_scale_up": 75,
+            "memory_scale_up": 80
+        }
+    }
+)
+```
+
+**Only horizontal scaling:**
+
+```python
+project.add_python_service(
+    "api",
+    auto_scaling={
+        "horizontal": {
+            "rps_scale_up": 500,
+            "rps_scale_down": 50
+        }
+    }
+)
+```
+
+### Default Thresholds
+
+When `auto_scaling=True` or thresholds not specified:
+
+**Vertical Scaling (Resource-based):**
+
+- CPU scale up: 75%
+- CPU scale down: 20%
+- Memory scale up: 80%
+- Memory scale down: 30%
+
+**Horizontal Scaling (Traffic-based):**
+
+- RPS scale up: 500 requests/second
+- RPS scale down: 50 requests/second
+
+### How It Works
+
+**Architecture:**
+
+1. **Metrics Collection** (Every 60 seconds):
+
+   - All servers collect their own metrics
+   - Metrics stored in rolling 10-minute window
+   - CPU, Memory, and RPS tracked per service
+
+2. **Scaling Decisions** (Every 5 minutes):
+
+   - Leader server analyzes aggregated metrics
+   - Averages across all servers running the service
+   - Compares against configured thresholds
+   - Makes scaling decision if needed
+
+3. **Scaling Execution**:
+   - Vertical: Updates server specs, redeploys service
+   - Horizontal: Adds/removes servers, zero-downtime deployment
+
+**Scaling Priority:**
+
+Vertical scaling (resource optimization) takes priority over horizontal scaling (traffic handling). If both are needed, vertical scaling happens first, then horizontal on the next check cycle.
+
+**Cooldown Periods:**
+
+- Scale up: 5 minutes (react quickly to load spikes)
+- Scale down: 10 minutes (be conservative to avoid flapping)
+
+**Constraints:**
+
+- Minimum servers: 1
+- Maximum servers: 20
+- Server size tiers follow DigitalOcean's available sizes (1-32 vCPU, 1GB-64GB RAM)
+
+### Monitoring Auto-Scaling
+
+**Check auto-scaling status:**
+
+```python
+from backend.infra.auto_scaling_coordinator import AutoScalingCoordinator
+
+coordinator = AutoScalingCoordinator()
+
+# Collect current metrics (happens automatically every minute)
+coordinator.collect_all_metrics()
+
+# Manual scaling check (happens automatically every 5 minutes via leader)
+coordinator.check_and_scale_all_services()
+```
+
+**View scaling history in logs:**
+
+```python
+project.logs(service="api", env="prod", lines=200)
+# Look for entries like:
+# "Auto-scaling check for myapp/prod/api (3 servers)"
+# "Metrics: CPU=82.3% Memory=65.1% RPS=723.4"
+# "Triggering vertical scaling for api"
+# "✓ Vertical scaling completed for api"
+```
+
+### Example Scenarios
+
+**Scenario 1: High CPU usage**
+
+```
+Current: 2 servers, 2 vCPU each, CPU at 85%
+Action: Vertical scale up to 4 vCPU per server
+Result: 2 servers, 4 vCPU each, CPU drops to ~42%
+```
+
+**Scenario 2: Traffic spike**
+
+```
+Current: 3 servers, RPS at 650 per server (1950 total)
+Action: Horizontal scale up, add 1 server
+Result: 4 servers, RPS ~487 per server (1950 total distributed)
+```
+
+**Scenario 3: Low utilization**
+
+```
+Current: 5 servers, 4 vCPU each, CPU at 15%, RPS at 30 per server
+Actions (over time):
+1. Horizontal scale down: 5 → 4 servers (wait 10 min)
+2. Horizontal scale down: 4 → 3 servers (wait 10 min)
+3. Vertical scale down: 4 vCPU → 2 vCPU per server
+```
+
+### Cost Optimization
+
+Auto-scaling helps optimize costs by:
+
+- ✅ Scaling down during low-traffic periods
+- ✅ Right-sizing server specs to actual usage
+- ✅ Avoiding over-provisioning
+
+**Example monthly savings:**
+
+```
+Without auto-scaling:
+- 5 servers × 4 vCPU/8GB × $48/month = $240/month
+
+With auto-scaling (average):
+- 3 servers × 2 vCPU/4GB × $24/month = $72/month
+- Scales up to 5×4vCPU during peak hours only
+- Savings: ~$168/month (70%)
+```
+
+### Disabling Auto-Scaling
+
+```python
+# Remove auto-scaling from existing service
+project.update_service("api", auto_scaling=False)
+project.deploy(env="prod", service="api")
+```
+
+### Best Practices
+
+**✅ Do:**
+
+- Start with default thresholds and adjust based on observation
+- Use vertical scaling for predictable workloads
+- Use horizontal scaling for variable traffic patterns
+- Monitor scaling decisions via logs
+- Set reasonable min/max server counts for cost control
+
+**❌ Don't:**
+
+- Set thresholds too tight (causes flapping)
+- Enable auto-scaling without monitoring
+- Scale down too aggressively (can cause service degradation)
+- Use auto-scaling for databases (use vertical scaling only if needed)
+
+### Troubleshooting
+
+**"Auto-scaling not triggering"**
+
+- Check if service has `auto_scaling` enabled in config
+- Verify metrics are being collected: check logs for "Auto-scaling check"
+- Ensure leader server is healthy (oldest server becomes leader)
+- Check if cooldown period is still active
+
+**"Too many scale events"**
+
+- Increase cooldown periods in `AutoScaler` class
+- Widen threshold gaps (e.g., scale_up=80, scale_down=20 instead of 75/30)
+- Increase metrics averaging window (default: 10 minutes)
+
+**"Scaling in wrong direction"**
+
+- Check metric collection: `coordinator.collect_all_metrics()`
+- Review aggregated metrics in logs
+- Verify thresholds are correctly configured
+- Check if multiple services competing for resources
+
+---
+
 ## Advanced Features
 
 ### Rollback
@@ -1149,262 +1643,6 @@ deployer.pull_data(env="prod")
 
 ---
 
-## Auto-Scaling
-
-The system provides intelligent auto-scaling capabilities that automatically adjust your infrastructure based on real-time metrics.
-
-### Overview
-
-Auto-scaling monitors your services and can:
-
-- **Vertical Scaling**: Upgrade/downgrade server specs (CPU/Memory) based on resource usage
-- **Horizontal Scaling**: Add/remove servers based on request traffic (RPS)
-
-**Key Features:**
-
-- ✅ Automatic metric collection (CPU, Memory, RPS)
-- ✅ Configurable thresholds per service
-- ✅ Cooldown periods to prevent flapping
-- ✅ Smart averaging over 10-minute windows
-- ✅ Priority-based scaling (vertical first, then horizontal)
-
-### Enabling Auto-Scaling
-
-**Enable with defaults (both vertical and horizontal):**
-
-```python
-project.add_service(
-    "api",
-    dockerfile_content={...},
-    servers_count=2,
-    auto_scaling=True  # Enables both with default thresholds
-)
-```
-
-**Custom thresholds:**
-
-```python
-project.add_service(
-    "api",
-    dockerfile_content={...},
-    servers_count=2,
-    auto_scaling={
-        "vertical": {
-            "cpu_scale_up": 80,      # Scale up when CPU > 80%
-            "cpu_scale_down": 25,    # Scale down when CPU < 25%
-            "memory_scale_up": 85,   # Scale up when Memory > 85%
-            "memory_scale_down": 30  # Scale down when Memory < 30%
-        },
-        "horizontal": {
-            "rps_scale_up": 1000,    # Add server when RPS > 1000
-            "rps_scale_down": 100    # Remove server when RPS < 100
-        }
-    }
-)
-```
-
-**Only vertical scaling:**
-
-```python
-project.add_service(
-    "api",
-    auto_scaling={
-        "vertical": {
-            "cpu_scale_up": 75,
-            "memory_scale_up": 80
-        }
-    }
-)
-```
-
-**Only horizontal scaling:**
-
-```python
-project.add_service(
-    "api",
-    auto_scaling={
-        "horizontal": {
-            "rps_scale_up": 500,
-            "rps_scale_down": 50
-        }
-    }
-)
-```
-
-### Default Thresholds
-
-When `auto_scaling=True` or thresholds not specified:
-
-**Vertical Scaling (Resource-based):**
-
-- CPU scale up: 75%
-- CPU scale down: 20%
-- Memory scale up: 80%
-- Memory scale down: 30%
-
-**Horizontal Scaling (Traffic-based):**
-
-- RPS scale up: 500 requests/second
-- RPS scale down: 50 requests/second
-
-### How It Works
-
-**Architecture:**
-
-1. **Metrics Collection** (Every 60 seconds):
-
-   - All servers collect their own metrics
-   - Metrics stored in rolling 10-minute window
-   - CPU, Memory, and RPS tracked per service
-
-2. **Scaling Decisions** (Every 5 minutes):
-
-   - Leader server analyzes aggregated metrics
-   - Averages across all servers running the service
-   - Compares against configured thresholds
-   - Makes scaling decision if needed
-
-3. **Scaling Execution**:
-   - Vertical: Updates server specs, redeploys service
-   - Horizontal: Adds/removes servers, zero-downtime deployment
-
-**Scaling Priority:**
-
-Vertical scaling (resource optimization) takes priority over horizontal scaling (traffic handling). If both are needed, vertical scaling happens first, then horizontal on the next check cycle.
-
-**Cooldown Periods:**
-
-- Scale up: 5 minutes (react quickly to load spikes)
-- Scale down: 10 minutes (be conservative to avoid flapping)
-
-**Constraints:**
-
-- Minimum servers: 1
-- Maximum servers: 20
-- Server size tiers follow DigitalOcean's available sizes (1-32 vCPU, 1GB-64GB RAM)
-
-### Monitoring Auto-Scaling
-
-**Check auto-scaling status:**
-
-```python
-from backend.infra.auto_scaling_coordinator import AutoScalingCoordinator
-
-coordinator = AutoScalingCoordinator()
-
-# Collect current metrics (happens automatically every minute)
-coordinator.collect_all_metrics()
-
-# Manual scaling check (happens automatically every 5 minutes via leader)
-coordinator.check_and_scale_all_services()
-```
-
-**View scaling history in logs:**
-
-```python
-project.logs(service="api", env="prod", lines=200)
-# Look for entries like:
-# "Auto-scaling check for myapp/prod/api (3 servers)"
-# "Metrics: CPU=82.3% Memory=65.1% RPS=723.4"
-# "Triggering vertical scaling for api"
-# "✓ Vertical scaling completed for api"
-```
-
-### Example Scenarios
-
-**Scenario 1: High CPU usage**
-
-```
-Current: 2 servers, 2 vCPU each, CPU at 85%
-Action: Vertical scale up to 4 vCPU per server
-Result: 2 servers, 4 vCPU each, CPU drops to ~42%
-```
-
-**Scenario 2: Traffic spike**
-
-```
-Current: 3 servers, RPS at 650 per server (1950 total)
-Action: Horizontal scale up, add 1 server
-Result: 4 servers, RPS ~487 per server (1950 total distributed)
-```
-
-**Scenario 3: Low utilization**
-
-```
-Current: 5 servers, 4 vCPU each, CPU at 15%, RPS at 30 per server
-Actions (over time):
-1. Horizontal scale down: 5 → 4 servers (wait 10 min)
-2. Horizontal scale down: 4 → 3 servers (wait 10 min)
-3. Vertical scale down: 4 vCPU → 2 vCPU per server
-```
-
-### Cost Optimization
-
-Auto-scaling helps optimize costs by:
-
-- ✅ Scaling down during low-traffic periods
-- ✅ Right-sizing server specs to actual usage
-- ✅ Avoiding over-provisioning
-
-**Example monthly savings:**
-
-```
-Without auto-scaling:
-- 5 servers × 4 vCPU/8GB × $48/month = $240/month
-
-With auto-scaling (average):
-- 3 servers × 2 vCPU/4GB × $24/month = $72/month
-- Scales up to 5×4vCPU during peak hours only
-- Savings: ~$168/month (70%)
-```
-
-### Disabling Auto-Scaling
-
-```python
-# Remove auto-scaling from existing service
-project.update_service("api", auto_scaling=False)
-project.deploy(env="prod", service="api")
-```
-
-### Best Practices
-
-**✅ Do:**
-
-- Start with default thresholds and adjust based on observation
-- Use vertical scaling for predictable workloads
-- Use horizontal scaling for variable traffic patterns
-- Monitor scaling decisions via logs
-- Set reasonable min/max server counts for cost control
-
-**❌ Don't:**
-
-- Set thresholds too tight (causes flapping)
-- Enable auto-scaling without monitoring
-- Scale down too aggressively (can cause service degradation)
-- Use auto-scaling for databases (use vertical scaling only if needed)
-
-### Troubleshooting
-
-**"Auto-scaling not triggering"**
-
-- Check if service has `auto_scaling` enabled in config
-- Verify metrics are being collected: check logs for "Auto-scaling check"
-- Ensure leader server is healthy (oldest server becomes leader)
-- Check if cooldown period is still active
-
-**"Too many scale events"**
-
-- Increase cooldown periods in `AutoScaler` class
-- Widen threshold gaps (e.g., scale_up=80, scale_down=20 instead of 75/30)
-- Increase metrics averaging window (default: 10 minutes)
-
-**"Scaling in wrong direction"**
-
-- Check metric collection: `coordinator.collect_all_metrics()`
-- Review aggregated metrics in logs
-- Verify thresholds are correctly configured
-- Check if multiple services competing for resources
-
 ## Troubleshooting
 
 ### Common Issues
@@ -1439,6 +1677,19 @@ project.deploy(env="prod", service="api")
 - For production, ensure CLOUDFLARE_EMAIL is set
 - Check certificate renewal: `_renew_certificates()`
 
+**6. "Git checkout failed"**
+
+- Ensure Git is installed on your system
+- Verify repository URL is correct
+- For private repos, ensure SSH keys are configured
+- Check network connectivity to Git hosting service
+
+**7. "Requirements file not found"**
+
+- Ensure requirements files exist in build_context or git_repo
+- Check file paths are relative to repository root
+- Verify files are committed to Git repository
+
 ### Debug Mode
 
 ```python
@@ -1456,6 +1707,12 @@ from backend.infra.server_inventory import ServerInventory
 servers = ServerInventory.list_all_servers()
 for s in servers:
     print(s)
+
+# Check Git checkouts
+import os
+git_path = "C:/local/git_checkouts/myapp/prod/" if os.name == 'nt' else "/local/git_checkouts/myapp/prod/"
+if os.path.exists(git_path):
+    print(f"Git checkouts: {os.listdir(git_path)}")
 ```
 
 ---
@@ -1471,5 +1728,6 @@ For complete API documentation including all class methods with parameters, retu
 - `SecretsRotator` - Password rotation management
 - `BackupManager` - Backup configuration and restore
 - `HealthMonitor` - Health monitoring and self-healing
+- `GitManager` - Git repository checkout and management
 
 ---
