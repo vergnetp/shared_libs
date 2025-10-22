@@ -103,41 +103,37 @@ class SecretsRotator:
         """
         Push secrets directory to multiple servers.
         
-        Uses SSH to push secrets to all servers.
+        Uses DeploymentSyncer.push_directory() for tar + SSH streaming.
         """
-        try:
-            # Get local secrets directory
-            local_secrets_base = Path(ResourceResolver.get_volume_host_path(
-                self.project, self.env, "", "secrets", "localhost"
-            ))
-            
-            if not local_secrets_base.exists():
-                log(f"Warning: Local secrets directory not found: {local_secrets_base}")
-                return
-            
-            # Push to each server
-            for server_ip in server_ips:
-                try:
-                    log(f"Pushing secrets to {server_ip}...")                   
-                    from execute_cmd import CommandExecuter
-                    
-                    remote_secrets_path = f"/local/{self.project}/{self.env}/secrets/"
-                    
-                    # Ensure remote directory exists
-                    CommandExecuter.run_cmd(f"mkdir -p {remote_secrets_path}", server_ip)
-                    
-                    # Copy secrets directory
-                    # todo
-                    
-                    log(f"✓ Secrets pushed to {server_ip}")
-                    
-                except Exception as e:
-                    log(f"❌ Failed to push secrets to {server_ip}: {e}")
-                    raise
-            
-        except Exception as e:
-            log(f"Error pushing secrets: {e}")
-            raise
+        from deployment_syncer import DeploymentSyncer
+        
+        # Get local secrets base directory
+        local_secrets_base = Path(ResourceResolver.get_volume_host_path(
+            self.project, self.env, "", "secrets", "localhost"
+        ))
+        
+        if not local_secrets_base.exists():
+            log(f"Warning: Local secrets directory not found: {local_secrets_base}")
+            return
+        
+        # Remote base path (parent of secrets directory)
+        remote_base_path = f"/local/{self.project}/{self.env}"
+        
+        # Use DeploymentSyncer's push_directory utility
+        log(f"Pushing secrets to {len(server_ips)} server(s)...")
+        success = DeploymentSyncer.push_directory(
+            local_dir=local_secrets_base,
+            remote_base_path=remote_base_path,
+            server_ips=server_ips,
+            set_permissions=True,  # Secure secrets with proper permissions
+            dir_perms="700",
+            file_perms="600",
+            parallel=True  # Push to all servers in parallel for speed
+        )
+        
+        if not success:
+            raise Exception("Failed to push secrets to one or more servers")
+    
     
     def _restart_all_services_ordered(self, server_ips: List[str]) -> List[str]:
         """

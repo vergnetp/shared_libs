@@ -48,64 +48,64 @@ class HealthMonitorInstaller:
         Logger.start()
         
         try:
-            # 1. Create tarball of project directory
-            import tarfile
+            # 1. Create temporary directory with project files
             import tempfile
+            import shutil
             
             project_dir = Path(__file__).parent
             
-            with tempfile.NamedTemporaryFile(suffix='.tar.gz', delete=False) as tmp:
-                tarball_path = tmp.name
-            
-            with tarfile.open(tarball_path, "w:gz") as tar:
+            # Create temp directory to hold files to transfer
+            with tempfile.TemporaryDirectory() as temp_dir_str:
+                temp_dir = Path(temp_dir_str)
+                build_dir = temp_dir / "health_monitor_build"
+                build_dir.mkdir()
+                
+                # Copy project files (excluding certain directories)
                 for item in project_dir.iterdir():
                     if item.name in {'__pycache__', 'deployments', 'local', '.git'}:
                         continue
-                    tar.add(item, arcname=item.name)
-            
-            log(f"Created project tarball")
-            
-            # 2. Transfer to server
-            with open(tarball_path, "rb") as f:
-                CommandExecuter.run_cmd_with_stdin(
-                    "cat > /tmp/health_monitor.tar.gz",
-                    f.read(),
-                    server_ip, user
+                    
+                    if item.is_file():
+                        shutil.copy2(item, build_dir / item.name)
+                    elif item.is_dir():
+                        shutil.copytree(item, build_dir / item.name, 
+                                      ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+                
+                # Generate and add Dockerfile
+                dockerfile_text = HealthMonitorInstaller._generate_dockerfile()
+                (build_dir / "Dockerfile").write_text(dockerfile_text, encoding='utf-8')
+                
+                log(f"Prepared project files for transfer")
+                
+                # 2. Use DeploymentSyncer.push_directory to transfer files
+                from deployment_syncer import DeploymentSyncer
+                
+                success = DeploymentSyncer.push_directory(
+                    local_dir=build_dir,
+                    remote_base_path="/tmp",
+                    server_ips=[server_ip],
+                    set_permissions=False,
+                    parallel=False
                 )
+                
+                if not success:
+                    raise Exception("Failed to transfer project files to server")
+                
+                log(f"Project files transferred to server")
             
-            # 3. Extract to build directory
-            CommandExecuter.run_cmd("mkdir -p /tmp/health_monitor_build", server_ip, user)
-            CommandExecuter.run_cmd(
-                "tar -xzf /tmp/health_monitor.tar.gz -C /tmp/health_monitor_build",
-                server_ip, user
-            )
-            
-            # 4. Generate Dockerfile from content
-            dockerfile_text = HealthMonitorInstaller._generate_dockerfile()
-
-            CommandExecuter.run_cmd_with_stdin(
-                "cat > /tmp/health_monitor_build/Dockerfile",
-                dockerfile_text.encode("utf-8"),
-                server_ip,
-                user,
-            )
-            
-            # 5. Build Docker image
+            # 3. Build Docker image
             log(f"Building health monitor image on {server_ip}...")
             CommandExecuter.run_cmd(
                 f"docker build -t {HealthMonitorInstaller.IMAGE_NAME} /tmp/health_monitor_build",
                 server_ip, user
             )
             
-            # 6. Cleanup build directory
-            CommandExecuter.run_cmd("rm -rf /tmp/health_monitor_build /tmp/health_monitor.tar.gz", server_ip, user)
-            
-            # Cleanup local tarball
-            Path(tarball_path).unlink()
+            # 4. Cleanup build directory
+            CommandExecuter.run_cmd("rm -rf /tmp/health_monitor_build", server_ip, user)
             
             log(f"Built health monitor image")
             
-            # 7. Schedule with CronManager
+            # 5. Schedule with CronManager
             service_config = {
                 "schedule": HealthMonitorInstaller.SCHEDULE,
                 "image": HealthMonitorInstaller.IMAGE_NAME,
@@ -137,7 +137,7 @@ class HealthMonitorInstaller:
             log(f"Failed to install health monitor on {server_ip}: {e}")
             Logger.end()
             return False
-    
+
     @staticmethod
     def _generate_dockerfile() -> str:
         """Generate Dockerfile from DOCKERFILE_CONTENT dict"""

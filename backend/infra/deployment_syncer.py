@@ -636,3 +636,152 @@ class DeploymentSyncer:
             return [targets]
         else:
             return targets
+        
+    @staticmethod
+    def push_directory(local_dir: Path, remote_base_path: str, server_ips: List[str], 
+                      set_permissions: bool = False, dir_perms: str = "700", 
+                      file_perms: str = "600", parallel: bool = True) -> bool:
+        """
+        Push a local directory to multiple remote servers using tar streaming.
+        
+        Low-level utility for pushing arbitrary directories. For standard 
+        config/secrets/files operations, use push() instead.
+        
+        Args:
+            local_dir: Local directory to push (e.g., Path("/local/myapp/prod/secrets"))
+            remote_base_path: Remote base path where contents will be extracted (e.g., "/local/myapp/prod")
+            server_ips: List of server IPs to push to
+            set_permissions: If True, set permissions after extraction
+            dir_perms: Permissions for directories (e.g., "700")
+            file_perms: Permissions for files (e.g., "600")
+            parallel: If True, push to servers in parallel (default: True)
+            
+        Returns:
+            True if push completed successfully to all servers
+            
+        Example:
+            # Push secrets directory to servers with secure permissions
+            DeploymentSyncer.push_directory(
+                local_dir=Path("/local/myapp/prod/secrets"),
+                remote_base_path="/local/myapp/prod",
+                server_ips=["192.168.1.100", "192.168.1.101"],
+                set_permissions=True,
+                dir_perms="700",
+                file_perms="600"
+            )
+        """
+        import tarfile
+        import io
+        
+        if not local_dir.exists():
+            log(f"Warning: Local directory not found: {local_dir}")
+            return False
+        
+        try:
+            # Create tar archive
+            log(f"Creating archive of {local_dir}...")
+            tar_buffer = io.BytesIO()
+            
+            with tarfile.open(fileobj=tar_buffer, mode='w:gz') as tar:
+                for root, dirs, files in os.walk(local_dir):
+                    for file in files:
+                        file_path = os.path.join(root, file)
+                        # Archive path relative to parent of local_dir to preserve directory structure
+                        arcname = os.path.relpath(file_path, local_dir.parent).replace('\\', '/')
+                        tar.add(file_path, arcname=arcname)
+            
+            tar_data = tar_buffer.getvalue()
+            archive_size_mb = len(tar_data) / 1024 / 1024
+            log(f"Archive created: {archive_size_mb:.2f} MB")
+            
+            # Push to servers (parallel or sequential)
+            if parallel:
+                return DeploymentSyncer._push_directory_parallel(
+                    tar_data, remote_base_path, server_ips, 
+                    set_permissions, dir_perms, file_perms, local_dir.name
+                )
+            else:
+                return DeploymentSyncer._push_directory_sequential(
+                    tar_data, remote_base_path, server_ips,
+                    set_permissions, dir_perms, file_perms, local_dir.name
+                )
+            
+        except Exception as e:
+            log(f"Error creating archive: {e}")
+            return False
+    
+    @staticmethod
+    def _push_directory_parallel(tar_data: bytes, remote_base_path: str, server_ips: List[str],
+                                set_permissions: bool, dir_perms: str, file_perms: str, dir_name: str) -> bool:
+        """Push directory to servers in parallel"""
+        def push_to_server(server_ip):
+            """Push archive to a single server"""
+            try:
+                log(f"Pushing to {server_ip}...")
+                
+                # Ensure remote directory exists
+                CommandExecuter.run_cmd(f"mkdir -p {remote_base_path}", server_ip, "root")
+                
+                # Transfer and extract tar archive
+                extract_cmd = f"cd {remote_base_path} && tar -xzf -"
+                CommandExecuter.run_cmd_with_stdin(extract_cmd, tar_data, server_ip, "root")
+                
+                # Set permissions if requested
+                if set_permissions:
+                    CommandExecuter.run_cmd(
+                        f"find {remote_base_path}/{dir_name} -type d -exec chmod {dir_perms} {{}} \\; && "
+                        f"find {remote_base_path}/{dir_name} -type f -exec chmod {file_perms} {{}} \\;",
+                        server_ip, "root"
+                    )
+                
+                log(f"✓ Successfully pushed to {server_ip}")
+                return (server_ip, True, None)
+                
+            except Exception as e:
+                log(f"❌ Failed to push to {server_ip}: {e}")
+                return (server_ip, False, str(e))
+        
+        # Push to all servers in parallel
+        success = True
+        with ThreadPoolExecutor(max_workers=min(len(server_ips), 5)) as executor:
+            futures = [executor.submit(push_to_server, ip) for ip in server_ips]
+            
+            for future in as_completed(futures):
+                server_ip, server_success, error = future.result()
+                if not server_success:
+                    success = False
+        
+        return success
+    
+    @staticmethod
+    def _push_directory_sequential(tar_data: bytes, remote_base_path: str, server_ips: List[str],
+                                   set_permissions: bool, dir_perms: str, file_perms: str, dir_name: str) -> bool:
+        """Push directory to servers sequentially"""
+        success = True
+        
+        for server_ip in server_ips:
+            try:
+                log(f"Pushing to {server_ip}...")
+                
+                # Ensure remote directory exists
+                CommandExecuter.run_cmd(f"mkdir -p {remote_base_path}", server_ip, "root")
+                
+                # Transfer and extract tar archive
+                extract_cmd = f"cd {remote_base_path} && tar -xzf -"
+                CommandExecuter.run_cmd_with_stdin(extract_cmd, tar_data, server_ip, "root")
+                
+                # Set permissions if requested
+                if set_permissions:
+                    CommandExecuter.run_cmd(
+                        f"find {remote_base_path}/{dir_name} -type d -exec chmod {dir_perms} {{}} \\; && "
+                        f"find {remote_base_path}/{dir_name} -type f -exec chmod {file_perms} {{}} \\;",
+                        server_ip, "root"
+                    )
+                
+                log(f"✓ Successfully pushed to {server_ip}")
+                
+            except Exception as e:
+                log(f"❌ Failed to push to {server_ip}: {e}")
+                success = False
+        
+        return success
