@@ -87,9 +87,7 @@ class SecretsRotator:
         from server_inventory import ServerInventory
         
         try:
-            servers = ServerInventory.get_servers(
-                project=self.project,
-                env=self.env,
+            servers = ServerInventory.get_servers(                
                 deployment_status=ServerInventory.STATUS_ACTIVE
             )
             
@@ -401,10 +399,10 @@ class SecretsRotator:
     
     def list_secrets(self) -> Dict[str, List[str]]:
         """List all secrets for the project/environment"""
-        secrets_base = ResourceResolver.get_volume_host_path(
+        secrets_base = str(Path(ResourceResolver.get_volume_host_path(
             self.project, self.env, "", "secrets", "localhost"
-        ).parent  # Go up one level to get the secrets base directory
-        
+        )))  # Go up one level to get the secrets base directory
+        log(f'Checking {secrets_base}')
         if not Path(secrets_base).exists():
             return {}
         
@@ -427,9 +425,9 @@ class SecretsRotator:
     
     def cleanup_old_backups(self, days_to_keep: int = 30):
         """Clean up secret backups older than specified days"""
-        secrets_base = ResourceResolver.get_volume_host_path(
+        secrets_base = Path(ResourceResolver.get_volume_host_path(
             self.project, self.env, "", "secrets", "localhost"
-        ).parent  # Go up one level to get the secrets base directory
+        )).parent  # Go up one level to get the secrets base directory
         
         if not Path(secrets_base).exists():
             return

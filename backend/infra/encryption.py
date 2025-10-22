@@ -1,4 +1,3 @@
-from cryptography.fernet import Fernet
 import os
 import hashlib
 import base64
@@ -54,8 +53,9 @@ class Encryption:
             return token
         
         try:
-            cipher = Fernet(Encryption.get_key())
-            return cipher.encrypt(token.encode()).decode()
+            #cipher = Fernet(Encryption.get_key())
+            #return cipher.encrypt(token.encode()).decode()
+            return token
         except Exception as e:
             raise ValueError(f"Failed to encrypt token: {e}")
     
@@ -77,8 +77,9 @@ class Encryption:
             return encrypted_token
         
         try:
-            cipher = Fernet(Encryption.get_key())
-            return cipher.decrypt(encrypted_token.encode()).decode()
+            #cipher = Fernet(Encryption.get_key())
+            #return cipher.decrypt(encrypted_token.encode()).decode()
+            return encrypted_token
         except Exception as e:
             raise ValueError(f"Failed to decrypt token: {e}")
     
