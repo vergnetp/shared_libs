@@ -61,6 +61,9 @@ class HealthMonitor:
         4. Leader handles failures (leader only)
         5. Leader handles auto-scaling (leader only, if system is stable)
         """
+        log("check certificates..")
+        HealthMonitor._check_my_certificates()
+
         log("Running health check...")
         
         # STEP 1: Collect metrics from all services (all servers do this)
@@ -454,6 +457,49 @@ class HealthMonitor:
     # UTILITIES
     # ========================================
     
+    @staticmethod
+    def _check_my_certificates():
+        """
+        Check and renew certificates on THIS server.
+        
+        Runs on EVERY server independently (not just leader).
+        Each server manages its own certificates.
+        Rate limited to run once per hour.
+        """
+        from certificate_manager import CertificateManager
+       
+        try:
+            # Rate limiting - only check once per hour
+            last_check_file = Path("/tmp/cert_last_check")
+            
+            if last_check_file.exists():
+                last_check = datetime.fromtimestamp(last_check_file.stat().st_mtime)
+                minutes_since_check = (datetime.now() - last_check).total_seconds() / 60
+                
+                if minutes_since_check < 60:  # Check every 60 minutes
+                    return  # Not time to check yet
+            
+            # Update last check time
+            last_check_file.touch()
+            
+            log("🔒 Checking MY SSL certificates...")
+            
+            # Check and renew certificates on THIS server
+            # (CertificateManager reads local files and executes certbot locally)
+            results = CertificateManager.check_and_renew_all()
+            
+            # Send alerts for failures
+            failures = [domain for domain, success in results.items() if success is False]
+            
+            if failures:
+                HealthMonitor.send_alert(
+                    "Certificate Renewal Failed",
+                    f"Failed to renew certificates on this server: {', '.join(failures)}"
+                )
+                
+        except Exception as e:
+            log(f"Error checking certificates: {e}")
+
     @staticmethod
     def record_replacement_attempt(server_ip: str, success: bool, reason: str = ""):
         """Record replacement attempt for history/debugging"""

@@ -107,38 +107,6 @@ The deployer includes convenience methods that automatically generate optimized 
 - ✅ Service dependency tracking
 - ✅ Custom Dockerfile override
 
-**Example - Complete Stack in 20 Lines:**
-
-```python
-from backend.infra.project_deployer import ProjectDeployer
-
-project = ProjectDeployer.create("myapp")
-
-project.add_postgres() \
-       .add_redis() \
-       .add_python_service(
-           "api",
-           depends_on=["postgres", "redis"],
-           git_repo="https://github.com/user/api.git@main",
-           git_token="tk8787",
-           command="uvicorn main:app --host 0.0.0.0",
-           port=8000,
-           servers_count=3,
-           domain="api.example.com",
-           auto_scaling=True
-       ) \
-       .add_react_service(
-           "web",
-           depends_on=["api"],
-           git_repo="https://github.com/user/web.git@main",
-           git_token="tk8787",
-           domain="www.example.com",
-           servers_count=3,
-           auto_scaling=True
-       ) \
-       .deploy(env="prod")
-```
-
 ---
 
 ## Prerequisites
@@ -826,6 +794,109 @@ NginxConfigGenerator._renew_certificates(
 
 ---
 
+### Automatic Certificate Renewal
+
+**Zero Configuration Required** - Certificates renew automatically!
+
+The health monitoring system checks certificates **every hour** on every server and automatically renews certificates that are expiring within 30 days.
+
+**How It Works:**
+
+```
+Every Server (independently):
+  ↓
+  Health Monitor runs every minute (via cron)
+  ↓
+  Every 60 minutes:
+    ├─ Parse /local/nginx/configs/*.conf
+    ├─ Check certificate expiry with openssl
+    ├─ If < 30 days remaining:
+    │   └─ Auto-renew with zero downtime (DNS-01)
+    └─ Send email alert if renewal fails
+```
+
+**Certificate Lifecycle:**
+
+```
+Day 0:   Certificate issued (90 days validity)
+Day 60:  Health monitor: ✓ Valid (30 days remaining)
+Day 61:  Health monitor: ⚠️ Expiring soon (29 days)
+         🔄 Auto-renewal triggered
+         ✓ New certificate issued (ZERO DOWNTIME)
+Day 151: Auto-renewal again (automatic forever)
+```
+
+**Zero Downtime Renewal:**
+
+When `CLOUDFLARE_API_TOKEN` is configured:
+
+- Uses DNS-01 challenge validation (via Cloudflare API)
+- No need to stop nginx
+- Certificate renewed in background
+- Nginx reloaded gracefully (no dropped connections)
+
+**Fallback Method:**
+
+Without Cloudflare token:
+
+- Uses standalone HTTP-01 challenge
+- Brief downtime (5-10 seconds) during renewal
+- Still fully automatic
+
+**Monitoring:**
+
+```python
+# Check certificate status manually
+from backend.infra.certificate_manager import CertificateManager
+
+# Check all certificates on this server
+results = CertificateManager.check_and_renew_all()
+
+for domain, status in results.items():
+    if status is True:
+        print(f"✓ {domain}: Renewed successfully")
+    elif status is False:
+        print(f"❌ {domain}: Renewal failed")
+    else:
+        print(f"✓ {domain}: Still valid (no renewal needed)")
+
+# Check specific certificate expiry
+days = CertificateManager.check_expiry("example.com")
+print(f"Certificate expires in {days} days")
+```
+
+**Email Alerts:**
+
+You'll receive email alerts when:
+
+- Certificate renewal fails
+- Certificate is missing for a configured domain
+- Manual intervention is needed
+
+Ensure your `.env` has alert configuration:
+
+```bash
+ADMIN_EMAIL=admin@example.com
+GMAIL_APP_PASSWORD=your_gmail_app_password
+```
+
+**No Manual Intervention Needed:**
+
+✅ Certificates renew automatically every ~60 days
+✅ Each server manages its own certificates independently
+✅ No single point of failure
+✅ Works across all zones/regions
+✅ Email alerts only if something goes wrong
+
+**Best Practices:**
+
+- ✅ **Use Cloudflare DNS-01** for zero downtime (set `CLOUDFLARE_API_TOKEN`)
+- ✅ **Monitor alert emails** for renewal failures
+- ✅ **Test initially** by manually checking certificate expiry after first deployment
+- ⚠️ **Certificates expire in 90 days** - renewal starts at 30 days, so you have plenty of buffer
+
+---
+
 ## Database Access
 
 ### From Your Application Code
@@ -1049,9 +1120,15 @@ Health monitoring **is included in the template snapshot** that all servers are 
    - TCP port checks (for databases)
 
 3. **Cross-Server Checks:**
+
    - All servers monitor each other
    - VPC network connectivity
    - Response times
+
+4. **SSL Certificates** (every hour):
+   - Certificate expiry dates
+   - Auto-renewal when < 30 days remaining
+   - Zero-downtime renewal (with Cloudflare DNS-01)
 
 ### Self-Healing
 
