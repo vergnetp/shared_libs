@@ -2,6 +2,8 @@ from cryptography.fernet import Fernet
 import os
 import hashlib
 import base64
+import string
+import secrets
 
 class Encryption:
     """Encrypt/decrypt Git tokens and other sensitive data using DO token as key"""
@@ -102,3 +104,26 @@ class Encryption:
         
         # Fernet tokens always start with this pattern
         return token.startswith('gAAAAA')
+    
+
+    # Character set for passwords (alphanumeric only for compatibility)
+    SAFE_CHARS = string.ascii_letters + string.digits
+    
+    @staticmethod
+    def generate_password(length: int = 32, special_chars: bool = False) -> str:
+        """
+        Generate cryptographically secure password.
+        
+        Args:
+            length: Password length (default: 32)
+            special_chars: Include special characters (default: False for compatibility)
+            
+        Returns:
+            Secure random password
+        """
+        if special_chars:
+            chars = Encryption.SAFE_CHARS + "!@#$%^&*()-_=+[]{}:,.<>?"
+        else:
+            chars = Encryption.SAFE_CHARS
+        
+        return ''.join(secrets.choice(chars) for _ in range(length))

@@ -1,13 +1,12 @@
 import json
 from typing import Dict, Any, List
+from pathlib import Path
+import copy
+
 import constants
 from resource_resolver import ResourceResolver
-import secrets
-import string
-import hashlib
-from pathlib import Path
+from encryption import Encryption
 
-import copy
 
 def replace_env(obj: Any, env: str) -> Any:
     """Recursively replace '{env}' in strings, dict keys, and values."""
@@ -71,10 +70,7 @@ def prepare_raw_config(config):
 
 def provision_standard_service(project: str, env: str, service: str, existing_config: Dict[str, Any]) -> Dict[str, Any]:
     """Auto-generate configuration for standard services, respecting existing config"""
-    from deployment_syncer import DeploymentSyncer
-
-    safe_chars = string.ascii_letters + string.digits  # Only safe ASCII characters
-    
+       
     def merge_config(default_config: Dict[str, Any]) -> Dict[str, Any]:
         """Helper to merge default config with existing config"""
         result = {}
@@ -102,7 +98,7 @@ def provision_standard_service(project: str, env: str, service: str, existing_co
     secret_filename = ResourceResolver._get_secret_filename(service)
     password_file = Path(secrets_path) / secret_filename    
     if not password_file.exists():
-        password = ''.join(secrets.choice(safe_chars) for _ in range(32))
+        password = Encryption.generate_password() 
         password_file.write_text(password, encoding='utf-8')
     container_secrets_path = ResourceResolver.get_volume_container_path(service, "secrets")
     
