@@ -19,11 +19,14 @@ try:
     from . import env_loader
 except ImportError:
     import env_loader
-from health_agent_installer import HealthAgentInstaller
 try:
     from .execute_cmd import CommandExecuter
 except ImportError:
     from execute_cmd import CommandExecuter
+try:
+    from .health_agent_installer import HealthAgentInstaller
+except ImportError:
+    from health_agent_installer import HealthAgentInstaller
 
 
 def log(msg):

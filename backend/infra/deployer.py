@@ -14,8 +14,7 @@ from collections import defaultdict
 try:
     from . import constants
 except ImportError:
-    import constants
-from git_manager import GitManager                
+    import constants           
 try:
     from .execute_cmd import CommandExecuter
 except ImportError:
@@ -56,7 +55,6 @@ try:
     from .logger import Logger
 except ImportError:
     from logger import Logger
-from server_inventory import ServerInventory
 try:
     from .do_cost_tracker import DOCostTracker
 except ImportError:
@@ -65,7 +63,6 @@ try:
     from . import env_loader
 except ImportError:
     import env_loader
-from path_resolver import PathResolver
 try:
     from .do_manager import DOManager
 except ImportError:
@@ -82,6 +79,18 @@ try:
     from .resource_resolver import ResourceResolver
 except ImportError:
     from resource_resolver import ResourceResolver
+try:
+    from .git_manager import GitManager
+except ImportError:
+    from git_manager import GitManager
+try:
+    from .server_inventory import ServerInventory
+except ImportError:
+    from server_inventory import ServerInventory
+try:
+    from .path_resolver import PathResolver
+except ImportError:
+    from path_resolver import PathResolver
 
 
 def log(msg):

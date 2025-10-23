@@ -38,10 +38,6 @@ try:
 except ImportError:
     import env_loader
 try:
-    from .live_deployment_query import LiveDeploymentQuery
-except ImportError:
-    from live_deployment_query import LiveDeploymentQuery
-try:
     from .path_resolver import PathResolver
 except ImportError:
     from path_resolver import PathResolver
