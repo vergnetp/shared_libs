@@ -1856,14 +1856,15 @@ class Deployer:
                 log(f"[{server_ip}] Could not check container status: {e}")
                 return False
 
-    def _log_container_failure(self, container_name: str, server_ip: str, lines: int = 30):
+    def _log_container_failure(self, container_name: str, server_ip: str, lines: int = 100):
         """
         Log container failure details including logs and inspect output.
+        IMPROVED: Get more lines and prioritize error messages.
         
         Args:
             container_name: Name of the failed container
             server_ip: Server IP where container is running
-            lines: Number of log lines to show
+            lines: Number of log lines to fetch (increased default to 100)
         """
         log(f"[{server_ip}] ═══════════════════════════════════════════════")
         log(f"[{server_ip}] Container '{container_name}' failure details:")
@@ -1890,8 +1891,8 @@ class Deployer:
             log(f"[{server_ip}] Could not inspect container: {e}")
         
         try:
-            # Get container logs
-            log(f"[{server_ip}] Last {lines} lines of logs:")
+            # Get container logs (fetch more lines to capture errors)
+            log(f"[{server_ip}] Container logs (last {lines} lines):")
             log(f"[{server_ip}] ───────────────────────────────────────────────")
             
             logs_result = DockerExecuter.get_container_logs(container_name, lines=lines, server_ip=server_ip, user="root")
@@ -1899,28 +1900,79 @@ class Deployer:
             if logs_result:
                 logs = logs_result.strip() if isinstance(logs_result, str) else str(logs_result).strip()
                 
-                # Filter out noise (Alpine package manager, SSH installation, etc.)
-                filtered_lines = []
+                # Split into lines for processing
+                all_lines = logs.split('\n')
+                
+                # IMPROVED: Define noise patterns (package installation)
                 noise_patterns = [
                     'fetch https://dl-cdn.alpinelinux.org',
-                    'Installing',
+                    'fetch http://dl-cdn.alpinelinux.org',
+                    '/alpine/v3',
+                    'Installing ',
                     'Executing busybox',
                     'OK: ',
-                    '/alpine/'
+                    'MiB in ',
+                    'packages'
                 ]
                 
-                for line in logs.split('\n'):
-                    # Skip noise lines
-                    if not any(pattern in line for pattern in noise_patterns):
-                        filtered_lines.append(line)
+                # IMPROVED: Define error patterns (what we WANT to see)
+                error_patterns = [
+                    'Error',
+                    'ERROR',
+                    'Exception',
+                    'Traceback',
+                    'ImportError',
+                    'ModuleNotFoundError',
+                    'AttributeError',
+                    'Failed',
+                    'FAILED',
+                    'traceback',
+                    'File "',
+                    'SyntaxError',
+                    'NameError',
+                    'KeyError',
+                    'ValueError',
+                    'TypeError',
+                    'ConnectionError',
+                    'TimeoutError',
+                    'permission denied',
+                    'cannot',
+                    'fatal',
+                    'FATAL'
+                ]
                 
-                # Show filtered logs
-                if filtered_lines:
-                    for line in filtered_lines[-lines:]:  # Last N lines after filtering
+                # Separate lines into categories
+                error_lines = []
+                clean_lines = []
+                
+                for line in all_lines:
+                    # Check if it's an error line (PRIORITY)
+                    if any(pattern in line for pattern in error_patterns):
+                        error_lines.append(line)
+                    # Check if it's noise
+                    elif any(pattern in line for pattern in noise_patterns):
+                        continue  # Skip noise
+                    # Otherwise keep it
+                    else:
+                        clean_lines.append(line)
+                
+                # IMPROVED: Show error lines first (most important)
+                if error_lines:
+                    log(f"[{server_ip}] ⚠️  ERROR LINES DETECTED:")
+                    for line in error_lines[-50:]:  # Last 50 error lines
+                        log(f"[{server_ip}] ❌ {line}")
+                    log(f"[{server_ip}] ───────────────────────────────────────────────")
+                
+                # Then show clean lines (non-error, non-noise)
+                if clean_lines:
+                    log(f"[{server_ip}] Other relevant logs:")
+                    for line in clean_lines[-30:]:  # Last 30 clean lines
                         log(f"[{server_ip}] {line}")
-                else:
-                    # If everything was filtered, show raw logs
-                    for line in logs.split('\n')[-lines:]:
+                
+                # If we filtered everything out, show raw logs
+                if not error_lines and not clean_lines:
+                    log(f"[{server_ip}] Showing raw logs (all filtered as noise):")
+                    for line in all_lines[-30:]:
                         log(f"[{server_ip}] {line}")
             else:
                 log(f"[{server_ip}] No logs available")
