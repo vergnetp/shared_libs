@@ -3,6 +3,9 @@ Auto-Scaling Coordinator - Manages auto-scaling logic for HealthMonitor.
 
 This module separates auto-scaling concerns from health monitoring,
 providing a clean interface for metrics collection and scaling decisions.
+
+MIGRATED: Now uses LiveDeploymentQuery for live infrastructure queries
+instead of DeploymentStateManager JSON.
 """
 
 from typing import Dict, Any, Optional
@@ -62,27 +65,36 @@ class AutoScalingCoordinator:
         a continuous history of metrics for averaging.
         
         Called by: All servers (leader and followers)
+        
+        MIGRATED: Now uses LiveDeploymentQuery to get actual running containers
+        instead of reading from JSON.
         """
-        from deployment_state_manager import DeploymentStateManager
+        from live_deployment_query import LiveDeploymentQuery
         
         try:
-            all_deployments = DeploymentStateManager.get_all_deployments()
+            # Get all running containers across all servers
+            all_containers = LiveDeploymentQuery.get_all_running_containers()
             
-            for project in all_deployments:
-                for env in all_deployments[project]:
-                    for service_name, deployment in all_deployments[project][env].items():
-                        servers = deployment.get("servers", [])
-                        
-                        for server_ip in servers:
-                            # Collect service-specific metrics
-                            metrics = MetricsCollector.collect_service_metrics(
-                                project, env, service_name, server_ip
-                            )
-                            
-                            if metrics:
-                                # Store with unique key
-                                key = f"{server_ip}_{project}_{env}_{service_name}"
-                                self._metrics_collector.store_metrics(key, metrics)
+            for server_ip, containers in all_containers.items():
+                for container_name in containers:
+                    # Parse container name: {project}_{env}_{service}[_secondary]
+                    parts = container_name.split('_')
+                    if len(parts) < 3:
+                        continue
+                    
+                    project = parts[0]
+                    env = parts[1]
+                    service_name = parts[2]  # Ignore _secondary suffix if present
+                    
+                    # Collect service-specific metrics
+                    metrics = MetricsCollector.collect_service_metrics(
+                        project, env, service_name, server_ip
+                    )
+                    
+                    if metrics:
+                        # Store with unique key
+                        key = f"{server_ip}_{project}_{env}_{service_name}"
+                        self._metrics_collector.store_metrics(key, metrics)
         
         except Exception as e:
             log(f"Error collecting metrics: {e}")
@@ -103,16 +115,33 @@ class AutoScalingCoordinator:
         3. Collect and average metrics
         4. Make scaling decisions
         5. Execute scaling if needed
+        
+        MIGRATED: Now uses LiveDeploymentQuery to discover services
+        instead of reading from JSON.
         """
-        from deployment_state_manager import DeploymentStateManager
+        from live_deployment_query import LiveDeploymentQuery
         from deployment_config import DeploymentConfigurer
         
         log("Checking auto-scaling for all services...")
         
         try:
-            all_deployments = DeploymentStateManager.get_all_deployments()
+            # Get summary of all running services
+            summary = LiveDeploymentQuery.get_deployment_summary(None)  # All projects
             
-            for project in all_deployments:
+            # Group by project
+            projects_envs = {}
+            for server_ip in summary['servers']:
+                services = LiveDeploymentQuery.get_services_on_server(server_ip)
+                for svc in services:
+                    project = svc['project']
+                    env = svc['env']
+                    
+                    if project not in projects_envs:
+                        projects_envs[project] = set()
+                    projects_envs[project].add(env)
+            
+            # Process each project/env
+            for project, envs in projects_envs.items():
                 # Load project config
                 try:
                     config = DeploymentConfigurer(project)
@@ -123,14 +152,16 @@ class AutoScalingCoordinator:
                 # Get or create AutoScaler for this project
                 scaler = self._get_auto_scaler(project)
                 
-                for env in all_deployments[project]:
+                for env in envs:
                     services = config.get_services(env)
                     
                     for service_name, service_config in services.items():
-                        self._check_service_scaling(
-                            project, env, service_name,
-                            service_config, scaler
-                        )
+                        # Check if this service is actually running
+                        if LiveDeploymentQuery.is_service_running(project, env, service_name):
+                            self._check_service_scaling(
+                                project, env, service_name,
+                                service_config, scaler
+                            )
         
         except Exception as e:
             log(f"Error in auto-scaling check: {e}")
@@ -152,6 +183,9 @@ class AutoScalingCoordinator:
                 service: Service name
                 service_config: Service configuration dict
                 scaler: AutoScaler instance for this project
+                
+            MIGRATED: Now uses LiveDeploymentQuery to get servers
+            instead of reading from JSON.
             """
             # Get auto_scaling config
             auto_scale_config = service_config.get("auto_scaling")
@@ -182,14 +216,10 @@ class AutoScalingCoordinator:
             if not self._should_check_now(check_key):
                 return
             
-            # Get current deployment
-            from deployment_state_manager import DeploymentStateManager
-            deployment = DeploymentStateManager.get_current_deployment(project, env, service)
+            # Get servers running this service (LIVE QUERY)
+            from live_deployment_query import LiveDeploymentQuery
+            servers = LiveDeploymentQuery.get_servers_running_service(project, env, service)
             
-            if not deployment:
-                return
-            
-            servers = deployment.get("servers", [])
             if not servers:
                 return
             

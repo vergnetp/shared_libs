@@ -2726,21 +2726,25 @@ class Deployer:
         Returns:
             Log output
         """ 
-        # Get deployment info
-        deployment = DeploymentStateManager.get_current_deployment(
+        from live_deployment_query import LiveDeploymentQuery
+        
+        # Query live infrastructure for running containers
+        servers = LiveDeploymentQuery.get_servers_running_service(
             self.project_name, env, service
         )
         
-        if not deployment:
-            return f"No deployment found for {self.project_name}/{env}/{service}"
-        
-        container_name = deployment['container_name']
-        servers = deployment['servers']
-        
         if not servers:
-            return "No servers found for this deployment"
+            return f"No running containers found for {self.project_name}/{env}/{service}"
         
-        # Fetch logs from first server
+        # Get actual container name from first server
+        container = DockerExecuter.find_service_container(
+            self.project_name, env, service, servers[0]
+        )
+        
+        if not container:
+            return f"Container not found on {servers[0]}"
+        
+        container_name = container['name']
         server_ip = servers[0]
         
         try:
@@ -2750,7 +2754,7 @@ class Deployer:
             return logs
         except Exception as e:
             return f"Failed to fetch logs: {e}"
-
+    
     def print_logs(self, service: str, env: str, lines: int = 100):
         """Fetch and print logs to console"""
         print(f"\n{'='*60}")

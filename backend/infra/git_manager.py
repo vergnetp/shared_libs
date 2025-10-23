@@ -5,7 +5,6 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 from logger import Logger
-from encryption import Encryption
 
 def log(msg):
     Logger.log(msg)

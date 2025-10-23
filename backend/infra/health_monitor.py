@@ -10,6 +10,7 @@ from do_manager import DOManager
 from execute_cmd import CommandExecuter
 from logger import Logger
 from auto_scaling_coordinator import AutoScalingCoordinator
+from live_deployment_query import LiveDeploymentQuery
 import env_loader
 
 def log(msg):
@@ -329,34 +330,24 @@ class HealthMonitor:
     
     @staticmethod
     def check_service_containers(server: Dict[str, Any]) -> List[str]:
-        """Check which expected containers are missing on a server via health agent."""
-        from deployment_state_manager import DeploymentStateManager
+        """
+        Check if all expected service containers are running on a server.
+        
+        Returns list of missing container names.
+        """
+        from live_deployment_query import LiveDeploymentQuery
         
         ip = server['ip']
         
-        # Get expected services on this server
-        expected_services = DeploymentStateManager.get_services_on_server(ip)
+        # Use live query to compare expected vs actual
+        diff = LiveDeploymentQuery.compare_expected_vs_actual(ip)
         
-        if not expected_services:
-            return []
-        
-        # Get running containers via agent
-        try:
-            response = HealthMonitor.agent_request(ip, "GET", "/health", timeout=5)
-            running_containers = set(response.get('containers', []))
-        except Exception as e:
-            log(f"Could not get containers on {ip} via agent: {e}")
-            return [s['container_name'] for s in expected_services]
-        
-        # Find missing containers
-        missing = []
-        for service in expected_services:
-            container_name = service['container_name']
-            if container_name not in running_containers:
-                missing.append(container_name)
+        # Log details
+        if diff['missing']:
+            for container_name in diff['missing']:
                 log(f"Missing container on {ip}: {container_name}")
         
-        return missing
+        return diff['missing']
 
     @staticmethod
     def restart_container_via_agent(server_ip: str, container_name: str) -> bool:
@@ -512,9 +503,9 @@ class HealthMonitor:
         log(f"Replacing failed server {failed_server['ip']}")
         Logger.start()
         
-        # Get services that were on the failed server
-        failed_services = DeploymentStateManager.get_services_on_server(failed_server['ip'])
-        
+        # Get services that were on the failed server        
+        failed_services = LiveDeploymentQuery.get_services_on_server(failed_server['ip'])
+
         if failed_services:
             log(f"Server had {len(failed_services)} services: {[s['service'] for s in failed_services]}")
         else:

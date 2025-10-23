@@ -1366,16 +1366,16 @@ class ProjectDeployer:
         
         # Filter by env if specified
         if env:
-            # Get services in this env to find which servers are used
-            from deployment_state_manager import DeploymentStateManager
+            # Get servers that have containers for this env
+            from live_deployment_query import LiveDeploymentQuery
             env_servers = set()
             
             services = self.deployment_configurer.get_services(env)
             for service_name in services:
-                service_servers = DeploymentStateManager.get_servers_for_service(
+                service_servers = LiveDeploymentQuery.get_servers_running_service(
                     self.project_name, env, service_name
                 )
-                env_servers.update([s['ip'] for s in service_servers])
+                env_servers.update(service_servers)
             
             servers = [s for s in servers if s['ip'] in env_servers]
         
