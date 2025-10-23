@@ -2,7 +2,10 @@ import os
 from typing import Optional, Dict, List, Any
 from project_manager import ProjectManager
 from global_deployer import UnifiedDeployer
+from logger import Logger
 
+def log(msg):
+    Logger.log(msg)
 
 class ProjectDeployer:
     """
@@ -1220,7 +1223,240 @@ class ProjectDeployer:
             project.rollback(env="prod", service="api", version="v1.2.3")
         """
         return self._deployer.rollback(env, service, version)
+
+    # ========================================
+    # FILE OPERATIONS (delegate to Deployer)
+    # ========================================
     
+    def push_config(self, env: str, targets: List[str] = None) -> bool:
+        """Push config/secrets/files to servers"""
+        from deployer import Deployer
+        deployer = Deployer(self.project_name)
+        return deployer.push_config(env, targets)
+    
+    def pull_data(self, env: str, targets: List[str] = None) -> bool:
+        """Pull data/logs/backups from servers"""
+        from deployer import Deployer
+        deployer = Deployer(self.project_name)
+        return deployer.pull_data(env, targets)
+    
+    def pull_backups(self, env: str, service: str = None) -> bool:
+        """Pull backups from servers"""
+        from deployer import Deployer
+        deployer = Deployer(self.project_name)
+        return deployer.pull_backups(env, service)
+    
+    def sync_files(self, env: str) -> bool:
+        """Full bidirectional sync"""
+        from deployer import Deployer
+        deployer = Deployer(self.project_name)
+        return deployer.full_sync(env)
+    
+    # ========================================
+    # SECRETS MANAGEMENT (delegate to SecretsRotator)
+    # ========================================
+    
+    def rotate_secrets(
+        self, 
+        env: str, 
+        services: List[str] = None,
+        auto_deploy: bool = False
+    ) -> bool:
+        """
+        Rotate passwords for stateful services.
+        
+        Args:
+            env: Environment name
+            services: List of services to rotate (None = all)
+            auto_deploy: If True, automatically redeploy after rotation
+            
+        Returns:
+            True if successful
+        """
+        from secrets_rotator import SecretsRotator
+        rotator = SecretsRotator(self.project_name, env)
+        
+        if services:
+            for service in services:
+                rotator.rotate_service_password(service)
+        else:
+            rotator.rotate_all_secrets()
+        
+        if auto_deploy:
+            return self.deploy(env=env)
+        
+        return True
+    
+    def list_secrets(self, env: str) -> Dict[str, List[str]]:
+        """List all secrets for an environment"""
+        from secrets_rotator import SecretsRotator
+        rotator = SecretsRotator(self.project_name, env)
+        return rotator.list_secrets()
+    
+    # ========================================
+    # HEALTH MONITORING (delegate to HealthMonitor)
+    # ========================================
+    
+    def check_health(self) -> None:
+        """Run health check once (monitor_and_heal)"""
+        from health_monitor import HealthMonitor
+        HealthMonitor.monitor_and_heal()
+    
+    def get_health_status(self) -> Dict[str, Any]:
+        """
+        Get current health status of all servers.
+        
+        Returns:
+            Dict with servers categorized by health
+        """
+        from server_inventory import ServerInventory
+        from health_monitor import HealthMonitor
+        
+        all_servers = ServerInventory.get_servers(
+            deployment_status=ServerInventory.STATUS_ACTIVE
+        )
+        
+        healthy = []
+        unhealthy = []
+        
+        for server in all_servers:
+            if HealthMonitor.is_server_healthy(server):
+                healthy.append(server)
+            else:
+                unhealthy.append(server)
+        
+        return {
+            'healthy': healthy,
+            'unhealthy': unhealthy,
+            'total': len(all_servers)
+        }
+    
+    # ========================================
+    # SERVER MANAGEMENT (delegate to ServerInventory)
+    # ========================================
+    
+    def list_servers(
+        self, 
+        env: str = None, 
+        zone: str = None,
+        status: str = None
+    ) -> List[Dict[str, Any]]:
+        """
+        List servers with optional filtering.
+        
+        Args:
+            env: Filter by environment (e.g., "prod")
+            zone: Filter by zone (e.g., "lon1")
+            status: Filter by status ("active", "blue", "destroying")
+            
+        Returns:
+            List of server dicts
+        """
+        from server_inventory import ServerInventory
+        
+        # Get all servers or filtered by status
+        if status:
+            servers = ServerInventory.get_servers(deployment_status=status)
+        else:
+            servers = ServerInventory.list_all_servers()
+        
+        # Filter by zone if specified
+        if zone:
+            servers = [s for s in servers if s.get('zone') == zone]
+        
+        # Filter by env if specified
+        if env:
+            # Get services in this env to find which servers are used
+            from deployment_state_manager import DeploymentStateManager
+            env_servers = set()
+            
+            services = self.deployment_configurer.get_services(env)
+            for service_name in services:
+                service_servers = DeploymentStateManager.get_servers_for_service(
+                    self.project_name, env, service_name
+                )
+                env_servers.update([s['ip'] for s in service_servers])
+            
+            servers = [s for s in servers if s['ip'] in env_servers]
+        
+        return servers
+    
+    def destroy_server(self, server_ip: str) -> bool:
+        """
+        Destroy a specific server.
+        
+        Args:
+            server_ip: IP address of server to destroy
+            
+        Returns:
+            True if successful
+        """
+        from server_inventory import ServerInventory
+        from do_manager import DOManager
+        
+        # Find server
+        servers = ServerInventory.list_all_servers()
+        server = next((s for s in servers if s['ip'] == server_ip), None)
+        
+        if not server:
+            log(f"Server {server_ip} not found")
+            return False
+        
+        # Destroy via DO API
+        DOManager.destroy_droplet(server['droplet_id'])
+        
+        # Release from inventory
+        ServerInventory.release_servers([server_ip], destroy=False)
+        
+        return True
+    
+    # ========================================
+    # DEPLOYMENT STATE (delegate to DeploymentStateManager)
+    # ========================================
+    
+    def get_deployment_state(
+        self, 
+        env: str, 
+        service: str = None
+    ) -> Dict[str, Any]:
+        """
+        Get current deployment state.
+        
+        Args:
+            env: Environment name
+            service: Optional service name (None = all services)
+            
+        Returns:
+            Deployment state dict
+        """
+        from deployment_state_manager import DeploymentStateManager
+        
+        if service:
+            return DeploymentStateManager.get_current_deployment(
+                self.project_name, env, service
+            )
+        else:
+            # Get all services
+            services = self.deployment_configurer.get_services(env)
+            return {
+                service_name: DeploymentStateManager.get_current_deployment(
+                    self.project_name, env, service_name
+                )
+                for service_name in services
+            }
+    
+    def get_deployment_history(
+        self, 
+        env: str, 
+        service: str,
+        limit: int = 10
+    ) -> List[Dict[str, Any]]:
+        """Get deployment history for a service"""
+        from deployment_state_manager import DeploymentStateManager
+        return DeploymentStateManager.get_deployment_history(
+            self.project_name, env, service, limit
+        )
+
     # =========================================================================
     # UTILITY
     # =========================================================================

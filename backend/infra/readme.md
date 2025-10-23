@@ -1030,30 +1030,24 @@ project.add_postgres(
 
 ### Managing Backups
 
-**Pull backups to bastion:**
-
 ```python
-from backend.infra.deployer import Deployer
-
-deployer = Deployer("myapp")
+project = ProjectDeployer("myapp")
 
 # Pull all backups for an environment
-deployer.pull_backups(env="prod")
+project.pull_backups(env="prod")
 
 # Pull specific service backups
-deployer.pull_backups(env="prod", service="postgres")
-```
+project.pull_backups(env="prod", service="postgres")
 
-**List available backups:**
-
-```python
-backups = deployer.list_backups(env="prod", service="postgres")
-
+# List available backups
+backups = project.list_backups(env="prod", service="postgres")
 for backup in backups:
     print(f"{backup['timestamp']}: {backup['size_mb']}MB, {backup['age_hours']}h old")
-```
 
-**Restore from backup:**
+# Restore from backup
+project.rollback(env="prod", service="postgres", timestamp="latest")
+project.rollback(env="prod", service="postgres", timestamp="20250120_020000")
+```
 
 ```python
 # Restore latest backup
@@ -1280,17 +1274,22 @@ All autonomous - no manual intervention required.
 ### Manual Health Check
 
 ```python
-from backend.infra.health_monitor import HealthMonitor
+project = ProjectDeployer("myapp")
 
 # Run health check once
-HealthMonitor.monitor_and_heal()
+project.check_health()
 
 # Get server health status
-from backend.infra.server_inventory import ServerInventory
-servers = ServerInventory.list_all_servers()
+status = project.get_health_status()
+print(f"Healthy: {len(status['healthy'])}, Unhealthy: {len(status['unhealthy'])}")
 
+# List all servers
+servers = project.list_servers()
 for server in servers:
     print(f"{server['ip']}: {server['deployment_status']} - {server['zone']}")
+
+# Filter servers by environment and zone
+servers = project.list_servers(env="prod", zone="lon1")
 ```
 
 ---
@@ -1315,42 +1314,24 @@ Passwords are automatically generated for stateful services (Postgres, Redis, Op
 Secrets should be rotated periodically:
 
 ```python
-from backend.infra.secrets_rotator import SecretsRotator
+project = ProjectDeployer("myapp")
 
-rotator = SecretsRotator("myapp", "prod")
+# Rotate all secrets (with automatic redeployment)
+project.rotate_secrets(env="prod", auto_deploy=True)
 
-# Rotate all services
-rotator.rotate_all_secrets()
+# Rotate specific services only
+project.rotate_secrets(env="prod", services=["postgres", "redis"])
 
-# Rotate specific service
-rotator.rotate_postgres_password(service_name="postgres")
-rotator.rotate_redis_password(service_name="redis")
-rotator.rotate_opensearch_password(service_name="opensearch")
-```
+# Rotate without automatic redeployment (must deploy manually)
+project.rotate_secrets(env="prod")
+project.deploy(env="prod")  # Manual redeploy
 
-**⚠️ Important:** After rotation, you must redeploy services for the new password to take effect:
-
-```python
-rotator.rotate_all_secrets()
-project.deploy(env="prod")  # Redeploy to apply new passwords
-```
-
-### List Secrets
-
-```python
-secrets = rotator.list_secrets()
-
+# List all secrets
+secrets = project.list_secrets(env="prod")
 for service, files in secrets.items():
     print(f"{service}:")
     for file in files:
         print(f"  - {file}")
-```
-
-### Cleanup Old Backups
-
-```python
-# Remove secret backups older than 30 days
-rotator.cleanup_old_backups(days_to_keep=30)
 ```
 
 ### Security Best Practices
@@ -1789,18 +1770,30 @@ Both scripts automatically discover servers and prompt for project name.
 ### Manual Sync Operations
 
 ```python
-from backend.infra.deployer import Deployer
-
-deployer = Deployer("myapp")
+project = ProjectDeployer("myapp")
 
 # Push local files to servers
-deployer.push_config(env="prod")
+project.push_config(env="prod")
 
 # Pull server data to local
-deployer.pull_data(env="prod")
+project.pull_data(env="prod")
 
 # Full bidirectional sync
-deployer.full_sync(env="prod")
+project.sync_files(env="prod")
+
+# Common workflows
+# 1. Config change workflow
+# Edit: C:/local/myapp/prod/config/api/settings.json
+project.push_config(env="prod")
+project.deploy(env="prod", service="api", build=False)
+
+# 2. Retrieve backups
+project.pull_data(env="prod")
+# Backups in: C:/local/myapp/prod/backups/{server_ip}/
+
+# 3. Analyze logs
+project.pull_data(env="prod")
+# Logs in: C:/local/myapp/prod/logs/{server_ip}/
 ```
 
 ### Directory Structure
@@ -1822,23 +1815,6 @@ deployer.full_sync(env="prod")
 - **Push**: Single archive, parallel to all servers, auto-distributes secrets
 - **Pull**: Server-separated (e.g., `logs/192_168_1_100/`), parallel retrieval
 - **Automatic**: Secrets from databases copied to all consumer services
-
-### Common Workflows
-
-```python
-# 1. Config change workflow
-# Edit: C:/local/myapp/prod/config/api/settings.json
-deployer.push_config(env="prod")
-project.deploy(env="prod", service="api", build=False)
-
-# 2. Retrieve backups
-deployer.pull_data(env="prod")
-# Backups in: C:/local/myapp/prod/backups/{server_ip}/
-
-# 3. Analyze logs
-deployer.pull_data(env="prod")
-# Logs in: C:/local/myapp/prod/logs/{server_ip}/
-```
 
 ---
 
@@ -1892,41 +1868,80 @@ deployer.pull_data(env="prod")
 ### Debug Mode
 
 ```python
+project = ProjectDeployer("myapp")
+
 # Enable verbose logging
 import logging
 logging.basicConfig(level=logging.DEBUG)
 
 # Check deployment state
-from backend.infra.deployment_state_manager import DeploymentStateManager
-state = DeploymentStateManager.get_current_deployment("myapp", "prod", "api")
+state = project.get_deployment_state(env="prod", service="api")
 print(state)
 
-# Check server inventory
-from backend.infra.server_inventory import ServerInventory
-servers = ServerInventory.list_all_servers()
-for s in servers:
-    print(s)
+# Get deployment history
+history = project.get_deployment_history(env="prod", service="api", limit=10)
+for deployment in history:
+    print(f"{deployment['timestamp']}: version {deployment['version']}")
 
-# Check Git checkouts
-import os
-git_path = "C:/local/git_checkouts/myapp/prod/" if os.name == 'nt' else "/local/git_checkouts/myapp/prod/"
-if os.path.exists(git_path):
-    print(f"Git checkouts: {os.listdir(git_path)}")
+# Check server inventory
+servers = project.list_servers(env="prod")
+for s in servers:
+    print(f"{s['ip']}: {s['deployment_status']} - {s['zone']}")
+
+# Get health status
+status = project.get_health_status()
+print(f"Healthy servers: {len(status['healthy'])}")
+print(f"Unhealthy servers: {len(status['unhealthy'])}")
 ```
 
 ---
 
 ## API Reference
 
-For complete API documentation including all class methods with parameters, returns, and descriptions, see the separate API documentation file.
-
 **Key Classes:**
 
-- `ProjectDeployer` - Main interface for all operations
-- `ResourceResolver` - Service discovery and connection details
-- `SecretsRotator` - Password rotation management
-- `BackupManager` - Backup configuration and restore
-- `HealthMonitor` - Health monitoring and self-healing
-- `GitManager` - Git repository checkout and management
+Key Classes:
+
+ProjectDeployer - Unified interface for ALL operations (single import needed)
+ResourceResolver - Service discovery and connection details (automatic)
+GitManager - Git repository checkout and management (automatic)
+
+Note: You no longer need to import Deployer, SecretsRotator, HealthMonitor, ServerInventory, or DeploymentStateManager directly. All functionality is accessible through ProjectDeployer.
+
+ProjectDeployer Methods:
+Service Management:
+
+add\_\*() - Add services (postgres, redis, python, nodejs, react, etc.)
+update_service() - Modify service configuration
+delete_service() - Remove service from configuration
+deploy() - Deploy services to servers
+rollback() - Rollback to previous version
+status() - Get deployment status
+logs() - View service logs
+
+File Operations:
+
+push_config() - Push config/secrets to servers
+pull_data() - Pull logs/backups from servers
+pull_backups() - Pull backups specifically
+sync_files() - Bidirectional sync
+list_backups() - List available backups
+
+Secrets Management:
+
+rotate_secrets() - Rotate passwords (with auto-deploy option)
+list_secrets() - List all secrets
+
+Health & Monitoring:
+
+check_health() - Run health check once
+get_health_status() - Get current health status of all servers
+
+Server Management:
+
+list_servers() - List servers (with filtering by env/zone/status)
+destroy_server() - Destroy specific server
+get_deployment_state() - Get current deployment state
+get_deployment_history() - Get deployment history
 
 ---
