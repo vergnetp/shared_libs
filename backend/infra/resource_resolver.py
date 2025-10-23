@@ -436,6 +436,29 @@ class ResourceResolver:
     # PATH RESOLUTION
     # ========================================
     
+
+    @staticmethod
+    def detect_target_os(server_ip: Optional[str], user: str = "root") -> Literal["windows", "linux"]:
+        """
+        Detect OS of target server (cached).
+        
+        Delegates to PathResolver for OS detection logic.
+        
+        Args:
+            server_ip: Target server IP (None or "localhost" for local detection)
+            user: SSH user for remote servers (default: "root")
+        
+        Returns:
+            "windows" or "linux"
+        
+        Examples:
+            >>> ResourceResolver.detect_target_os(None)
+            'windows'  # On Windows machine
+            >>> ResourceResolver.detect_target_os("167.99.88.1")
+            'linux'    # Remote Linux server
+        """
+        return PathResolver.detect_target_os(server_ip, user)
+
     @staticmethod
     def get_volume_host_path(project: str, env: str, service: str,
                             path_type: Literal["config", "secrets", "files", "data", "logs", "backups", "monitoring"],
