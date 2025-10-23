@@ -1,5 +1,5 @@
 import os
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Any, Union
 from project_manager import ProjectManager
 from global_deployer import UnifiedDeployer
 from logger import Logger
@@ -187,7 +187,7 @@ class ProjectDeployer:
         build_context: Optional[str] = None,
         git_repo: Optional[str] = None,
         git_token: Optional[str] = None,
-        auto_scaling: Optional[bool | Dict[str, Any]] = None,
+        auto_scaling: Optional[Union[bool, Dict[str, Any]]] = None,
         **other_config
     ) -> 'ProjectDeployer':
         """
@@ -304,7 +304,7 @@ class ProjectDeployer:
         build_context: Optional[str] = None,
         git_repo: Optional[str] = None,
         git_token: Optional[str] = None,
-        auto_scaling: Optional[bool | Dict[str, Any]] = None,
+        auto_scaling: Optional[Union[bool, Dict[str, Any]]] = None,
         **other_config
     ) -> 'ProjectDeployer':
         """
@@ -488,7 +488,7 @@ class ProjectDeployer:
         build_context: Optional[str] = None,
         git_repo: Optional[str] = None,
         git_token: Optional[str] = None,
-        auto_scaling: Optional[bool | Dict[str, Any]] = None,
+        auto_scaling: Optional[Union[bool, Dict[str, Any]]] = None,
         **other_config
     ) -> 'ProjectDeployer':
         """
@@ -682,7 +682,7 @@ class ProjectDeployer:
         build_context: Optional[str] = None,
         git_repo: Optional[str] = None,
         git_token: Optional[str] = None,
-        auto_scaling: Optional[bool | Dict[str, Any]] = None,
+        auto_scaling: Optional[Union[bool, Dict[str, Any]]] = None,
         **other_config
     ) -> 'ProjectDeployer':
         """

@@ -1,4 +1,4 @@
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Any, Union
 from deployment_config import DeploymentConfigurer
 
 
@@ -118,7 +118,7 @@ class ProjectManager:
         dockerfile_content: Optional[Dict[str, str]] = None,
         image: Optional[str] = None,
         build_context: Optional[str] = None,
-        auto_scaling: Optional[bool | Dict[str, Any]] = None,
+        auto_scaling: Optional[Union[bool, Dict[str, Any]]] = None,
         **other_config
     ) -> bool:
         """Adds service to project config"""
