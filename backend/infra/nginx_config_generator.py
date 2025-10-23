@@ -641,11 +641,38 @@ class NginxConfigGenerator:
                 CommandExecuter.run_cmd("docker start nginx", target_server, user)
                 return True
         
-        # Case 3: Nginx exists on WRONG network (needs recreation)
+        # Case 3: Nginx exists on different network
         else:
-            log(f"Nginx on wrong network ({current_network}), expected {network_name} - recreating")
-            CommandExecuter.run_cmd("docker rm -f nginx", target_server, user)
-            # Fall through to creation
+            # REFACTORED: With shared network, migrate nginx instead of recreating
+            log(f"Nginx on network '{current_network}', migrating to shared network '{network_name}'")
+            
+            try:
+                # Stop nginx (preserve configs)
+                CommandExecuter.run_cmd("docker stop nginx", target_server, user)
+                
+                # Disconnect from old network (ignore if already disconnected)
+                CommandExecuter.run_cmd(
+                    f"docker network disconnect {current_network} nginx 2>/dev/null || true",
+                    target_server, user
+                )
+                
+                # Connect to new shared network
+                CommandExecuter.run_cmd(
+                    f"docker network connect {network_name} nginx",
+                    target_server, user
+                )
+                
+                # Start nginx
+                CommandExecuter.run_cmd("docker start nginx", target_server, user)
+                
+                log(f"Nginx migrated to shared network {network_name}")
+                return True
+                
+            except Exception as e:
+                # If migration fails, fall back to recreation
+                log(f"Migration failed ({e}), recreating nginx on {network_name}")
+                CommandExecuter.run_cmd("docker rm -f nginx 2>/dev/null || true", target_server, user)
+                # Fall through to creation
         
         # ============================================================
         # CREATE NGINX CONTAINER (only if needed)
@@ -689,6 +716,152 @@ class NginxConfigGenerator:
         
         return True
 
+    @staticmethod
+    def cleanup_service_nginx_config(
+        project: str,
+        env: str,
+        service: str,
+        server_ip: str,
+        user: str = "root"
+    ) -> bool:
+        """
+        Remove nginx config for a specific service and reload nginx.
+        
+        Use this when removing a service to clean up its nginx configuration.
+        With shared network architecture, we must clean up configs when services
+        are removed to prevent nginx from trying to route to non-existent containers.
+        
+        Args:
+            project: Project name
+            env: Environment name
+            service: Service name
+            server_ip: Target server
+            user: SSH user (default: root)
+            
+        Returns:
+            True if successful, False otherwise
+            
+        Example:
+            >>> NginxConfigGenerator.cleanup_service_nginx_config(
+            ...     "myapp", "prod", "postgres", "165.227.224.92"
+            ... )
+            True
+        """
+        config_filename = f"{project}_{env}_{service}.conf"
+        config_path = f"/etc/nginx/stream.d/{config_filename}"
+        
+        try:
+            # Remove config file
+            CommandExecuter.run_cmd(
+                f"rm -f {config_path}",
+                server_ip, user
+            )
+            log(f"Removed nginx config: {config_path}")
+            
+            # Reload nginx (graceful reload, no downtime)
+            CommandExecuter.run_cmd(
+                f"docker exec {NginxConfigGenerator.NGINX_CONTAINER} nginx -s reload",
+                server_ip, user
+            )
+            log(f"Reloaded nginx on {server_ip}")
+            
+            return True
+            
+        except Exception as e:
+            log(f"Failed to cleanup nginx config on {server_ip}: {e}")
+            return False
+
+
+    @staticmethod
+    def cleanup_project_env_nginx_configs(
+        project: str,
+        env: str,
+        server_ip: str,
+        user: str = "root"
+    ) -> bool:
+        """
+        Remove ALL nginx configs for a project/env and reload nginx.
+        
+        Use this when removing an entire environment to clean up all
+        service configs in one operation.
+        
+        Args:
+            project: Project name
+            env: Environment name
+            server_ip: Target server
+            user: SSH user (default: root)
+            
+        Returns:
+            True if successful, False otherwise
+            
+        Example:
+            >>> NginxConfigGenerator.cleanup_project_env_nginx_configs(
+            ...     "myapp", "prod", "165.227.224.92"
+            ... )
+            True
+        """
+        pattern = f"/etc/nginx/stream.d/{project}_{env}_*.conf"
+        
+        try:
+            # Remove all configs matching pattern
+            CommandExecuter.run_cmd(
+                f"rm -f {pattern}",
+                server_ip, user
+            )
+            log(f"Removed all nginx configs for {project}/{env}: {pattern}")
+            
+            # Reload nginx (graceful reload, no downtime)
+            CommandExecuter.run_cmd(
+                f"docker exec {NginxConfigGenerator.NGINX_CONTAINER} nginx -s reload",
+                server_ip, user
+            )
+            log(f"Reloaded nginx on {server_ip}")
+            
+            return True
+            
+        except Exception as e:
+            log(f"Failed to cleanup nginx configs on {server_ip}: {e}")
+            return False
+
+
+    @staticmethod
+    def list_nginx_configs(
+        server_ip: str,
+        user: str = "root"
+    ) -> List[str]:
+        """
+        List all nginx stream configs on a server.
+        
+        Useful for debugging and verifying which projects/envs are configured.
+        
+        Args:
+            server_ip: Target server
+            user: SSH user (default: root)
+            
+        Returns:
+            List of config filenames
+            
+        Example:
+            >>> NginxConfigGenerator.list_nginx_configs("165.227.224.92")
+            ['project_a_prod_postgres.conf', 'project_b_dev_api.conf']
+        """
+        try:
+            result = CommandExecuter.run_cmd(
+                "ls /etc/nginx/stream.d/*.conf 2>/dev/null | xargs -n1 basename",
+                server_ip, user
+            )
+            
+            if isinstance(result, str):
+                configs = [c.strip() for c in result.split('\n') if c.strip()]
+            else:
+                configs = []
+            
+            return configs
+            
+        except Exception as e:
+            log(f"Failed to list nginx configs on {server_ip}: {e}")
+            return []
+    
     @staticmethod
     def _cf_get_zone_id(target_server: str, cf_token: str, zone_name: str) -> str | None:
         url = f"https://api.cloudflare.com/client/v4/zones?name={zone_name}&status=active"

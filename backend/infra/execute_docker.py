@@ -27,6 +27,8 @@ def log(msg):
 class DockerExecuter:
     """Docker-specific command executor with specialized methods"""
 
+    _network_cache = {}
+
     @staticmethod
     def check_docker() -> bool:
         """Check if Docker is available and running"""
@@ -163,14 +165,36 @@ class DockerExecuter:
 
     @staticmethod
     def create_network(network_name: str, server_ip: str = 'localhost', 
-                      user: str = "root", ignore_if_exists: bool = True) -> Any:
-        """Create Docker network, optionally ignoring if it already exists"""
+                    user: str = "root", ignore_if_exists: bool = True) -> Any:
+        """Create Docker network with caching"""
+        
+        # Check cache first
+        cache_key = server_ip or 'localhost'
+        if cache_key in DockerExecuter._network_cache:
+            if network_name in DockerExecuter._network_cache[cache_key]:
+                log(f"Network '{network_name}' already exists (cached)")
+                return None
+        
+        # Not in cache - create
         try:
-            return CommandExecuter.run_cmd(["docker", "network", "create", network_name], server_ip, user)
+            result = CommandExecuter.run_cmd(["docker", "network", "create", network_name], server_ip, user)
+            
+            # Cache it
+            if cache_key not in DockerExecuter._network_cache:
+                DockerExecuter._network_cache[cache_key] = {}
+            DockerExecuter._network_cache[cache_key][network_name] = True
+            
+            return result
+            
         except Exception as e:
             error_msg = str(e).lower()
             if ignore_if_exists and "already exists" in error_msg:
-                log(f"Network '{network_name}' already exists")
+                # Cache it
+                if cache_key not in DockerExecuter._network_cache:
+                    DockerExecuter._network_cache[cache_key] = {}
+                DockerExecuter._network_cache[cache_key][network_name] = True
+                
+                log(f"Network '{network_name}' already exists (cached)")
                 return None
             raise
 
@@ -589,3 +613,13 @@ class DockerExecuter:
         except Exception as e:
             log(f"Could not get exit code for {container_name}: {e}")
             return -1
+        
+    @staticmethod
+    def clear_network_cache(server_ip: str = None):
+        """Clear network cache"""
+        if server_ip:
+            cache_key = server_ip or 'localhost'
+            if cache_key in DockerExecuter._network_cache:
+                del DockerExecuter._network_cache[cache_key]
+        else:
+            DockerExecuter._network_cache.clear()

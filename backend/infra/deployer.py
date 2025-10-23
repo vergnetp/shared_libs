@@ -682,11 +682,13 @@ class Deployer:
                     
                     # Host directories (config, secrets, files)
                     host_mount_types = ["config", "secrets", "files"]
+                    host_paths = []
                     for path_type in host_mount_types:
                         host_path = PathResolver.get_volume_host_path(
                             project, env, service_name, path_type, server_ip
                         )
-                        commands.append(f"mkdir -p {host_path}")
+                        host_paths.append(host_path)
+                    commands.append(f"mkdir -p {' '.join(host_paths)}")
                     
                     # Docker volumes (data, logs, backups, monitoring)
                     docker_volume_types = ["data", "logs", "backups", "monitoring"]
@@ -1662,19 +1664,9 @@ class Deployer:
                 if old_name:
                     log(f"[{target_ip}] Checking for old container: {old_name}")
                     try:
-                        # Check if opposite container exists
-                        check_cmd = f"docker ps -aq --filter 'name=^{old_name}$'"
-                        check_result = CommandExecuter.run_cmd(check_cmd, target_ip, 'root')
-                        
-                        if hasattr(check_result, 'stdout'):
-                            existing_id = check_result.stdout.strip()
-                        else:
-                            existing_id = str(check_result).strip()
-                        
-                        if existing_id:
-                            log(f"[{target_ip}] Force removing old container: {old_name}")
-                            CommandExecuter.run_cmd(f"docker rm -f {old_name}", target_ip, 'root')
-                            log(f"[{target_ip}] Successfully removed {old_name}")
+                        remove_cmd = f"docker rm -f {old_name} 2>/dev/null || true"
+                        CommandExecuter.run_cmd(remove_cmd, target_ip, 'root')
+                        log(f"[{target_ip}] Ensured {old_name} is removed")
                     except Exception as e:
                         log(f"[{target_ip}] Note: Could not remove old container {old_name}: {e}")
                 
@@ -2162,6 +2154,8 @@ class Deployer:
                     log(f"Removed container {container_name} from {server_ip}")
                 except Exception as e:
                     log(f"Could not remove {container_name} from {server_ip}: {e}")
+            
+            NginxConfigGenerator.cleanup_service_nginx_config(project, env, service_name, server_ip, 'root')
                     
         except Exception as e:
             log(f"Could not cleanup {service_name} on {server_ip}: {e}")

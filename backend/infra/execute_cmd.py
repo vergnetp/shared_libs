@@ -217,12 +217,13 @@ class CommandExecuter:
             # So we need proper quoting for the sh -c context
             escaped_remote_cmd = remote_cmd.replace("'", "'\\''")  # Escape single quotes for sh -c
             
+            # FIX: Suppress Alpine package installation output by redirecting to /dev/null
             docker_ssh_cmd = [
                 "docker", "run", "--rm",
                 "-v", f"{key_path_str}:/root/.ssh/deployer_id_rsa",
                 "alpine:latest",
                 "sh", "-c",
-                f"apk add --no-cache openssh-client && "
+                f"apk add --no-cache openssh-client >/dev/null 2>&1 && "
                 f"chmod 600 /root/.ssh/deployer_id_rsa && "
                 f"ssh -o StrictHostKeyChecking=no -i /root/.ssh/deployer_id_rsa {user}@{server_ip} '{escaped_remote_cmd}'"
             ]
@@ -266,13 +267,15 @@ class CommandExecuter:
             key_path_str = str(ssh_key_path).replace("\\", "/")
             if key_path_str[1] == ":":
                 key_path_str = f"/{key_path_str[0].lower()}{key_path_str[2:]}"
+            
+            # FIX: Suppress Alpine package installation output
             ssh_wrapper = [
                 "docker", "run", "--rm",
                 "-i",  # keep stdin open
                 "-v", f"{key_path_str}:/root/.ssh/deployer_id_rsa",
                 "alpine:latest",
                 "sh", "-c",
-                f"apk add --no-cache openssh-client && "
+                f"apk add --no-cache openssh-client >/dev/null 2>&1 && "
                 f"chmod 600 /root/.ssh/deployer_id_rsa && "
                 f"ssh -o StrictHostKeyChecking=no -i /root/.ssh/deployer_id_rsa {user}@{server_ip} {shlex.quote(remote_cmd)}"
             ]

@@ -71,13 +71,31 @@ class DeploymentNaming:
     @staticmethod
     def get_network_name(project: str, env: str) -> str:
         """Generate Docker network name.
-
-        Format: ``<project>_<env>_network``
-
-        Example:
-        - get_network_name("myproj", "dev") -> "myproj_dev_network"
+        
+        REFACTORED: Now returns shared network for all projects/envs.
+        This eliminates nginx recreation overhead when switching between projects.
+        
+        Format: ``deployer_network`` (constant)
+        
+        Args:
+            project: Project name (unused, kept for API compatibility)
+            env: Environment name (unused, kept for API compatibility)
+        
+        Returns:
+            Shared network name
+        
+        Examples:
+            - get_network_name("myproj", "dev") -> "deployer_network"
+            - get_network_name("another", "prod") -> "deployer_network"
+            
+        Note: All containers across all projects/envs now share one Docker network.
+        This is safe because:
+        - Containers have unique names (project_env_service)
+        - Internal ports are hashed to avoid collisions
+        - VPC network provides server-to-server security
+        - Nginx configs are project/env/service specific
         """
-        return f"{project}_{env}_network"
+        return "deployer_network"  # CHANGED: was f"{project}_{env}_network"
 
     @staticmethod
     def get_dockerfile_name(project: str, env: str, service_name: str) -> str:
