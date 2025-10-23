@@ -915,7 +915,7 @@ DB_CONFIG = {
     "host": ResourceResolver.get_service_host(project, env, "postgres"),  # Returns "nginx"
     "port": ResourceResolver.get_service_port(project, env, "postgres"),  # Returns internal port (e.g., 5234)
     "database": ResourceResolver.get_db_name(project, env, "postgres"),
-    "user": ResourceResolver.get_db_user(project, env, "postgres"),
+    "user": ResourceResolver.get_db_user(project, "postgres"),
     "password": ResourceResolver.get_service_password(project, env, "postgres")
 }
 conn = psycopg2.connect(**DB_CONFIG)
