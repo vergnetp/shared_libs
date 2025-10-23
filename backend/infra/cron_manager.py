@@ -165,28 +165,16 @@ class CronManager:
         identifier = CronManager.get_cron_identifier(project, env, service_name)
         
         try:
-            # Remove existing cron job if it exists
-            CronManager.remove_cron_job(project, env, service_name, server_ip, user)
-            
-            # Add new cron job
-            full_cron_entry = f"{identifier}\n{cron_entry}"
-            
-            # Create temporary cron file
-            temp_cron_file = f"/tmp/cron_temp_{project}_{env}_{service_name}"
-            
-            # Escape the cron entry for shell
-            escaped_cron_entry = full_cron_entry.replace("'", "'\\''")
+            install_cmd = f"""
+        bash -c '
+        # Remove old cron
+        crontab -l 2>/dev/null | grep -v "{identifier}" | crontab - 2>/dev/null || true
 
-            # Get current crontab, add new entry, and install
-            commands = [
-                f"crontab -l 2>/dev/null > {temp_cron_file} || touch {temp_cron_file}",
-                f"echo '{escaped_cron_entry}' >> {temp_cron_file}",  # Use single quotes
-                f"crontab {temp_cron_file}",
-                f"rm {temp_cron_file}"
-            ]
-            
-            for cmd in commands:
-                CommandExecuter.run_cmd(cmd, server_ip, user)
+        # Add new cron
+        (crontab -l 2>/dev/null; echo "{identifier}"; echo "{cron_entry}") | crontab -
+        '
+        """            
+            CommandExecuter.run_cmd(install_cmd, server_ip, user)
             
             log(f"Installed cron job for {service_name}: {service_config.get('schedule')}")
             return True

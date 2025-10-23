@@ -223,9 +223,10 @@ class ResourceResolver:
         
         Strategy:
         1. Check environment variable {SERVICE}_PASSWORD_FILE for custom path
-        2. Try container path (via PathResolver.get_volume_container_path)
-        3. Try host path (via PathResolver.get_volume_host_path)
-        4. Fall back to {SERVICE}_PASSWORD environment variable
+        2. Try container path for the service itself (e.g., /run/secrets for postgres)
+        3. Try container path for custom services (e.g., /app/secrets for api accessing postgres password)
+        4. Try host path (via PathResolver.get_volume_host_path)
+        5. Fall back to {SERVICE}_PASSWORD environment variable
         
         Args:
             project: Project name
@@ -240,8 +241,6 @@ class ResourceResolver:
             'dbpassword123'
             >>> ResourceResolver.get_service_password("myapp", "prod", "redis")
             'redispassword456'
-            >>> ResourceResolver.get_service_password("myapp", "prod", "opensearch")
-            'opensearchpassword789'
         """
         secret_filename = ResourceResolver._get_secret_filename(service)
         env_var_name = f"{service.upper()}_PASSWORD_FILE"
@@ -252,7 +251,7 @@ class ResourceResolver:
         if custom_path and os.path.exists(custom_path):
             return Path(custom_path).read_text().strip()
         
-        # 2. Container path (PathResolver determines the actual path)
+        # 2. Try container path for the service itself (e.g., postgres container uses /run/secrets)
         try:
             container_path = PathResolver.get_volume_container_path(service, "secrets")
             password_file = Path(container_path) / secret_filename
@@ -261,7 +260,16 @@ class ResourceResolver:
         except Exception:
             pass
         
-        # 3. Host path (PathResolver determines OS-aware path)
+        # 3. Try /app/secrets (for custom services like api accessing postgres password)
+        # The deployment system copies stateful service secrets to all consumer services
+        try:
+            password_file = Path("/app/secrets") / secret_filename
+            if password_file.exists():
+                return password_file.read_text().strip()
+        except Exception:
+            pass
+        
+        # 4. Host path (PathResolver determines OS-aware path)
         try:
             host_path = PathResolver.get_volume_host_path(
                 project, env, service, "secrets", "localhost"
@@ -272,9 +280,9 @@ class ResourceResolver:
         except Exception:
             pass
         
-        # 4. Fallback to environment variable
+        # 5. Fallback to environment variable
         return os.getenv(env_var_password, "")
-    
+
     @staticmethod
     def get_service_port(project: str, env: str, service: str) -> int:
         """

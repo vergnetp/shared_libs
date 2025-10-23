@@ -614,99 +614,80 @@ class NginxConfigGenerator:
         target_server: str = "localhost",
         user: str = "root"
     ) -> bool:
-        """Ensure nginx container is running with proper configuration"""
-     
+        """Ensure nginx container is running with proper configuration (OPTIMIZED)"""
+    
         container_name = NginxConfigGenerator.NGINX_CONTAINER
         network_name = ResourceResolver.get_network_name(project, env)
         
-        # Check if container exists
-        check_cmd = "docker ps -a --filter 'name=^nginx$' --format '{{.Names}}'"
+        # ============================================================
+        # OPTIMIZATION: Single command check for existence + network
+        # ============================================================
+        check_cmd = f"docker inspect nginx --format '{{{{.HostConfig.NetworkMode}}}}' 2>/dev/null || echo 'missing'"
         result = CommandExecuter.run_cmd(check_cmd, target_server, user)
+        current_network = str(result).strip()
         
-        if result and 'nginx' in str(result):
-            # Container exists - check its network
-            network_cmd = "timeout 5 docker inspect nginx --format '{{.HostConfig.NetworkMode}}' 2>/dev/null || echo 'bridge'"
-            current_network = CommandExecuter.run_cmd(network_cmd, target_server, user)
-            current_network = current_network.stdout.strip() if hasattr(current_network, 'stdout') else str(current_network).strip()
-            
-            if current_network != network_name:
-                # Wrong network - recreate it!
-                log(f"Nginx on wrong network ({current_network}), expected {network_name} - recreating")
-                CommandExecuter.run_cmd("docker rm -f nginx", target_server, user)
-                # Fall through to creation below
-            elif DockerExecuter.is_container_running(container_name, target_server, user):
-                log(f"Nginx container '{container_name}' already running on correct network")
+        # Case 1: Nginx doesn't exist
+        if current_network == 'missing':
+            log(f"Nginx container not found - will create on network {network_name}")
+            # Fall through to creation
+        
+        # Case 2: Nginx exists on CORRECT network
+        elif current_network == network_name:
+            if DockerExecuter.is_container_running(container_name, target_server, user):
+                log(f"Nginx already running on correct network ({network_name}) - skipping")
                 return True
             else:
-                # Correct network but not running - start it
+                log(f"Starting existing nginx container on {network_name}")
                 CommandExecuter.run_cmd("docker start nginx", target_server, user)
-                log(f"Started existing nginx container")
                 return True
         
-        # Create nginx container on the correct network
+        # Case 3: Nginx exists on WRONG network (needs recreation)
+        else:
+            log(f"Nginx on wrong network ({current_network}), expected {network_name} - recreating")
+            CommandExecuter.run_cmd("docker rm -f nginx", target_server, user)
+            # Fall through to creation
+        
+        # ============================================================
+        # CREATE NGINX CONTAINER (only if needed)
+        # ============================================================
+        
+        # Ensure network exists
+        try:
+            DockerExecuter.create_network(network_name, target_server, user, ignore_if_exists=True)
+            log(f"Network {network_name} ready")
+        except Exception as e:
+            log(f"Network creation warning: {e}")
+        
+        # Get all internal ports for stream configuration
+        internal_ports = []
+        for service_name in services.keys():
+            internal_port = ResourceResolver.get_service_port(project, env, service_name)
+            internal_ports.append(internal_port)
+        
+        # Build port mappings
+        port_mappings = ["-p", "80:80", "-p", "443:443"]
+        for port in set(internal_ports):  # Use set to avoid duplicates
+            port_mappings.extend(["-p", f"{port}:{port}"])
+        
+        # Create nginx container
         log(f"Starting nginx container '{container_name}' on network '{network_name}'")
         
-        cert_paths = NginxConfigGenerator._get_cert_paths(target_server)
-        target_os = ResourceResolver.detect_target_os(target_server, user)
+        create_cmd = " ".join([
+            "docker", "run", "-d",
+            "--name", container_name,
+            "--network", network_name,
+            "--restart", "unless-stopped",
+            "-v", "/etc/nginx/nginx.conf:/etc/nginx/nginx.conf:ro",
+            "-v", "/etc/nginx/conf.d:/etc/nginx/conf.d:ro",
+            "-v", "/etc/nginx/stream.d:/etc/nginx/stream.d:ro",
+            *port_mappings,
+            "nginx:alpine"
+        ])
         
-        # Get base nginx path
-        if target_server == "localhost" or target_server is None:
-            if target_os == "windows":
-                nginx_base = "C:/local/nginx"
-            else:
-                nginx_base = "/etc/nginx"
-        else:
-            nginx_base = "/etc/nginx"
+        CommandExecuter.run_cmd(create_cmd, target_server, user)
+        log(f"Started nginx container '{container_name}' on network '{network_name}'")
         
-        # Build paths
-        main_conf = f"{nginx_base}/nginx.conf"
-        conf_dir = f"{nginx_base}/conf.d"
-        stream_dir = f"{nginx_base}/stream.d"
-        
-        # For localhost, create directories
-        if target_server == "localhost" or target_server is None:
-          
-            Path(conf_dir).mkdir(parents=True, exist_ok=True)
-            Path(stream_dir).mkdir(parents=True, exist_ok=True)
-            
-            if not Path(main_conf).exists():
-                NginxConfigGenerator._ensure_main_nginx_local(target_os)
-        
-        volumes = [
-            f"{main_conf}:/etc/nginx/nginx.conf:ro",
-            f"{conf_dir}:/etc/nginx/conf.d:ro",
-            f"{stream_dir}:/etc/nginx/stream.d:ro",
-            f"{cert_paths['etc']}:/etc/letsencrypt:ro",
-            f"{cert_paths['ssl']}:/etc/nginx/ssl:ro",
-            "/var/log/nginx:/var/log/nginx"
-        ]
-        
-        ports = {
-            "80": "80",
-            "443": "443"
-        }
-        
-        # Expose internal port for every service
-        for service_name in services.keys():
-            internal_port = ResourceResolver.get_internal_port(project, env, service_name)
-            ports[str(internal_port)] = str(internal_port)
-
-        try:
-            DockerExecuter.run_container(
-                image="nginx:alpine",
-                name=container_name,
-                network=network_name,  # ← This is already correct
-                ports=ports,
-                volumes=volumes,
-                restart_policy="unless-stopped",
-                server_ip=target_server,
-                user=user
-            )
-            log(f"Started nginx container '{container_name}' on network '{network_name}'")
-            return True
-        except Exception as e:
-            log(f"Failed to start nginx container: {e}")
-            return False
+        return True
 
     @staticmethod
     def _cf_get_zone_id(target_server: str, cf_token: str, zone_name: str) -> str | None:
