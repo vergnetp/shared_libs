@@ -2512,10 +2512,8 @@ class Deployer:
                     docker_hub_user, project_name, env, service_name, version
                 )
             
-            # Pull image if remote
-            if server_ip != 'localhost':
-                log(f"Pulling image {image} to {server_ip}...")
-                DockerExecuter.pull_image(image, server_ip, user)
+           # Images are pre-pulled in batch prep, no need to pull again
+            log(f"Using pre-pulled image {image} on {server_ip}")
             
             # Get volumes
             volumes = PathResolver.generate_all_volume_mounts(

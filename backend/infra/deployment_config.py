@@ -1,5 +1,5 @@
 import json
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from pathlib import Path
 import copy
 
@@ -212,6 +212,8 @@ class DeploymentConfigurer:
 
     DEFAULT_ENVS = ["dev", "test", "uat", "production"]
 
+    _config_cache: Dict[str, 'DeploymentConfigurer'] = {}
+
     def __init__(self, project_name: str):
         """
         Initialize deployment configuration for a specific project.
@@ -223,23 +225,25 @@ class DeploymentConfigurer:
             FileNotFoundError: If project config file not found
             ValueError: If project_name not specified
         """
-        if not project_name:
-            projects = constants.list_projects()
-            if projects:
-                raise ValueError(
-                    f"Must specify project_name. Available projects: {', '.join(projects)}"
-                )
-            else:
-                raise ValueError("No projects found in config/projects/")
+                # CHECK CACHE FIRST:
+        cache_key = project_name
+        if cache_key in DeploymentConfigurer._config_cache:
+            # Return cached instance
+            cached = DeploymentConfigurer._config_cache[cache_key]
+            self.config_file = cached.config_file
+            self.raw_config = cached.raw_config
+            self.config = cached.config
+            return
         
-        self.project_name = project_name
+        # ORIGINAL CODE (only runs if not cached):
         self.config_file = constants.get_project_config_path(project_name)
         
         if not self.config_file.exists():
             available = constants.list_projects()
             if available:
                 raise FileNotFoundError(
-                    f"Project '{project_name}' not found. Available: {', '.join(available)}"
+                    f"Project '{project_name}' not found. "
+                    f"Available: {', '.join(available)}"
                 )
             else:
                 raise FileNotFoundError(
@@ -250,6 +254,11 @@ class DeploymentConfigurer:
         prepare_raw_config(self.raw_config)
         self.rebuild_config()
         self.validate_config()
+        
+        # CACHE THE RESULT:
+        DeploymentConfigurer._config_cache[cache_key] = self
+
+
 
     def _load_raw_config(self) -> Dict[str, Any]:
         """Load raw JSON configuration from file."""
@@ -374,3 +383,21 @@ class DeploymentConfigurer:
     def get_services(self, env: str) -> dict[str, dict]:
         """Return all services for a given environment"""
         return self.config['project']['environments'].get(env, {}).get("services", {})
+    
+    @staticmethod
+    def clear_cache(project_name: Optional[str] = None):
+        """
+        Clear cached configurations.
+        
+        Args:
+            project_name: Clear specific project, or None to clear all
+        """
+        if project_name:
+            DeploymentConfigurer._config_cache.pop(project_name, None)
+        else:
+            DeploymentConfigurer._config_cache.clear()
+    
+    @staticmethod
+    def is_cached(project_name: str) -> bool:
+        """Check if project config is cached"""
+        return project_name in DeploymentConfigurer._config_cache

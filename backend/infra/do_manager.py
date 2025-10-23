@@ -227,7 +227,48 @@ class DOManager:
         except Exception as e:
             log(f"Failed to delete snapshot {snapshot_id}: {e}")
             return False
-    
+
+    @staticmethod
+    def _prebake_common_images(server_ip: str):
+        """
+        Pre-pull commonly used Docker images into template snapshot.
+        
+        These images will be baked into the snapshot, making deployments faster.
+        """
+        log("Pre-baking common Docker images into template...")
+        
+        # List of commonly used images to pre-bake
+        common_images = [
+            # Databases
+            "postgres:15",
+            "postgres:14",
+            "postgres:13",
+            "redis:7-alpine",
+            "redis:6-alpine",
+            
+            # Web servers
+            "nginx:alpine",
+            "nginx:latest",
+            
+            # Search
+            "opensearchproject/opensearch:2",
+            
+            # Message queues (optional)
+            # "rabbitmq:3-alpine",            
+        ]
+        
+        log(f"Pre-pulling {len(common_images)} images...")
+        
+        for image in common_images:
+            try:
+                log(f"  Pulling {image}...")
+                CommandExecuter.run_cmd(f"docker pull {image}", server_ip, "root")
+                log(f"  ✓ {image}")
+            except Exception as e:
+                log(f"  ⚠ Failed to pull {image}: {e}")
+        
+        log("Image pre-baking complete")
+
     @staticmethod
     def get_or_create_template(region: str = "lon1") -> str:
         """
@@ -276,6 +317,8 @@ class DOManager:
             # Install basic nginx
             DOManager._install_basic_nginx(ip)
             
+            DOManager._prebake_common_images(ip)
+
             log(f"Template droplet {template_id} fully provisioned")
             
             # Create snapshot
