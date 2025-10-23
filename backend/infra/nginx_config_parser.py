@@ -8,8 +8,11 @@ in nginx. The nginx configs are the real source of truth for what's deployed.
 import re
 from typing import List, Dict, Any, Optional
 from pathlib import Path
+
+from resource_resolver import ResourceResolver
 from execute_cmd import CommandExecuter
 from logger import Logger
+from server_inventory import ServerInventory
 
 
 def log(msg):
@@ -32,8 +35,7 @@ class NginxConfigParser:
     @staticmethod
     def get_stream_config_path(server_ip: str = "localhost", user: str = "root") -> str:
         """Get path to stream config directory for a server"""
-        if server_ip == "localhost" or server_ip is None:
-            from resource_resolver import ResourceResolver
+        if server_ip == "localhost" or server_ip is None:            
             target_os = ResourceResolver.detect_target_os(None)
             if target_os == "windows":
                 return NginxConfigParser.STREAM_DIR_WINDOWS
@@ -313,9 +315,7 @@ class NginxConfigParser:
             
         Returns:
             List of server IPs where this service has backends configured
-        """
-        from server_inventory import ServerInventory
-        
+        """       
         all_servers = ServerInventory.list_all_servers()
         backend_servers = []
         

@@ -3,13 +3,13 @@ Auto-Scaling Coordinator - Manages auto-scaling logic for HealthMonitor.
 
 This module separates auto-scaling concerns from health monitoring,
 providing a clean interface for metrics collection and scaling decisions.
-
-MIGRATED: Now uses LiveDeploymentQuery for live infrastructure queries
-instead of DeploymentStateManager JSON.
 """
 
 from typing import Dict, Any, Optional
 from datetime import datetime, timedelta
+
+from deployment_config import DeploymentConfigurer
+from live_deployment_query import LiveDeploymentQuery
 from metrics_collector import MetricsCollector
 from auto_scaler import AutoScaler
 from logger import Logger
@@ -68,9 +68,7 @@ class AutoScalingCoordinator:
         
         MIGRATED: Now uses LiveDeploymentQuery to get actual running containers
         instead of reading from JSON.
-        """
-        from live_deployment_query import LiveDeploymentQuery
-        
+        """      
         try:
             # Get all running containers across all servers
             all_containers = LiveDeploymentQuery.get_all_running_containers()
@@ -118,10 +116,7 @@ class AutoScalingCoordinator:
         
         MIGRATED: Now uses LiveDeploymentQuery to discover services
         instead of reading from JSON.
-        """
-        from live_deployment_query import LiveDeploymentQuery
-        from deployment_config import DeploymentConfigurer
-        
+        """        
         log("Checking auto-scaling for all services...")
         
         try:
@@ -216,8 +211,7 @@ class AutoScalingCoordinator:
             if not self._should_check_now(check_key):
                 return
             
-            # Get servers running this service (LIVE QUERY)
-            from live_deployment_query import LiveDeploymentQuery
+            # Get servers running this service (LIVE QUERY)            
             servers = LiveDeploymentQuery.get_servers_running_service(project, env, service)
             
             if not servers:

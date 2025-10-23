@@ -1,5 +1,11 @@
 from typing import Optional, Dict, List, Any, Union
+
 from deployment_config import DeploymentConfigurer
+from logger import Logger
+
+
+def log(msg):
+    Logger.log(msg)
 
 
 class ProjectManager:
@@ -83,11 +89,6 @@ class ProjectManager:
         Returns:
             Calculated startup_order (max of dependencies + 1)
         """
-        from logger import Logger
-        
-        def log(msg):
-            Logger.log(msg)
-        
         try:
             config = DeploymentConfigurer(project_name)
             services = config.raw_config.get("project", {}).get("services", {})

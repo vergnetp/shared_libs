@@ -12,10 +12,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import defaultdict
 
 import constants
+from git_manager import GitManager                
 from execute_cmd import CommandExecuter
 from nginx_config_generator import NginxConfigGenerator
 from deployment_config import DeploymentConfigurer
-
+from live_deployment_query import LiveDeploymentQuery
 from deployment_syncer import DeploymentSyncer
 from execute_docker import DockerExecuter
 from deployment_state_manager import DeploymentStateManager
@@ -469,10 +470,7 @@ class Deployer:
             # Handle git checkout if git_repo specified
             build_context = service_config.get("build_context", ".")
             
-            if service_config.get("git_repo"):
-                from git_manager import GitManager
-                from encryption import Encryption  # ADD THIS IMPORT
-                
+            if service_config.get("git_repo"):                
                 log(f"Checking out Git repository for {service_name}...")
                 
                 # Get git_token from service config or environment
@@ -2725,9 +2723,7 @@ class Deployer:
             
         Returns:
             Log output
-        """ 
-        from live_deployment_query import LiveDeploymentQuery
-        
+        """   
         # Query live infrastructure for running containers
         servers = LiveDeploymentQuery.get_servers_running_service(
             self.project_name, env, service

@@ -1,10 +1,15 @@
 import platform
 import subprocess
+import getpass
+import os
 from typing import Dict, Any, List, Optional, Tuple
+
 from execute_cmd import CommandExecuter
 from logger import Logger
 from pathlib import Path
 from resource_resolver import ResourceResolver
+from cron_manager import CronManager
+
 
 def log(msg):
     Logger.log(msg)
@@ -172,8 +177,6 @@ class WindowsTaskScheduler:
             log(f"Created batch script: {script_path}")
             
             # Get current user for task execution
-            import getpass
-            import os
             current_user = os.environ.get('USERNAME', getpass.getuser())
             
             # Simple schtasks command - run every minute with current user
@@ -273,9 +276,6 @@ class WindowsTaskScheduler:
     @staticmethod
     def _try_current_user(task_name: str, script_path: Path, windows_schedule: Dict, user: str, server_ip: str) -> bool:
         """Try creating task with current user context"""
-        import getpass
-        import os
-        
         # Get current user - try multiple methods
         current_user = os.environ.get('USERNAME') or getpass.getuser()
         
@@ -503,8 +503,7 @@ class EnhancedCronManager:
             return EnhancedCronManager._handle_no_scheduler(
                 platform, project, env, service_name, service_config, server_ip, user
             )
-        elif scheduler == "cron":
-            from cron_manager import CronManager
+        elif scheduler == "cron":            
             return CronManager.install_cron_job(
                 project, env, service_name, service_config,
                 docker_hub_user, version, server_ip, user
@@ -584,8 +583,7 @@ class EnhancedCronManager:
         
         platform, scheduler = PlatformScheduler.detect_platform_and_scheduler(server_ip, user)
         
-        if scheduler == "cron":
-            from cron_manager import CronManager
+        if scheduler == "cron":            
             return CronManager.remove_cron_job(project, env, service_name, server_ip, user)
         elif scheduler == "schtasks":
             return WindowsTaskScheduler.remove_scheduled_task(
@@ -606,8 +604,7 @@ class EnhancedCronManager:
         
         platform, scheduler = PlatformScheduler.detect_platform_and_scheduler(server_ip, user)
         
-        if scheduler == "cron":
-            from cron_manager import CronManager
+        if scheduler == "cron":            
             return CronManager.list_managed_cron_jobs(project, env, server_ip, user)
         elif scheduler == "schtasks":
             return WindowsTaskScheduler.list_managed_tasks(project, env, server_ip, user or "Administrator")

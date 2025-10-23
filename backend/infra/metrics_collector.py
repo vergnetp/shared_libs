@@ -1,11 +1,13 @@
-import time
+import os
 import psutil
 from typing import Dict, Any, List
 from datetime import datetime, timedelta
 from collections import deque
+
 from execute_cmd import CommandExecuter
-from server_inventory import ServerInventory
 from logger import Logger
+from resource_resolver import ResourceResolver
+from deployment_config import DeploymentConfigurer
 
 def log(msg):
     Logger.log(msg)
@@ -107,10 +109,7 @@ class MetricsCollector:
                 'rps': float,
                 'internal_port': int
             }
-        """
-        from resource_resolver import ResourceResolver
-        from deployment_config import DeploymentConfigurer
-        
+        """        
         container_name = ResourceResolver.get_container_name(project, env, service)
         
         try:
@@ -195,8 +194,7 @@ class MetricsCollector:
             Number of CPUs (e.g., 8 for 8-CPU host)
         """
         try:
-            if server_ip == "localhost":
-                import os
+            if server_ip == "localhost":                
                 return os.cpu_count() or 1
             else:
                 # Remote server via SSH

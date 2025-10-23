@@ -1,9 +1,11 @@
 # backend/infra/git_manager.py
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Optional
+
 from logger import Logger
 
 def log(msg):
@@ -232,8 +234,7 @@ class GitManager:
             else:
                 checkout_dir = GitManager.GIT_CHECKOUT_BASE
             
-            if checkout_dir.exists():
-                import shutil
+            if checkout_dir.exists():                
                 shutil.rmtree(checkout_dir)
                 log(f"✓ Cleaned up checkouts: {checkout_dir}")
         except Exception as e:

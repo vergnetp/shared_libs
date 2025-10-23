@@ -4,6 +4,8 @@ from deployment_state_manager import DeploymentStateManager
 from deployment_naming import DeploymentNaming
 from execute_cmd import CommandExecuter
 from logger import Logger
+from deployer import Deployer
+from deployment_config import DeploymentConfigurer
 
 
 def log(msg):
@@ -112,9 +114,6 @@ class RollbackManager:
         Logger.start()
         
         try:
-            from deployer import Deployer
-            from deployment_config import DeploymentConfigurer
-            
             # Get current version
             current = DeploymentStateManager.get_current_deployment(project, env, service)
             

@@ -7,6 +7,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import platform
 import os
 import shutil
+import tarfile
+import io
+
+from backup_manager import BackupManager
+from deployment_config import DeploymentConfigurer
 
 BASE = "local"
 
@@ -109,9 +114,7 @@ class DeploymentSyncer:
             project: Project name
             env: Environment name
             services: Dictionary of all services in the environment
-        """
-        from backup_manager import BackupManager
-        
+        """        
         local_base = DeploymentSyncer.get_local_base(project, env)
         secrets_base = local_base / "secrets"
         
@@ -203,8 +206,7 @@ class DeploymentSyncer:
             dir_path = local_base / dir_name
             dir_path.mkdir(parents=True, exist_ok=True)
 
-        try:
-            from deployment_config import DeploymentConfigurer
+        try:            
             configurer = DeploymentConfigurer(project)
             services = configurer.get_services(env)
             DeploymentSyncer._copy_stateful_secrets_to_consumers(project, env, services)
@@ -239,9 +241,6 @@ class DeploymentSyncer:
         log(f"Content to push: {', '.join(content_summary)}")
         
         # Create single tar archive of all push directories
-        import tarfile
-        import io
-        
         log("Creating archive...")
         tar_buffer = io.BytesIO()
         
@@ -545,12 +544,8 @@ class DeploymentSyncer:
                 
                 # Create tar on remote and transfer back
                 tar_cmd = f"cd {remote_path} && tar -czf - ."
-                result = CommandExecuter.run_cmd(tar_cmd, server_ip, "root")
-                
-                # Extract locally
-                import tarfile
-                import io
-                
+                result = CommandExecuter.run_cmd(tar_cmd, server_ip, "root")                
+              
                 # Handle the result properly - it should be bytes or string
                 if isinstance(result, str):
                     tar_data = result.encode('latin-1')
@@ -669,10 +664,7 @@ class DeploymentSyncer:
                 dir_perms="700",
                 file_perms="600"
             )
-        """
-        import tarfile
-        import io
-        
+        """        
         if not local_dir.exists():
             log(f"Warning: Local directory not found: {local_dir}")
             return False

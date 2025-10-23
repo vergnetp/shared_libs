@@ -3,14 +3,18 @@
 import os
 import time
 import requests
-import subprocess
+from datetime import datetime
 from typing import List, Dict, Any, Tuple, Optional
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from logger import Logger
-from execute_cmd import CommandExecuter
 import threading
+
+from logger import Logger
+from health_monitor_installer import HealthMonitorInstaller
 import env_loader
+from health_agent_installer import HealthAgentInstaller
+from execute_cmd import CommandExecuter
+
 
 def log(msg):
     Logger.log(msg)
@@ -124,8 +128,7 @@ class DOManager:
         Returns:
             Snapshot ID or None if failed
         """
-        if snapshot_name is None:
-            from datetime import datetime
+        if snapshot_name is None:            
             timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
             snapshot_name = f"{DOManager.TEMPLATE_SNAPSHOT_PREFIX}-{timestamp}"
         
@@ -251,12 +254,10 @@ class DOManager:
             # Install Docker
             DOManager.install_docker(ip)
             
-            # Install health monitor
-            from health_monitor_installer import HealthMonitorInstaller
+            # Install health monitor            
             HealthMonitorInstaller.install_on_server(ip)
             
-            # Install health agent
-            from health_agent_installer import HealthAgentInstaller
+            # Install health agent            
             HealthAgentInstaller.install_on_server(ip)
             
             # Install basic nginx
@@ -507,8 +508,7 @@ class DOManager:
         # Install Docker
         DOManager.install_docker(ip)
         
-        # Install health monitor
-        from health_monitor_installer import HealthMonitorInstaller
+        # Install health monitor        
         HealthMonitorInstaller.install_on_server(ip)
         
         # Install basic nginx
@@ -575,9 +575,7 @@ class DOManager:
     @staticmethod
     def _install_basic_nginx(server_ip: str):
         """Install nginx container with empty config directories"""
-        from execute_docker import DockerExecuter
-        from execute_cmd import CommandExecuter
-        
+
         # Create nginx directories
         CommandExecuter.run_cmd("mkdir -p /etc/nginx/conf.d /etc/nginx/stream.d", server_ip, "root")
         

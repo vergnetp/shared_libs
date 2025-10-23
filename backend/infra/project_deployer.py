@@ -1,8 +1,20 @@
 import os
 from typing import Optional, Dict, List, Any, Union
+
+from deployment_config import DeploymentConfigurer
 from project_manager import ProjectManager
 from global_deployer import UnifiedDeployer
 from logger import Logger
+from encryption import Encryption
+from git_manager import GitManager
+from deployer import Deployer
+from secrets_rotator import SecretsRotator
+from health_monitor import HealthMonitor
+from server_inventory import ServerInventory
+from live_deployment_query import LiveDeploymentQuery
+from do_manager import DOManager
+from deployment_state_manager import DeploymentStateManager
+
 
 def log(msg):
     Logger.log(msg)
@@ -92,8 +104,7 @@ class ProjectDeployer:
         Example:
             projects = ProjectDeployer.list_projects()
             # ['myapp', 'another-project', ...]
-        """
-        from deployment_config import DeploymentConfigurer
+        """        
         return DeploymentConfigurer.list_projects()
     
     def update_config(
@@ -149,13 +160,7 @@ class ProjectDeployer:
             
         Returns:
             Calculated startup_order (max of dependencies + 1)
-        """
-        from deployment_config import DeploymentConfigurer
-        from logger import Logger
-        
-        def log(msg):
-            Logger.log(msg)
-        
+        """        
         try:
             config = DeploymentConfigurer(self.project_name)
             services = config.raw_config.get("project", {}).get("services", {})
@@ -222,8 +227,7 @@ class ProjectDeployer:
         
         if git_repo:
             other_config['git_repo'] = git_repo
-        if git_token:
-            from encryption import Encryption
+        if git_token:            
             other_config['git_token'] = Encryption.encode(git_token)
 
         ProjectManager.add_service(
@@ -283,8 +287,7 @@ class ProjectDeployer:
         
         Example:
             project.cleanup_git_checkouts()
-        """
-        from git_manager import GitManager
+        """        
         GitManager.cleanup_checkouts(self.project_name)
 
     # =========================================================================
@@ -1229,26 +1232,22 @@ class ProjectDeployer:
     # ========================================
     
     def push_config(self, env: str, targets: List[str] = None) -> bool:
-        """Push config/secrets/files to servers"""
-        from deployer import Deployer
+        """Push config/secrets/files to servers"""        
         deployer = Deployer(self.project_name)
         return deployer.push_config(env, targets)
     
     def pull_data(self, env: str, targets: List[str] = None) -> bool:
-        """Pull data/logs/backups from servers"""
-        from deployer import Deployer
+        """Pull data/logs/backups from servers"""       
         deployer = Deployer(self.project_name)
         return deployer.pull_data(env, targets)
     
     def pull_backups(self, env: str, service: str = None) -> bool:
-        """Pull backups from servers"""
-        from deployer import Deployer
+        """Pull backups from servers"""        
         deployer = Deployer(self.project_name)
         return deployer.pull_backups(env, service)
     
     def sync_files(self, env: str) -> bool:
-        """Full bidirectional sync"""
-        from deployer import Deployer
+        """Full bidirectional sync"""        
         deployer = Deployer(self.project_name)
         return deployer.full_sync(env)
     
@@ -1272,8 +1271,7 @@ class ProjectDeployer:
             
         Returns:
             True if successful
-        """
-        from secrets_rotator import SecretsRotator
+        """        
         rotator = SecretsRotator(self.project_name, env)
         
         if services:
@@ -1288,8 +1286,7 @@ class ProjectDeployer:
         return True
     
     def list_secrets(self, env: str) -> Dict[str, List[str]]:
-        """List all secrets for an environment"""
-        from secrets_rotator import SecretsRotator
+        """List all secrets for an environment"""       
         rotator = SecretsRotator(self.project_name, env)
         return rotator.list_secrets()
     
@@ -1298,8 +1295,7 @@ class ProjectDeployer:
     # ========================================
     
     def check_health(self) -> None:
-        """Run health check once (monitor_and_heal)"""
-        from health_monitor import HealthMonitor
+        """Run health check once (monitor_and_heal)"""        
         HealthMonitor.monitor_and_heal()
     
     def get_health_status(self) -> Dict[str, Any]:
@@ -1309,9 +1305,6 @@ class ProjectDeployer:
         Returns:
             Dict with servers categorized by health
         """
-        from server_inventory import ServerInventory
-        from health_monitor import HealthMonitor
-        
         all_servers = ServerInventory.get_servers(
             deployment_status=ServerInventory.STATUS_ACTIVE
         )
@@ -1351,8 +1344,7 @@ class ProjectDeployer:
             
         Returns:
             List of server dicts
-        """
-        from server_inventory import ServerInventory
+        """        
         
         # Get all servers or filtered by status
         if status:
@@ -1366,8 +1358,7 @@ class ProjectDeployer:
         
         # Filter by env if specified
         if env:
-            # Get servers that have containers for this env
-            from live_deployment_query import LiveDeploymentQuery
+            # Get servers that have containers for this env            
             env_servers = set()
             
             services = self.deployment_configurer.get_services(env)
@@ -1389,11 +1380,8 @@ class ProjectDeployer:
             server_ip: IP address of server to destroy
             
         Returns:
-            True if successful
-        """
-        from server_inventory import ServerInventory
-        from do_manager import DOManager
-        
+            True i successful
+        """        
         # Find server
         servers = ServerInventory.list_all_servers()
         server = next((s for s in servers if s['ip'] == server_ip), None)
@@ -1428,9 +1416,7 @@ class ProjectDeployer:
             
         Returns:
             Deployment state dict
-        """
-        from deployment_state_manager import DeploymentStateManager
-        
+        """       
         if service:
             return DeploymentStateManager.get_current_deployment(
                 self.project_name, env, service
@@ -1451,8 +1437,7 @@ class ProjectDeployer:
         service: str,
         limit: int = 10
     ) -> List[Dict[str, Any]]:
-        """Get deployment history for a service"""
-        from deployment_state_manager import DeploymentStateManager
+        """Get deployment history for a service"""        
         return DeploymentStateManager.get_deployment_history(
             self.project_name, env, service, limit
         )

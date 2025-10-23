@@ -1,7 +1,9 @@
 from pathlib import Path
 from typing import Dict, List, Any
-import requests
+import platform
+import uuid
 import base64
+import time
 import tarfile
 import io
 import os
@@ -44,8 +46,7 @@ class AgentDeployer:
         
         log(f"Pushing files to {server_ip} for {project}/{env}...")
         
-        # Get local base path
-        import platform
+        # Get local base path        
         if platform.system() == 'Windows':
             local_base = Path(f"C:/local/{project}/{env}")
         else:
@@ -109,9 +110,7 @@ class AgentDeployer:
             
         Returns:
             True if successful
-        """
-        import uuid
-        
+        """       
         upload_id = str(uuid.uuid4())
         total_size = len(tar_data)
         total_chunks = (total_size + AgentDeployer.CHUNK_SIZE - 1) // AgentDeployer.CHUNK_SIZE
@@ -261,8 +260,7 @@ class AgentDeployer:
             
         Returns:
             True if container is running
-        """
-        import time
+        """       
         
         log(f"Verifying container {container_name} on {server_ip}...")
         

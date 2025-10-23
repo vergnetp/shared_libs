@@ -2,16 +2,33 @@ import time
 import requests
 import socket
 import subprocess
+import os
+import platform
+import traceback
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 from datetime import datetime, timedelta
+import json
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+
+
 from server_inventory import ServerInventory
 from do_manager import DOManager
-from execute_cmd import CommandExecuter
 from logger import Logger
 from auto_scaling_coordinator import AutoScalingCoordinator
 from live_deployment_query import LiveDeploymentQuery
 import env_loader
+from live_deployment_query import LiveDeploymentQuery
+from path_resolver import PathResolver
+from deployment_naming import DeploymentNaming
+from deployment_port_resolver import DeploymentPortResolver
+from deployment_state_manager import DeploymentStateManager
+from agent_deployer import AgentDeployer
+from deployment_config import DeploymentConfigurer
+from certificate_manager import CertificateManager
+
 
 def log(msg):
     Logger.log(msg)
@@ -234,8 +251,7 @@ class HealthMonitor:
                     if restart_success_count == len(missing_containers):
                         log(f"✓ Successfully restarted all containers on {server_ip}")
                         
-                        # Wait a bit for containers to start
-                        import time
+                        # Wait a bit for containers to start                        
                         time.sleep(10)
                         
                         # Verify containers are running
@@ -284,7 +300,6 @@ class HealthMonitor:
         """Get this server's IP address"""
         try:
             # Try to get from environment first (set during deployment)
-            import os
             my_ip = os.getenv("SERVER_IP")
             if my_ip:
                 return my_ip
@@ -302,8 +317,7 @@ class HealthMonitor:
     @staticmethod
     def ping_server(ip: str, timeout: int = 5) -> bool:
         """Check if server is reachable via ping"""
-        try:
-            import platform
+        try:            
             param = '-n' if platform.system().lower() == 'windows' else '-c'
             
             result = subprocess.run(
@@ -334,9 +348,7 @@ class HealthMonitor:
         Check if all expected service containers are running on a server.
         
         Returns list of missing container names.
-        """
-        from live_deployment_query import LiveDeploymentQuery
-        
+        """      
         ip = server['ip']
         
         # Use live query to compare expected vs actual
@@ -429,9 +441,6 @@ class HealthMonitor:
         Returns:
             Container config dict for agent
         """
-        from path_resolver import PathResolver
-        from deployment_naming import DeploymentNaming
-        
         project = service['project']
         env = service['env']
         service_name = service['name']
@@ -451,8 +460,7 @@ class HealthMonitor:
         # Ports
         ports = {}
         if config.get('port'):
-            # Get host port from hash
-            from deployment_port_resolver import DeploymentPortResolver
+            # Get host port from hash            
             host_port = DeploymentPortResolver.get_host_port(project, env, service_name)
             container_port = config['port']
             ports[str(host_port)] = str(container_port)
@@ -496,10 +504,7 @@ class HealthMonitor:
         
         Returns:
             True if replacement successful
-        """
-        from deployment_state_manager import DeploymentStateManager
-        from agent_deployer import AgentDeployer
-        
+        """        
         log(f"Replacing failed server {failed_server['ip']}")
         Logger.start()
         
@@ -535,8 +540,7 @@ class HealthMonitor:
                 # Add to inventory as blue (not active yet)
                 ServerInventory.add_servers([new_server], ServerInventory.STATUS_BLUE)
                 
-                # STEP 2: Wait for server to be ready (comes from template snapshot)
-                import time
+                # STEP 2: Wait for server to be ready (comes from template snapshot)                
                 log("Waiting for server to boot...")
                 time.sleep(30)  # Give it time to fully boot
                 
@@ -587,9 +591,7 @@ class HealthMonitor:
                     # STEP 4: Deploy services to new server via agent
                     log(f"Deploying {len(failed_services)} services via agent...")
                     
-                    # Group services by startup_order
-                    from deployment_config import DeploymentConfigurer
-                    
+                    # Group services by startup_order      
                     services_by_order = {}
                     for service_info in failed_services:
                         service_name = service_info['service']
@@ -718,8 +720,7 @@ class HealthMonitor:
                     )
             
             except Exception as e:
-                log(f"Replacement attempt {attempt} failed: {e}")
-                import traceback
+                log(f"Replacement attempt {attempt} failed: {e}")                
                 traceback.print_exc()
                 
                 if attempt == HealthMonitor.MAX_REPLACEMENT_ATTEMPTS:
@@ -753,9 +754,7 @@ class HealthMonitor:
         Runs on EVERY server independently (not just leader).
         Each server manages its own certificates.
         Rate limited to run once per hour.
-        """
-        from certificate_manager import CertificateManager
-       
+        """       
         try:
             # Rate limiting - only check once per hour
             last_check_file = Path("/tmp/cert_last_check")
@@ -790,9 +789,7 @@ class HealthMonitor:
 
     @staticmethod
     def record_replacement_attempt(server_ip: str, success: bool, reason: str = ""):
-        """Record replacement attempt for history/debugging"""
-        import json
-        
+        """Record replacement attempt for history/debugging"""        
         history = []
         if HealthMonitor.REPLACEMENT_HISTORY_FILE.exists():
             try:
@@ -817,11 +814,6 @@ class HealthMonitor:
     def send_alert(subject: str, message: str):
         """Send email alert about critical issues"""
         try:
-            import smtplib
-            from email.mime.text import MIMEText
-            from email.mime.multipart import MIMEMultipart
-            import os
-            
             smtp_host = "smtp.gmail.com"
             smtp_port = 587
             email = os.getenv("ADMIN_EMAIL", "robinworld.contact@gmail.com")

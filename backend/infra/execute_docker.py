@@ -2,10 +2,13 @@ import subprocess
 import shlex
 import time
 import os
+import re
 import platform
 from typing import Union, List, Optional, Dict, Any
+
 from execute_cmd import CommandExecuter
 from logger import Logger
+from deployment_naming import DeploymentNaming
 
 
 def log(msg):
@@ -445,9 +448,7 @@ class DockerExecuter:
             
             Or if nothing running:
             Returns: None
-        """
-        from deployment_naming import DeploymentNaming
-        
+        """       
         # Get base container name
         base_name = DeploymentNaming.get_container_name(project, env, service)
         
@@ -561,8 +562,7 @@ class DockerExecuter:
                 exit_code_str = str(result).strip()
             
             # Clean the output - sometimes Docker inspect returns extra text
-            # Extract just the numeric exit code
-            import re
+            # Extract just the numeric exit code            
             match = re.search(r'^\d+$', exit_code_str)
             if match:
                 exit_code = int(match.group())

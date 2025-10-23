@@ -1,11 +1,13 @@
 from pathlib import Path
 from typing import Dict, Any
 import os
-from execute_docker import DockerExecuter
+import tempfile
+import shutil
+
 from execute_cmd import CommandExecuter
 from cron_manager import CronManager
-from deployment_naming import DeploymentNaming
 from logger import Logger
+from deployment_syncer import DeploymentSyncer
 
 
 def log(msg):
@@ -48,10 +50,7 @@ class HealthMonitorInstaller:
         Logger.start()
         
         try:
-            # 1. Create temporary directory with project files
-            import tempfile
-            import shutil
-            
+            # 1. Create temporary directory with project files            
             project_dir = Path(__file__).parent
             
             # Create temp directory to hold files to transfer
@@ -77,9 +76,7 @@ class HealthMonitorInstaller:
                 
                 log(f"Prepared project files for transfer")
                 
-                # 2. Use DeploymentSyncer.push_directory to transfer files
-                from deployment_syncer import DeploymentSyncer
-                
+                # 2. Use DeploymentSyncer.push_directory to transfer files                
                 success = DeploymentSyncer.push_directory(
                     local_dir=build_dir,
                     remote_base_path="/tmp",

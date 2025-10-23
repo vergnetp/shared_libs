@@ -1,4 +1,6 @@
 from pathlib import Path
+import time
+
 from execute_cmd import CommandExecuter
 from logger import Logger
 import secrets
@@ -116,8 +118,7 @@ WantedBy=multi-user.target
             )
             log("Service enabled and started")
             
-            # 7. Wait a moment for service to start
-            import time
+            # 7. Wait a moment for service to start            
             time.sleep(3)
             
             # 8. Verify service is running

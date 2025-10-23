@@ -1,12 +1,20 @@
 # backend/infra/secrets_rotator.py
 
 import shutil
+import argparse
 from pathlib import Path
 from datetime import datetime
+import time
 from typing import Dict, List, Optional, Any
+
 from resource_resolver import ResourceResolver
 from logger import Logger
 from encryption import Encryption
+from server_inventory import ServerInventory
+from deployment_syncer import DeploymentSyncer
+from deployment_config import DeploymentConfigurer
+from execute_cmd import CommandExecuter
+
 
 def log(msg):
     Logger.log(msg)
@@ -84,8 +92,6 @@ class SecretsRotator:
         Returns:
             List of server IP addresses
         """
-        from server_inventory import ServerInventory
-        
         try:
             servers = ServerInventory.get_servers(                
                 deployment_status=ServerInventory.STATUS_ACTIVE
@@ -102,9 +108,7 @@ class SecretsRotator:
         Push secrets directory to multiple servers.
         
         Uses DeploymentSyncer.push_directory() for tar + SSH streaming.
-        """
-        from deployment_syncer import DeploymentSyncer
-        
+        """       
         # Get local secrets base directory
         local_secrets_base = Path(ResourceResolver.get_volume_host_path(
             self.project, self.env, "", "secrets", "localhost"
@@ -149,10 +153,6 @@ class SecretsRotator:
         Returns:
             List of successfully restarted services
         """
-        from deployment_config import DeploymentConfigurer
-        from execute_cmd import CommandExecuter
-        import time
-        
         try:
             config = DeploymentConfigurer(self.project)
             services = config.get_services(self.env)
@@ -453,8 +453,6 @@ class SecretsRotator:
 
 def main():
     """CLI interface for secret rotation"""
-    import argparse
-    
     parser = argparse.ArgumentParser(description='Rotate secrets for deployed services')
     parser.add_argument('project', help='Project name')
     parser.add_argument('env', help='Environment')

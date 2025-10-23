@@ -2,6 +2,8 @@ import subprocess
 from pathlib import Path
 import shlex
 from typing import Union, List, Any
+import platform
+
 from logger import Logger
 
 
@@ -175,8 +177,7 @@ class CommandExecuter:
 
     @staticmethod
     def _run_ssh_cmd(cmd: Union[List[str], str], server_ip: str, user: str = "root") -> str:
-        """Run command via SSH with cross-platform support (Docker on Windows)"""
-        import platform
+        """Run command via SSH with cross-platform support (Docker on Windows)"""        
         
         # If it's already a string, use it as-is (it may contain shell operators)
         if isinstance(cmd, str):
@@ -253,7 +254,6 @@ class CommandExecuter:
     @staticmethod
     def run_cmd_with_stdin(remote_cmd: str, data: bytes, server_ip: str, user: str = "root") -> None:
         """Run a remote command and stream data to its stdin (avoids huge base64 echoes)."""
-        import platform
 
         ssh_key_path = Path.home() / ".ssh" / "deployer_id_rsa"
         system = platform.system()

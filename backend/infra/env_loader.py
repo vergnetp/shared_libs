@@ -1,14 +1,14 @@
 # env_loader.py
 import os
 from pathlib import Path
+from dotenv import load_dotenv
 
 def load_env():
     """Load .env file into os.environ - idempotent"""
     if os.getenv("_ENV_LOADED"):  # Skip if already loaded
         return
     
-    try:
-        from dotenv import load_dotenv
+    try:        
         load_dotenv()
     except ImportError:
         env_file = Path('.env')

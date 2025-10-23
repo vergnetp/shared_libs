@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 import subprocess
+
+from nginx_config_generator import NginxConfigGenerator
 from logger import Logger
 
 def log(msg):
@@ -132,9 +134,7 @@ class CertificateManager:
                 'another.com': False,  # Renewal failed
                 'valid.com': None      # No renewal needed (still valid)
             }
-        """
-        from nginx_config_generator import NginxConfigGenerator
-        
+        """       
         log("🔒 Checking SSL certificates for renewal...")
         
         results = {}

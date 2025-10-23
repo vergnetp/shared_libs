@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import re
 import json
-import time
 from typing import Dict, Any, List, Optional
 from pathlib import Path
 
@@ -1470,9 +1469,7 @@ http {{
             
         Returns:
             True if successful
-        """
-        import json
-        
+        """    
         zone_name = _registrable_zone(domain)
         
         # Get zone ID
@@ -1609,9 +1606,7 @@ http {{
                 "sgp1": ["9.10.11.12", "9.10.11.13", "9.10.11.14"]
             }
             setup_cloudflare_load_balancer_with_zones("api.example.com", zone_to_ips, token)
-        """
-        import json
-        
+        """        
         zone_name = _registrable_zone(domain)
         
         # Get zone ID

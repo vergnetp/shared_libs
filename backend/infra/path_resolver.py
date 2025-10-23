@@ -5,6 +5,8 @@ Handles Windows/Linux path differences and local/remote distinctions.
 
 from pathlib import Path
 from typing import Dict, List, Optional, Literal
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from execute_cmd import CommandExecuter
 from execute_docker import DockerExecuter
 from logger import Logger
@@ -256,9 +258,7 @@ class PathResolver:
             
             return f"{host_path}:{container_path}{ro_flag}"
     
-    def ensure_host_directories(project, env, service, server_ip, user="root"):
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        
+    def ensure_host_directories(project, env, service, server_ip, user="root"): 
         host_mount_types = ["config", "secrets", "files"]
         
         with ThreadPoolExecutor(max_workers=3) as executor:
@@ -283,9 +283,7 @@ class PathResolver:
                 except Exception as e:
                     log(f"Warning: Could not create directory {host_path}: {e}")
     
-    def ensure_docker_volumes(project, env, service, server_ip="localhost", user="root"):
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        
+    def ensure_docker_volumes(project, env, service, server_ip="localhost", user="root"):      
         docker_volume_types = ["data", "logs", "backups", "monitoring"]
         
         def create_volume_if_needed(path_type):
