@@ -199,8 +199,7 @@ class SecretsRotator:
                                 CommandExecuter.run_cmd(
                                     f"docker restart {container_name}",
                                     server_ip,
-                                    "root",
-                                    timeout=60
+                                    "root"                                    
                                 )
                                 
                                 log(f"  ✓ Restarted {container_name} on {server_ip}")

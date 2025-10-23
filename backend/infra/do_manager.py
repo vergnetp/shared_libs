@@ -216,10 +216,6 @@ class DOManager:
     def get_or_create_template(region: str = "lon1") -> str:
         """
         Get existing template snapshot or create a new one.
-        Thread-safe - only one template creation at a time.
-        
-        Returns:
-            Snapshot ID to use as base image
         """
         with DOManager._template_lock:
             # Check if we already have a snapshot
@@ -237,12 +233,12 @@ class DOManager:
                 cpu=1,
                 memory=1024,
                 tags=[DOManager.TEMPLATE_TAG],
-                use_base_os=True  # Force use of base Ubuntu, not snapshot
+                use_base_os=True
             )
             
             if not template_id:
                 log("Failed to create template droplet")
-                return DOManager.DROPLET_OS  # Fallback to base OS
+                return DOManager.DROPLET_OS
             
             # Wait for droplet to be ready
             DOManager.wait_for_droplet_active(template_id)
@@ -259,6 +255,10 @@ class DOManager:
             from health_monitor_installer import HealthMonitorInstaller
             HealthMonitorInstaller.install_on_server(ip)
             
+            # Install health agent
+            from health_agent_installer import HealthAgentInstaller
+            HealthAgentInstaller.install_on_server(ip)
+            
             # Install basic nginx
             DOManager._install_basic_nginx(ip)
             
@@ -270,7 +270,7 @@ class DOManager:
             if not snapshot_id:
                 log("Failed to create snapshot from template")
                 DOManager.destroy_droplet(template_id)
-                return DOManager.DROPLET_OS  # Fallback to base OS
+                return DOManager.DROPLET_OS
             
             # Destroy template droplet (save $6/month)
             log(f"Destroying template droplet {template_id}")
@@ -278,7 +278,7 @@ class DOManager:
             
             log(f"Template snapshot ready: {snapshot_id}")
             return snapshot_id
-    
+
     @staticmethod
     def delete_template():
         """

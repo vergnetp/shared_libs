@@ -1078,92 +1078,186 @@ Health monitoring **is included in the template snapshot** that all servers are 
 1. **First-time setup:** When the first server is needed, the system:
 
    - Creates a template droplet from base Ubuntu
-   - Installs Docker, health monitor, and nginx configs
-   - **Schedules health monitor as a cron job** (runs every minute)
+   - Installs Docker, health monitor cron, **health agent API**, and nginx configs
    - Takes a snapshot of this fully-provisioned state
    - Destroys the template droplet (saves cost)
 
 2. **Subsequent servers:** All new servers are created from this template snapshot, so they come with:
    - Docker pre-installed
-   - Health monitor Docker image pre-built
-   - **Cron job pre-configured** to run `docker run health-monitor:latest` every minute
+   - Health monitor cron job (runs every minute)
+   - **Health agent API service** (HTTP API on port 9999)
+   - Ready for autonomous management
 
-**Implementation Details:**
+### Architecture: Distributed Monitoring + HTTP Agent
 
-- **Type:** Cron job (NOT a systemd service or daemon)
-- **Schedule:** `* * * * *` (runs every minute)
-- **Execution:** Each minute, cron spawns a Docker container that:
-  1. Runs `python /app/health_monitor.py`
-  2. Calls `HealthMonitor.monitor_and_heal()` once
-  3. Container exits
-  4. Cron runs it again next minute
+**Two Components Work Together:**
 
-**Note:** The `health_monitor.py` script has a `start_monitoring_daemon()` function with an infinite loop, but this is **NOT used** in production. The cron job approach is preferred because:
+1. **Health Monitor** (Cron Job)
 
-- Simpler to manage (standard cron)
-- Self-healing (if monitor crashes, cron restarts it)
-- No need for systemd service management
-- Works identically across all servers
+   - **Type:** Cron job running every minute on all servers
+   - **Execution:** Spawns Docker container that runs `HealthMonitor.monitor_and_heal()`
+   - **Purpose:** Detects failures and coordinates healing (leader only)
+
+2. **Health Agent** (HTTP API Service)
+   - **Type:** Systemd service (always running)
+   - **Port:** 9999 (VPC-only, secured with API key)
+   - **Purpose:** Provides HTTP API for container management
+   - **Technology:** Flask + subprocess (10MB, lightweight)
+   - **Endpoints:**
+     - `GET /health` - Docker status + container list
+     - `POST /containers/<n>/restart` - Restart container
+     - `POST /containers/run` - Deploy new container
+     - `POST /upload/tar/chunked` - Receive config/secrets
+     - `POST /images/<image>/pull` - Pull Docker image
+
+**Communication Flow:**
+
+```
+Health Monitor (every server)
+  ↓ Detects failures via HTTP
+  ↓ http://other-server:9999/health
+  ↓
+Health Agent (every server)
+  ↓ Reports status
+  ↓ Executes commands via Docker CLI
+  ↓
+Docker Daemon
+```
+
+**Key Benefits:**
+
+- ✅ **No SSH between servers** - all communication via HTTP/VPC
+- ✅ **Fast container restarts** - 10 seconds via agent
+- ✅ **Fully autonomous** - no bastion needed for healing
+- ✅ **Secure** - API key auth, VPC-only access
+- ✅ **Lightweight** - Flask + subprocess (10MB total)
 
 ### What It Monitors
 
 1. **Server Health:**
 
-   - SSH connectivity
-   - Docker daemon status
+   - Ping connectivity (ICMP)
+   - Docker daemon status (via agent HTTP)
+   - Container presence (via agent HTTP)
    - Disk space
 
 2. **Service Health:**
 
-   - Container running status
-   - HTTP endpoint checks (for web services)
-   - TCP port checks (for databases)
+   - Container running status (via agent HTTP)
+   - Expected vs actual containers
+   - Container restart attempts
 
 3. **Cross-Server Checks:**
 
-   - All servers monitor each other
-   - VPC network connectivity
-   - Response times
+   - All servers monitor each other via VPC
+   - Leader coordinates all healing actions
+   - Followers report but don't act
 
 4. **SSL Certificates** (every hour):
    - Certificate expiry dates
    - Auto-renewal when < 30 days remaining
    - Zero-downtime renewal (with Cloudflare DNS-01)
 
-### Self-Healing
+### Self-Healing: Two-Stage Recovery
+
+**Stage 1: Container Restart (Fast - 10 seconds)**
+
+When containers fail but server is responsive:
+
+1. Leader detects missing container via `GET /health`
+2. Leader calls `POST /containers/<n>/restart` on agent
+3. Container restarts via Docker CLI
+4. Verification via agent
+5. Alert sent: "Server recovered by restarting containers"
+
+**Stage 2: Server Replacement (Full - 5 minutes)**
+
+When server completely fails (no ping/agent response):
+
+1. **Failed Server Detected** (ping timeout or agent unresponsive)
+2. **Leader Creates Replacement:**
+   - Provisions new server via DigitalOcean API (~60 seconds)
+   - Waits for health agent to respond
+3. **Push Config/Secrets via Agent:**
+   - Creates tar.gz of `/local/project/env/config` and `/secrets`
+   - Uploads in 5MB chunks via `POST /upload/tar/chunked`
+   - Agent extracts files locally
+4. **Deploy Services via Agent:**
+   - Leader tells agent: `POST /images/<image>/pull`
+   - Leader tells agent: `POST /containers/run` (with volumes, ports, env)
+   - Agent starts containers via Docker CLI
+5. **Health Check via Agent:**
+   - Verify Docker running: `GET /health`
+   - Verify containers present
+6. **If Healthy:**
+   - Promote to active status
+   - Update deployment state
+   - Destroy failed server via DO API
+   - Alert sent: "Server replaced successfully - fully autonomous"
+7. **If Unhealthy:**
+   - Destroy replacement
+   - Retry (up to 3 attempts)
+   - Alert administrator if all attempts fail
 
 **Leader Election:**
 
-- Oldest healthy server becomes leader
+- Lowest healthy IP becomes leader (lexicographic sort)
 - Leader is responsible for healing actions
 - Followers monitor but don't take action
+- If leader fails, new leader elected automatically
 
-**Automatic Actions:**
+**Complete Autonomy:**
 
-1. **Failed Server Detected** (after 3 consecutive failures)
-2. **Leader Creates Replacement:**
-   - Provisions new server with same specs
-   - Installs Docker & health monitor
-   - Deploys same services
-3. **Health Check** new server
-4. **If Healthy:**
-   - Updates nginx configs
-   - Destroys failed server
-   - Updates deployment state
-5. **If Unhealthy:**
-   - Destroys replacement
-   - Retries (max 3 attempts)
-   - Sends alert if all attempts fail
+- ✅ Container crashes → Leader restarts via agent (no human)
+- ✅ Server crashes → Leader replaces and redeploys via agent (no human)
+- ✅ Leader crashes → New leader elected, continues healing (no human)
+- ⏳ All servers crash → Alerts sent, manual intervention required
+
+### Security Model
+
+**VPC Network Isolation:**
+
+```
+Internet
+  ↓
+  Port 443 only (HTTPS, Cloudflare IPs only)
+  ↓
+Servers in VPC (10.0.0.0/16)
+  ↓
+  Port 9999: Health agent (VPC only, API key required)
+  Port 22: SSH (Bastion IP only)
+  ↓
+Firewall rules (ufw):
+  - Allow 9999 from 10.0.0.0/16
+  - Allow 22 from bastion IP only
+  - Allow 443 from Cloudflare IPs
+  - Deny all other inbound
+```
+
+**Authentication:**
+
+- Health agent requires `X-API-Key` header
+- API key generated during template creation
+- Same key on all servers (acceptable in private VPC)
+- Stored in `/etc/health-agent/api-key` (mode 600)
+
+**Command Restriction:**
+
+- Agent only accepts specific Docker operations
+- No arbitrary shell command execution
+- No SSH access granted
+- File uploads restricted to `/local/*` paths
 
 ### Alert System
 
 **Email Alerts Sent When:**
 
-- Server fails health checks
-- Automatic replacement fails
-- All servers are down (critical)
-- Service deployment fails
-- Backup fails
+- ✅ Server failures and recoveries
+- ✅ Container restarts
+- ✅ Server replacements (success/failure)
+- ✅ SSL certificate renewals
+- ✅ Backup failures
+- ✅ Auto-scaling events
 
 **Configuration:**
 
@@ -1171,6 +1265,16 @@ Health monitoring **is included in the template snapshot** that all servers are 
 # .env file
 ADMIN_EMAIL=admin@example.com
 GMAIL_APP_PASSWORD=your_gmail_app_password
+```
+
+**Example Alert:**
+
+```
+Subject: [Health Monitor] Server Replacement Successful
+
+Failed server 10.0.1.5 replaced with 10.0.1.8
+Services redeployed: 3
+All autonomous - no manual intervention required.
 ```
 
 ### Manual Health Check
