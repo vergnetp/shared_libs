@@ -11,11 +11,27 @@ NO imports of Deployer or high-level classes to avoid circular dependencies.
 """
 
 from typing import Dict, Any, List, Optional
-from logger import Logger
-from execute_cmd import CommandExecuter
-from execute_docker import DockerExecuter
-from server_inventory import ServerInventory
-from nginx_config_parser import NginxConfigParser
+
+try:
+    from .logger import Logger
+except ImportError:
+    from logger import Logger
+try:
+    from .execute_cmd import CommandExecuter
+except ImportError:
+    from execute_cmd import CommandExecuter
+try:
+    from .execute_docker import DockerExecuter
+except ImportError:
+    from execute_docker import DockerExecuter
+try:
+    from .server_inventory import ServerInventory
+except ImportError:
+    from server_inventory import ServerInventory
+try:
+    from .nginx_config_parser import NginxConfigParser
+except ImportError:
+    from nginx_config_parser import NginxConfigParser
 
 
 def log(msg):

@@ -1,12 +1,20 @@
 from pathlib import Path
 import time
-
-from execute_cmd import CommandExecuter
-from logger import Logger
 import secrets
+
+try:
+    from .execute_cmd import CommandExecuter
+except ImportError:
+    from execute_cmd import CommandExecuter
+try:
+    from .logger import Logger
+except ImportError:
+    from logger import Logger
+
 
 def log(msg):
     Logger.log(msg)
+
 
 class HealthAgentInstaller:
     """Install health agent as systemd service"""

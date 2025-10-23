@@ -8,11 +8,27 @@ providing a clean interface for metrics collection and scaling decisions.
 from typing import Dict, Any, Optional
 from datetime import datetime, timedelta
 
-from deployment_config import DeploymentConfigurer
-from live_deployment_query import LiveDeploymentQuery
-from metrics_collector import MetricsCollector
-from auto_scaler import AutoScaler
-from logger import Logger
+try:
+    from .deployment_config import DeploymentConfigurer
+except ImportError:
+    from deployment_config import DeploymentConfigurer
+try:
+    from .live_deployment_query import LiveDeploymentQuery
+except ImportError:
+    from live_deployment_query import LiveDeploymentQuery
+try:
+    from .metrics_collector import MetricsCollector
+except ImportError:
+    from metrics_collector import MetricsCollector
+try:
+    from .auto_scaler import AutoScaler
+except ImportError:
+    from auto_scaler import AutoScaler
+try:
+    from .logger import Logger
+except ImportError:
+    from logger import Logger
+
 
 def log(msg):
     Logger.log(msg)

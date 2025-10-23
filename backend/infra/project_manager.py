@@ -1,7 +1,13 @@
 from typing import Optional, Dict, List, Any, Union
 
-from deployment_config import DeploymentConfigurer
-from logger import Logger
+try:
+    from .deployment_config import DeploymentConfigurer
+except ImportError:
+    from deployment_config import DeploymentConfigurer
+try:
+    from .logger import Logger
+except ImportError:
+    from logger import Logger
 
 
 def log(msg):

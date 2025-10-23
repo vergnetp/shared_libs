@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
+
 def load_env():
     """Load .env file into os.environ - idempotent"""
     if os.getenv("_ENV_LOADED"):  # Skip if already loaded

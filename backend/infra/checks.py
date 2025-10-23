@@ -3,8 +3,15 @@
 Clean deployment status check - Uses ServerInventory as source of truth
 """
 
-from execute_cmd import CommandExecuter
-from server_inventory import ServerInventory
+try:
+    from .execute_cmd import CommandExecuter
+except ImportError:
+    from execute_cmd import CommandExecuter
+try:
+    from .server_inventory import ServerInventory
+except ImportError:
+    from server_inventory import ServerInventory
+
 
 def run_remote_cmd(cmd, server_ip, quiet=False):
     """Run command and return clean output"""

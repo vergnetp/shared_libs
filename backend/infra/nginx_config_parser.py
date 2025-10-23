@@ -9,10 +9,22 @@ import re
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 
-from resource_resolver import ResourceResolver
-from execute_cmd import CommandExecuter
-from logger import Logger
-from server_inventory import ServerInventory
+try:
+    from .resource_resolver import ResourceResolver
+except ImportError:
+    from resource_resolver import ResourceResolver
+try:
+    from .execute_cmd import CommandExecuter
+except ImportError:
+    from execute_cmd import CommandExecuter
+try:
+    from .logger import Logger
+except ImportError:
+    from logger import Logger
+try:
+    from .server_inventory import ServerInventory
+except ImportError:
+    from server_inventory import ServerInventory
 
 
 def log(msg):

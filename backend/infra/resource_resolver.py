@@ -16,9 +16,18 @@ import hashlib
 from pathlib import Path
 from typing import Optional, Literal
 
-from deployment_naming import DeploymentNaming
-from deployment_port_resolver import DeploymentPortResolver
-from path_resolver import PathResolver
+try:
+    from .deployment_naming import DeploymentNaming
+except ImportError:
+    from deployment_naming import DeploymentNaming
+try:
+    from .deployment_port_resolver import DeploymentPortResolver
+except ImportError:
+    from deployment_port_resolver import DeploymentPortResolver
+try:
+    from .path_resolver import PathResolver
+except ImportError:
+    from path_resolver import PathResolver
 
 
 class ResourceResolver:

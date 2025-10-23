@@ -7,13 +7,34 @@ from datetime import datetime
 import time
 from typing import Dict, List, Optional, Any
 
-from resource_resolver import ResourceResolver
-from logger import Logger
-from encryption import Encryption
-from server_inventory import ServerInventory
-from deployment_syncer import DeploymentSyncer
-from deployment_config import DeploymentConfigurer
-from execute_cmd import CommandExecuter
+try:
+    from .resource_resolver import ResourceResolver
+except ImportError:
+    from resource_resolver import ResourceResolver
+try:
+    from .logger import Logger
+except ImportError:
+    from logger import Logger
+try:
+    from .encryption import Encryption
+except ImportError:
+    from encryption import Encryption
+try:
+    from .server_inventory import ServerInventory
+except ImportError:
+    from server_inventory import ServerInventory
+try:
+    from .deployment_syncer import DeploymentSyncer
+except ImportError:
+    from deployment_syncer import DeploymentSyncer
+try:
+    from .deployment_config import DeploymentConfigurer
+except ImportError:
+    from deployment_config import DeploymentConfigurer
+try:
+    from .execute_cmd import CommandExecuter
+except ImportError:
+    from execute_cmd import CommandExecuter
 
 
 def log(msg):

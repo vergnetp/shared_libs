@@ -2,7 +2,11 @@ import json
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from datetime import datetime
-from logger import Logger
+
+try:
+    from .logger import Logger
+except ImportError:
+    from logger import Logger
 
 
 def log(msg):

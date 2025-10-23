@@ -1,23 +1,62 @@
-import os
 from typing import Optional, Dict, List, Any, Union
 
-from deployment_config import DeploymentConfigurer
-from project_manager import ProjectManager
-from global_deployer import UnifiedDeployer
-from logger import Logger
-from encryption import Encryption
-from git_manager import GitManager
-from deployer import Deployer
-from secrets_rotator import SecretsRotator
-from health_monitor import HealthMonitor
-from server_inventory import ServerInventory
-from live_deployment_query import LiveDeploymentQuery
-from do_manager import DOManager
-from deployment_state_manager import DeploymentStateManager
+try:
+    from .deployment_config import DeploymentConfigurer
+except ImportError:
+    from deployment_config import DeploymentConfigurer
+try:
+    from .project_manager import ProjectManager
+except ImportError:
+    from project_manager import ProjectManager
+try:
+    from .global_deployer import UnifiedDeployer
+except ImportError:
+    from global_deployer import UnifiedDeployer
+try:
+    from .logger import Logger
+except ImportError:
+    from logger import Logger
+try:
+    from .encryption import Encryption
+except ImportError:
+    from encryption import Encryption
+try:
+    from .git_manager import GitManager
+except ImportError:
+    from git_manager import GitManager
+try:
+    from .deployer import Deployer
+except ImportError:
+    from deployer import Deployer
+try:
+    from .secrets_rotator import SecretsRotator
+except ImportError:
+    from secrets_rotator import SecretsRotator
+try:
+    from .health_monitor import HealthMonitor
+except ImportError:
+    from health_monitor import HealthMonitor
+try:
+    from .server_inventory import ServerInventory
+except ImportError:
+    from server_inventory import ServerInventory
+try:
+    from .live_deployment_query import LiveDeploymentQuery
+except ImportError:
+    from live_deployment_query import LiveDeploymentQuery
+try:
+    from .do_manager import DOManager
+except ImportError:
+    from do_manager import DOManager
+try:
+    from .deployment_state_manager import DeploymentStateManager
+except ImportError:
+    from deployment_state_manager import DeploymentStateManager
 
 
 def log(msg):
     Logger.log(msg)
+
 
 class ProjectDeployer:
     """

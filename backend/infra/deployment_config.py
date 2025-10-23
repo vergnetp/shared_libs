@@ -3,9 +3,15 @@ from typing import Dict, Any, List
 from pathlib import Path
 import copy
 
-import constants
+try:
+    from . import constants
+except ImportError:
+    import constants
 from resource_resolver import ResourceResolver
-from encryption import Encryption
+try:
+    from .encryption import Encryption
+except ImportError:
+    from encryption import Encryption
 
 
 def replace_env(obj: Any, env: str) -> Any:

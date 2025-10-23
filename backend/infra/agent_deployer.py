@@ -7,8 +7,14 @@ import time
 import tarfile
 import io
 import os
-from logger import Logger
-from health_monitor import HealthMonitor
+try:
+    from .logger import Logger
+except ImportError:
+    from logger import Logger
+try:
+    from .health_monitor import HealthMonitor
+except ImportError:
+    from health_monitor import HealthMonitor
 
 def log(msg):
     Logger.log(msg)

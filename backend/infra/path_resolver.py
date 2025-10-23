@@ -6,11 +6,20 @@ Handles Windows/Linux path differences and local/remote distinctions.
 from pathlib import Path
 from typing import Dict, List, Optional, Literal
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
-from execute_cmd import CommandExecuter
-from execute_docker import DockerExecuter
-from logger import Logger
 import platform as sys_platform
+
+try:
+    from .execute_cmd import CommandExecuter
+except ImportError:
+    from execute_cmd import CommandExecuter
+try:
+    from .execute_docker import DockerExecuter
+except ImportError:
+    from execute_docker import DockerExecuter
+try:
+    from .logger import Logger
+except ImportError:
+    from logger import Logger
 
 
 def log(msg):

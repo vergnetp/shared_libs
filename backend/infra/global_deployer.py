@@ -1,16 +1,38 @@
 import os            
 import json
 from typing import List, Dict, Any, Optional
-from server_inventory import ServerInventory
-from deployer import Deployer
-from logger import Logger
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import env_loader
-from execute_cmd import CommandExecuter
-from rollback_manager import RollbackManager
-from nginx_config_generator import NginxConfigGenerator
+try:
+    from .server_inventory import ServerInventory
+except ImportError:
+    from server_inventory import ServerInventory
+try:
+    from .deployer import Deployer
+except ImportError:
+    from deployer import Deployer
+try:
+    from .logger import Logger
+except ImportError:
+    from logger import Logger
+try:
+    from . import env_loader
+except ImportError:
+    import env_loader
+try:
+    from .execute_cmd import CommandExecuter
+except ImportError:
+    from execute_cmd import CommandExecuter
+try:
+    from .rollback_manager import RollbackManager
+except ImportError:
+    from rollback_manager import RollbackManager
+try:
+    from .nginx_config_generator import NginxConfigGenerator
+except ImportError:
+    from nginx_config_generator import NginxConfigGenerator
+
 
 def log(msg):
     Logger.log(msg)

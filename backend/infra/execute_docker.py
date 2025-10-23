@@ -6,9 +6,18 @@ import re
 import platform
 from typing import Union, List, Optional, Dict, Any
 
-from execute_cmd import CommandExecuter
-from logger import Logger
-from deployment_naming import DeploymentNaming
+try:
+    from .execute_cmd import CommandExecuter
+except ImportError:
+    from execute_cmd import CommandExecuter
+try:
+    from .logger import Logger
+except ImportError:
+    from logger import Logger
+try:
+    from .deployment_naming import DeploymentNaming
+except ImportError:
+    from deployment_naming import DeploymentNaming
 
 
 def log(msg):

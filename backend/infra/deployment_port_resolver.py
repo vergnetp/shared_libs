@@ -1,11 +1,10 @@
 import os
 import hashlib
 from typing import List
+
 try:
-    # Try relative import (when used as package)
     from .logger import Logger
 except ImportError:
-    # Fall back to absolute import (when run directly)
     from logger import Logger
 
 

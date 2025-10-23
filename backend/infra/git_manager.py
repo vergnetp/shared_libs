@@ -6,10 +6,15 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
-from logger import Logger
+try:
+    from .logger import Logger
+except ImportError:
+    from logger import Logger
+
 
 def log(msg):
     Logger.log(msg)
+
 
 class GitManager:
     """

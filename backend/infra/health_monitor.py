@@ -13,21 +13,62 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
-
-from server_inventory import ServerInventory
-from do_manager import DOManager
-from logger import Logger
-from auto_scaling_coordinator import AutoScalingCoordinator
-from live_deployment_query import LiveDeploymentQuery
-import env_loader
-from live_deployment_query import LiveDeploymentQuery
-from path_resolver import PathResolver
-from deployment_naming import DeploymentNaming
-from deployment_port_resolver import DeploymentPortResolver
-from deployment_state_manager import DeploymentStateManager
-from agent_deployer import AgentDeployer
-from deployment_config import DeploymentConfigurer
-from certificate_manager import CertificateManager
+try:
+    from .server_inventory import ServerInventory
+except ImportError:
+    from server_inventory import ServerInventory
+try:
+    from .do_manager import DOManager
+except ImportError:
+    from do_manager import DOManager
+try:
+    from .logger import Logger
+except ImportError:
+    from logger import Logger
+try:
+    from .auto_scaling_coordinator import AutoScalingCoordinator
+except ImportError:
+    from auto_scaling_coordinator import AutoScalingCoordinator
+try:
+    from .live_deployment_query import LiveDeploymentQuery
+except ImportError:
+    from live_deployment_query import LiveDeploymentQuery
+try:
+    from . import env_loader
+except ImportError:
+    import env_loader
+try:
+    from .live_deployment_query import LiveDeploymentQuery
+except ImportError:
+    from live_deployment_query import LiveDeploymentQuery
+try:
+    from .path_resolver import PathResolver
+except ImportError:
+    from path_resolver import PathResolver
+try:
+    from .deployment_naming import DeploymentNaming
+except ImportError:
+    from deployment_naming import DeploymentNaming
+try:
+    from .deployment_port_resolver import DeploymentPortResolver
+except ImportError:
+    from deployment_port_resolver import DeploymentPortResolver
+try:
+    from .deployment_state_manager import DeploymentStateManager
+except ImportError:
+    from deployment_state_manager import DeploymentStateManager
+try:
+    from .agent_deployer import AgentDeployer
+except ImportError:
+    from agent_deployer import AgentDeployer
+try:
+    from .deployment_config import DeploymentConfigurer
+except ImportError:
+    from deployment_config import DeploymentConfigurer
+try:
+    from .certificate_manager import CertificateManager
+except ImportError:
+    from certificate_manager import CertificateManager
 
 
 def log(msg):

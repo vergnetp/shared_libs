@@ -1,13 +1,23 @@
 from pathlib import Path
-from typing import Dict, Any
-import os
 import tempfile
 import shutil
 
-from execute_cmd import CommandExecuter
-from cron_manager import CronManager
-from logger import Logger
-from deployment_syncer import DeploymentSyncer
+try:
+    from .execute_cmd import CommandExecuter
+except ImportError:
+    from execute_cmd import CommandExecuter
+try:
+    from .cron_manager import CronManager
+except ImportError:
+    from cron_manager import CronManager
+try:
+    from .logger import Logger
+except ImportError:
+    from logger import Logger
+try:
+    from .deployment_syncer import DeploymentSyncer
+except ImportError:
+    from deployment_syncer import DeploymentSyncer
 
 
 def log(msg):

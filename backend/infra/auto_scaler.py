@@ -1,13 +1,24 @@
 import time
-from typing import Dict, Any, List, Optional
-from datetime import datetime, timedelta
-from metrics_collector import MetricsCollector
-from server_inventory import ServerInventory
-from project_deployer import ProjectDeployer
-from logger import Logger
+from typing import Dict, Any, Optional
+from datetime import datetime
+
+try:
+    from .metrics_collector import MetricsCollector
+except ImportError:
+    from metrics_collector import MetricsCollector
+try:
+    from .project_deployer import ProjectDeployer
+except ImportError:
+    from project_deployer import ProjectDeployer
+try:
+    from .logger import Logger
+except ImportError:
+    from logger import Logger
+
 
 def log(msg):
     Logger.log(msg)
+
 
 class AutoScaler:
     """

@@ -1,11 +1,29 @@
-import json
 from typing import Optional, List
-from deployment_state_manager import DeploymentStateManager
-from deployment_naming import DeploymentNaming
-from execute_cmd import CommandExecuter
-from logger import Logger
-from deployer import Deployer
-from deployment_config import DeploymentConfigurer
+
+try:
+    from .deployment_state_manager import DeploymentStateManager
+except ImportError:
+    from deployment_state_manager import DeploymentStateManager
+try:
+    from .deployment_naming import DeploymentNaming
+except ImportError:
+    from deployment_naming import DeploymentNaming
+try:
+    from .execute_cmd import CommandExecuter
+except ImportError:
+    from execute_cmd import CommandExecuter
+try:
+    from .logger import Logger
+except ImportError:
+    from logger import Logger
+try:
+    from .deployer import Deployer
+except ImportError:
+    from deployer import Deployer
+try:
+    from .deployment_config import DeploymentConfigurer
+except ImportError:
+    from deployment_config import DeploymentConfigurer
 
 
 def log(msg):

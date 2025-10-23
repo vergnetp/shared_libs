@@ -4,18 +4,32 @@ import re
 import json
 from typing import Dict, Any, List, Optional
 from pathlib import Path
-
-from execute_cmd import CommandExecuter
-from execute_docker import DockerExecuter
-from logger import Logger
-import env_loader
-from resource_resolver import ResourceResolver
-
 # Optional: precise zone parsing for Cloudflare zones
 try:
     import tldextract as _tldextract
 except Exception:
     _tldextract = None
+
+try:
+    from .execute_cmd import CommandExecuter
+except ImportError:
+    from execute_cmd import CommandExecuter
+try:
+    from .execute_docker import DockerExecuter
+except ImportError:
+    from execute_docker import DockerExecuter
+try:
+    from .logger import Logger
+except ImportError:
+    from logger import Logger
+try:
+    from . import env_loader
+except ImportError:
+    import env_loader
+try:
+    from .resource_resolver import ResourceResolver
+except ImportError:
+    from resource_resolver import ResourceResolver
 
 
 def log(msg: str) -> None:

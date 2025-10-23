@@ -4,6 +4,7 @@ import base64
 import string
 import secrets
 
+
 class Encryption:
     """Encrypt/decrypt Git tokens and other sensitive data using DO token as key"""
     

@@ -1,9 +1,13 @@
-# server_inventory.py - Simplified version with only RESERVE and ACTIVE statuses
+from typing import List, Dict, Any
 
-import json
-from typing import List, Dict, Any, Optional
-from logger import Logger
-from do_manager import DOManager
+try:
+    from .logger import Logger
+except ImportError:
+    from logger import Logger
+try:
+    from .do_manager import DOManager
+except ImportError:
+    from do_manager import DOManager
 
 
 def log(msg):

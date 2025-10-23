@@ -2,8 +2,15 @@ import os
 import json
 from typing import Dict, Any, Optional
 from datetime import datetime
-from execute_cmd import CommandExecuter
-from logger import Logger
+
+try:
+    from .execute_cmd import CommandExecuter
+except ImportError:
+    from execute_cmd import CommandExecuter
+try:
+    from .logger import Logger
+except ImportError:
+    from logger import Logger
 
 
 def log(msg):

@@ -1,8 +1,5 @@
 from typing import Union, List, Dict, Any
-from execute_cmd import CommandExecuter
-from execute_docker import DockerExecuter
 from pathlib import Path
-from logger import Logger
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import platform
 import os
@@ -10,13 +7,34 @@ import shutil
 import tarfile
 import io
 
-from backup_manager import BackupManager
-from deployment_config import DeploymentConfigurer
+try:
+    from .execute_cmd import CommandExecuter
+except ImportError:
+    from execute_cmd import CommandExecuter
+try:
+    from .execute_docker import DockerExecuter
+except ImportError:
+    from execute_docker import DockerExecuter
+try:
+    from .logger import Logger
+except ImportError:
+    from logger import Logger
+try:
+    from .backup_manager import BackupManager
+except ImportError:
+    from backup_manager import BackupManager
+try:
+    from .deployment_config import DeploymentConfigurer
+except ImportError:
+    from deployment_config import DeploymentConfigurer
+
 
 BASE = "local"
 
+
 def log(msg):
     Logger.log(msg)
+
 
 class DeploymentSyncer:
     """

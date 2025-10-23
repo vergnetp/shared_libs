@@ -1,5 +1,3 @@
-# do_manager.py - Updated with template/snapshot management
-
 import os
 import time
 import requests
@@ -9,11 +7,23 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 
-from logger import Logger
-from health_monitor_installer import HealthMonitorInstaller
-import env_loader
+try:
+    from .logger import Logger
+except ImportError:
+    from logger import Logger
+try:
+    from .health_monitor_installer import HealthMonitorInstaller
+except ImportError:
+    from health_monitor_installer import HealthMonitorInstaller
+try:
+    from . import env_loader
+except ImportError:
+    import env_loader
 from health_agent_installer import HealthAgentInstaller
-from execute_cmd import CommandExecuter
+try:
+    from .execute_cmd import CommandExecuter
+except ImportError:
+    from execute_cmd import CommandExecuter
 
 
 def log(msg):

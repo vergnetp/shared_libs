@@ -11,29 +11,78 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import defaultdict
 
-import constants
+try:
+    from . import constants
+except ImportError:
+    import constants
 from git_manager import GitManager                
-from execute_cmd import CommandExecuter
-from nginx_config_generator import NginxConfigGenerator
-from deployment_config import DeploymentConfigurer
-from live_deployment_query import LiveDeploymentQuery
-from deployment_syncer import DeploymentSyncer
-from execute_docker import DockerExecuter
-from deployment_state_manager import DeploymentStateManager
-from scheduler_manager import EnhancedCronManager
-from cron_manager import CronManager
-from logger import Logger
+try:
+    from .execute_cmd import CommandExecuter
+except ImportError:
+    from execute_cmd import CommandExecuter
+try:
+    from .nginx_config_generator import NginxConfigGenerator
+except ImportError:
+    from nginx_config_generator import NginxConfigGenerator
+try:
+    from .deployment_config import DeploymentConfigurer
+except ImportError:
+    from deployment_config import DeploymentConfigurer
+try:
+    from .live_deployment_query import LiveDeploymentQuery
+except ImportError:
+    from live_deployment_query import LiveDeploymentQuery
+try:
+    from .deployment_syncer import DeploymentSyncer
+except ImportError:
+    from deployment_syncer import DeploymentSyncer
+try:
+    from .execute_docker import DockerExecuter
+except ImportError:
+    from execute_docker import DockerExecuter
+try:
+    from .deployment_state_manager import DeploymentStateManager
+except ImportError:
+    from deployment_state_manager import DeploymentStateManager
+try:
+    from .scheduler_manager import EnhancedCronManager
+except ImportError:
+    from scheduler_manager import EnhancedCronManager
+try:
+    from .cron_manager import CronManager
+except ImportError:
+    from cron_manager import CronManager
+try:
+    from .logger import Logger
+except ImportError:
+    from logger import Logger
 from server_inventory import ServerInventory
-from do_cost_tracker import DOCostTracker
-import env_loader
+try:
+    from .do_cost_tracker import DOCostTracker
+except ImportError:
+    from do_cost_tracker import DOCostTracker
+try:
+    from . import env_loader
+except ImportError:
+    import env_loader
 from path_resolver import PathResolver
-from do_manager import DOManager
-from backup_manager import BackupManager
-from encryption import Encryption
+try:
+    from .do_manager import DOManager
+except ImportError:
+    from do_manager import DOManager
+try:
+    from .backup_manager import BackupManager
+except ImportError:
+    from backup_manager import BackupManager
+try:
+    from .encryption import Encryption
+except ImportError:
+    from encryption import Encryption
+try:
+    from .resource_resolver import ResourceResolver
+except ImportError:
+    from resource_resolver import ResourceResolver
 
-
-
-from resource_resolver import ResourceResolver
 
 def log(msg):
     Logger.log(msg)

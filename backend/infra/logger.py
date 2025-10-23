@@ -1,11 +1,10 @@
-# logger.py - Add threading support
 
-import os
 from datetime import datetime
 from pathlib import Path
 import threading
 
 INDENT = 2
+
 
 class Logger:
     offset = 0

@@ -1,7 +1,15 @@
 from typing import Dict, Any, List, Optional
-from execute_cmd import CommandExecuter
-from logger import Logger
+
+try:
+    from .execute_cmd import CommandExecuter
+except ImportError:
+    from execute_cmd import CommandExecuter
+try:
+    from .logger import Logger
+except ImportError:
+    from logger import Logger
 from resource_resolver import ResourceResolver
+
 
 def log(msg):
     Logger.log(msg)

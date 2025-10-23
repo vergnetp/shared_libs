@@ -3,6 +3,7 @@ Fix all imports in backend/infra files to work both locally and in containers.
 
 Changes imports from:
     from module_name import Something
+    import module_name
     
 To:
     try:
@@ -54,9 +55,19 @@ INFRA_MODULES = [
     'do_cost_tracker',
 ]
 
-def fix_imports_in_file(filepath):
+def get_all_infra_modules(infra_dir):
+    """Get list of all .py files in infra directory (these are all infra modules)"""
+    python_files = list(infra_dir.glob("*.py"))
+    modules = []
+    for f in python_files:
+        if f.name not in ['__init__.py', 'test.py', 'conftest.py', 'fix.py']:
+            # Remove .py extension to get module name
+            modules.append(f.stem)
+    return modules
+
+def fix_imports_in_file(filepath, all_modules):
     """Fix imports in a single file"""
-    print(f"Processing: {filepath}")
+    print(f"Processing: {filepath.name}")
     
     with open(filepath, 'r', encoding='utf-8') as f:
         content = f.read()
@@ -64,12 +75,7 @@ def fix_imports_in_file(filepath):
     original_content = content
     changes_made = []
     
-    # Pattern: from module_name import Something
-    # But NOT: from .module_name (already relative)
-    # But NOT: from typing import (standard library)
-    # But NOT: from datetime import (standard library)
-    
-    for module in INFRA_MODULES:
+    for module in all_modules:
         # Pattern 1: from module_name import ClassName
         pattern1 = rf'^(\s*)from {module} import (.+)$'
         
@@ -83,10 +89,7 @@ def fix_imports_in_file(filepath):
             
             changes_made.append(f"  - from {module} import {imports}")
             
-            return f"""{indent}try:
-{indent}    from .{module} import {imports}
-{indent}except ImportError:
-{indent}    from {module} import {imports}"""
+            return f"{indent}try:\n{indent}    from .{module} import {imports}\n{indent}except ImportError:\n{indent}    from {module} import {imports}"
         
         content = re.sub(pattern1, replace1, content, flags=re.MULTILINE)
         
@@ -121,12 +124,26 @@ def fix_imports_in_file(filepath):
             
             changes_made.append(f"  - from {module} import (...)")
             
-            return f"""{indent}try:
-{indent}    from .{module} import ({import_items}
-{indent}except ImportError:
-{indent}    from {module} import ({import_items}"""
+            return f"{indent}try:\n{indent}    from .{module} import ({import_items}\n{indent}except ImportError:\n{indent}    from {module} import ({import_items}"
         
         content = re.sub(pattern2, replace2, content, flags=re.MULTILINE)
+        
+        # Pattern 3: import module_name (bare import)
+        pattern3 = rf'^(\s*)import {module}(\s*)$'
+        
+        def replace3(match):
+            indent = match.group(1)
+            trailing = match.group(2)
+            
+            # Check if already has try/except
+            if 'try:' in content[max(0, match.start()-100):match.start()]:
+                return match.group(0)  # Already fixed
+            
+            changes_made.append(f"  - import {module}")
+            
+            return f"{indent}try:\n{indent}    from . import {module}\n{indent}except ImportError:\n{indent}    import {module}{trailing}"
+        
+        content = re.sub(pattern3, replace3, content, flags=re.MULTILINE)
     
     # Only write if changes were made
     if content != original_content:
@@ -161,18 +178,22 @@ def main():
     print(f"Fixing imports in: {infra_dir}")
     print("=" * 60)
     
+    # Get all infra modules dynamically
+    all_modules = get_all_infra_modules(infra_dir)
+    print(f"Found {len(all_modules)} infra modules to check for")
+    
     # Get all Python files
     python_files = list(infra_dir.glob("*.py"))
     
     # Exclude some files
-    exclude_files = ['__init__.py', 'test.py', 'conftest.py']
+    exclude_files = ['__init__.py', 'test.py', 'conftest.py', 'fix.py']
     python_files = [f for f in python_files if f.name not in exclude_files]
     
-    print(f"Found {len(python_files)} Python files to process\n")
+    print(f"Processing {len(python_files)} Python files\n")
     
     fixed_count = 0
     for filepath in sorted(python_files):
-        if fix_imports_in_file(filepath):
+        if fix_imports_in_file(filepath, all_modules):
             fixed_count += 1
         print()
     

@@ -7,9 +7,12 @@ This module provides:
 - Dockerfile generation for backup containers with verification
 """
 
-import hashlib
 from typing import Dict, Any, Optional
-from resource_resolver import ResourceResolver
+
+try:
+    from .resource_resolver import ResourceResolver
+except ImportError:
+    from resource_resolver import ResourceResolver
 
 
 # Service types that support automatic backups

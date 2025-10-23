@@ -6,11 +6,19 @@ from typing import Optional, List, Dict, Any
 from datetime import datetime
 import subprocess
 
-from nginx_config_generator import NginxConfigGenerator
-from logger import Logger
+try:
+    from .nginx_config_generator import NginxConfigGenerator
+except ImportError:
+    from nginx_config_generator import NginxConfigGenerator
+try:
+    from .logger import Logger
+except ImportError:
+    from logger import Logger
+
 
 def log(msg):
     Logger.log(msg)
+
 
 class CertificateManager:
     """

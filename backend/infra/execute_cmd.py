@@ -4,7 +4,10 @@ import shlex
 from typing import Union, List, Any
 import platform
 
-from logger import Logger
+try:
+    from .logger import Logger
+except ImportError:
+    from logger import Logger
 
 
 def log(msg):
