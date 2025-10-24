@@ -16,9 +16,6 @@
                     "7": "EXPOSE 8000",
                     "8": "CMD [\"python\", \"api.py\"]"
                 },
-                "volumes": {
-                    "/local/new_project/uat/secrets/postgres": "/run/secrets:ro"
-                },
                 "build_context": "C:\\Users\\vergn\\Desktop\\Projects",
                 "startup_order": 2,
                 "server_zone": "lon1",
@@ -49,7 +46,7 @@
                     }
                 }
             },
-            "production": {
+            "production2": {
                 "services": {
                     "job": {
                         "dockerfile_content": {
