@@ -522,7 +522,7 @@ class NginxConfigGenerator:
         return conf_path_str
 
     @staticmethod
-    def _get_conf_path(project: str, env: str, service_name: str, target_server: str = "localhost") -> str:
+    def _get_conf_path(user: str, project: str, env: str, service_name: str, target_server: str = "localhost") -> str:
         """
         Get the path to the nginx config file for a service.
         
@@ -530,7 +530,7 @@ class NginxConfigGenerator:
             String path (works for both local and remote servers)
         """
             
-        filename = ResourceResolver.get_nginx_config_name(project, env, service_name)
+        filename = ResourceResolver.get_nginx_config_name(user, project, env, service_name)
         
         if target_server == "localhost" or target_server is None:
             target_os = ResourceResolver.detect_target_os(None)
@@ -617,7 +617,7 @@ class NginxConfigGenerator:
         """Ensure nginx container is running with proper configuration (OPTIMIZED)"""
     
         container_name = NginxConfigGenerator.NGINX_CONTAINER
-        network_name = ResourceResolver.get_network_name(project, env)
+        network_name = ResourceResolver.get_network_name()
         
         # ============================================================
         # OPTIMIZATION: Single command check for existence + network
@@ -688,7 +688,7 @@ class NginxConfigGenerator:
         # Get all internal ports for stream configuration
         internal_ports = []
         for service_name in services.keys():
-            internal_port = ResourceResolver.get_service_port(project, env, service_name)
+            internal_port = ResourceResolver.get_service_port(user, project, env, service_name)
             internal_ports.append(internal_port)
         
         # Build port mappings
@@ -1371,6 +1371,7 @@ class NginxConfigGenerator:
 
     @staticmethod
     def _get_upstream_servers(
+        user: str,
         project: str,
         env: str,
         service_name: str,
@@ -1392,7 +1393,7 @@ class NginxConfigGenerator:
 
         if len(server_ips) > 1:
             for server_ip in server_ips:
-                host_port = ResourceResolver.get_host_port(project, env, service_name, container_port)
+                host_port = ResourceResolver.get_host_port(user, project, env, service_name, container_port)
                 servers.append({
                     "host": server_ip,
                     "port": host_port,
@@ -1401,7 +1402,7 @@ class NginxConfigGenerator:
                     "fail_timeout": "30s",
                 })
         else:
-            container_name = ResourceResolver.get_container_name(project, env, service_name)
+            container_name = ResourceResolver.get_container_name(user, project, env, service_name)
             servers.append({"host": container_name, "port": container_port, "weight": 1})
         
         return servers

@@ -94,6 +94,7 @@ class BackupManager:
     
     @staticmethod
     def generate_backup_service_config(
+        user: str,
         project: str,
         env: str,
         service_name: str,
@@ -104,6 +105,7 @@ class BackupManager:
         Auto-generate backup service configuration from parent service.
         
         Args:
+            user: user id (e.g. "u1")
             project: Project name
             env: Environment name
             service_name: Parent service name (e.g., "postgres")
@@ -126,7 +128,7 @@ class BackupManager:
         backup_config = service_config.get("backup", {})
         
         # Get parent container name for Docker DNS
-        parent_container_name = ResourceResolver.get_container_name(project, env, service_name)
+        parent_container_name = ResourceResolver.get_container_name(user, project, env, service_name)
         
         # Copy parent's env vars (includes POSTGRES_DB, POSTGRES_USER, etc.)
         parent_env_vars = service_config.get("env_vars", {}).copy()
@@ -162,13 +164,13 @@ class BackupManager:
             "env_vars": backup_env_vars,
             "volumes": {
                 # Data volume (read-only)
-                ResourceResolver.get_docker_volume_name(project, env, "data", service_name): "/data:ro",
+                ResourceResolver.get_docker_volume_name(user, project, env, "data", service_name): "/data:ro",
                 # Secrets (read-only host mount)
-                ResourceResolver.get_volume_host_path(project, env, service_name, "secrets", server_ip): "/run/secrets:ro",
+                ResourceResolver.get_volume_host_path(user, project, env, service_name, "secrets", server_ip): "/run/secrets:ro",
                 # Backups volume (write)
-                ResourceResolver.get_docker_volume_name(project, env, "backups", service_name): "/backups"
+                ResourceResolver.get_docker_volume_name(user, project, env, "backups", service_name): "/backups"
             },
-            "network": ResourceResolver.get_network_name(project, env)
+            "network": ResourceResolver.get_network_name()
         }
     
     @staticmethod

@@ -124,7 +124,7 @@ class MetricsCollector:
                 'internal_port': int
             }
         """        
-        container_name = ResourceResolver.get_container_name(project, env, service)
+        container_name = ResourceResolver.get_container_name(user, project, env, service)
         
         try:
             # Get host CPU count for normalization
@@ -158,7 +158,7 @@ class MetricsCollector:
                 memory_mb = 0
             
             # Get internal port for this service
-            internal_port = ResourceResolver.get_internal_port(project, env, service)
+            internal_port = ResourceResolver.get_internal_port(user, project, env, service)
             
             # Collect RPS from Nginx logs - only if service has exposed ports
             rps = 0.0

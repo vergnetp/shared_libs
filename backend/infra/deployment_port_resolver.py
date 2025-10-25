@@ -65,7 +65,7 @@ class DeploymentPortResolver:
 
     @staticmethod
     def generate_host_port(
-        project_name: str, env: str, service_name: str, container_port: str, base_port: int = 8000
+        user: str, project_name: str, env: str, service_name: str, container_port: str, base_port: int = 8000
     ) -> int:
         """
         Generate deterministic host port for mapping.
@@ -74,6 +74,7 @@ class DeploymentPortResolver:
         Secondary deployments add 10000 to this port.
         
         Args:
+            user: user id (e.g. "u1")
             project_name: Project name
             env: Environment
             service_name: Service name
@@ -84,17 +85,17 @@ class DeploymentPortResolver:
             Base host port (8000-8999 range)
             
         Examples:
-            generate_host_port("proj", "dev", "postgres", "5432") -> 8357
+            generate_host_port("u1", "proj", "dev", "postgres", "5432") -> 8357
             Secondary deployment would use: 8357 + 10000 = 18357
         """
-        hash_input = f"{project_name}_{env}_{service_name}_{container_port}"
+        hash_input = f"{user}_{project_name}_{env}_{service_name}_{container_port}"
         hash_value = int(hashlib.md5(hash_input.encode()).hexdigest()[:8], 16)
         port_offset = hash_value % 1000
         return base_port + port_offset
 
     @staticmethod
     def get_internal_port(
-        project_name: str, env: str, service_name: str, base_port: int = 5000
+        user: str, project_name: str, env: str, service_name: str, base_port: int = 5000
     ) -> int:
         """
         Generate deterministic internal port for nginx to listen on.
@@ -106,6 +107,7 @@ class DeploymentPortResolver:
         This ensures the internal port never changes for a given service.
         
         Args:
+            user: user id (e.g. "u1")
             project_name: Project name
             env: Environment
             service_name: Service name
@@ -115,9 +117,8 @@ class DeploymentPortResolver:
             Internal port (5000-5999 range)
             
         Examples:
-            get_internal_port("new_project", "uat", "postgres") -> 5234
-            get_internal_port("new_project", "uat", "redis") -> 5678
-            get_internal_port("new_project", "prod", "postgres") -> 5789
+            get_internal_port("u1", "new_project", "uat", "postgres") -> 5234
+            get_internal_port("u1", "new_project", "uat", "redis") -> 5678
             
         Note:
             This port is used by nginx for the listen directive.
@@ -125,7 +126,7 @@ class DeploymentPortResolver:
             It NEVER changes, even during toggle deployments.
         """
         # Hash input: only project_env_service (no version, no container_port)
-        hash_input = f"{project_name}_{env}_{service_name}_internal"
+        hash_input = f"{user}_{project_name}_{env}_{service_name}_internal"
         hash_value = int(hashlib.md5(hash_input.encode()).hexdigest()[:8], 16)
         port_offset = hash_value % 1000
         return base_port + port_offset

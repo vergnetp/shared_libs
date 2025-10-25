@@ -44,7 +44,8 @@ def log(msg):
 class SecretsRotator:
     """Handle rotation of secrets for deployed services"""
     
-    def __init__(self, project: str, env: str):
+    def __init__(self, user: str, project: str, env: str):
+        self.user = user
         self.project = project
         self.env = env
     
@@ -85,7 +86,7 @@ class SecretsRotator:
         """
         try:
             secrets_dir = ResourceResolver.get_volume_host_path(
-                self.project, self.env, service_name, "secrets", "localhost"
+                self.user, self.project, self.env, service_name, "secrets", "localhost"
             )
             secret_filename = ResourceResolver._get_secret_filename(service_name)
             password_file = Path(secrets_dir) / secret_filename
@@ -132,7 +133,7 @@ class SecretsRotator:
         """       
         # Get local secrets base directory
         local_secrets_base = Path(ResourceResolver.get_volume_host_path(
-            self.project, self.env, "", "secrets", "localhost"
+            self.user, self.project, self.env, "", "secrets", "localhost"
         ))
         
         if not local_secrets_base.exists():
@@ -201,7 +202,7 @@ class SecretsRotator:
                 # Restart all services in this group (parallel across servers)
                 for service_name in services_in_group:
                     container_name = ResourceResolver.get_container_name(
-                        self.project, self.env, service_name
+                        self.user, self.project, self.env, service_name
                     )
                     
                     service_restarted = False

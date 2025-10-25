@@ -4,7 +4,7 @@ Handles Windows/Linux path differences and local/remote distinctions.
 """
 
 from pathlib import Path
-from typing import Dict, List, Optional, Literal
+from typing import Dict, List, Optional, Literal, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import platform as sys_platform
 
@@ -78,6 +78,7 @@ class PathResolver:
     
     @staticmethod
     def get_volume_host_path(
+        user: str,
         project: str,
         env: str,
         service: str,
@@ -90,6 +91,7 @@ class PathResolver:
         This is the SINGLE source of truth for all volume host paths.
         
         Args:
+            user: user id (e.g. "u1")
             project: Project name
             env: Environment name
             service: Service name (or None for global paths)
@@ -100,9 +102,9 @@ class PathResolver:
             Properly formatted path string for Docker volume mounting
             
         Examples:
-            get_volume_host_path("myapp", "prod", "api", "config", "localhost")
-            -> Windows: "C:/local/myapp/prod/config/api"
-            -> Linux: "/local/myapp/prod/config/api"
+            get_volume_host_path("u1", "myapp", "prod", "api", "config", "localhost")
+            -> Windows: "C:/local/u1/myapp/prod/config/api"
+            -> Linux: "/local/u1/myapp/prod/config/api"
         """
         target_os = PathResolver.detect_target_os(server_ip)
         
@@ -115,15 +117,15 @@ class PathResolver:
             
             # Build path: /local/{project}/{env}/{path_type}/{service}
             if service:
-                path = base / project / env / path_type / service
+                path = base / user / project / env / path_type / service
             else:
-                path = base / project / env / path_type
+                path = base / user / project / env / path_type
         else:
             # Remote server: always Linux-style paths
             if service:
-                path = Path(f"/local/{project}/{env}/{path_type}/{service}")
+                path = Path(f"/local/{user}/{project}/{env}/{path_type}/{service}")
             else:
-                path = Path(f"/local/{project}/{env}/{path_type}")
+                path = Path(f"/local/{user}/{project}/{env}/{path_type}")
         
         # Convert to string with forward slashes (Docker requirement)
         return str(path).replace("\\", "/")
@@ -182,6 +184,7 @@ class PathResolver:
     
     @staticmethod
     def get_docker_volume_name(
+        user: str,
         project: str,
         env: str,
         path_type: Literal["data", "logs", "backups", "monitoring"],
@@ -191,6 +194,7 @@ class PathResolver:
         Get Docker volume name for named volumes.
         
         Args:
+            user: user id (e.g. "u1")
             project: Project name
             env: Environment name
             path_type: Type of volume (only data/logs/backups/monitoring use Docker volumes)
@@ -200,19 +204,20 @@ class PathResolver:
             Docker volume name
             
         Examples:
-            get_docker_volume_name("myapp", "prod", "data", "postgres")
-            -> "myapp_prod_data_postgres"
+            get_docker_volume_name("u1", "myapp", "prod", "data", "postgres")
+            -> "u1_myapp_prod_data_postgres"
             
-            get_docker_volume_name("myapp", "prod", "logs")
-            -> "myapp_prod_logs"
+            get_docker_volume_name("u1", "myapp", "prod", "logs")
+            -> "u1_myapp_prod_logs"
         """
         if service:
-            return f"{project}_{env}_{path_type}_{service}"
+            return f"{user}_{project}_{env}_{path_type}_{service}"
         else:
-            return f"{project}_{env}_{path_type}"
+            return f"{user}_{project}_{env}_{path_type}"
     
     @staticmethod
     def generate_volume_mount(
+        user: str,
         project: str,
         env: str,
         service: str,
@@ -227,6 +232,7 @@ class PathResolver:
         This is the SINGLE method that should generate volume mount strings.
         
         Args:
+            user: user id (e.g. "u1")
             project: Project name
             env: Environment name
             service: Service name
@@ -239,11 +245,11 @@ class PathResolver:
             Complete volume mount string for docker run -v flag
             
         Examples:
-            generate_volume_mount("myapp", "prod", "api", "config", "localhost")
-            -> "C:/local/myapp/prod/config/api:/app/config:ro"
+            generate_volume_mount("u1", "myapp", "prod", "api", "config", "localhost")
+            -> "C:/local/u1/myapp/prod/config/api:/app/config:ro"
             
-            generate_volume_mount("myapp", "prod", "postgres", "data", use_docker_volumes=True)
-            -> "myapp_prod_data_postgres:/var/lib/postgresql/data"
+            generate_volume_mount("u1", "myapp", "prod", "postgres", "data", use_docker_volumes=True)
+            -> "u1_myapp_prod_data_postgres:/var/lib/postgresql/data"
         """
         # Push operations (config, secrets, files) always use host mounts
         # Pull operations (data, logs, backups, monitoring) can use Docker volumes
@@ -254,12 +260,12 @@ class PathResolver:
         
         if should_use_docker_volume:
             # Use Docker named volume
-            volume_name = PathResolver.get_docker_volume_name(project, env, path_type, service)
+            volume_name = PathResolver.get_docker_volume_name(user, project, env, path_type, service)
             container_path = PathResolver.get_volume_container_path(service, path_type)
             return f"{volume_name}:{container_path}"
         else:
             # Use host mount
-            host_path = PathResolver.get_volume_host_path(project, env, service, path_type, server_ip)
+            host_path = PathResolver.get_volume_host_path(user, project, env, service, path_type, server_ip)
             container_path = PathResolver.get_volume_container_path(service, path_type)
             
             # Add read-only flag if needed
@@ -267,7 +273,8 @@ class PathResolver:
             
             return f"{host_path}:{container_path}{ro_flag}"
     
-    def ensure_host_directories(project, env, service, server_ip, user="root"): 
+    @staticmethod
+    def ensure_host_directories(user: str, project: str, env: str, service: str, server_ip: str): 
         host_mount_types = ["config", "secrets", "files"]
         
         with ThreadPoolExecutor(max_workers=3) as executor:
@@ -275,7 +282,7 @@ class PathResolver:
             
             for path_type in host_mount_types:
                 host_path = PathResolver.get_volume_host_path(
-                    project, env, service, path_type, server_ip
+                    user, project, env, service, path_type, server_ip
                 )
                 future = executor.submit(
                     DockerExecuter.mkdir_on_server, 
@@ -292,12 +299,13 @@ class PathResolver:
                 except Exception as e:
                     log(f"Warning: Could not create directory {host_path}: {e}")
     
-    def ensure_docker_volumes(project, env, service, server_ip="localhost", user="root"):      
+    @staticmethod
+    def ensure_docker_volumes(user: str, project: str, env: str, service: str, server_ip: str="localhost") -> Tuple[str, str]:      
         docker_volume_types = ["data", "logs", "backups", "monitoring"]
         
         def create_volume_if_needed(path_type):
             volume_name = PathResolver.get_docker_volume_name(
-                project, env, path_type, service
+                user, project, env, path_type, service
             )
             
             if not DockerExecuter.volume_exists(volume_name, server_ip, user):
@@ -326,7 +334,7 @@ class PathResolver:
     @staticmethod
     def ensure_nginx_cert_directories(
         target_server: str,
-        user: str = "root"
+        user: str
     ):
         """
         Ensure nginx certificate directories exist.
@@ -361,12 +369,12 @@ class PathResolver:
     
     @staticmethod
     def generate_all_volume_mounts(
+        user: str,
         project: str,
         env: str,
         service: str,
-        server_ip: str,  # REQUIRED - must know target server for path resolution
-        use_docker_volumes: bool = True,
-        user: str = "root",
+        server_ip: str, 
+        use_docker_volumes: bool = True,        
         auto_create_dirs: bool = True
     ) -> List[str]:
         """
@@ -379,12 +387,12 @@ class PathResolver:
         Do not default to "localhost" - caller must explicitly specify target.
         
         Args:
+            user: user id (e.g. "u1")
             project: Project name
             env: Environment name
             service: Service name
             server_ip: Target server IP (REQUIRED for correct path resolution)
-            use_docker_volumes: Use Docker volumes for data/logs
-            user: SSH user for remote servers (default: "root")
+            use_docker_volumes: Use Docker volumes for data/logs            
             auto_create_dirs: Automatically create host directories (default: True)
             
         Returns:
@@ -393,7 +401,7 @@ class PathResolver:
         Example:
             # During deployment to specific blue server
             volumes = PathResolver.generate_all_volume_mounts(
-                "myapp", "prod", "api", 
+                "u1", "myapp", "prod", "api", 
                 server_ip="10.0.0.5"  # The specific blue server we're deploying to
             )
             # Directories automatically created on 10.0.0.5 before returning
@@ -401,13 +409,13 @@ class PathResolver:
         # Step 1: Ensure host directories exist (if enabled)
         if auto_create_dirs:
             PathResolver.ensure_host_directories(
-                project, env, service, server_ip, user
+                user, project, env, service, server_ip
             )
             
             # Step 1b: Ensure Docker volumes exist (if using them)
             if use_docker_volumes:
                 PathResolver.ensure_docker_volumes(
-                    project, env, service, server_ip, user
+                    user, project, env, service, server_ip
                 )
         
         # Step 2: Generate volume mounts
@@ -416,7 +424,7 @@ class PathResolver:
         # Config (read-only, host mount)
         volumes.append(
             PathResolver.generate_volume_mount(
-                project, env, service, "config", server_ip, 
+                user, project, env, service, "config", server_ip, 
                 use_docker_volumes=False, read_only=True
             )
         )
@@ -424,7 +432,7 @@ class PathResolver:
         # Secrets (read-only, host mount)
         volumes.append(
             PathResolver.generate_volume_mount(
-                project, env, service, "secrets", server_ip,
+                user, project, env, service, "secrets", server_ip,
                 use_docker_volumes=False, read_only=True
             )
         )
@@ -432,7 +440,7 @@ class PathResolver:
         # Files (read-only, host mount) - shared files
         volumes.append(
             PathResolver.generate_volume_mount(
-                project, env, service, "files", server_ip,
+                user, project, env, service, "files", server_ip,
                 use_docker_volumes=False, read_only=True
             )
         )
@@ -440,7 +448,7 @@ class PathResolver:
         # Data (Docker volume or host mount)
         volumes.append(
             PathResolver.generate_volume_mount(
-                project, env, service, "data", server_ip,
+                user, project, env, service, "data", server_ip,
                 use_docker_volumes=use_docker_volumes, read_only=False
             )
         )
@@ -448,7 +456,7 @@ class PathResolver:
         # Logs (Docker volume or host mount)
         volumes.append(
             PathResolver.generate_volume_mount(
-                project, env, service, "logs", server_ip,
+                user, project, env, service, "logs", server_ip,
                 use_docker_volumes=use_docker_volumes, read_only=False
             )
         )

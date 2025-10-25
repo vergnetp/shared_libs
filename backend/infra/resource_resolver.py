@@ -79,36 +79,38 @@ class ResourceResolver:
     # ========================================
     
     @staticmethod
-    def get_container_name(project: str, env: str, service: str) -> str:
+    def get_container_name(user: str, project: str, env: str, service: str) -> str:
         """
         Get Docker container name for a service.
         
         Format: {project}_{env}_{service}
         
         Args:
+            user: user id (e.g. "u1")
             project: Project name
             env: Environment name
-            service: Service name
+            service: Service name            
         
         Returns:
             Container name string
         
         Examples:
-            >>> ResourceResolver.get_container_name("myapp", "prod", "api")
-            'myapp_prod_api'
+            >>> ResourceResolver.get_container_name("u1", "myapp", "prod", "api")
+            'u1_myapp_prod_api'
         """
-        return DeploymentNaming.get_container_name(project, env, service)
+        return DeploymentNaming.get_container_name(user, project, env, service)
     
     @staticmethod
-    def get_container_name_pattern(project: str, env: str, service: str) -> str:
+    def get_container_name_pattern(user: str, project: str, env: str, service: str) -> str:
         """
         Get wildcard pattern for finding service containers (primary and secondary).
         
-        Format: {project}_{env}_{service}*
+        Format: {user}_{project}_{env}_{service}*
         
         Matches both primary and secondary containers in toggle deployments.
         
         Args:
+            user: user id (e.g. "u1")
             project: Project name
             env: Environment name
             service: Service name
@@ -117,13 +119,13 @@ class ResourceResolver:
             Pattern string for container matching
         
         Examples:
-            >>> ResourceResolver.get_container_name_pattern("myapp", "prod", "api")
-            'myapp_prod_api*'
+            >>> ResourceResolver.get_container_name_pattern("u1", "myapp", "prod", "api")
+            'u1_myapp_prod_api*'
         """
-        return DeploymentNaming.get_container_name_pattern(project, env, service)
+        return DeploymentNaming.get_container_name_pattern(user, project, env, service)
     
     @staticmethod
-    def get_image_name(docker_hub_user: str, project: str, env: str, 
+    def get_image_name(docker_hub_user: str, user: str, project: str, env: str, 
                       service: str, version: str = "latest") -> str:
         """
         Get Docker image name for registry.
@@ -132,6 +134,7 @@ class ResourceResolver:
         
         Args:
             docker_hub_user: Docker Hub username
+            user: user id (e.g. "u1")
             project: Project name
             env: Environment name
             service: Service name
@@ -141,39 +144,34 @@ class ResourceResolver:
             Docker image name with tag
         
         Examples:
-            >>> ResourceResolver.get_image_name("alice", "myapp", "prod", "api", "1.2.3")
-            'alice/myapp-prod-api:1.2.3'
+            >>> ResourceResolver.get_image_name("alice", "u1", "myapp", "prod", "api", "1.2.3")
+            'alice/u1-myapp-prod-api:1.2.3'
         """
-        return DeploymentNaming.get_image_name(docker_hub_user, project, env, service, version)
+        return DeploymentNaming.get_image_name(docker_hub_user, user, project, env, service, version)
     
     @staticmethod
-    def get_network_name(project: str, env: str) -> str:
+    def get_network_name() -> str:
         """
         Get Docker network name for project/environment.
-        
-        Format: {project}_{env}_network
-        
-        Args:
-            project: Project name
-            env: Environment name
-        
+            
         Returns:
             Docker network name
         
         Examples:
             >>> ResourceResolver.get_network_name("myapp", "prod")
-            'myapp_prod_network'
+            'deployer_network'
         """
-        return DeploymentNaming.get_network_name(project, env)
+        return DeploymentNaming.get_network_name()
     
     @staticmethod
-    def get_dockerfile_name(project: str, env: str, service: str) -> str:
+    def get_dockerfile_name(user: str, project: str, env: str, service: str) -> str:
         """
         Get Dockerfile name with project/env/service discrimination.
         
-        Format: Dockerfile.{project}-{env}-{service}
+        Format: Dockerfile.{user}-{project}-{env}-{service}
         
         Args:
+            user: user id (e.g. "u1")
             project: Project name
             env: Environment name
             service: Service name
@@ -182,19 +180,20 @@ class ResourceResolver:
             Dockerfile filename
         
         Examples:
-            >>> ResourceResolver.get_dockerfile_name("myapp", "prod", "api")
-            'Dockerfile.myapp-prod-api'
+            >>> ResourceResolver.get_dockerfile_name("u1", "myapp", "prod", "api")
+            'Dockerfile.u1-myapp-prod-api'
         """
-        return DeploymentNaming.get_dockerfile_name(project, env, service)
+        return DeploymentNaming.get_dockerfile_name(user, project, env, service)
     
     @staticmethod
-    def get_nginx_config_name(project: str, env: str, service: str) -> str:
+    def get_nginx_config_name(user: str, project: str, env: str, service: str) -> str:
         """
         Get nginx configuration filename for a service.
         
-        Format: nginx-{project}_{env}_{service}.conf
+        Format: nginx-{user}_{project}_{env}_{service}.conf
         
         Args:
+            user: user id (e.g. "u1")
             project: Project name
             env: Environment name
             service: Service name
@@ -203,17 +202,17 @@ class ResourceResolver:
             Nginx config filename
         
         Examples:
-            >>> ResourceResolver.get_nginx_config_name("myapp", "prod", "api")
-            'nginx-myapp_prod_api.conf'
+            >>> ResourceResolver.get_nginx_config_name("u1", "myapp", "prod", "api")
+            'nginx-u1_myapp_prod_api.conf'
         """
-        return DeploymentNaming.get_nginx_config_name(project, env, service)
+        return DeploymentNaming.get_nginx_config_name(user, project, env, service)
     
     # ========================================
     # GENERIC SERVICE RESOURCES
     # ========================================
     
     @staticmethod
-    def get_service_password(project: str, env: str, service: str) -> str:
+    def get_service_password(user: str, project: str, env: str, service: str) -> str:
         """
         Read service password from secrets file (GENERIC for all services).
         
@@ -229,6 +228,7 @@ class ResourceResolver:
         5. Fall back to {SERVICE}_PASSWORD environment variable
         
         Args:
+            user: user id (e.g. "u1")
             project: Project name
             env: Environment name
             service: Service name (postgres, redis, mongo, opensearch, etc.)
@@ -237,9 +237,9 @@ class ResourceResolver:
             Password string, or empty string if not found
         
         Examples:
-            >>> ResourceResolver.get_service_password("myapp", "prod", "postgres")
+            >>> ResourceResolver.get_service_password("u1", "myapp", "prod", "postgres")
             'dbpassword123'
-            >>> ResourceResolver.get_service_password("myapp", "prod", "redis")
+            >>> ResourceResolver.get_service_password("u1", "myapp", "prod", "redis")
             'redispassword456'
         """
         secret_filename = ResourceResolver._get_secret_filename(service)
@@ -272,7 +272,7 @@ class ResourceResolver:
         # 4. Host path (PathResolver determines OS-aware path)
         try:
             host_path = PathResolver.get_volume_host_path(
-                project, env, service, "secrets", "localhost"
+                user, project, env, service, "secrets", "localhost"
             )
             password_file = Path(host_path) / secret_filename
             if password_file.exists():
@@ -284,7 +284,7 @@ class ResourceResolver:
         return os.getenv(env_var_password, "")
 
     @staticmethod
-    def get_service_port(project: str, env: str, service: str) -> int:
+    def get_service_port(user: str, project: str, env: str, service: str) -> int:
         """
         Get service internal port for service discovery (GENERIC for all services).
         
@@ -294,6 +294,7 @@ class ResourceResolver:
         Works for: postgres, redis, mongo, opensearch, api, worker, etc.
         
         Args:
+            user: user id (e.g. "u1")
             project: Project name
             env: Environment name
             service: Service name
@@ -302,17 +303,15 @@ class ResourceResolver:
             Internal port number (5000-65535 range)
         
         Examples:
-            >>> ResourceResolver.get_service_port("myapp", "prod", "postgres")
+            >>> ResourceResolver.get_service_port("u1", "myapp", "prod", "postgres")
             5234
-            >>> ResourceResolver.get_service_port("myapp", "prod", "redis")
+            >>> ResourceResolver.get_service_port("u1", "myapp", "prod", "redis")
             6891
-            >>> ResourceResolver.get_service_port("myapp", "prod", "opensearch")
-            9456
         """
-        return DeploymentPortResolver.get_internal_port(project, env, service)
+        return DeploymentPortResolver.get_internal_port(user, project, env, service)
     
     @staticmethod
-    def get_service_host(project: str, env: str, service: str) -> str:
+    def get_service_host(user, project: str, env: str, service: str) -> str:
         """
         Get service host for application connections (GENERIC for all services).
         
@@ -320,17 +319,21 @@ class ResourceResolver:
         on the internal service discovery port.
         
         Args:
+            user: user id (e.g. "u1")
             project: Project name (unused, for API consistency)
             env: Environment name (unused, for API consistency)
             service: Service name (unused, for API consistency)
         
         Returns:
-            "localhost" string
+            "nginx" string
         
+        Todo:
+            Maybe remove useless arguments, and maybe rename to clearer function name
+
         Examples:
-            >>> ResourceResolver.get_service_host("myapp", "prod", "postgres")
+            >>> ResourceResolver.get_service_host("u1", "myapp", "prod", "postgres")
             'nginx'
-            >>> ResourceResolver.get_service_host("myapp", "prod", "opensearch")
+            >>> ResourceResolver.get_service_host("u1", "myapp", "prod", "opensearch")
             'nginx'
         """
         return "nginx"
@@ -340,7 +343,7 @@ class ResourceResolver:
     # ========================================
     
     @staticmethod
-    def get_db_name(project: str, env: str, service: str = "postgres") -> str:
+    def get_db_name(user: str, project: str, env: str, service: str = "postgres") -> str:
         """
         Generate database name from project/env/service.
         
@@ -348,6 +351,7 @@ class ResourceResolver:
         Format: {project}_{hash8}
         
         Args:
+            user: user id (e.g. "u1")
             project: Project name
             env: Environment name
             service: Database service name (default: "postgres")
@@ -356,35 +360,37 @@ class ResourceResolver:
             Database name string
         
         Examples:
-            >>> ResourceResolver.get_db_name("myapp", "prod", "postgres")
-            'myapp_8e9fb088'
+            >>> ResourceResolver.get_db_name("u1", "myapp", "prod", "postgres")
+            'u1_myapp_8e9fb088'
         """
         hash_input = f"{project}_{env}_{service}"
         db_suffix = hashlib.md5(hash_input.encode()).hexdigest()[:8]
-        return f"{project}_{db_suffix}"
+        return f"{user}_{project}_{db_suffix}"
     
     @staticmethod
-    def get_db_user(project: str, service: str = "postgres") -> str:
+    def get_db_user(user: str, project: str, env: str, service: str = "postgres") -> str:
         """
         Generate database username from project.
         
-        Format: {project}_user
+        Format: {user}_{project}_{env}_{service}_user
         
         Args:
+            user: user id (e.g. "u1")
             project: Project name
+            env: environment name
             service: Database service name (default: "postgres")
         
         Returns:
             Database username string
         
         Examples:
-            >>> ResourceResolver.get_db_user("myapp")
-            'myapp_user'
+            >>> ResourceResolver.get_db_user("u1", "myapp", "uat", "postgres")
+            'u1_myapp_uat_postgres_user'
         """
-        return f"{project}_user"
+        return f"{user}_{project}_{env}_{service}_user"
     
     @staticmethod
-    def get_db_connection_string(project: str, env: str, service: str = "postgres") -> str:
+    def get_db_connection_string(user: str, project: str, env: str, service: str = "postgres") -> str:
         """
         Generate complete PostgreSQL connection string.
         
@@ -393,6 +399,7 @@ class ResourceResolver:
         Uses generic service methods for password/host/port resolution.
         
         Args:
+            user: user id (e.g. "u1")
             project: Project name
             env: Environment name
             service: Database service name (default: "postgres")
@@ -401,19 +408,19 @@ class ResourceResolver:
             Complete PostgreSQL connection URL
         
         Examples:
-            >>> ResourceResolver.get_db_connection_string("myapp", "prod")
-            'postgresql://myapp_user:secret123@localhost:5234/myapp_8e9fb088'
+            >>> ResourceResolver.get_db_connection_string("u1", "myapp", "prod")
+            'postgresql://u1_myapp_uat_postgres_user:secret123@localhost:5234/u1_myapp_8e9fb088'
         """
-        user = ResourceResolver.get_db_user(project, service)
-        password = ResourceResolver.get_service_password(project, env, service)
-        host = ResourceResolver.get_service_host(project, env, service)
-        port = ResourceResolver.get_service_port(project, env, service)
-        database = ResourceResolver.get_db_name(project, env, service)
+        user = ResourceResolver.get_db_user(user, project, env, service)
+        password = ResourceResolver.get_service_password(user, project, env, service)
+        host = ResourceResolver.get_service_host(user, project, env, service)
+        port = ResourceResolver.get_service_port(user, project, env, service)
+        database = ResourceResolver.get_db_name(user, project, env, service)
         
         return f"postgresql://{user}:{password}@{host}:{port}/{database}"
     
     @staticmethod
-    def get_redis_connection_string(project: str, env: str, service: str = "redis", db: int = 0) -> str:
+    def get_redis_connection_string(user: str, project: str, env: str, service: str = "redis", db: int = 0) -> str:
         """
         Generate complete Redis connection string.
         
@@ -422,6 +429,7 @@ class ResourceResolver:
         Uses generic service methods for password/host/port resolution.
         
         Args:
+            user: user id (e.g. "u1")
             project: Project name
             env: Environment name
             service: Redis service name (default: "redis")
@@ -431,12 +439,12 @@ class ResourceResolver:
             Complete Redis connection URL
         
         Examples:
-            >>> ResourceResolver.get_redis_connection_string("myapp", "prod")
+            >>> ResourceResolver.get_redis_connection_string("u1", "myapp", "prod")
             'redis://:redispass@localhost:6891/0'
         """
-        password = ResourceResolver.get_service_password(project, env, service)
-        host = ResourceResolver.get_service_host(project, env, service)
-        port = ResourceResolver.get_service_port(project, env, service)
+        password = ResourceResolver.get_service_password(user, project, env, service)
+        host = ResourceResolver.get_service_host(user, project, env, service)
+        port = ResourceResolver.get_service_port(user, project, env, service)
         
         return f"redis://:{password}@{host}:{port}/{db}"
     
@@ -468,7 +476,7 @@ class ResourceResolver:
         return PathResolver.detect_target_os(server_ip, user)
 
     @staticmethod
-    def get_volume_host_path(project: str, env: str, service: str,
+    def get_volume_host_path(user: str, project: str, env: str, service: str,
                             path_type: Literal["config", "secrets", "files", "data", "logs", "backups", "monitoring"],
                             server_ip: str) -> str:
         """
@@ -477,6 +485,7 @@ class ResourceResolver:
         Delegates to PathResolver which handles OS detection and path formatting.
         
         Args:
+            user: user id (e.g. "u1")
             project: Project name
             env: Environment name
             service: Service name
@@ -487,11 +496,11 @@ class ResourceResolver:
             Host path string (OS-appropriate format)
         
         Examples:
-            >>> ResourceResolver.get_volume_host_path("myapp", "prod", "api", "config", "localhost")
-            'C:/local/myapp/prod/config/api'  # On Windows
-            '/local/myapp/prod/config/api'    # On Linux
+            >>> ResourceResolver.get_volume_host_path("u1", "myapp", "prod", "api", "config", "localhost")
+            'C:/local/u1/myapp/prod/config/api'  # On Windows
+            '/local/u1/myapp/prod/config/api'    # On Linux
         """
-        return PathResolver.get_volume_host_path(project, env, service, path_type, server_ip)
+        return PathResolver.get_volume_host_path(user, project, env, service, path_type, server_ip)
     
     @staticmethod
     def get_volume_container_path(service: str,
@@ -519,7 +528,7 @@ class ResourceResolver:
         return PathResolver.get_volume_container_path(service, path_type)
     
     @staticmethod
-    def get_docker_volume_name(project: str, env: str,
+    def get_docker_volume_name(user: str, project: str, env: str,
                               path_type: Literal["data", "logs", "backups", "monitoring"],
                               service: Optional[str] = None) -> str:
         """
@@ -529,6 +538,7 @@ class ResourceResolver:
         Config/secrets/files use bind mounts.
         
         Args:
+            user: user id (e.g. "u1")
             project: Project name
             env: Environment name
             path_type: Type of volume (must be data/logs/backups/monitoring)
@@ -538,22 +548,22 @@ class ResourceResolver:
             Docker volume name
         
         Examples:
-            >>> ResourceResolver.get_docker_volume_name("myapp", "prod", "data", "postgres")
-            'myapp_prod_data_postgres'
+            >>> ResourceResolver.get_docker_volume_name("u1", "myapp", "prod", "data", "postgres")
+            'u1_myapp_prod_data_postgres'
             
-            >>> ResourceResolver.get_docker_volume_name("myapp", "prod", "logs")
-            'myapp_prod_logs'
+            >>> ResourceResolver.get_docker_volume_name("u1", "myapp", "prod", "logs")
+            'u1_myapp_prod_logs'
         """
-        return PathResolver.get_docker_volume_name(project, env, path_type, service)
+        return PathResolver.get_docker_volume_name(user, project, env, path_type, service)
     
     @staticmethod
     def generate_all_volume_mounts(
+        user: str,
         project: str,
         env: str,
         service: str,
         server_ip: str,
-        use_docker_volumes: bool = True,
-        user: str = "root",
+        use_docker_volumes: bool = True,        
         auto_create_dirs: bool = True
     ) -> list:
         """
@@ -563,24 +573,24 @@ class ResourceResolver:
         returning volume mounts.
         
         Args:
+            user: user id (e.g. "u1")
             project: Project name
             env: Environment name
             service: Service name
             server_ip: Target server IP (REQUIRED)
             use_docker_volumes: Use Docker volumes for data/logs (default: True)
-            user: SSH user for remote servers (default: "root")
             auto_create_dirs: Auto-create directories (default: True)
         
         Returns:
             List of volume mount strings ready for docker run
         
         Examples:
-            >>> ResourceResolver.generate_all_volume_mounts("myapp", "prod", "api", "10.0.0.5")
-            ['C:/local/myapp/prod/config/api:/app/config:ro', ...]
+            >>> ResourceResolver.generate_all_volume_mounts("u1", "myapp", "prod", "api", "10.0.0.5")
+            ['C:/local/u1/myapp/prod/config/api:/app/config:ro', ...]
         """
         return PathResolver.generate_all_volume_mounts(
-            project, env, service, server_ip,
-            use_docker_volumes, user, auto_create_dirs
+            user, project, env, service, server_ip,
+            use_docker_volumes, auto_create_dirs
         )
 
     # ========================================
@@ -588,7 +598,7 @@ class ResourceResolver:
     # ========================================
     
     @staticmethod
-    def get_host_port(project: str, env: str, service: str,
+    def get_host_port(user: str, project: str, env: str, service: str,
                      container_port: str, base_port: int = 8000) -> int:
         """
         Get host port for service container.
@@ -597,6 +607,7 @@ class ResourceResolver:
         the container's internal port. Used for toggle deployments.
         
         Args:
+            user: user id (e.g. "u1")
             project: Project name
             env: Environment name
             service: Service name
@@ -607,15 +618,15 @@ class ResourceResolver:
             Host port number (deterministic hash-based)
         
         Examples:
-            >>> ResourceResolver.get_host_port("myapp", "prod", "api", "8000")
+            >>> ResourceResolver.get_host_port("u1", "myapp", "prod", "api", "8000")
             8357
         """
         return DeploymentPortResolver.generate_host_port(
-            project, env, service, container_port, base_port
+            user, project, env, service, container_port, base_port
         )
     
     @staticmethod
-    def get_internal_port(project: str, env: str, service: str) -> int:
+    def get_internal_port(user: str, project: str, env: str, service: str) -> int:
         """
         Get internal service discovery port.
         
@@ -623,6 +634,7 @@ class ResourceResolver:
         communication via nginx proxy. Never changes across deployments.
         
         Args:
+            user: user id (e.g. "u1")
             project: Project name
             env: Environment name
             service: Service name
@@ -631,10 +643,10 @@ class ResourceResolver:
             Internal port number (5000-65535 range)
         
         Examples:
-            >>> ResourceResolver.get_internal_port("myapp", "prod", "api")
+            >>> ResourceResolver.get_internal_port("u1", "myapp", "prod", "api")
             5678
         """
-        return DeploymentPortResolver.get_internal_port(project, env, service)
+        return DeploymentPortResolver.get_internal_port(user, project, env, service)
     
     @staticmethod
     def get_container_ports(service: str, dockerfile_path: Optional[str] = None) -> list:

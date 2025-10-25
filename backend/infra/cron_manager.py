@@ -8,7 +8,10 @@ try:
     from .logger import Logger
 except ImportError:
     from logger import Logger
-from resource_resolver import ResourceResolver
+try:
+    from .resource_resolver import ResourceResolver
+except ImportError:
+    from resource_resolver import ResourceResolver
 
 
 def log(msg):
@@ -20,19 +23,20 @@ class CronManager:
 
     @staticmethod
     def generate_cron_entry(
+        user: str,
         project: str, 
         env: str, 
         service_name: str, 
         service_config: Dict[str, Any],
         docker_hub_user: str,        
-        server_ip: str,
-        user: str = "root",
+        server_ip: str,       
         version: str = "latest",
     ) -> Optional[str]:
         """
         Generate a cron entry for a scheduled service.
         
         Args:
+            user: user id (e.g. "u1")
             project: Project name
             env: Environment name  
             service_name: Service name
@@ -55,6 +59,7 @@ class CronManager:
         else:
             image = ResourceResolver.get_image_name(
                 docker_hub_user,
+                user,
                 project,
                 env,
                 service_name,
@@ -62,11 +67,11 @@ class CronManager:
             )
         
         # Generate unique container name with timestamp to avoid conflicts
-        base_container_name = ResourceResolver.get_container_name(project, env, service_name)
+        base_container_name = ResourceResolver.get_container_name(user, project, env, service_name)
         container_name = f"{base_container_name}_$(date +%Y%m%d_%H%M%S)"
         
         # Get network name
-        network_name = ResourceResolver.get_network_name(project, env)
+        network_name = ResourceResolver.get_network_name()
         
         # Build docker run command
         docker_cmd_parts = ["docker", "run", "--rm", "--name", container_name]
@@ -76,7 +81,7 @@ class CronManager:
             docker_cmd_parts.extend(["--network", network_name])
         
         # Add volumes
-        volumes = CronManager._prepare_volumes_for_cron(project, env, service_name, service_config, server_ip, user)
+        volumes = CronManager._prepare_volumes_for_cron(user, project, env, service_name, service_config, server_ip)
         for volume in volumes:
             docker_cmd_parts.extend(["-v", volume])
         
@@ -100,13 +105,13 @@ class CronManager:
         docker_cmd = " ".join(f'"{part}"' if " " in str(part) else str(part) for part in docker_cmd_parts)
     
         # Create cron entry with logging
-        log_file = f"/var/log/cron_{project}_{env}_{service_name}.log"
+        log_file = f"/var/log/cron_{user}_{project}_{env}_{service_name}.log"
         cron_entry = f"{schedule} {docker_cmd} >> {log_file} 2>&1"
         
         return cron_entry
 
     @staticmethod
-    def _prepare_volumes_for_cron(project: str, env: str, service_name: str, service_config: Dict[str, Any], server_ip: str, user: str = "root") -> List[str]:
+    def _prepare_volumes_for_cron(user: str, project: str, env: str, service_name: str, service_config: Dict[str, Any], server_ip: str) -> List[str]:
         """Prepare volumes for cron job containers"""
         volumes = []
         
@@ -124,29 +129,28 @@ class CronManager:
             # Use auto-generated volumes from ResourceResolver
             # Don't auto-create dirs since they're already created in parallel by install_scheduled_service
             volumes = ResourceResolver.generate_all_volume_mounts(
-                project, env, service_name, server_ip,
-                use_docker_volumes=True, 
-                user=user,
+                user, project, env, service_name, server_ip,
+                use_docker_volumes=True,               
                 auto_create_dirs=False  # Already created in parallel
             )
         
         return volumes
 
     @staticmethod
-    def get_cron_identifier(project: str, env: str, service_name: str) -> str:
+    def get_cron_identifier(user: str, project: str, env: str, service_name: str) -> str:
         """Generate unique identifier for cron job management"""
-        return f"# MANAGED_CRON_{project}_{env}_{service_name}"
+        return f"# MANAGED_CRON_{user}_{project}_{env}_{service_name}"
 
     @staticmethod
     def install_cron_job(
+        user: str,
         project: str,
         env: str,
         service_name: str,
         service_config: Dict[str, Any],
         docker_hub_user: str,
         version: str = "latest",
-        server_ip: str = "localhost",
-        user: str = "root"
+        server_ip: str = "localhost"
     ) -> bool:
         """
         Install or update cron job for a scheduled service.
@@ -155,14 +159,14 @@ class CronManager:
             True if cron job was installed/updated successfully
         """
         cron_entry = CronManager.generate_cron_entry(
-            project, env, service_name, service_config, docker_hub_user, server_ip, user, version
+            user, project, env, service_name, service_config, docker_hub_user, server_ip, version
         )
         
         if not cron_entry:
             log(f"No schedule defined for {service_name}, skipping cron installation")
             return False
         
-        identifier = CronManager.get_cron_identifier(project, env, service_name)
+        identifier = CronManager.get_cron_identifier(user, project, env, service_name)
         
         try:
             install_cmd = f"""
@@ -185,11 +189,11 @@ class CronManager:
 
     @staticmethod
     def remove_cron_job(
+        user: str,
         project: str,
         env: str,
         service_name: str,
-        server_ip: str = "localhost",
-        user: str = "root"
+        server_ip: str = "localhost"
     ) -> bool:
         """
         Remove cron job for a service.
@@ -197,10 +201,10 @@ class CronManager:
         Returns:
             True if cron job was removed successfully or didn't exist
         """
-        identifier = CronManager.get_cron_identifier(project, env, service_name)
+        identifier = CronManager.get_cron_identifier(user, project, env, service_name)
         
         try:
-            temp_cron_file = f"/tmp/cron_temp_remove_{project}_{env}_{service_name}"
+            temp_cron_file = f"/tmp/cron_temp_remove_{user}_{project}_{env}_{service_name}"
 
             # Export current crontab, remove lines with our identifier, and reinstall
             commands = [
@@ -222,10 +226,10 @@ class CronManager:
 
     @staticmethod
     def list_managed_cron_jobs(
+        user: str,
         project: str,
         env: str,
-        server_ip: str = "localhost",
-        user: str = "root"
+        server_ip: str = "localhost"
     ) -> List[str]:
         """
         List all managed cron jobs for a project/environment.
@@ -241,7 +245,7 @@ class CronManager:
             lines = crontab_content.split('\n')
             
             for i, line in enumerate(lines):
-                if f"# MANAGED_CRON_{project}_{env}" in line:
+                if f"# MANAGED_CRON_{user}_{project}_{env}" in line:
                     # Next line should be the actual cron job
                     if i + 1 < len(lines):
                         managed_jobs.append(lines[i + 1])
@@ -254,15 +258,15 @@ class CronManager:
 
     @staticmethod
     def cleanup_old_containers(
+        user: str,
         project: str,
         env: str,
         service_name: str,
-        server_ip: str = "localhost",
-        user: str = "root"
+        server_ip: str = "localhost"
     ) -> None:
         """Clean up old scheduled containers that may not have been removed"""
         try:
-            base_name = ResourceResolver.get_container_name(project, env, service_name)
+            base_name = ResourceResolver.get_container_name(user, project, env, service_name)
             
             # Find containers with our naming pattern
             cmd = f'docker ps -a --filter "name={base_name}_" --format "{{{{.Names}}}}"'
