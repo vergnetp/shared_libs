@@ -205,7 +205,7 @@ class ProjectDeployer:
             Calculated startup_order (max of dependencies + 1)
         """        
         try:
-            config = DeploymentConfigurer(self.project_name)
+            config = DeploymentConfigurer(self.user, self.project_name)
             services = config.raw_config.get("project", {}).get("services", {})
             
             max_order = 0
@@ -1315,7 +1315,7 @@ class ProjectDeployer:
         Returns:
             True if successful
         """        
-        rotator = SecretsRotator(self.project_name, env)
+        rotator = SecretsRotator(self.user, self.project_name, env)
         
         if services:
             for service in services:
@@ -1330,7 +1330,7 @@ class ProjectDeployer:
     
     def list_secrets(self, env: str) -> Dict[str, List[str]]:
         """List all secrets for an environment"""       
-        rotator = SecretsRotator(self.project_name, env)
+        rotator = SecretsRotator(self.user, self.project_name, env)
         return rotator.list_secrets()
     
     # ========================================

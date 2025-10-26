@@ -53,40 +53,60 @@ class DeploymentSyncer:
     """
 
     @staticmethod
-    def get_local_base(project: str, env: str) -> Path:
+    def get_local_base(user: str, project: str, env: str) -> Path:
         """
         Get local base path for file sync operations.
         
         NOTE: This is for file sync only (push/pull operations).
         For volume mounting, use PathResolver.get_volume_host_path().
         
+        Args:
+            user: User for resource segregation (mandatory)
+            project: Project name
+            env: Environment name
+        
         Returns:
             Path to local sync directory
         """
         if platform.system() == 'Windows':
-            local_base = Path("C:/") / BASE / project / env
+            local_base = Path("C:/") / BASE / user / project / env
         else:
-            local_base = Path("/", BASE, project, env)
+            local_base = Path("/", BASE, user, project, env)
         return local_base        
 
     @staticmethod
-    def get_remote_base(project: str, env: str) -> str:
+    def get_remote_base(user: str, project: str, env: str) -> str:
         """
         Get remote base path for file sync operations.
         
         NOTE: This is for file sync only (push/pull operations).
         For volume mounting, use PathResolver.get_volume_host_path().
         
+        Args:
+            user: User for resource segregation (mandatory)
+            project: Project name
+            env: Environment name
+        
         Returns:
             String path on remote server
         """
-        remote_base = f"/{BASE}/{project}/{env}"
+        remote_base = f"/{BASE}/{user}/{project}/{env}"
         return remote_base
 
     @staticmethod
-    def get_volume_prefix(project: str, env: str) -> str:
-        """Generate Docker volume name prefix"""
-        return f"{project}_{env}"
+    def get_volume_prefix(user: str, project: str, env: str) -> str:
+        """
+        Generate Docker volume name prefix.
+        
+        Args:
+            user: User for resource segregation (mandatory)
+            project: Project name
+            env: Environment name
+        
+        Returns:
+            Volume prefix string (e.g., "user_project_env")
+        """
+        return f"{user}_{project}_{env}"
        
     @staticmethod
     def _sanitize_server_ip(server_ip: str) -> str:
@@ -94,7 +114,7 @@ class DeploymentSyncer:
         return server_ip.replace('.', '_')
 
     @staticmethod
-    def _copy_stateful_secrets_to_consumers(project: str, env: str, services: Dict[str, Dict[str, Any]]):
+    def _copy_stateful_secrets_to_consumers(user: str, project: str, env: str, services: Dict[str, Dict[str, Any]]):
         """
         Copy secrets from stateful services (postgres, redis, mongo) to all consumer services.
         
@@ -133,7 +153,7 @@ class DeploymentSyncer:
             env: Environment name
             services: Dictionary of all services in the environment
         """        
-        local_base = DeploymentSyncer.get_local_base(project, env)
+        local_base = DeploymentSyncer.get_local_base(user, project, env)
         secrets_base = local_base / "secrets"
         
         if not secrets_base.exists():
@@ -198,12 +218,13 @@ class DeploymentSyncer:
     # =============================================================================
 
     @staticmethod
-    def push(project: str, env: str, targets: Union[str, List[str]] = None) -> bool:
+    def push(user: str, project: str, env: str, targets: Union[str, List[str]] = None) -> bool:
         """
         Push local content (config, secrets, files) to remote servers - OPTIMIZED & PARALLEL.
         Single archive, parallel transfer to all servers.
         
         Args:
+            user: User for resource segregation (mandatory)
             project: Project name
             env: Environment name  
             targets: Server IPs to push to, or None for default
@@ -211,12 +232,12 @@ class DeploymentSyncer:
         Returns:
             True if push completed successfully
         """
-        log(f"Pushing content for {project}/{env}")
+        log(f"Pushing content for {user}/{project}/{env}")
         Logger.start()
         
         # Get paths
-        local_base = DeploymentSyncer.get_local_base(project, env)
-        remote_base = DeploymentSyncer.get_remote_base(project, env)
+        local_base = DeploymentSyncer.get_local_base(user, project, env)
+        remote_base = DeploymentSyncer.get_remote_base(user, project, env)
         
         # Ensure local directories exist
         push_dirs = ['config', 'secrets', 'files']
@@ -225,9 +246,9 @@ class DeploymentSyncer:
             dir_path.mkdir(parents=True, exist_ok=True)
 
         try:            
-            configurer = DeploymentConfigurer(project)
+            configurer = DeploymentConfigurer(user, project)
             services = configurer.get_services(env)
-            DeploymentSyncer._copy_stateful_secrets_to_consumers(project, env, services)
+            DeploymentSyncer._copy_stateful_secrets_to_consumers(user, project, env, services)
         except Exception as e:
             log(f"Warning: Could not distribute stateful secrets: {e}")
         
@@ -324,11 +345,12 @@ class DeploymentSyncer:
         return success
 
     @staticmethod  
-    def pull(project: str, env: str, targets: Union[str, List[str]] = None) -> bool:
+    def pull(user: str, project: str, env: str, targets: Union[str, List[str]] = None) -> bool:
         """
         Pull generated content (data, logs, backups, monitoring) from remote servers/containers - PARALLEL.
         
         Args:
+            user: User for resource segregation (mandatory)
             project: Project name
             env: Environment name
             targets: Server IPs to pull from, or None for default
@@ -336,14 +358,14 @@ class DeploymentSyncer:
         Returns:
             True if pull completed successfully
         """
-        log(f"Pulling content for {project}/{env}")
+        log(f"Pulling content for {user}/{project}/{env}")
         Logger.start()
         
         # ========== OPTIMIZATION: Pull all types in PARALLEL ==========
         def pull_sync_type(sync_type):
             """Pull a single sync type"""
             try:
-                DeploymentSyncer._sync_type(project, env, sync_type, targets, direction='pull')
+                DeploymentSyncer._sync_type(user, project, env, sync_type, targets, direction='pull')
                 return (sync_type, True, None)
             except Exception as e:
                 return (sync_type, False, str(e))
@@ -368,23 +390,24 @@ class DeploymentSyncer:
         return success
 
     @staticmethod
-    def sync(project: str, env: str, targets: Union[str, List[str]] = None) -> bool:
+    def sync(user: str, project: str, env: str, targets: Union[str, List[str]] = None) -> bool:
         """
         Full bidirectional sync - push local content and pull generated content.
         
         Args:
             project: Project name
             env: Environment name
+            user: Optional user for resource segregation
             targets: Server IPs to sync with, or None for default
             
         Returns:
             True if sync completed successfully
         """
-        log(f"Full sync for {project}/{env}")
+        log(f"Full sync for {user}/{project}/{env}")
         Logger.start()
         
-        push_success = DeploymentSyncer.push(project, env, targets)
-        pull_success = DeploymentSyncer.pull(project, env, targets)
+        push_success = DeploymentSyncer.push(user, project, env, targets)
+        pull_success = DeploymentSyncer.pull(user, project, env, targets)
         
         success = push_success and pull_success
         
@@ -397,7 +420,7 @@ class DeploymentSyncer:
     # =============================================================================
 
     @staticmethod
-    def _sync_type(project: str, env: str, sync_type: str, targets: Union[str, List[str]], direction: str):
+    def _sync_type(user: str, project: str, env: str, sync_type: str, targets: Union[str, List[str]], direction: str):
         """Internal method to sync a specific type in a specific direction"""
         
         # For push operations of config/secrets/files, this should not be called anymore
@@ -406,7 +429,7 @@ class DeploymentSyncer:
             log(f"Warning: _sync_type called for {sync_type} push - should use push() method directly")
             return
         
-        sync_configs = DeploymentSyncer._get_sync_configs(project, env)
+        sync_configs = DeploymentSyncer._get_sync_configs(user, project, env)
         
         if sync_type not in sync_configs:
             raise ValueError(f"Invalid sync type: {sync_type}")
@@ -422,13 +445,13 @@ class DeploymentSyncer:
         
         # Handle based on storage type - determine by presence of volume_name
         if 'volume_name' in config:
-            DeploymentSyncer._sync_docker_volume(project, env, sync_type, config, direction)
+            DeploymentSyncer._sync_docker_volume(user, project, env, sync_type, config, direction)
         else:
             # This path should only be used for pull operations now
-            DeploymentSyncer._sync_host_mount(project, env, sync_type, config, targets, direction)
+            DeploymentSyncer._sync_host_mount(user, project, env, sync_type, config, targets, direction)
 
     @staticmethod
-    def _sync_docker_volume(project: str, env: str, sync_type: str, config: Dict[str, Any], direction: str):
+    def _sync_docker_volume(user: str, project: str, env: str, sync_type: str, config: Dict[str, Any], direction: str):
         """Handle Docker volume sync operations"""
         
         if direction == 'push':
@@ -453,20 +476,21 @@ class DeploymentSyncer:
             return
         
         # Handle both global volumes and service-specific volumes
-        if '_' in volume_name and len(volume_name.split('_')) >= 3:
-            # Service-specific volumes like "project_env_logs_service"
-            DeploymentSyncer._sync_service_volumes(project, env, local_path)
+        # Volume format: user_project_env_logs (global) or user_project_env_logs_service (service-specific)
+        if '_' in volume_name and len(volume_name.split('_')) > 4:
+            # Service-specific volumes like "user_project_env_logs_service"
+            DeploymentSyncer._sync_service_volumes(user, project, env, local_path)
         else:
-            # Global volumes like "project_env_logs"  
+            # Global volumes like "user_project_env_logs"
             if DockerExecuter.volume_exists(volume_name):
                 DeploymentSyncer._copy_from_docker_volume(volume_name, local_path)
             else:
                 log(f"Volume {volume_name} does not exist, skipping")
 
     @staticmethod
-    def _sync_service_volumes(project: str, env: str, base_local_path: Path):
+    def _sync_service_volumes(user: str, project: str, env: str, base_local_path: Path):
         """Sync all service-specific volumes for a type (e.g., all service logs) - PARALLEL"""
-        volume_prefix = DeploymentSyncer.get_volume_prefix(project, env)
+        volume_prefix = DeploymentSyncer.get_volume_prefix(user, project, env)
         
         # Find all volumes matching our pattern
         all_volumes = DeploymentSyncer.list_volumes()
@@ -485,18 +509,20 @@ class DeploymentSyncer:
             """Pull volume for a single service"""
             try:
                 # Extract service name from volume name
-                # e.g., "project_env_logs_worker" -> "worker"
+                # Format: user_project_env_logs_service
+                # e.g., "alice_myapp_prod_logs_worker" -> "worker"
                 parts = volume_name.split('_')
-                if len(parts) >= 4:
-                    service_name = '_'.join(parts[3:])  # Handle service names with underscores
+                if len(parts) >= 5:
+                    service_name = '_'.join(parts[4:])  # Handle service names with underscores
                     
-                    # Create service directory directly under the type directory
-                    service_local_path = base_local_path / service_name
-                    service_local_path.mkdir(parents=True, exist_ok=True)
-                    
-                    # Copy directly from volume to service directory
-                    DeploymentSyncer._copy_from_docker_volume(volume_name, service_local_path)
-                    return (service_name, True)
+                    if service_name:
+                        # Create service directory directly under the type directory
+                        service_local_path = base_local_path / service_name
+                        service_local_path.mkdir(parents=True, exist_ok=True)
+                        
+                        # Copy directly from volume to service directory
+                        DeploymentSyncer._copy_from_docker_volume(volume_name, service_local_path)
+                        return (service_name, True)
             except Exception as e:
                 log(f"Failed to pull {volume_name}: {e}")
                 return (volume_name, False)
@@ -530,8 +556,7 @@ class DeploymentSyncer:
             return []
 
     @staticmethod
-    def _sync_host_mount(project: str, env: str, sync_type: str, config: Dict[str, Any], 
-                        targets: Union[str, List[str]], direction: str):
+    def _sync_host_mount(user: str, project: str, env: str, sync_type: str, config: Dict[str, Any], targets: Union[str, List[str]], direction: str):
         """
         Handle host mount sync operations - ONLY for pull operations now.
         Push operations should use the optimized push() method.
@@ -588,13 +613,13 @@ class DeploymentSyncer:
                 log(f"Remote path {remote_path} may not exist on {server_ip}: {e}")
 
     @staticmethod
-    def _get_sync_configs(project: str, env: str) -> Dict[str, Dict[str, Any]]:
+    def _get_sync_configs(user: str, project: str, env: str) -> Dict[str, Dict[str, Any]]:
         """Get sync configuration with hybrid Docker volume approach"""
         
-        local_base = DeploymentSyncer.get_local_base(project, env)
-        remote_base = DeploymentSyncer.get_remote_base(project, env)
+        local_base = DeploymentSyncer.get_local_base(user, project, env)
+        remote_base = DeploymentSyncer.get_remote_base(user, project, env)
         local_base_str = str(local_base).replace('\\', '/')
-        volume_prefix = DeploymentSyncer.get_volume_prefix(project, env)
+        volume_prefix = DeploymentSyncer.get_volume_prefix(user, project, env)
         
         return {
             # Push operations (host mounts for easy editing)

@@ -176,7 +176,7 @@ class SecretsRotator:
             List of successfully restarted services
         """
         try:
-            config = DeploymentConfigurer(self.project)
+            config = DeploymentConfigurer(self.user, self.project)
             services = config.get_services(self.env)
             
             if not services:
@@ -476,6 +476,7 @@ class SecretsRotator:
 def main():
     """CLI interface for secret rotation"""
     parser = argparse.ArgumentParser(description='Rotate secrets for deployed services')
+    parser.add_argument('user', help='user')
     parser.add_argument('project', help='Project name')
     parser.add_argument('env', help='Environment')
     
@@ -505,7 +506,7 @@ def main():
         parser.print_help()
         return
     
-    rotator = SecretsRotator(args.project, args.env)
+    rotator = SecretsRotator(args.user, args.project, args.env)
     
     if args.command == 'rotate':
         rotator.rotate_all_secrets(restart_all_services=not args.no_restart)

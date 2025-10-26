@@ -117,7 +117,9 @@ class HealthMonitorInstaller:
                 "schedule": HealthMonitorInstaller.SCHEDULE,
                 "image": HealthMonitorInstaller.IMAGE_NAME,
                 "env_vars": {},
-                "network_name": None  # Health monitor doesn't need a project network
+                "volumes": [
+                    "/local:/app/local:ro"  # Mount entire /local tree read-only
+                ]                
             }
             
             success = CronManager.install_cron_job(

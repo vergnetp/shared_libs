@@ -12,9 +12,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import defaultdict
 
 try:
-    from . import constants
+    from .temp_storage import TempStorage
 except ImportError:
-    import constants           
+    from temp_storage import TempStorage
 try:
     from .execute_cmd import CommandExecuter
 except ImportError:
@@ -131,17 +131,15 @@ class Deployer:
         self.deployment_configurer = DeploymentConfigurer(user, project_name)
         
         # Save debug configs
-        debug_path = constants.get_deployment_files_path(self.id)
+        debug_path = TempStorage.get_deployment_debug_path(self.id)
         
         with open(debug_path / 'raw_config.json', 'w') as f:
             json.dump(self.deployment_configurer.raw_config, f, indent=4)
         
         with open(debug_path / 'project_info.txt', 'w') as f:
             f.write(f"Project: {self.project_name}\n")
-            f.write(f"Config File: {self.deployment_configurer.config_file}\n")
             f.write(f"Deployment ID: {self.id}\n")
         
-        # Save final processed config for audit/debug
         self.deployment_configurer.save_final_config(self.id)
         
         log(f"Initialized Deployer for project: {self.project_name}")
@@ -373,10 +371,13 @@ class Deployer:
         Example:
             generate_dockerfile("api", {"dockerfile": "Dockerfile.api"}) -> "Dockerfile.api"
         """
-        dockerfile_path = str(service_config.get("dockerfile", constants.get_dockerfiles_path(self.user) / Path(f"Dockerfile.{service_name}")))
-        if os.path.exists(dockerfile_path):
-            return dockerfile_path
-        return None
+        dockerfile_path = service_config.get("dockerfile")
+        if not dockerfile_path:
+            dockerfile_path = TempStorage.get_dockerfiles_path(self.user) / f"Dockerfile.{service_name}"
+
+        # Return as string if exists
+        dockerfile_path = Path(dockerfile_path)
+        return str(dockerfile_path) if dockerfile_path.exists() else None
 
     def build_images(self, environment: str = None, push_to_registry: bool = False, service_name: str = None):
             """
@@ -854,6 +855,9 @@ class Deployer:
 
         self.pre_provision_servers(env, service_name)
 
+        if env:
+            self._write_deployment_config(env)
+
         log("Auto-sync: Pushing config, secrets, and files...")
         environments = [env] if env else self.deployment_configurer.get_environments()
         
@@ -1291,6 +1295,51 @@ class Deployer:
             log(f"[{current_server}] Backend mode for {service}: multi_server (service is remote)")
             return "multi_server"
 
+
+    def _write_deployment_config(self, env: str):
+        """
+        Write deployment config to local directory for health monitor.
+        
+        Uses standard PathResolver to get config path, ensuring consistency
+        with rest of system. Config is synced to servers automatically via
+        DeploymentSyncer.push_directory() (no extra SSH needed).
+        
+        Args:
+            env: Environment name
+        """
+        try:
+            # Get local config path for "health_monitor" virtual service
+            # This uses the standard /local/{user}/{project}/{env}/config/health_monitor structure
+            config_dir = PathResolver.get_volume_host_path(
+                self.user,
+                self.project_name,
+                env,
+                "health_monitor",  # Virtual service for health monitor
+                "config",
+                "localhost" # goes to the bastion before being pushed
+            )
+            
+            config_file = Path(config_dir) / "deployment.json"
+            config_file.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Build full config (same as before, but now using standard paths)
+            full_config = {
+                "project": {
+                    "name": self.project_name,
+                    "docker_hub_user": self.deployment_configurer.get_docker_hub_user(),
+                    "version": self._get_version(),
+                    "user": self.user
+                },
+                "env": env,
+                "services": self.deployment_configurer.get_services(env)
+            }
+            
+            config_file.write_text(json.dumps(full_config, indent=2), encoding='utf-8')
+            log(f"✓ Wrote deployment config: {config_file}")
+            
+        except Exception as e:
+            log(f"⚠️ Failed to write deployment config: {e}")
+            # Don't fail deployment - health monitor falls back to nginx configs
 
     def _generate_nginx_backends(
         self,
@@ -2259,14 +2308,14 @@ class Deployer:
                         return False
                             
                 # STEP 3: Calculate todel_ips (servers with service but not in target)
-                current_service_servers = self._get_servers_running_service(self.project_name, env, service_name)
+                current_service_servers = self._get_servers_running_service(env, service_name)
                 
                 # STEP 4: Calculate target_ips
                 target_ips = green_ips + new_ips
 
                 
                 try:
-                    self._batch_prepare_servers(self.project_name, env, {service_name: service_config}, target_ips)
+                    self._batch_prepare_servers(env, {service_name: service_config}, target_ips)
                 except Exception as e:
                     log(f"Warning: batch prepare on target_ips failed: {e}")
 
@@ -2306,7 +2355,7 @@ class Deployer:
                     for target_ip in target_ips:
                         future = executor.submit(
                             self._deploy_to_single_server,
-                            self.project_name, env, service_name, service_config,
+                            env, service_name, service_config,
                             target_ip, base_name, base_port, need_port_mapping
                         )
                         deployment_futures[future] = target_ip
@@ -2642,7 +2691,7 @@ class Deployer:
 
     def write_temporary_dockerfile(self, content: str, service_name: str, env: str) -> str:
         """Write temporary Dockerfile and inject /app directories"""
-        dockerfile_path = constants.get_dockerfiles_path(self.user) / f"Dockerfile.{self.project_name}-{env}-{service_name}.tmp"
+        dockerfile_path = TempStorage.get_dockerfile_path(self.user, self.project_name, env, service_name)
         
         # Write initial content
         dockerfile_path.write_text(content)
@@ -2652,7 +2701,6 @@ class Deployer:
 
     def _update_nginx_for_new_servers(
         self,
-        project: str,
         env: str,
         service_name: str,
         service_config: Dict[str, Any],

@@ -24,6 +24,7 @@ class ProjectManager:
     
     @staticmethod
     def create_project(
+        user: str,
         name: str,
         docker_hub_user: str = None,
         version: str = "latest",
@@ -33,6 +34,7 @@ class ProjectManager:
         Create new project configuration.
         
         Args:
+            user: User ID
             name: Project name
             docker_hub_user: Docker Hub username
             version: Default version tag
@@ -41,7 +43,7 @@ class ProjectManager:
         Returns:
             True if created successfully
         """
-        config = DeploymentConfigurer(name, create_if_missing=True)
+        config = DeploymentConfigurer(user, name, create_if_missing=True)
         
         config.raw_config = {
             "project": {
@@ -58,13 +60,14 @@ class ProjectManager:
     
     @staticmethod
     def update_project(
+        user: str,
         name: str,
         docker_hub_user: Optional[str] = None,
         version: Optional[str] = None,
         default_server_ip: Optional[str] = None
     ) -> bool:
         """Update project-level configuration"""
-        config = DeploymentConfigurer(name)
+        config = DeploymentConfigurer(user, name)
         
         if docker_hub_user:
             config.raw_config["project"]["docker_hub_user"] = docker_hub_user
@@ -77,18 +80,19 @@ class ProjectManager:
         return True
     
     @staticmethod
-    def delete_project(name: str) -> bool:
+    def delete_project(user: str, name: str) -> bool:
         """Delete project configuration"""
-        config = DeploymentConfigurer(name)
+        config = DeploymentConfigurer(user, name)
         config.config_file.unlink()
         return True
     
     @staticmethod
-    def _calculate_startup_order(project_name: str, depends_on: List[str]) -> int:
+    def _calculate_startup_order(user: str, project_name: str, depends_on: List[str]) -> int:
         """
         Calculate startup_order based on dependencies.
         
         Args:
+            user: User ID
             project_name: Project name
             depends_on: List of service names this service depends on
             
@@ -96,7 +100,7 @@ class ProjectManager:
             Calculated startup_order (max of dependencies + 1)
         """
         try:
-            config = DeploymentConfigurer(project_name)
+            config = DeploymentConfigurer(user, project_name)
             services = config.raw_config.get("project", {}).get("services", {})
             
             max_order = 0
@@ -116,6 +120,7 @@ class ProjectManager:
     
     @staticmethod
     def add_service(
+        user: str,
         project_name: str,
         service_name: str,
         startup_order: int = 1,
@@ -129,7 +134,7 @@ class ProjectManager:
         **other_config
     ) -> bool:
         """Adds service to project config"""
-        config = DeploymentConfigurer(project_name)
+        config = DeploymentConfigurer(user, project_name)
         
         service_config = {
             "startup_order": startup_order,
@@ -155,12 +160,13 @@ class ProjectManager:
     
     @staticmethod
     def update_service(
+        user: str,
         project_name: str,
         service_name: str,
         **updates
     ) -> bool:
         """Updates existing service config"""
-        config = DeploymentConfigurer(project_name)
+        config = DeploymentConfigurer(user, project_name)
         
         if service_name not in config.raw_config["project"]["services"]:
             raise ValueError(f"Service '{service_name}' does not exist")
@@ -171,11 +177,12 @@ class ProjectManager:
     
     @staticmethod
     def delete_service(
+        user: str,
         project_name: str,
         service_name: str
     ) -> bool:
         """Removes service from project config"""
-        config = DeploymentConfigurer(project_name)
+        config = DeploymentConfigurer(user, project_name)
         
         if service_name not in config.raw_config["project"]["services"]:
             raise ValueError(f"Service '{service_name}' does not exist")
@@ -186,6 +193,7 @@ class ProjectManager:
 
     @staticmethod
     def add_postgres(
+        user: str,
         project_name: str,
         version: str = "15",
         server_zone: str = "lon1",
@@ -195,16 +203,16 @@ class ProjectManager:
     ) -> bool:
         """Adds PostgreSQL service to project"""
         try:
-            config = DeploymentConfigurer(project_name)
+            config = DeploymentConfigurer(user, project_name)
         except FileNotFoundError:
-            ProjectManager.create_project(project_name)
-            config = DeploymentConfigurer(project_name)
+            ProjectManager.create_project(user, project_name)
+            config = DeploymentConfigurer(user, project_name)
         
         # Calculate startup_order
         if 'startup_order' in other_config:
             startup_order = other_config.pop('startup_order')
         elif depends_on:
-            startup_order = ProjectManager._calculate_startup_order(project_name, depends_on)
+            startup_order = ProjectManager._calculate_startup_order(user, project_name, depends_on)
             other_config['depends_on'] = depends_on
         else:
             startup_order = 1  # Default for databases
@@ -228,6 +236,7 @@ class ProjectManager:
     
     @staticmethod
     def add_redis(
+        user: str,
         project_name: str,
         version: str = "7-alpine",
         server_zone: str = "lon1",
@@ -237,16 +246,16 @@ class ProjectManager:
     ) -> bool:
         """Adds Redis service to project"""
         try:
-            config = DeploymentConfigurer(project_name)
+            config = DeploymentConfigurer(user, project_name)
         except FileNotFoundError:
-            ProjectManager.create_project(project_name)
-            config = DeploymentConfigurer(project_name)
+            ProjectManager.create_project(user, project_name)
+            config = DeploymentConfigurer(user, project_name)
         
         # Calculate startup_order
         if 'startup_order' in other_config:
             startup_order = other_config.pop('startup_order')
         elif depends_on:
-            startup_order = ProjectManager._calculate_startup_order(project_name, depends_on)
+            startup_order = ProjectManager._calculate_startup_order(user, project_name, depends_on)
             other_config['depends_on'] = depends_on
         else:
             startup_order = 1
@@ -266,6 +275,7 @@ class ProjectManager:
 
     @staticmethod
     def add_opensearch(
+        user: str,
         project_name: str,
         version: str = "2",
         server_zone: str = "lon1",
@@ -275,16 +285,16 @@ class ProjectManager:
     ) -> bool:
         """Adds OpenSearch service to project"""
         try:
-            config = DeploymentConfigurer(project_name)
+            config = DeploymentConfigurer(user, project_name)
         except FileNotFoundError:
-            ProjectManager.create_project(project_name)
-            config = DeploymentConfigurer(project_name)
+            ProjectManager.create_project(user, project_name)
+            config = DeploymentConfigurer(user, project_name)
         
         # Calculate startup_order
         if 'startup_order' in other_config:
             startup_order = other_config.pop('startup_order')
         elif depends_on:
-            startup_order = ProjectManager._calculate_startup_order(project_name, depends_on)
+            startup_order = ProjectManager._calculate_startup_order(user, project_name, depends_on)
             other_config['depends_on'] = depends_on
         else:
             startup_order = 1
@@ -307,6 +317,7 @@ class ProjectManager:
 
     @staticmethod
     def add_nginx(
+        user: str,
         project_name: str,
         version: str = "alpine",
         server_zone: str = "lon1",
@@ -316,16 +327,16 @@ class ProjectManager:
     ) -> bool:
         """Adds Nginx service to project"""
         try:
-            config = DeploymentConfigurer(project_name)
+            config = DeploymentConfigurer(user, project_name)
         except FileNotFoundError:
-            ProjectManager.create_project(project_name)
-            config = DeploymentConfigurer(project_name)
+            ProjectManager.create_project(user, project_name)
+            config = DeploymentConfigurer(user, project_name)
         
         # Calculate startup_order
         if 'startup_order' in other_config:
             startup_order = other_config.pop('startup_order')
         elif depends_on:
-            startup_order = ProjectManager._calculate_startup_order(project_name, depends_on)
+            startup_order = ProjectManager._calculate_startup_order(user, project_name, depends_on)
             other_config['depends_on'] = depends_on
         else:
             startup_order = 10  # Nginx typically starts last

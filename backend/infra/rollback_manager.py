@@ -75,6 +75,7 @@ class RollbackManager:
     
     @staticmethod
     def list_available_versions(
+        user: str,
         project: str,
         env: str,
         service: str
@@ -85,10 +86,11 @@ class RollbackManager:
         Returns:
             List of version strings (newest first)
         """
-        return DeploymentStateManager.get_version_history(project, env, service)
+        return DeploymentStateManager.get_version_history(user, project, env, service)
     
     @staticmethod
     def get_previous_version(
+        user: str,
         project: str,
         env: str,
         service: str
@@ -99,10 +101,11 @@ class RollbackManager:
         Returns:
             Previous version string or None
         """
-        return DeploymentStateManager.get_previous_version(project, env, service)
+        return DeploymentStateManager.get_previous_version(user, project, env, service)
     
     @staticmethod
     def rollback(
+        user: str,
         project: str,
         env: str,
         service: str,
@@ -119,6 +122,7 @@ class RollbackManager:
         4. Existing immutable infrastructure handles the rest
         
         Args:
+            user: user id (e.g. "u1")
             project: Project name
             env: Environment
             service: Service name
@@ -128,7 +132,7 @@ class RollbackManager:
         Returns:
             True if rollback successful
         """
-        log(f"Starting rollback for {project}/{env}/{service}")
+        log(f"Starting rollback for {user}/{project}/{env}/{service}")
         Logger.start()
         
         try:
@@ -168,7 +172,7 @@ class RollbackManager:
             if validate_registry:
                 log("Validating image exists in registry...")
                 
-                configurer = DeploymentConfigurer(project)
+                configurer = DeploymentConfigurer(user, project)
                 docker_hub_user = configurer.get_docker_hub_user()
                 service_config = configurer.get_services(env).get(service)
                 
@@ -180,6 +184,7 @@ class RollbackManager:
                 # Build repository name
                 repository = DeploymentNaming.get_image_name(
                     docker_hub_user,
+                    user,
                     project,
                     env,
                     service,

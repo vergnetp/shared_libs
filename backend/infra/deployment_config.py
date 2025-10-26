@@ -4,10 +4,13 @@ from pathlib import Path
 import copy
 
 try:
-    from . import constants
+    from .config_storage import ConfigStorage
 except ImportError:
-    import constants
-from resource_resolver import ResourceResolver
+    from config_storage import ConfigStorage
+try:
+    from .resource_resolver import ResourceResolver
+except ImportError:
+    from resource_resolver import ResourceResolver
 try:
     from .encryption import Encryption
 except ImportError:
@@ -175,10 +178,10 @@ class DeploymentConfigurer:
         - self.config contains no top-level `services`; all services live under each environment.
 
     Config file location:
-        - Default: <deployment_config_path>/deploy-config.json
-          where `deployment_config_path` is returned by `constants.get_deployment_config_path()`.
-        - Can specify a custom filename via `config_file` argument.
-        - Folder is created automatically if missing when saving.
+        - Managed by ConfigStorage backend (default: filesystem)
+        - Filesystem: config/{user}/projects/{project_name}.json
+        - Database: Projects table with user_id and project_name keys
+        - Storage backend configurable via ConfigStorage.get_instance()
 
     Minimum viable raw configuration:
 
@@ -228,55 +231,45 @@ class DeploymentConfigurer:
         """
         self.user = user
         self.project_name = project_name
-        # CHECK CACHE FIRST:
+        
+        # CHECK CACHE FIRST
         cache_key = f'{user}_{project_name}'
         if cache_key in DeploymentConfigurer._config_cache:
-            # Return cached instance
             cached = DeploymentConfigurer._config_cache[cache_key]
-            self.config_file = cached.config_file
             self.raw_config = cached.raw_config
             self.config = cached.config
             return
         
-        # ORIGINAL CODE (only runs if not cached):
-        self.config_file = constants.get_project_config_path(user, project_name)
+        # Load from storage
+        storage = ConfigStorage.get_instance()
         
-        if not self.config_file.exists():
-            available = constants.list_projects(user)
+        if not storage.project_exists(user, project_name):
+            available = storage.list_projects(user)
             if available:
                 raise FileNotFoundError(
-                    f"Project '{project_name}' not found. "
+                    f"Project '{project_name}' not found for user '{user}'. "
                     f"Available: {', '.join(available)}"
                 )
             else:
                 raise FileNotFoundError(
-                    f"Project '{project_name}' not found. No projects in config/projects/{user}/"
+                    f"Project '{project_name}' not found for user '{user}'. "
+                    f"No projects in config/{user}/projects/"
                 )
         
-        self.raw_config = self._load_raw_config()
+        # Load and process configuration
+        self.raw_config = storage.load_project(user, project_name)
         prepare_raw_config(self.raw_config)
         self.rebuild_config()
         self.validate_config()
         
-        # CACHE THE RESULT:
+        # Cache the result
         DeploymentConfigurer._config_cache[cache_key] = self
-
-
-
-    def _load_raw_config(self) -> Dict[str, Any]:
-        """Load raw JSON configuration from file."""
-        if not self.config_file.exists():
-            raise FileNotFoundError(f"Config file not found: {self.config_file}")
-        try:
-            with self.config_file.open("r") as f:
-                return json.load(f)
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Invalid JSON in {self.config_file}: {e}")
 
     @staticmethod
     def list_projects(user: str) -> List[str]:
         """List all available projects."""
-        return constants.list_projects(user)
+        storage = ConfigStorage.get_instance()
+        return storage.list_projects(user)
     
     def rebuild_config(self):
         """
@@ -320,29 +313,40 @@ class DeploymentConfigurer:
 
     def save_config(self):
         """
-        Save the current raw_config to JSON file.
+        Save the current raw_config to storage.
 
-        - Folder is created automatically if missing.
-        - Overwrites existing file.
+        - Uses ConfigStorage backend (filesystem or database)
+        - Validation performed before saving
         """
         self.validate_config()
-        try:
-            self.config_file.parent.mkdir(exist_ok=True, parents=True)
-            with self.config_file.open("w") as f:
-                json.dump(self.raw_config, f, indent=4)
-        except Exception as e:
-            raise Exception(f"Cannot save deployer config: {e}")
+        storage = ConfigStorage.get_instance()
+        storage.save_project(self.user, self.project_name, self.raw_config)
 
     def save_final_config(self, deployment_id: str):
         """
         Save the final processed config for audit/debug purposes.
         
+        OPTIONAL: Only saves if DEBUG_DEPLOYMENTS environment variable is set.
+        Uses temporary storage that can be cleaned up.
+        
         Args:
             deployment_id (str): Unique deployment ID for the config file
         """
+        import os
+        
+        # Only save debug files if explicitly enabled
+        if not os.getenv('DEBUG_DEPLOYMENTS'):
+            return
+        
         try:
-            config_path = constants.get_deployment_files_path(deployment_id) / 'final_config.json'
-            config_path.parent.mkdir(exist_ok=True, parents=True)
+            from .temp_storage import TempStorage
+        except ImportError:
+            from temp_storage import TempStorage
+        
+        try:
+            debug_path = TempStorage.get_deployment_debug_path(deployment_id)
+            config_path = debug_path / 'final_config.json'
+            
             with config_path.open("w") as f:
                 json.dump(self.config, f, indent=4)
             print(f"Saved final config to: {config_path}")
