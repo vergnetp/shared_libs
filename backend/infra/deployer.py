@@ -117,7 +117,7 @@ class Deployer:
             FileNotFoundError: If project not found
         """
         if not project_name:
-            projects = DeploymentConfigurer.list_projects()
+            projects = DeploymentConfigurer.list_projects(user)
             if projects:
                 raise ValueError(
                     f"Must specify project_name. Available projects: {', '.join(projects)}"
@@ -128,7 +128,7 @@ class Deployer:
         self.id = f'deployment_{uuid4()}'
         self.user = user
         self.project_name = project_name
-        self.deployment_configurer = DeploymentConfigurer(project_name)
+        self.deployment_configurer = DeploymentConfigurer(user, project_name)
         
         # Save debug configs
         debug_path = constants.get_deployment_files_path(self.id)
@@ -373,7 +373,7 @@ class Deployer:
         Example:
             generate_dockerfile("api", {"dockerfile": "Dockerfile.api"}) -> "Dockerfile.api"
         """
-        dockerfile_path = str(service_config.get("dockerfile", constants.get_dockerfiles_path() / Path(f"Dockerfile.{service_name}")))
+        dockerfile_path = str(service_config.get("dockerfile", constants.get_dockerfiles_path(self.user) / Path(f"Dockerfile.{service_name}")))
         if os.path.exists(dockerfile_path):
             return dockerfile_path
         return None
@@ -2642,7 +2642,7 @@ class Deployer:
 
     def write_temporary_dockerfile(self, content: str, service_name: str, env: str) -> str:
         """Write temporary Dockerfile and inject /app directories"""
-        dockerfile_path = constants.get_dockerfiles_path() / f"Dockerfile.{self.project_name}-{env}-{service_name}.tmp"
+        dockerfile_path = constants.get_dockerfiles_path(self.user) / f"Dockerfile.{self.project_name}-{env}-{service_name}.tmp"
         
         # Write initial content
         dockerfile_path.write_text(content)

@@ -74,7 +74,7 @@ def prepare_raw_config(config):
     """Add volumes to base services and provision standard services"""
     pass
 
-def provision_standard_service(project: str, env: str, service: str, existing_config: Dict[str, Any]) -> Dict[str, Any]:
+def provision_standard_service(user: str, project: str, env: str, service: str, existing_config: Dict[str, Any]) -> Dict[str, Any]:
     """Auto-generate configuration for standard services, respecting existing config"""
        
     def merge_config(default_config: Dict[str, Any]) -> Dict[str, Any]:
@@ -99,7 +99,7 @@ def provision_standard_service(project: str, env: str, service: str, existing_co
         
         return result       
 
-    secrets_path = ResourceResolver.get_volume_host_path(project, env, service, "secrets", "localhost")
+    secrets_path = ResourceResolver.get_volume_host_path(user, project, env, service, "secrets", "localhost")
     Path(secrets_path).mkdir(parents=True, exist_ok=True)
     secret_filename = ResourceResolver._get_secret_filename(service)
     password_file = Path(secrets_path) / secret_filename    
@@ -113,8 +113,8 @@ def provision_standard_service(project: str, env: str, service: str, existing_co
         default_config = {
             "image": "postgres:15",
             "env_vars": {
-                "POSTGRES_DB": ResourceResolver.get_db_name(project, env, service),
-                "POSTGRES_USER": ResourceResolver.get_db_user(project, service),
+                "POSTGRES_DB": ResourceResolver.get_db_name(user, project, env, service),
+                "POSTGRES_USER": ResourceResolver.get_db_user(user, project, service),
                 "POSTGRES_PASSWORD_FILE": f"{container_secrets_path}/{secret_filename}"
             },
             "startup_order": 1
@@ -214,19 +214,22 @@ class DeploymentConfigurer:
 
     _config_cache: Dict[str, 'DeploymentConfigurer'] = {}
 
-    def __init__(self, project_name: str):
+    def __init__(self, user: str, project_name: str):
         """
         Initialize deployment configuration for a specific project.
         
         Args:
-            project_name: Name of the project (loads config/projects/<project_name>.json)
+            user: user id (e.g. "u1")
+            project_name: Name of the project (loads config/projects/<user>/<project_name>.json)
         
         Raises:
             FileNotFoundError: If project config file not found
             ValueError: If project_name not specified
         """
-                # CHECK CACHE FIRST:
-        cache_key = project_name
+        self.user = user
+        self.project_name = project_name
+        # CHECK CACHE FIRST:
+        cache_key = f'{user}_{project_name}'
         if cache_key in DeploymentConfigurer._config_cache:
             # Return cached instance
             cached = DeploymentConfigurer._config_cache[cache_key]
@@ -236,10 +239,10 @@ class DeploymentConfigurer:
             return
         
         # ORIGINAL CODE (only runs if not cached):
-        self.config_file = constants.get_project_config_path(project_name)
+        self.config_file = constants.get_project_config_path(user, project_name)
         
         if not self.config_file.exists():
-            available = constants.list_projects()
+            available = constants.list_projects(user)
             if available:
                 raise FileNotFoundError(
                     f"Project '{project_name}' not found. "
@@ -247,7 +250,7 @@ class DeploymentConfigurer:
                 )
             else:
                 raise FileNotFoundError(
-                    f"Project '{project_name}' not found. No projects in config/projects/"
+                    f"Project '{project_name}' not found. No projects in config/projects/{user}/"
                 )
         
         self.raw_config = self._load_raw_config()
@@ -271,9 +274,9 @@ class DeploymentConfigurer:
             raise ValueError(f"Invalid JSON in {self.config_file}: {e}")
 
     @staticmethod
-    def list_projects() -> List[str]:
+    def list_projects(user: str) -> List[str]:
         """List all available projects."""
-        return constants.list_projects()
+        return constants.list_projects(user)
     
     def rebuild_config(self):
         """
@@ -300,7 +303,7 @@ class DeploymentConfigurer:
                     if service_name in ["postgres", "redis", "opensearch", "nginx"]:
                         print(f"Auto-provisioning standard service: {service_name} for {env_name}")
                         provisioned_config = provision_standard_service(
-                            project.get("name"), env_name, service_name, service_config
+                            self.user, self.project_name, env_name, service_name, service_config
                         )
                         merged_services[service_name] = provisioned_config
             
@@ -363,6 +366,9 @@ class DeploymentConfigurer:
         if "services" not in project:
             raise ValueError("Missing required field: project.services")
 
+    def get_user(self) -> str:
+        return self.user
+    
     def get_project_name(self) -> str:
         return self.config["project"]["name"]
     
@@ -385,19 +391,30 @@ class DeploymentConfigurer:
         return self.config['project']['environments'].get(env, {}).get("services", {})
     
     @staticmethod
-    def clear_cache(project_name: Optional[str] = None):
+    def clear_cache(user: Optional[str] = None, project_name: Optional[str] = None):
         """
         Clear cached configurations.
         
         Args:
-            project_name: Clear specific project, or None to clear all
+            user: Clear specific user's projects, or None to clear all
+            project_name: Clear specific project, or None to clear all for user
         """
-        if project_name:
-            DeploymentConfigurer._config_cache.pop(project_name, None)
+        if user and project_name:
+            # Clear specific project for user
+            cache_key = f'{user}_{project_name}'
+            DeploymentConfigurer._config_cache.pop(cache_key, None)
+        elif user:
+            # Clear all projects for user
+            keys_to_remove = [k for k in DeploymentConfigurer._config_cache.keys() 
+                             if k.startswith(f'{user}:')]
+            for key in keys_to_remove:
+                DeploymentConfigurer._config_cache.pop(key)
         else:
+            # Clear entire cache
             DeploymentConfigurer._config_cache.clear()
     
     @staticmethod
-    def is_cached(project_name: str) -> bool:
+    def is_cached(user: str, project_name: str) -> bool:
         """Check if project config is cached"""
-        return project_name in DeploymentConfigurer._config_cache
+        cache_key = f'{user}_{project_name}'
+        return cache_key in DeploymentConfigurer._config_cache

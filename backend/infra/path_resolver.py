@@ -4,6 +4,7 @@ Handles Windows/Linux path differences and local/remote distinctions.
 """
 
 from pathlib import Path
+import os
 from typing import Dict, List, Optional, Literal, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import platform as sys_platform

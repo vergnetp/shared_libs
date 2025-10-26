@@ -137,7 +137,7 @@ class ProjectDeployer:
         return ProjectDeployer(user, name)
     
     @staticmethod
-    def list_projects() -> List[str]:
+    def list_projects(user: str) -> List[str]:
         """
         List all available projects.
         
@@ -145,10 +145,10 @@ class ProjectDeployer:
             List of project names
             
         Example:
-            projects = ProjectDeployer.list_projects()
+            projects = ProjectDeployer.list_projects("u1")
             # ['myapp', 'another-project', ...]
         """        
-        return DeploymentConfigurer.list_projects()
+        return DeploymentConfigurer.list_projects(user)
     
     def update_config(
         self,
