@@ -101,6 +101,7 @@ class CommandExecuter:
     @staticmethod
     def run_cmd(cmd: Union[List[str], str], server_ip: str = 'localhost', user: str = "root") -> Any:
         """Run command(s) locally or via SSH depending on server_ip"""
+        user='root' # todo: clean that
         # Handle multiple commands case
         if isinstance(cmd, list) and len(cmd) > 0 and isinstance(cmd[0], str) and any(' ' in c for c in cmd):
             # This looks like a list of complete command strings
@@ -181,7 +182,7 @@ class CommandExecuter:
     @staticmethod
     def _run_ssh_cmd(cmd: Union[List[str], str], server_ip: str, user: str = "root") -> str:
         """Run command via SSH with cross-platform support (Docker on Windows)"""        
-        
+        user='root' # todo: clean that
         # If it's already a string, use it as-is (it may contain shell operators)
         if isinstance(cmd, str):
             remote_cmd = cmd
@@ -258,7 +259,7 @@ class CommandExecuter:
     @staticmethod
     def run_cmd_with_stdin(remote_cmd: str, data: bytes, server_ip: str, user: str = "root") -> None:
         """Run a remote command and stream data to its stdin (avoids huge base64 echoes)."""
-
+        user='root' # todo: clean that
         ssh_key_path = Path.home() / ".ssh" / "deployer_id_rsa"
         system = platform.system()
 

@@ -1153,7 +1153,7 @@ class Deployer:
                         email=None,  # force self-signed
                         cloudflare_api_token=None,
                         auto_firewall=False  # skip firewall on localhost
-                    ) # todo: find real function
+                    ) 
                     log(f"Nginx setup complete for {service_name}")
                 except Exception as e:
                     log(f"Warning: Nginx setup failed for {service_name}: {e}")
@@ -1174,7 +1174,7 @@ class Deployer:
                         cloudflare_api_token=cf_token,
                         admin_ip=admin_ip,
                         auto_firewall=True
-                    ) # todo: find real function
+                    ) 
                     log(f"Nginx setup complete for {service_name}")
                 except Exception as e:
                     log(f"Warning: Nginx setup failed for {service_name}: {e}")
@@ -1195,7 +1195,7 @@ class Deployer:
                         cloudflare_api_token=None,
                         admin_ip=admin_ip,
                         auto_firewall=True
-                    ) # todo: find rela function
+                    ) 
                     log(f"Nginx setup complete for {service_name}")
                 except Exception as e:
                     log(f"Warning: Nginx setup failed for {service_name}: {e}")
@@ -2004,8 +2004,7 @@ class Deployer:
                         user=self.user,
                         project=self.project_name,
                         env=env,
-                        server_ip=server_ip,
-                        user=self.user
+                        server_ip=server_ip
                     )
                     
                     # Filter out health_monitor jobs (those are system-level, not project-specific)
@@ -2680,7 +2679,7 @@ class Deployer:
                     email=email,
                     cloudflare_api_token=cloudflare_api_token,
                     auto_firewall=True
-                ) # todo: find real function
+                ) 
                 
                 log(f"Updated nginx for {service_name} on {server_ip}")
             except Exception as e:

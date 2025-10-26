@@ -662,6 +662,7 @@ def main():
     """Simple CLI for unified deployer"""   
     
     parser = argparse.ArgumentParser(description='Unified deployment CLI')
+    parser.add_argument('--user', required=True, help='User')
     parser.add_argument('--project', required=True, help='Project name')
     
     subparsers = parser.add_subparsers(dest='command', required=True)
@@ -699,7 +700,7 @@ def main():
     
     args = parser.parse_args()
     
-    deployer = UnifiedDeployer(args.project)
+    deployer = UnifiedDeployer(args.user, args.project)
     
     if args.command == 'build':
         success = deployer.build(env=args.env, push=not args.no_push)
