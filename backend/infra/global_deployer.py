@@ -47,7 +47,7 @@ class UnifiedDeployer:
     - deploy(env, zones=None, service=None, build=True, parallel=True) - Deploy anywhere
     
     Usage:
-        deployer = UnifiedDeployer("myapp")
+        deployer = UnifiedDeployer("u1", "myapp")
         
         # Single zone (automatic)
         deployer.deploy(env="prod")
@@ -59,15 +59,16 @@ class UnifiedDeployer:
         deployer.build(env="prod", push=True)
     """
     
-    def __init__(self, project: str):
+    def __init__(self, user: str, project: str):
         """
         Initialize deployer for a project.
         
         Args:
             project: Project name           
         """
+        self.user = user
         self.project = project        
-        self.deployer = Deployer(project)
+        self.deployer = Deployer(user, project)
         log(f"Initialized global deployer for project: {project}")
     
     # =========================================================================

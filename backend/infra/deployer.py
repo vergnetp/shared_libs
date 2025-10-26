@@ -104,11 +104,12 @@ class Deployer:
         deployment_configurer (DeploymentConfigurer): Provides configuration access and helper methods.
     """
 
-    def __init__(self, project_name: str):
+    def __init__(self, user: str, project_name: str):
         """
         Initialize a Deployer instance for a specific project.
 
         Args:
+            user: user id (e.g. "u1")
             project_name: Name of the project to deploy            
             
         Raises:
@@ -125,6 +126,7 @@ class Deployer:
                 raise ValueError("No projects found in config/projects/")
         
         self.id = f'deployment_{uuid4()}'
+        self.user = user
         self.project_name = project_name
         self.deployment_configurer = DeploymentConfigurer(project_name)
         
@@ -164,16 +166,14 @@ class Deployer:
             
         Returns:
             True if push completed successfully
-        """
-        project_name = self.deployment_configurer.get_project_name()
-        
+        """     
         if env:
-            return DeploymentSyncer.push(project_name, env, targets)
+            return DeploymentSyncer.push(self.project_name, env, targets)
         else:
             # Push to all environments
             success = True
             for environment in self.deployment_configurer.get_environments():
-                if not DeploymentSyncer.push(project_name, environment, targets):
+                if not DeploymentSyncer.push(self.project_name, environment, targets):
                     success = False
             return success
 
@@ -187,16 +187,14 @@ class Deployer:
             
         Returns:
             True if pull completed successfully
-        """
-        project_name = self.deployment_configurer.get_project_name()
-        
+        """        
         if env:
-            return DeploymentSyncer.pull(project_name, env, targets)
+            return DeploymentSyncer.pull(self.project_name, env, targets)
         else:
             # Pull from all environments
             success = True
             for environment in self.deployment_configurer.get_environments():
-                if not DeploymentSyncer.pull(project_name, environment, targets):
+                if not DeploymentSyncer.pull(self.project_name, environment, targets):
                     success = False
             return success
 
@@ -210,16 +208,14 @@ class Deployer:
             
         Returns:
             True if sync completed successfully
-        """
-        project_name = self.deployment_configurer.get_project_name()
-        
+        """        
         if env:
-            return DeploymentSyncer.sync(project_name, env, targets)
+            return DeploymentSyncer.sync(self.project_name, env, targets)
         else:
             # Sync all environments
             success = True
             for environment in self.deployment_configurer.get_environments():
-                if not DeploymentSyncer.sync(project_name, environment, targets):
+                if not DeploymentSyncer.sync(self.project_name, environment, targets):
                     success = False
             return success
 
@@ -292,10 +288,9 @@ class Deployer:
         
         # Use localhost for Dockerfile generation (build context)
         volumes = PathResolver.generate_all_volume_mounts(
-            "temp", "temp", service_name,
+            self.user, "temp", "temp", service_name,
             server_ip="localhost",  # Dockerfile build happens locally
-            use_docker_volumes=True,
-            user="root",
+            use_docker_volumes=True,           
             auto_create_dirs=False  # Don't create dirs during Dockerfile gen
         )
         app_dirs = set()
@@ -541,7 +536,8 @@ class Deployer:
                 
                 checkout_path = GitManager.checkout_repo(
                     repo_url=service_config["git_repo"],
-                    project_name=self.deployment_configurer.get_project_name(),
+                    user=self.user,
+                    project_name=self.project_name,
                     service_name=service_name,
                     env=env,
                     git_token=git_token  # Pass token here
@@ -577,12 +573,11 @@ class Deployer:
 
             docker_hub_user = self.deployment_configurer.get_docker_hub_user()
             version = self._get_version()
-            project_name = self.deployment_configurer.get_project_name()
-
+            
             tag = ResourceResolver.get_image_name(
                 docker_hub_user,
-                user,
-                project_name,
+                self.user,
+                self.project_name,
                 env,
                 service_name,
                 version
@@ -606,8 +601,7 @@ class Deployer:
             return (None, False)
     
     def _batch_prepare_servers(
-        self,
-        project: str,
+        self,        
         env: str,
         services: Dict[str, Dict[str, Any]],
         target_servers: List[str]
@@ -629,8 +623,7 @@ class Deployer:
         
         This reduces SSH overhead from (services × servers × 7 calls) to (servers × 1 call).
         
-        Args:
-            project: Project name
+        Args:            
             env: Environment name
             services: Dictionary of {service_name: service_config} (flat dict from get_services_by_startup_order)
             target_servers: List of server IPs to prepare
@@ -682,7 +675,7 @@ class Deployer:
                     host_paths = []
                     for path_type in host_mount_types:
                         host_path = PathResolver.get_volume_host_path(
-                            project, env, service_name, path_type, server_ip
+                            self.user, self.project_name, env, service_name, path_type, server_ip
                         )
                         host_paths.append(host_path)
                     commands.append(f"mkdir -p {' '.join(host_paths)}")
@@ -691,7 +684,7 @@ class Deployer:
                     docker_volume_types = ["data", "logs", "backups", "monitoring"]
                     for path_type in docker_volume_types:
                         volume_name = PathResolver.get_docker_volume_name(
-                            project, env, path_type, service_name
+                            self.user, self.project_name, env, path_type, service_name
                         )
                         # Use || true to ignore errors if volume already exists
                         commands.append(f"docker volume create {volume_name} 2>/dev/null || true")
@@ -707,7 +700,7 @@ class Deployer:
                 batch_cmd = " && ".join(commands)
                 
                 log(f"[{server_ip}] Preparing {len(services_prepared)} service(s): {', '.join(services_prepared[:3])}{'...' if len(services_prepared) > 3 else ''}")
-                CommandExecuter.run_cmd(batch_cmd, server_ip, "root")
+                CommandExecuter.run_cmd(batch_cmd, server_ip, self.user)
                 
                 # ========================================
                 # STEP 3.5: CREATE NGINX.CONF SEPARATELY (FIX!)
@@ -739,7 +732,7 @@ class Deployer:
                         "cat > /etc/nginx/nginx.conf",
                         nginx_conf_content.encode('utf-8'),
                         server_ip,
-                        "root"
+                        self.user
                     )
                 except Exception as e:
                     log(f"[{server_ip}] Warning: Could not create nginx.conf: {e}")
@@ -752,22 +745,21 @@ class Deployer:
                 
                 # Ensure network exists first
                 try:
-                    DockerExecuter.create_network(network_name, server_ip, "root", ignore_if_exists=True)
+                    DockerExecuter.create_network(network_name, server_ip, self.user, ignore_if_exists=True)
                 except:
                     pass
                 
-                # Get ALL services for this env (not just ones being deployed)               
-                configurer = DeploymentConfigurer(project)
-                all_services = configurer.get_services(env)
+                # Get ALL services for this env (not just ones being deployed) 
+                all_services = self.deployment_configurer.get_services(env)
 
                 # Start/ensure nginx container
                 try:
                     NginxConfigGenerator.ensure_nginx_container(
-                        project=project,
+                        project=self.project_name,
                         env=env,
                         services=all_services,
                         target_server=server_ip,
-                        user="root"
+                        user=self.user
                     )
                     log(f"[{server_ip}] Nginx sidecar ready")
                 except Exception as e:
@@ -833,8 +825,7 @@ class Deployer:
         Uses immutable infrastructure with parallel deployment:
         - Services with same startup_order deploy in parallel
         - Each service deploys to multiple droplets in parallel
-        """
-        project_name = self.deployment_configurer.get_project_name()
+        """       
         
         # Store target version for use in image generation
         self._override_version = target_version
@@ -858,7 +849,7 @@ class Deployer:
             
             log("Build complete")
         
-        log(f'Deploying {project_name}, env: {env or "all"}, service: {service_name or "all"}')
+        log(f'Deploying {self.project_name}, env: {env or "all"}, service: {service_name or "all"}')
         Logger.start()
 
         self.pre_provision_servers(env, service_name)
@@ -883,7 +874,7 @@ class Deployer:
             
             if target_ips:
                 log(f"Pushing to {len(target_ips)} servers: {target_ips}")
-                DeploymentSyncer.push(project_name, environment, targets=target_ips)
+                DeploymentSyncer.push(self.project_name, environment, targets=target_ips)
             else:
                 log("No remote servers found for push")
 
@@ -914,7 +905,7 @@ class Deployer:
         
         if all_target_servers:
             # First: Create all directories and volumes in batch
-            self._batch_prepare_servers(project_name, env or 'dev', services, list(all_target_servers))
+            self._batch_prepare_servers(env or 'dev', services, list(all_target_servers))
             
             # Second: Pre-pull all images in parallel
             self._pre_pull_images_parallel(services, list(all_target_servers), env or 'dev')
@@ -964,7 +955,7 @@ class Deployer:
                         for server_ip in target_servers:
                             future = executor.submit(
                                 self.install_scheduled_service,
-                                project_name, env or 'dev', svc_name, config, server_ip
+                                env or 'dev', svc_name, config, server_ip
                             )
                             futures.append(future)
                         
@@ -972,7 +963,7 @@ class Deployer:
                         for future in as_completed(futures):
                             future.result()
                 else:
-                    success = self._deploy_immutable(project_name, env or 'dev', svc_name, config)
+                    success = self._deploy_immutable(env or 'dev', svc_name, config)
                     
                     if not success:
                         log(f"Deployment failed for {svc_name}")
@@ -991,8 +982,8 @@ class Deployer:
                 with ThreadPoolExecutor(max_workers=min(len(service_group), 5)) as executor:
                     for svc_name, config in service_group:
                         future = executor.submit(
-                            self._deploy_service_wrapper,
-                            project_name, env or 'dev', svc_name, config
+                            self._deploy_single_service,
+                            env or 'dev', svc_name, config
                         )
                         service_futures[future] = svc_name
                     
@@ -1017,7 +1008,7 @@ class Deployer:
         
         # Cleanup empty servers
         log("Performing server cleanup...")
-        self._cleanup_empty_servers(project=project_name, env=env or 'dev')
+        self._cleanup_empty_servers(env=env or 'dev')
         
         # Check for nginx automation
         log("Checking for nginx automation...")
@@ -1066,7 +1057,7 @@ class Deployer:
                 version = self._get_version()
                 project_name = self.deployment_configurer.get_project_name()
                 image = ResourceResolver.get_image_name(
-                    docker_hub_user, user, project_name, env, service_name, version
+                    docker_hub_user, self.user, project_name, env, service_name, version
                 )
             
             images_to_pull[service_name] = image
@@ -1098,7 +1089,7 @@ class Deployer:
                     DockerExecuter.pull_image,
                     task['image'],
                     task['server_ip'],
-                    "root"
+                    self.user
                 ): task
                 for task in pull_tasks
             }
@@ -1162,7 +1153,7 @@ class Deployer:
                         email=None,  # force self-signed
                         cloudflare_api_token=None,
                         auto_firewall=False  # skip firewall on localhost
-                    )
+                    ) # todo: find real function
                     log(f"Nginx setup complete for {service_name}")
                 except Exception as e:
                     log(f"Warning: Nginx setup failed for {service_name}: {e}")
@@ -1183,7 +1174,7 @@ class Deployer:
                         cloudflare_api_token=cf_token,
                         admin_ip=admin_ip,
                         auto_firewall=True
-                    )
+                    ) # todo: find real function
                     log(f"Nginx setup complete for {service_name}")
                 except Exception as e:
                     log(f"Warning: Nginx setup failed for {service_name}: {e}")
@@ -1204,7 +1195,7 @@ class Deployer:
                         cloudflare_api_token=None,
                         admin_ip=admin_ip,
                         auto_firewall=True
-                    )
+                    ) # todo: find rela function
                     log(f"Nginx setup complete for {service_name}")
                 except Exception as e:
                     log(f"Warning: Nginx setup failed for {service_name}: {e}")
@@ -1219,8 +1210,7 @@ class Deployer:
     # =============================================================================
 
     def _determine_toggle(
-        self,
-        project: str,
+        self,       
         env: str,
         service: str,
         server_ip: str,
@@ -1235,8 +1225,7 @@ class Deployer:
         - If base running → use secondary (port 18357, name "base_secondary")
         - If secondary running → use base (port 8357, name "base")
         
-        Args:
-            project: Project name
+        Args:           
             env: Environment
             service: Service name
             server_ip: Target server IP
@@ -1247,7 +1236,7 @@ class Deployer:
             {"port": 8357, "name": "base_name"} or
             {"port": 18357, "name": "base_name_secondary"}
         """
-        existing = DockerExecuter.find_service_container(project, env, service, server_ip)
+        existing = DockerExecuter.find_service_container(self.project_name, env, service, server_ip, self.user)
         
         if not existing:
             # First deployment - use base
@@ -1266,8 +1255,6 @@ class Deployer:
 
     def _determine_backend_mode_for_service(
         self,
-        project: str,
-        env: str,
         service: str,
         deployed_servers: List[str],
         current_server: str  # NEW: which server's nginx are we configuring?
@@ -1307,8 +1294,7 @@ class Deployer:
 
     def _generate_nginx_backends(
         self,
-        mode: str,
-        project: str,
+        mode: str,        
         env: str,
         service: str,
         deployed_servers: List[str],
@@ -1337,7 +1323,7 @@ class Deployer:
             
             # Get both primary and secondary containers if they exist
             for suffix in ["", "_secondary"]:
-                container_name = ResourceResolver.get_container_name(user, project, env, service)
+                container_name = ResourceResolver.get_container_name(self.user, self.project_name, env, service)
                 if suffix:
                     container_name = f"{container_name}{suffix}"
                 
@@ -1361,7 +1347,7 @@ class Deployer:
             backends = []
             
             # Calculate the internal port that nginx listens on
-            internal_port = ResourceResolver.get_internal_port(user, project, env, service)
+            internal_port = ResourceResolver.get_internal_port(self.user, self.project_name, env, service)
             
             for server_ip in deployed_servers:
                 # Point to the remote server's nginx internal port
@@ -1374,8 +1360,7 @@ class Deployer:
 
 
     def _update_all_nginx_for_service(
-        self,
-        project: str,
+        self,      
         env: str,
         service: str,
         deployed_servers: List[str],
@@ -1400,8 +1385,7 @@ class Deployer:
                     server 161.35.164.134:5228;  # Remote via IP:internal_port
                 }
         
-        Args:
-            project: Project name
+        Args:            
             env: Environment
             service: Service name
             deployed_servers: Servers where THIS SERVICE is deployed
@@ -1414,7 +1398,7 @@ class Deployer:
         log(f"Updating nginx stream config for {service} on {len(all_zone_servers)} servers")
         
         # Calculate internal port (stable for this service)
-        internal_port = ResourceResolver.get_internal_port(project, env, service)
+        internal_port = ResourceResolver.get_internal_port(self.user, self.project_name, env, service)
         log(f"Internal port for {service}: {internal_port}")
         
         # Update nginx on EVERY server in the zone (each gets different config!)
@@ -1424,12 +1408,12 @@ class Deployer:
             try:
                 # Determine mode FOR THIS SPECIFIC SERVER
                 mode = self._determine_backend_mode_for_service(
-                    project, env, service, deployed_servers, server_ip
+                     env, service, deployed_servers, server_ip
                 )
                 
                 # Generate backends FOR THIS SPECIFIC SERVER
                 backends = self._generate_nginx_backends(
-                    mode, project, env, service, deployed_servers, server_ip
+                    mode, self.project_name, env, service, deployed_servers, server_ip
                 )
                 
                 if not backends:
@@ -1438,7 +1422,7 @@ class Deployer:
                 
                 # Update nginx config on this server with its specific backends
                 NginxConfigGenerator.update_stream_config_on_server(
-                    server_ip, project, env, service, backends, internal_port, mode
+                    server_ip, self.project_name, env, service, backends, internal_port, mode, user=self.user
                 )
                 
                 log(f"[{server_ip}] Updated nginx config for {service} (mode: {mode}, backends: {len(backends)})")
@@ -1529,8 +1513,7 @@ class Deployer:
     # =============================================================================
 
     def _deploy_single_service(
-        self,
-        project_name: str,
+        self,       
         env: str,
         svc_name: str,
         config: Dict[str, Any]
@@ -1571,7 +1554,7 @@ class Deployer:
                     for server_ip in target_servers:
                         future = executor.submit(
                             self.install_scheduled_service,
-                            project_name, env or 'dev', svc_name, config, server_ip
+                            env or 'dev', svc_name, config, server_ip
                         )
                         futures.append(future)
                     
@@ -1582,7 +1565,7 @@ class Deployer:
                 result['success'] = True
                 
             else:
-                success = self._deploy_immutable(project_name, env, svc_name, config)
+                success = self._deploy_immutable(env, svc_name, config)
                 
                 if success:
                     result['success'] = True
@@ -1602,8 +1585,7 @@ class Deployer:
         return result
 
     def _deploy_to_single_server(
-            self,
-            project: str,
+            self,          
             env: str,
             service_name: str,
             service_config: Dict[str, Any],
@@ -1624,8 +1606,7 @@ class Deployer:
             3. Health check
             4. Old container cleanup
             
-            Args:
-                project: Project name
+            Args:               
                 env: Environment name
                 service_name: Service name
                 service_config: Service configuration
@@ -1647,12 +1628,12 @@ class Deployer:
                 log(f"[{target_ip}] Starting deployment")
                 
                 # STEP 1: Create network (quick operation)
-                self.create_containers_network(env, target_ip, "root")
+                self.create_containers_network(env, target_ip)
                 network_name = ResourceResolver.get_network_name()
                 log(f"[{target_ip}] Network ready")
                 
                 # STEP 2: Determine toggle (which container name/port to use)
-                toggle = self._determine_toggle(user, project, env, service_name, target_ip, base_port, base_name)
+                toggle = self._determine_toggle(self.user, self.project_name, env, service_name, target_ip, base_port, base_name)
                 new_name = toggle["name"]
                 new_port = toggle["port"]
                 
@@ -1662,7 +1643,7 @@ class Deployer:
                     log(f"[{target_ip}] Checking for old container: {old_name}")
                     try:
                         remove_cmd = f"docker rm -f {old_name} 2>/dev/null || true"
-                        CommandExecuter.run_cmd(remove_cmd, target_ip, 'root')
+                        CommandExecuter.run_cmd(remove_cmd, target_ip, self.user)
                         log(f"[{target_ip}] Ensured {old_name} is removed")
                     except Exception as e:
                         log(f"[{target_ip}] Note: Could not remove old container {old_name}: {e}")
@@ -1685,8 +1666,8 @@ class Deployer:
 
                 # STEP 3: Get volumes (directories already created by _batch_prepare_servers)
                 volumes = PathResolver.generate_all_volume_mounts(
-                    project, env, service_name, target_ip,
-                    use_docker_volumes=True, user="root",
+                    self.user, self.project_name, env, service_name, target_ip,
+                    use_docker_volumes=True, user=self.user,
                     auto_create_dirs=False  # Already created in batch!
                 )
                 
@@ -1699,7 +1680,7 @@ class Deployer:
                     docker_hub_user = self.deployment_configurer.get_docker_hub_user()
                     version = self._get_version()
                     image = ResourceResolver.get_image_name(
-                        docker_hub_user, user, project, env, service_name, version
+                        docker_hub_user, self.user, self.project_name, env, service_name, version
                     )
                 
                 # STEP 6: Get ports configuration
@@ -1728,7 +1709,7 @@ class Deployer:
                     environment=env_vars,
                     network=network_name,
                     server_ip=target_ip,
-                    user='root',
+                    user=self.user,
                     restart_policy='always' if service_config.get('restart', False) else 'no'
                 )
                 
@@ -1792,7 +1773,7 @@ class Deployer:
                 # First check if container is still running
                 status_result = CommandExecuter.run_cmd(
                     f"docker ps --filter 'name={container_name}' --format '{{{{.Status}}}}'",
-                    server_ip, "root"
+                    server_ip, self.user
                 )
                 status = status_result.stdout.strip() if hasattr(status_result, 'stdout') else str(status_result).strip()
                 
@@ -1801,7 +1782,7 @@ class Deployer:
                     log(f"[{server_ip}] Container still running - treating as healthy")
                     return True
                 
-                exit_code = DockerExecuter.get_container_exit_code(container_name, server_ip, "root")
+                exit_code = DockerExecuter.get_container_exit_code(container_name, server_ip, self.user)
 
                 if exit_code == -1:
                     log(f"[{server_ip}] Could not determine exit code for {container_name}")
@@ -1829,7 +1810,7 @@ class Deployer:
             try:
                 result = CommandExecuter.run_cmd(
                     f"docker ps --filter 'name={container_name}' --format '{{{{.Status}}}}'",
-                    server_ip, "root"
+                    server_ip, self.user
                 )
                 status = result.stdout.strip() if hasattr(result, 'stdout') else str(result).strip()
                 
@@ -1862,7 +1843,7 @@ class Deployer:
         try:
             # Get container state
             inspect_cmd = f"docker inspect {container_name} --format '{{{{json .State}}}}'"
-            inspect_result = CommandExecuter.run_cmd(inspect_cmd, server_ip, "root")
+            inspect_result = CommandExecuter.run_cmd(inspect_cmd, server_ip, self.user)
             
             if inspect_result:               
                 state_str = inspect_result.stdout.strip() if hasattr(inspect_result, 'stdout') else str(inspect_result).strip()
@@ -1884,7 +1865,7 @@ class Deployer:
             log(f"[{server_ip}] Container logs (last {lines} lines):")
             log(f"[{server_ip}] ───────────────────────────────────────────────")
             
-            logs_result = DockerExecuter.get_container_logs(container_name, lines=lines, server_ip=server_ip, user="root")
+            logs_result = DockerExecuter.get_container_logs(container_name, lines=lines, server_ip=server_ip, user=self.user)
             
             if logs_result:
                 logs = logs_result.strip() if isinstance(logs_result, str) else str(logs_result).strip()
@@ -1971,7 +1952,7 @@ class Deployer:
         
         log(f"[{server_ip}] ═══════════════════════════════════════════════")
 
-    def _cleanup_empty_servers(self, project: str, env: str):
+    def _cleanup_empty_servers(self, env: str):
             """
             Find servers with no services deployed and destroy/release them.
             
@@ -1982,12 +1963,11 @@ class Deployer:
             1. No running containers for this project/env, AND
             2. No scheduled cron jobs for this project/env (excluding health_monitor)
             
-            Args:
-                project: Project name
+            Args:                
                 env: Environment name
             """       
             all_servers = ServerInventory.list_all_servers()
-            container_pattern = f"{project}_{env}_"
+            container_pattern = f"{self.project_name}_{env}_"
             
             empty_servers = []
             
@@ -1999,7 +1979,7 @@ class Deployer:
                     result = CommandExecuter.run_cmd(
                         f"docker ps --filter 'name={container_pattern}' --format '{{{{.Names}}}}'",
                         server_ip,
-                        'root'
+                        self.user
                     )
                     
                     # Extract container names properly
@@ -2021,10 +2001,11 @@ class Deployer:
                     
                     # Check 2: Scheduled cron jobs (excluding health_monitor)
                     cron_jobs = CronManager.list_managed_cron_jobs(
-                        project=project,
+                        user=self.user,
+                        project=self.project_name,
                         env=env,
                         server_ip=server_ip,
-                        user='root'
+                        user=self.user
                     )
                     
                     # Filter out health_monitor jobs (those are system-level, not project-specific)
@@ -2039,7 +2020,7 @@ class Deployer:
                     
                     # Server is truly empty
                     empty_servers.append(server_ip)
-                    log(f"Server {server_ip} has no {project}/{env} services (containers or cron jobs)")
+                    log(f"Server {server_ip} has no {self.project_name}/{env} services (containers or cron jobs)")
                         
                 except Exception as e:
                     log(f"Could not check {server_ip}: {e}")
@@ -2059,12 +2040,11 @@ class Deployer:
             else:
                 log("No empty servers found")
 
-    def _get_servers_running_service(self, project: str, env: str, service_name: str) -> List[str]:
+    def _get_servers_running_service(self, env: str, service_name: str) -> List[str]:
         """
         Get list of server IPs that have containers for this service.
         
-        Args:
-            project: Project name
+        Args:           
             env: Environment name
             service_name: Service name
             
@@ -2074,7 +2054,7 @@ class Deployer:
         all_servers = ServerInventory.list_all_servers()
         servers_with_service = []
         
-        container_pattern = f"{project}_{env}_{service_name}"
+        container_pattern = f"{self.project_name}_{env}_{service_name}"
         
         for server in all_servers:
             server_ip = server['ip']
@@ -2083,7 +2063,7 @@ class Deployer:
                 result = CommandExecuter.run_cmd(
                     f"docker ps -a --filter 'name={container_pattern}' --format '{{{{.Names}}}}'",
                     server_ip,
-                    'root'
+                    self.user
                 )
                 
                 # Extract container names properly
@@ -2108,24 +2088,23 @@ class Deployer:
         
         return servers_with_service
 
-    def _cleanup_service_on_server(self, project: str, env: str, service_name: str, server_ip: str):
+    def _cleanup_service_on_server(self, env: str, service_name: str, server_ip: str):
         """
         Stop and remove all containers for a service on a specific server.
         
-        Args:
-            project: Project name
+        Args:            
             env: Environment name
             service_name: Service name
             server_ip: Server IP to clean up
         """
-        container_pattern = f"{project}_{env}_{service_name}"
+        container_pattern = f"{self.project_name}_{env}_{service_name}"
         
         try:
             # Find all containers for this service (base and secondary)
             result = CommandExecuter.run_cmd(
                 f"docker ps -a --filter 'name={container_pattern}' --format '{{{{.Names}}}}'",
                 server_ip,
-                'root'
+                self.user
             )
             
             # Extract container names - handle both stdout attribute and string result
@@ -2152,14 +2131,13 @@ class Deployer:
                 except Exception as e:
                     log(f"Could not remove {container_name} from {server_ip}: {e}")
             
-            NginxConfigGenerator.cleanup_service_nginx_config(project, env, service_name, server_ip, 'root')
+            NginxConfigGenerator.cleanup_service_nginx_config(self.project_name, env, service_name, server_ip, user=self.user)
                     
         except Exception as e:
             log(f"Could not cleanup {service_name} on {server_ip}: {e}")
 
     def _deploy_immutable(
-                self,
-                project: str,
+                self,                
                 env: str,
                 service_name: str,
                 service_config: Dict[str, Any]
@@ -2203,13 +2181,13 @@ class Deployer:
                     log(f"Localhost deployment - starting service directly")
                     self.create_containers_network(env, 'localhost')
                     
-                    base_name = ResourceResolver.get_container_name(user, project, env, service_name)
+                    base_name = ResourceResolver.get_container_name(self.user, self.project_name, env, service_name)
                     dockerfile = service_config.get("dockerfile")
                     container_ports = ResourceResolver.get_container_ports(service_name, dockerfile)
                     container_port = container_ports[0] if container_ports else "8000"
-                    base_port = ResourceResolver.get_host_port(user, project, env, service_name, container_port)
+                    base_port = ResourceResolver.get_host_port(self.user, self.project_name, env, service_name, container_port)
                     
-                    toggle = self._determine_toggle(user, project, env, service_name, 'localhost', base_port, base_name)
+                    toggle = self._determine_toggle(self.user, self.project_name, env, service_name, 'localhost', base_port, base_name)
                     new_name = toggle["name"]   
                     
                     old_name = self._get_opposite_container_name(new_name, base_name)
@@ -2226,10 +2204,10 @@ class Deployer:
                         pass
 
                     try:
-                        self.start_service(project, env, service_name, service_config, 'localhost')
+                        self.start_service(env, service_name, service_config, 'localhost')
                         all_zone_servers = [{'ip': 'localhost'}]
                         self._update_all_nginx_for_service(
-                            project, env, service_name, ['localhost'], all_zone_servers
+                            self.project_name, env, service_name, ['localhost'], all_zone_servers
                         )
                         Logger.end()
                         log(f"Localhost deployment successful")
@@ -2282,14 +2260,14 @@ class Deployer:
                         return False
                             
                 # STEP 3: Calculate todel_ips (servers with service but not in target)
-                current_service_servers = self._get_servers_running_service(project, env, service_name)
+                current_service_servers = self._get_servers_running_service(self.project_name, env, service_name)
                 
                 # STEP 4: Calculate target_ips
                 target_ips = green_ips + new_ips
 
-                project_name = project  # same variable scope
+                
                 try:
-                    self._batch_prepare_servers(project_name, env, {service_name: service_config}, target_ips)
+                    self._batch_prepare_servers(self.project_name, env, {service_name: service_config}, target_ips)
                 except Exception as e:
                     log(f"Warning: batch prepare on target_ips failed: {e}")
 
@@ -2311,11 +2289,11 @@ class Deployer:
                 deployed_servers = []
                 
                 # Calculate base naming (same for all servers)
-                base_name = ResourceResolver.get_container_name(user, project, env, service_name)
+                base_name = ResourceResolver.get_container_name(self.user, self.project_name, env, service_name)
                 dockerfile = service_config.get("dockerfile")
                 container_ports = ResourceResolver.get_container_ports(service_name, dockerfile)
                 container_port = container_ports[0] if container_ports else "8000"
-                base_port = ResourceResolver.get_host_port(user, project, env, service_name, container_port)
+                base_port = ResourceResolver.get_host_port(self.user, self.project_name, env, service_name, container_port)
                 
                 # Determine if we need port mapping (multi-server needs it)
                 need_port_mapping = self._should_map_host_port(target_ips)
@@ -2329,7 +2307,7 @@ class Deployer:
                     for target_ip in target_ips:
                         future = executor.submit(
                             self._deploy_to_single_server,
-                            project, env, service_name, service_config,
+                            self.project_name, env, service_name, service_config,
                             target_ip, base_name, base_port, need_port_mapping
                         )
                         deployment_futures[future] = target_ip
@@ -2391,18 +2369,18 @@ class Deployer:
                 
                 all_zone_servers = self._get_all_servers_in_zone(zone)
                 self._update_all_nginx_for_service(
-                    project, env, service_name, deployed_servers, all_zone_servers
+                    self.project_name, env, service_name, deployed_servers, all_zone_servers
                 )
                 
                 # STEP 7: Cleanup todel_ips (remove service from servers no longer in target)
                 if todel_ips:
                     log(f"Cleaning up {service_name} from removed servers: {todel_ips}")
                     for ip in todel_ips:
-                        self._cleanup_service_on_server(project, env, service_name, ip)
+                        self._cleanup_service_on_server(env, service_name, ip)
                 
                 # Record deployment state
                 DeploymentStateManager.record_deployment(
-                    project=project,
+                    project=self.project_name,
                     env=env,
                     service=service_name,
                     servers=target_ips,
@@ -2440,24 +2418,22 @@ class Deployer:
         
         return dict(sorted_services)
 
-    def create_containers_network(self, env: str, server_ip: str = 'localhost', user: str = "root"):
+    def create_containers_network(self, env: str, server_ip: str = 'localhost'):
         """Create Docker network for services communication"""
         network_name = ResourceResolver.get_network_name()
         
         try:
-            DockerExecuter.create_network(network_name, server_ip, user, ignore_if_exists=True)
+            DockerExecuter.create_network(network_name, server_ip, self.user, ignore_if_exists=True)
             log(f"Network {network_name} ready on {server_ip}")
         except Exception as e:
             log(f"Warning: Could not create network {network_name} on {server_ip}: {e}")
 
     def start_service(
-        self,
-        project: str,
+        self,        
         env: str,
         service_name: str,
         service_config: Dict[str, Any],
-        server_ip: str = 'localhost',
-        user: str = "root"
+        server_ip: str = 'localhost'       
     ):
         """
         Start a service container (wrapper for compatibility).
@@ -2465,19 +2441,17 @@ class Deployer:
         """
         if self.is_service_scheduled(service_config):
             # For scheduled services, install the cron job
-            return self.install_scheduled_service(project, env, service_name, service_config, server_ip)
+            return self.install_scheduled_service(env, service_name, service_config, server_ip)
         else:
             # For long-running services, start the container
-            return self.start_long_running_service(project, env, service_name, service_config, server_ip, user)
+            return self.start_long_running_service(env, service_name, service_config, server_ip)
 
     def start_long_running_service(
-        self,
-        project_name: str,
+        self,        
         env: str,
         service_name: str,
         service_config: Dict[str, Any],
-        server_ip: str = 'localhost',
-        user: str = "root"
+        server_ip: str = 'localhost'      
     ) -> bool:
         """
         Start a long-running service container.
@@ -2486,12 +2460,12 @@ class Deployer:
         It handles network setup, volume mounting, and container lifecycle.
         """
         try:
-            # Create network
-            self.create_containers_network(env, server_ip, user)
+            # Create network           
+            self.create_containers_network(env, server_ip)
             network_name = ResourceResolver.get_network_name()
             
             # Get container name and image
-            base_name = ResourceResolver.get_container_name(user, project_name, env, service_name)
+            base_name = ResourceResolver.get_container_name(self.user, self.project_name, env, service_name)
             
             # Get image (either custom or prebuilt)
             if service_config.get("image"):
@@ -2500,7 +2474,7 @@ class Deployer:
                 docker_hub_user = self.deployment_configurer.get_docker_hub_user()
                 version = self._get_version()
                 image = ResourceResolver.get_image_name(
-                    docker_hub_user, user, project_name, env, service_name, version
+                    docker_hub_user, self.user, self.project_name, env, service_name, version
                 )
             
            # Images are pre-pulled in batch prep, no need to pull again
@@ -2508,10 +2482,9 @@ class Deployer:
             
             # Get volumes
             volumes = PathResolver.generate_all_volume_mounts(
-                user, project_name, env, service_name,
+                self.user, self.project_name, env, service_name,
                 server_ip=server_ip,
-                use_docker_volumes=True,
-                user=user
+                use_docker_volumes=True                
             )
             
             # Get dockerfile for port detection
@@ -2540,7 +2513,7 @@ class Deployer:
                 environment=env_vars,
                 restart_policy=restart_policy,
                 server_ip=server_ip,
-                user=user
+                user=self.user
             )
             
             log(f"Started {service_name} on {server_ip}")
@@ -2551,8 +2524,7 @@ class Deployer:
             return False
 
     def install_scheduled_service(
-                self,
-                project_name: str,
+                self,                
                 env: str,
                 service_name: str,
                 service_config: Dict[str, Any],
@@ -2572,23 +2544,23 @@ class Deployer:
                     docker_hub_user = self.deployment_configurer.get_docker_hub_user()
                     version = self._get_version()
                     image = ResourceResolver.get_image_name(
-                        docker_hub_user, project_name, env, service_name, version
+                        docker_hub_user, self.user, self.project_name, env, service_name, version
                     )
                 
                 # Pull image if remote
                 if server_ip != 'localhost':
                     log(f"Pulling image {image} to {server_ip}...")
-                    DockerExecuter.pull_image(image, server_ip, "root")
+                    DockerExecuter.pull_image(image, server_ip, self.user)
                 
                 # Parallel directory and volume creation (like normal services)
                 with ThreadPoolExecutor(max_workers=2) as executor:
                     dir_future = executor.submit(
                         PathResolver.ensure_host_directories,
-                        user, project_name, env, service_name, server_ip, "root"
+                        self.user, self.project_name, env, service_name, server_ip, self.user
                     )
                     vol_future = executor.submit(
                         PathResolver.ensure_docker_volumes,
-                        user, project_name, env, service_name, server_ip, "root"
+                        self.user, self.project_name, env, service_name, server_ip, self.user
                     )
                     
                     # Wait for both to complete
@@ -2599,15 +2571,14 @@ class Deployer:
                 
                 # Install via CronManager directly
                 success = CronManager.install_cron_job(
-                    user=user,
-                    project=project_name,
+                    user=self.user,
+                    project=self.project_name,
                     env=env,
                     service_name=service_name,
                     service_config=service_config,
                     docker_hub_user=self.deployment_configurer.get_docker_hub_user(),
                     version=self._get_version(),
-                    server_ip=server_ip,
-                    user="root"
+                    server_ip=server_ip
                 )
                 
                 if success:
@@ -2701,7 +2672,7 @@ class Deployer:
         for server_ip in new_server_ips:
             try:    
                 NginxConfigGenerator.setup_service(
-                    project=project,
+                    project=self.project_name,
                     env=env,
                     service_name=service_name,
                     service_config=service_config,
@@ -2709,7 +2680,7 @@ class Deployer:
                     email=email,
                     cloudflare_api_token=cloudflare_api_token,
                     auto_firewall=True
-                )
+                ) # todo: find real function
                 
                 log(f"Updated nginx for {service_name} on {server_ip}")
             except Exception as e:
@@ -2903,9 +2874,8 @@ class Deployer:
             # Call this before deploy() for faster deployment
             deployer.pre_provision_servers(env="prod")
             deployer.deploy(env="prod")
-        """
-        project = self.deployment_configurer.get_project_name()
-        log(f"Pre-provisioning servers for {project}/{env}")
+        """        
+        log(f"Pre-provisioning servers for {self.project_name}/{env}")
         
         # Get all services to deploy
         services = self.get_services_by_startup_order(env)
@@ -3094,27 +3064,25 @@ class Deployer:
             log(f"[{service_name}] (backup) Parent deployed on: {deployed_servers}")
             
             # Deploy backup to same servers
-            self._deploy_backup_service(
-                project_name,
+            self._deploy_backup_service(               
                 env,
                 service_name,
                 service_config,
                 deployed_servers
             )
     
-    def _get_deployed_servers(self, project: str, env: str, service_name: str) -> List[str]:
+    def _get_deployed_servers(self, env: str, service_name: str) -> List[str]:
         """
         Get list of server IPs where a service is currently deployed.
         
-        Args:
-            project: Project name
+        Args:           
             env: Environment name
             service_name: Service name
             
         Returns:
             List of server IPs where the service is running
         """
-        container_pattern = ResourceResolver.get_container_name_pattern(user, project, env, service_name)
+        container_pattern = ResourceResolver.get_container_name_pattern(self.user, self.project_name, env, service_name)
         
         all_servers = ServerInventory.get_servers(
             deployment_status=ServerInventory.STATUS_ACTIVE
@@ -3129,7 +3097,7 @@ class Deployer:
                 result = CommandExecuter.run_cmd(
                     f"docker ps --filter 'name={container_pattern}' --format '{{{{.Names}}}}'",
                     server_ip,
-                    'root'
+                    self.user
                 )
                 
                 if result and str(result).strip():
@@ -3142,8 +3110,7 @@ class Deployer:
         return deployed_servers
     
     def _deploy_backup_service(
-            self,
-            project: str,
+            self,            
             env: str,
             parent_service_name: str,
             parent_service_config: Dict[str, Any],
@@ -3153,8 +3120,7 @@ class Deployer:
             Deploy backup service to the same servers as the parent service.
             This ensures backup can connect via Docker DNS (container name).
             
-            Args:
-                project: Project name
+            Args:             
                 env: Environment name
                 parent_service_name: Parent service name (e.g., "postgres")
                 parent_service_config: Parent service configuration
@@ -3164,7 +3130,7 @@ class Deployer:
             
             # Generate backup service config for first server (for path resolution)
             backup_service_config = BackupManager.generate_backup_service_config(
-                project, env, parent_service_name, parent_service_config, deployed_servers[0]
+                self.user, self.project_name, env, parent_service_name, parent_service_config, deployed_servers[0]
             )
             
             if not backup_service_config:
@@ -3194,7 +3160,7 @@ class Deployer:
                 
                 # Build image
                 image_name = ResourceResolver.get_image_name(
-                    docker_hub_user, user, project, env, backup_service_name, version
+                    docker_hub_user, self.user, self.project_name, env, backup_service_name, version
                 )
                 
                 build_context = backup_service_config.get("build_context", ".")
@@ -3221,7 +3187,7 @@ class Deployer:
                 for server_ip in deployed_servers:
                     future = executor.submit(
                         self._install_backup_on_server,
-                        project, env, backup_service_name, backup_service_config,
+                        self.project_name, env, backup_service_name, backup_service_config,
                         parent_service_name, server_ip
                     )
                     futures[future] = server_ip
@@ -3239,8 +3205,7 @@ class Deployer:
                         log(f"[{parent_service_name}] (backup) ✗ Exception on {server_ip}: {e}")
 
     def _install_backup_on_server(
-        self,
-        project: str,
+        self,      
         env: str,
         backup_service_name: str,
         backup_service_config: Dict[str, Any],
@@ -3250,8 +3215,7 @@ class Deployer:
         """
         Install backup service on a specific server.
         
-        Args:
-            project: Project name
+        Args:           
             env: Environment name
             backup_service_name: Backup service name
             backup_service_config: Backup service configuration
@@ -3263,8 +3227,7 @@ class Deployer:
         """
         try:
             # Use install_scheduled_service method
-            success = self.install_scheduled_service(
-                project_name=project,
+            success = self.install_scheduled_service(                
                 env=env,
                 service_name=backup_service_name,
                 service_config=backup_service_config,
@@ -3351,7 +3314,7 @@ class Deployer:
                 CommandExecuter.run_cmd(
                     f"docker create --name {temp_container} -v {volume_name}:/backups alpine",
                     server_ip,
-                    'root'
+                    self.user
                 )
                 
                 # Copy files from container to local
@@ -3364,7 +3327,7 @@ class Deployer:
                     CommandExecuter.run_cmd(
                         f"docker cp {temp_container}:/backups/. {local_path}/",
                         server_ip,
-                        'root'
+                        self.user
                     )
                 else:
                     # Remote copy via docker cp then scp
@@ -3372,28 +3335,28 @@ class Deployer:
                     CommandExecuter.run_cmd(
                         f"docker cp {temp_container}:/backups {remote_temp}",
                         server_ip,
-                        'root'
+                        self.user
                     )
                     
                     # SCP from remote to local                   
                     subprocess.run([
                         "scp", "-r",
-                        f"root@{server_ip}:{remote_temp}/.",
+                        f"{self.user}@{server_ip}:{remote_temp}/.",
                         local_path
-                    ], check=True)
+                    ], check=True) 
                     
                     # Cleanup remote temp
                     CommandExecuter.run_cmd(
                         f"rm -rf {remote_temp}",
                         server_ip,
-                        'root'
+                        self.user
                     )
                 
                 # Remove temporary container
                 CommandExecuter.run_cmd(
                     f"docker rm {temp_container}",
                     server_ip,
-                    'root'
+                    self.user
                 )
                 
                 log(f"✓ Pulled backups for {svc_name} to {local_path}")
@@ -3493,8 +3456,7 @@ class Deployer:
         Returns:
             True if successful
         """
-        project_name = self.deployment_configurer.get_project_name()
-        
+       
         log(f"WARNING: Rolling back {service} to {timestamp}")
         log("This will STOP the service and REPLACE its data!")
         
@@ -3512,7 +3474,7 @@ class Deployer:
         log(f"Using backup: {backup['filename']} ({backup['size_mb']} MB)")
         
         # Get deployed servers
-        deployed_servers = self._get_deployed_servers(project_name, env, service)
+        deployed_servers = self._get_deployed_servers(env, service)
         if not deployed_servers:
             log(f"Service {service} is not deployed")
             return False
@@ -3535,24 +3497,24 @@ class Deployer:
             
             try:
                 # 1. Stop service
-                container_name = ResourceResolver.get_container_name(user, project_name, env, service)
+                container_name = ResourceResolver.get_container_name(self.user, self.project_name, env, service)
                 log(f"Stopping {container_name}...")
                 DockerExecuter.stop_and_remove_container(container_name, server_ip, ignore_if_not_exists=True)
                 
                 # 2. Restore backup based on service type
                 if service_type == "postgres":
                     success &= self._rollback_postgres(
-                        project_name, env, service, backup, server_ip
+                        env, service, backup, server_ip
                     )
                 elif service_type == "redis":
                     success &= self._rollback_redis(
-                        project_name, env, service, backup, server_ip
+                        env, service, backup, server_ip
                     )
                 
                 # 3. Restart service
                 log(f"Restarting {service}...")
                 # Trigger redeployment
-                self._deploy_single_service_wrapper(service, service_config, env)
+                self._deploy_immutable(env, service, service_config)
                 
             except Exception as e:
                 log(f"✗ Rollback failed on {server_ip}: {e}")
@@ -3566,8 +3528,7 @@ class Deployer:
         return success
     
     def _rollback_postgres(
-        self,
-        project: str,
+        self,        
         env: str,
         service: str,
         backup: Dict[str, Any],
@@ -3583,8 +3544,7 @@ class Deployer:
         4. Run pg_restore
         5. Cleanup temp container
         
-        Args:
-            project: Project name
+        Args:            
             env: Environment name
             service: Service name (e.g., "postgres")
             backup: Backup info dict with 'path' and 'filename'
@@ -3597,12 +3557,12 @@ class Deployer:
             log(f"Restoring Postgres backup on {server_ip}...")            
              
             # Get container and volume names
-            container_name = ResourceResolver.get_container_name(user, project, env, service)
-            data_volume = ResourceResolver.get_docker_volume_name(user, project, env, "data", service)
-            backups_volume = ResourceResolver.get_docker_volume_name(user, project, env, "backups", service)  
+            container_name = ResourceResolver.get_container_name(self.user, self.project_name, env, service)
+            data_volume = ResourceResolver.get_docker_volume_name(self.user, self.project_name, env, "data", service)
+            backups_volume = ResourceResolver.get_docker_volume_name(self.user, self.project_name, env, "backups", service)  
 
-            db_name = ResourceResolver.get_db_name(user, project, env, service)
-            db_user = ResourceResolver.get_db_user(user, project, service)            
+            db_name = ResourceResolver.get_db_name(self.user, self.project_name, env, service)
+            db_user = ResourceResolver.get_db_user(self.user, self.project_name, service)            
             
             # Step 1: Upload backup to server's backup volume
             log(f"  Uploading backup file: {backup['filename']}")
@@ -3624,14 +3584,14 @@ class Deployer:
                 upload_cmd, 
                 backup_data, 
                 server_ip, 
-                "root"
+                self.user
             )
             log(f"  ✓ Backup uploaded to server")
             
             # Step 2: Stop postgres container
             log(f"  Stopping {service} container...")
             try:
-                DockerExecuter.stop_container(container_name, server_ip, "root")
+                DockerExecuter.stop_container(container_name, server_ip, self.user)
                 log(f"  ✓ Container stopped")
             except Exception as e:
                 log(f"  Warning: Could not stop container (may already be stopped): {e}")
@@ -3644,7 +3604,7 @@ class Deployer:
             
             # Get password file path
             secrets_volume = PathResolver.get_volume_host_path(
-                user, project, env, service, "secrets", server_ip
+                self.user, self.project_name, env, service, "secrets", server_ip
             )
             secret_filename = ResourceResolver._get_secret_filename(service)
             password_file = f"{secrets_volume}/{secret_filename}"
@@ -3665,7 +3625,7 @@ class Deployer:
                 f"--network {network} "
                 f"postgres:latest"
             )
-            CommandExecuter.run_cmd(start_pg_cmd, server_ip, "root")
+            CommandExecuter.run_cmd(start_pg_cmd, server_ip, self.user)
             
             # Wait for postgres to be ready
             log(f"  Waiting for Postgres to start...")
@@ -3673,7 +3633,7 @@ class Deployer:
             
             # Read password
             password_read_cmd = f"cat {password_file}"
-            db_password = CommandExecuter.run_cmd(password_read_cmd, server_ip, "root").strip()
+            db_password = CommandExecuter.run_cmd(password_read_cmd, server_ip, self.user).strip()
             
             # Drop connections and recreate database
             drop_db_cmd = (
@@ -3681,21 +3641,21 @@ class Deployer:
                 f"-U {db_user} -d postgres "
                 f"-c \"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{db_name}' AND pid <> pg_backend_pid();\""
             )
-            CommandExecuter.run_cmd(drop_db_cmd, server_ip, "root")
+            CommandExecuter.run_cmd(drop_db_cmd, server_ip, self.user)
             
             drop_cmd = (
                 f"docker exec {temp_pg_container} psql "
                 f"-U {db_user} -d postgres "
                 f"-c 'DROP DATABASE IF EXISTS {db_name};'"
             )
-            CommandExecuter.run_cmd(drop_cmd, server_ip, "root")
+            CommandExecuter.run_cmd(drop_cmd, server_ip, self.user)
             
             create_cmd = (
                 f"docker exec {temp_pg_container} psql "
                 f"-U {db_user} -d postgres "
                 f"-c 'CREATE DATABASE {db_name};'"
             )
-            CommandExecuter.run_cmd(create_cmd, server_ip, "root")
+            CommandExecuter.run_cmd(create_cmd, server_ip, self.user)
             log(f"  ✓ Database recreated")
             
             # Step 4: Run pg_restore
@@ -3713,12 +3673,12 @@ class Deployer:
                 f"--no-owner --no-acl /backups/{backup['filename']}"
             )
             
-            CommandExecuter.run_cmd(restore_cmd, server_ip, "root")
+            CommandExecuter.run_cmd(restore_cmd, server_ip, self.user)
             log(f"  ✓ Backup restored successfully")
             
             # Step 5: Cleanup temp postgres container
-            DockerExecuter.stop_container(temp_pg_container, server_ip, "root")
-            DockerExecuter.remove_container(temp_pg_container, server_ip, "root")
+            DockerExecuter.stop_container(temp_pg_container, server_ip, self.user)
+            DockerExecuter.remove_container(temp_pg_container, server_ip, self.user)
             log(f"  ✓ Cleanup complete")
             
             return True
@@ -3729,8 +3689,7 @@ class Deployer:
             return False
     
     def _rollback_redis(
-        self,
-        project: str,
+        self,        
         env: str,
         service: str,
         backup: Dict[str, Any],
@@ -3745,8 +3704,7 @@ class Deployer:
         3. Copy RDB to data volume
         4. Start redis (will load from RDB)
         
-        Args:
-            project: Project name
+        Args:           
             env: Environment name
             service: Service name (e.g., "redis")
             backup: Backup info dict with 'path' and 'filename'
@@ -3759,9 +3717,9 @@ class Deployer:
             log(f"Restoring Redis backup on {server_ip}...")
             
             # Get container and volume names
-            container_name = ResourceResolver.get_container_name(user, project, env, service)
-            data_volume = ResourceResolver.get_docker_volume_name(user, project, env, "data", service)
-            backups_volume = ResourceResolver.get_docker_volume_name(user, project, env, "backups", service)
+            container_name = ResourceResolver.get_container_name(self.user, self.project_name, env, service)
+            data_volume = ResourceResolver.get_docker_volume_name(self.user, self.project_name, env, "data", service)
+            backups_volume = ResourceResolver.get_docker_volume_name(self.user, self.project_name, env, "backups", service)
             
             # Step 1: Upload backup to server's backup volume
             log(f"  Uploading backup file: {backup['filename']}")
@@ -3783,14 +3741,14 @@ class Deployer:
                 upload_cmd, 
                 backup_data, 
                 server_ip, 
-                "root"
+                self.user
             )
             log(f"  ✓ Backup uploaded to server")
             
             # Step 2: Stop redis container
             log(f"  Stopping {service} container...")
             try:
-                DockerExecuter.stop_container(container_name, server_ip, "root")
+                DockerExecuter.stop_container(container_name, server_ip, self.user)
                 log(f"  ✓ Container stopped")
             except Exception as e:
                 log(f"  Warning: Could not stop container (may already be stopped): {e}")
@@ -3807,7 +3765,7 @@ class Deployer:
                 f"cp /backups/{backup['filename']} /data/dump.rdb"
             )
             
-            CommandExecuter.run_cmd(copy_cmd, server_ip, "root")
+            CommandExecuter.run_cmd(copy_cmd, server_ip, self.user)
             log(f"  ✓ Backup copied to data volume")
             
             # Step 4: Set proper permissions on RDB file
@@ -3820,7 +3778,7 @@ class Deployer:
                 f"chmod 644 /data/dump.rdb"
             )
             
-            CommandExecuter.run_cmd(perms_cmd, server_ip, "root")
+            CommandExecuter.run_cmd(perms_cmd, server_ip, self.user)
             log(f"  ✓ Permissions set")
             
             log(f"  ✓ Redis restore complete (will load on next start)")

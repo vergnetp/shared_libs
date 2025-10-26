@@ -130,6 +130,13 @@ class PathResolver:
         # Convert to string with forward slashes (Docker requirement)
         return str(path).replace("\\", "/")
     
+
+    def get_git_checkout_path(user: str, project: str, env: str, service: str) -> Path:
+        """Get git checkout directory path"""
+        base = Path(os.getenv('LOCAL_DIR', 'C:/local'))
+        return base / user / "git_checkouts" / project / env / service
+
+
     @staticmethod
     def get_volume_container_path(
         service: str,

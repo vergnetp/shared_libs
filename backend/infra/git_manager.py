@@ -41,6 +41,7 @@ class GitManager:
     @staticmethod
     def checkout_repo(
         repo_url: str,
+        user: str,
         project_name: str,
         service_name: str,
         env: str,
@@ -61,6 +62,7 @@ class GitManager:
         
         Args:
             repo_url: Git repository URL (with optional @ref)
+            user: user id (e.g. "u1")
             project_name: Project name for organizing checkouts
             service_name: Service name for organizing checkouts
             env: Environment name for organizing checkouts
@@ -72,12 +74,13 @@ class GitManager:
         Example:
             path = GitManager.checkout_repo(
                 "https://github.com/user/myapp.git@develop",
+                "u1",
                 "myapp",
                 "api",
                 "prod",
                 git_token="ghp_xxxxxxxxxxxx"
             )
-            # Returns: C:/local/git_checkouts/myapp/prod/api
+            # Returns: C:/local/git_checkouts/u1/myapp/prod/api
         """
         if not GitManager._ensure_git_available():
             log("Error: Git is not installed or not in PATH")
@@ -121,7 +124,7 @@ class GitManager:
                     log(f"No Git token provided, attempting public repository access")
             
             # Determine checkout directory (includes env)
-            checkout_dir = GitManager.GIT_CHECKOUT_BASE / project_name / env / service_name
+            checkout_dir = GitManager.GIT_CHECKOUT_BASE / user / project_name / env / service_name
             checkout_dir.parent.mkdir(parents=True, exist_ok=True)
             
             # Clone or update
@@ -226,18 +229,19 @@ class GitManager:
             return None
     
     @staticmethod
-    def cleanup_checkouts(project_name: Optional[str] = None):
+    def cleanup_checkouts(user: str, project_name: Optional[str] = None):
         """
         Remove git checkouts.
         
         Args:
+            user: user id (e.g. "u1")
             project_name: If specified, only remove checkouts for this project
         """
         try:
             if project_name:
-                checkout_dir = GitManager.GIT_CHECKOUT_BASE / project_name
+                checkout_dir = GitManager.GIT_CHECKOUT_BASE / user / project_name
             else:
-                checkout_dir = GitManager.GIT_CHECKOUT_BASE
+                checkout_dir = GitManager.GIT_CHECKOUT_BASE / user
             
             if checkout_dir.exists():                
                 shutil.rmtree(checkout_dir)

@@ -5,6 +5,7 @@ ROOT_PATH = Path(__file__).resolve().parent  # Folder containing constants.py
 DEPLOYMENTS_FOLDER = Path("deployments")
 
 
+
 def get_root_path() -> Path:
     """Return the absolute path to the root folder (currently the folder containing constants.py)."""
     ROOT_PATH.mkdir(exist_ok=True, parents=True)
@@ -28,40 +29,40 @@ def get_deployment_files_path(deployment_id: str) -> Path:
     folder.mkdir(exist_ok=True, parents=True)
     return folder
 
-def get_deployment_config_path() -> Path:
+def get_deployment_config_path(user: str) -> Path:
     """
     Return the absolute path to the folder holding the deployment config file.
-    Currently: Path(__file__).resolve().parent / 'config'
+    Currently: Path(__file__).resolve().parent / 'config' / {user}
     """
-    return Path(__file__).resolve().parent / Path('config')
+    return Path(__file__).resolve().parent / Path('config') / Path(user)
 
-def get_dockerfiles_path() -> Path:
+def get_dockerfiles_path(user: str) -> Path:
     """
     Return the absolute path to the folder holding the docker files.
-    Currently: Path(__file__).resolve().parent / 'config'
+    Currently: Path(__file__).resolve().parent / 'config' / {user}}
     """
-    return Path(__file__).resolve().parent / Path('config')  
+    return Path(__file__).resolve().parent / Path('config') / Path(user)
 
-def get_projects_path() -> Path:
+def get_projects_path(user: str) -> Path:
     """
     Return the absolute path to the projects config folder.
-    Currently: ROOT_PATH / 'config' / 'projects'
+    Currently: ROOT_PATH / 'config' / {user} / 'projects'
     """
-    folder = get_root_path() / Path('config') / Path('projects')
+    folder = get_root_path() / Path('config') / Path(user) / Path('projects')
     folder.mkdir(exist_ok=True, parents=True)
     return folder
 
-def get_project_config_path(project_name: str) -> Path:
+def get_project_config_path(user: str, project_name: str) -> Path:
     """
     Return the absolute path to a specific project's config file.
     """
-    return get_projects_path() / f"{project_name}.json"
+    return get_projects_path(user) / f"{project_name}.json"
 
-def list_projects() -> List[str]:
+def list_projects(user: str) -> List[str]:
     """
     List all available projects by scanning the projects folder.
     """
-    projects_path = get_projects_path()
+    projects_path = get_projects_path(user)
     if not projects_path.exists():
         return []
     

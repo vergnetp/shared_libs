@@ -67,7 +67,7 @@ class ProjectDeployer:
     
     Usage Examples:
         # Create and configure new project
-        project = ProjectDeployer.create("myapp")
+        project = ProjectDeployer.create("u1", "myapp")
         project.add_postgres(version="15", servers_count=2) \\
                .add_redis() \\
                .add_service("api", 
@@ -76,7 +76,7 @@ class ProjectDeployer:
                            servers_count=3)
         
         # Load existing project
-        project = ProjectDeployer("myapp")
+        project = ProjectDeployer("u1", "myapp")
         
         # Deploy
         project.deploy(env="prod", zones=["lon1", "nyc3"])
@@ -87,16 +87,18 @@ class ProjectDeployer:
         project.rollback(env="prod", service="api")
     """
     
-    def __init__(self, project_name: str):
+    def __init__(self, user: str, project_name: str):
         """
         Load existing project.
         
         Args:
+            user: user id (e.g. "u1")
             project_name: Name of existing project
             
         Raises:
             FileNotFoundError: If project doesn't exist
         """
+        self.user = user
         self.project_name = project_name
         self._deployer = UnifiedDeployer(project_name)
     
@@ -106,6 +108,7 @@ class ProjectDeployer:
     
     @staticmethod
     def create(
+        user: str,
         name: str,
         docker_hub_user: str = None,
         version: str = "latest",
@@ -115,6 +118,7 @@ class ProjectDeployer:
         Create new project and return instance for chaining.
         
         Args:
+            user: user id (e.g. "u1")
             name: Project name
             docker_hub_user: Docker Hub username (default: from DOCKER_HUB_USER env var)
             version: Default version tag (default: "latest")
@@ -130,7 +134,7 @@ class ProjectDeployer:
             project = ProjectDeployer.create("myapp", docker_hub_user="john")
         """
         ProjectManager.create_project(name, docker_hub_user, version, default_server_ip)
-        return ProjectDeployer(name)
+        return ProjectDeployer(user, name)
     
     @staticmethod
     def list_projects() -> List[str]:
