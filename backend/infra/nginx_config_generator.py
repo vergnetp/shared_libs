@@ -212,6 +212,56 @@ class NginxConfigGenerator:
         
         return upstream + server
 
+
+    @staticmethod
+    def setup_service(
+        project: str,
+        env: str,
+        service_name: str,
+        service_config: Dict[str, Any],
+        target_server: str,
+        email: Optional[str] = None,
+        cloudflare_api_token: Optional[str] = None,
+        admin_ip: Optional[str] = None,
+        auto_firewall: bool = False
+    ) -> None:
+        """
+        Public API: Setup complete nginx configuration for a service.
+        Orchestrates: config write, SSL certs, DNS, firewall, and reload.
+        """
+        # Write nginx config (includes DNS if cloudflare_api_token provided)
+        NginxConfigGenerator._write_service_conf(
+            project=project,
+            env=env,
+            service_name=service_name,
+            service_config=service_config,
+            target_server=target_server,
+            cloudflare_api_token=cloudflare_api_token,
+            auto_reload=False
+        )
+        
+        # Handle certificates if domain configured
+        domain = service_config.get("domain")
+        if domain:
+            domains = NginxConfigGenerator._collect_domains_for_service(service_config)
+            mode = NginxConfigGenerator._detect_mode(email, cloudflare_api_token)
+            
+            NginxConfigGenerator._provision_cert_containers_and_issue(
+                target_server=target_server,
+                domains=domains,
+                email=email,
+                mode=mode,
+                cloudflare_api_token=cloudflare_api_token,
+                apply_dns=bool(cloudflare_api_token)
+            )
+        
+        # Setup firewall if requested
+        if auto_firewall:
+            NginxConfigGenerator._ensure_firewall(target_server, admin_ip)
+        
+        # Reload nginx to apply all changes
+        NginxConfigGenerator._reload_nginx(target_server)
+
     @staticmethod
     def update_stream_config_on_server(
         server_ip: str,
