@@ -274,6 +274,7 @@ class ProjectDeployer:
             other_config['git_token'] = Encryption.encode(git_token)
 
         ProjectManager.add_service(
+            self.user,
             self.project_name,
             service_name,
             startup_order,
@@ -306,7 +307,7 @@ class ProjectDeployer:
         Example:
             project.update_service("api", servers_count=5, domain="new.domain.com")
         """
-        ProjectManager.update_service(self.project_name, service_name, **updates)
+        ProjectManager.update_service(self.user, self.project_name, service_name, **updates)
         return self
     
     def delete_service(self, service_name: str) -> bool:
@@ -322,7 +323,7 @@ class ProjectDeployer:
         Example:
             project.delete_service("old-api")
         """
-        return ProjectManager.delete_service(self.project_name, service_name)
+        return ProjectManager.delete_service(self.user, self.project_name, service_name)
     
     def cleanup_git_checkouts(self) -> None:
         """
@@ -331,7 +332,7 @@ class ProjectDeployer:
         Example:
             project.cleanup_git_checkouts()
         """        
-        GitManager.cleanup_checkouts(self.project_name)
+        GitManager.cleanup_checkouts(self.user, self.project_name)
 
     # =========================================================================
     # SERVICE MANAGEMENT - Convenience Methods

@@ -1240,7 +1240,7 @@ class Deployer:
             {"port": 8357, "name": "base_name"} or
             {"port": 18357, "name": "base_name_secondary"}
         """
-        existing = DockerExecuter.find_service_container(self.project_name, env, service, server_ip, self.user)
+        existing = DockerExecuter.find_service_container(self.user, self.project_name, env, service, server_ip, self.user)
         
         if not existing:
             # First deployment - use base
@@ -1682,7 +1682,7 @@ class Deployer:
                 log(f"[{target_ip}] Network ready")
                 
                 # STEP 2: Determine toggle (which container name/port to use)
-                toggle = self._determine_toggle(self.user, self.project_name, env, service_name, target_ip, base_port, base_name)
+                toggle = self._determine_toggle(env, service_name, target_ip, base_port, base_name)
                 new_name = toggle["name"]
                 new_port = toggle["port"]
                 
@@ -2235,7 +2235,7 @@ class Deployer:
                     container_port = container_ports[0] if container_ports else "8000"
                     base_port = ResourceResolver.get_host_port(self.user, self.project_name, env, service_name, container_port)
                     
-                    toggle = self._determine_toggle(self.user, self.project_name, env, service_name, 'localhost', base_port, base_name)
+                    toggle = self._determine_toggle(env, service_name, 'localhost', base_port, base_name)
                     new_name = toggle["name"]   
                     
                     old_name = self._get_opposite_container_name(new_name, base_name)
