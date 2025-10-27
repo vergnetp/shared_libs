@@ -1307,7 +1307,11 @@ class Deployer:
                 env: Environment name
             """
             try:
-                from .deployment_constants import DEPLOYMENT_CONFIG_SERVICE_NAME, DEPLOYMENT_CONFIG_FILENAME
+                # Import constants with proper fallback
+                try:
+                    from .deployment_constants import DEPLOYMENT_CONFIG_SERVICE_NAME, DEPLOYMENT_CONFIG_FILENAME
+                except ImportError:
+                    from deployment_constants import DEPLOYMENT_CONFIG_SERVICE_NAME, DEPLOYMENT_CONFIG_FILENAME
                 
                 # Get local config path using centralized constants
                 config_dir = PathResolver.get_volume_host_path(
@@ -2417,7 +2421,7 @@ class Deployer:
                 
                 all_zone_servers = self._get_all_servers_in_zone(zone)
                 self._update_all_nginx_for_service(
-                    self.project_name, env, service_name, deployed_servers, all_zone_servers
+                    env, service_name, deployed_servers, all_zone_servers
                 )
                 
                 # STEP 7: Cleanup todel_ips (remove service from servers no longer in target)
@@ -2428,6 +2432,7 @@ class Deployer:
                 
                 # Record deployment state
                 DeploymentStateManager.record_deployment(
+                    user=self.user,
                     project=self.project_name,
                     env=env,
                     service=service_name,
@@ -3102,7 +3107,7 @@ class Deployer:
             log(f"\n[{service_name}] (backup) Deploying backup service...")
             
             # Get servers where parent service was just deployed
-            deployed_servers = self._get_deployed_servers(project_name, env, service_name)
+            deployed_servers = self._get_deployed_servers(env, service_name)
             
             if not deployed_servers:
                 log(f"[{service_name}] (backup) ✗ No deployed servers found for parent")
