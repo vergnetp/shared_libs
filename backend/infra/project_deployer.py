@@ -133,7 +133,7 @@ class ProjectDeployer:
         Example:
             project = ProjectDeployer.create("myapp", docker_hub_user="john")
         """
-        ProjectManager.create_project(name, docker_hub_user, version, default_server_ip)
+        ProjectManager.create_project(user, name, docker_hub_user, version, default_server_ip)
         return ProjectDeployer(user, name)
     
     @staticmethod
@@ -171,6 +171,7 @@ class ProjectDeployer:
             project.update_config(version="v2.0.0").deploy(env="prod")
         """
         ProjectManager.update_project(
+            self.user,
             self.project_name,
             docker_hub_user,
             version,
@@ -188,7 +189,7 @@ class ProjectDeployer:
         Example:
             project.delete()
         """
-        return ProjectManager.delete_project(self.project_name)
+        return ProjectManager.delete_project(self.user, self.project_name)
     
     # =========================================================================
     # SERVICE MANAGEMENT - Generic
@@ -986,6 +987,7 @@ class ProjectDeployer:
             project.add_postgres(version="15", servers_count=2)
         """
         ProjectManager.add_postgres(
+            self.user,
             self.project_name,
             version,
             server_zone,
@@ -1020,6 +1022,7 @@ class ProjectDeployer:
             project.add_redis(version="7-alpine", servers_count=1)
         """
         ProjectManager.add_redis(
+            self.user,
             self.project_name,
             version,
             server_zone,
@@ -1054,6 +1057,7 @@ class ProjectDeployer:
             project.add_opensearch(version="2", servers_count=1)
         """
         ProjectManager.add_opensearch(
+            self.user,
             self.project_name,
             version,
             server_zone,
@@ -1088,6 +1092,7 @@ class ProjectDeployer:
             project.add_nginx(version="alpine", servers_count=2)
         """
         ProjectManager.add_nginx(
+            self.user,
             self.project_name,
             version,
             server_zone,
