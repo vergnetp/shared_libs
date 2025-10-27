@@ -166,12 +166,12 @@ class Deployer:
             True if push completed successfully
         """     
         if env:
-            return DeploymentSyncer.push(self.project_name, env, targets)
+            return DeploymentSyncer.push(self.user, self.project_name, env, targets)
         else:
             # Push to all environments
             success = True
             for environment in self.deployment_configurer.get_environments():
-                if not DeploymentSyncer.push(self.project_name, environment, targets):
+                if not DeploymentSyncer.push(self.user, self.project_name, environment, targets):
                     success = False
             return success
 
@@ -187,12 +187,12 @@ class Deployer:
             True if pull completed successfully
         """        
         if env:
-            return DeploymentSyncer.pull(self.project_name, env, targets)
+            return DeploymentSyncer.pull(self.user, self.project_name, env, targets)
         else:
             # Pull from all environments
             success = True
             for environment in self.deployment_configurer.get_environments():
-                if not DeploymentSyncer.pull(self.project_name, environment, targets):
+                if not DeploymentSyncer.pull(self.user, self.project_name, environment, targets):
                     success = False
             return success
 
@@ -208,12 +208,12 @@ class Deployer:
             True if sync completed successfully
         """        
         if env:
-            return DeploymentSyncer.sync(self.project_name, env, targets)
+            return DeploymentSyncer.sync(self.user, self.project_name, env, targets)
         else:
             # Sync all environments
             success = True
             for environment in self.deployment_configurer.get_environments():
-                if not DeploymentSyncer.sync(self.project_name, environment, targets):
+                if not DeploymentSyncer.sync(self.user, self.project_name, environment, targets):
                     success = False
             return success
 
@@ -878,7 +878,7 @@ class Deployer:
             
             if target_ips:
                 log(f"Pushing to {len(target_ips)} servers: {target_ips}")
-                DeploymentSyncer.push(self.project_name, environment, targets=target_ips)
+                DeploymentSyncer.push(self.user, self.project_name, environment, targets=target_ips)
             else:
                 log("No remote servers found for push")
 
@@ -3306,10 +3306,9 @@ class Deployer:
             
         Returns:
             True if successful
-        """
-        project_name = self.deployment_configurer.get_project_name()
+        """       
         
-        log(f"Pulling backups for {project_name}/{env}")
+        log(f"Pulling backups for {self.user}/{self.project_name}/{env}")
         
         # Get all services or specific service
         services = self.deployment_configurer.get_services(env)
@@ -3339,7 +3338,7 @@ class Deployer:
             log(f"\nPulling backups for {svc_name}...")
             
             # Get servers where service is deployed
-            deployed_servers = self._get_deployed_servers(project_name, env, svc_name)
+            deployed_servers = self._get_deployed_servers(env, svc_name)
             
             if not deployed_servers:
                 log(f"No servers found for {svc_name}")
@@ -3350,8 +3349,8 @@ class Deployer:
             log(f"Pulling from {server_ip}...")
             
             # Pull backups volume
-            volume_name = PathResolver.get_docker_volume_name(project_name, env, "backups", svc_name)
-            local_path = PathResolver.get_volume_host_path(project_name, env, svc_name, "backups", "localhost")
+            volume_name = PathResolver.get_docker_volume_name(self.user, self.project_name, env, "backups", svc_name)
+            local_path = PathResolver.get_volume_host_path(self.user, self.project_name, env, svc_name, "backups", "localhost")
             
             try:
                 # Use docker cp to extract volume contents
@@ -3428,11 +3427,10 @@ class Deployer:
             
         Returns:
             List of backup info dicts with timestamp, size, age
-        """      
-        project_name = self.deployment_configurer.get_project_name()
+        """             
         
         # Get local backup path
-        local_path = PathResolver.get_volume_host_path(project_name, env, service, "backups", "localhost")
+        local_path = PathResolver.get_volume_host_path(self.user, self.project_name, env, service, "backups", "localhost")
         backup_dir = Path(local_path)
         
         if not backup_dir.exists():

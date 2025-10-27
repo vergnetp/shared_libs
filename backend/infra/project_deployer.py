@@ -100,7 +100,7 @@ class ProjectDeployer:
         """
         self.user = user
         self.project_name = project_name
-        self._deployer = UnifiedDeployer(project_name)
+        self._deployer = UnifiedDeployer(self.user, self.project_name)
     
     # =========================================================================
     # PROJECT LIFECYCLE - Configuration Management
