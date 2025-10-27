@@ -379,130 +379,180 @@ class Deployer:
         dockerfile_path = Path(dockerfile_path)
         return str(dockerfile_path) if dockerfile_path.exists() else None
 
-    def build_images(self, environment: str = None, push_to_registry: bool = False, service_name: str = None):
-            """
-            Build Docker images for all enabled services in parallel.
 
-            Logic:
-            1. Check Docker availability.
-            2. Iterate over environments (or a specific one if `environment` is provided).
-            3. Collect all services that need building.
-            4. Build all service images in parallel using ThreadPoolExecutor.
-            5. Push images to registry in parallel if requested.
 
-            Args:
-                environment (str, optional): Environment to build images for. Defaults to all.
-                push_to_registry (bool, optional): Whether to push built images to Docker registry. Defaults to False.
-                service_name (str, optional): The service to build. Defaults to all.
-
-            Returns:
-                bool: True if build process completed successfully.
-
-            Example:
-                build_images(environment="dev", push_to_registry=True)
-            """
-            if not DockerExecuter.check_docker():
-                log("Docker is not available. Please ensure Docker is installed and running.")
-                return False
-
-            log(f"Building images (push={push_to_registry})...")
-            Logger.start()
-
-            # Collect all build tasks
-            build_tasks = []
+    def build_images(self, 
+                    environment: str = None,
+                    push_to_registry: bool = False,
+                    service_name: str = None,
+                    credentials: dict = None):
+        """
+        Build Docker images for all enabled services in parallel.
+        
+        Logic:
+        1. Check Docker availability.
+        2. Iterate over environments (or a specific one if `environment` is provided).
+        3. Collect all services that need building.
+        4. Build all service images in parallel using ThreadPoolExecutor.
+        5. Push images to registry in parallel if requested (with authentication).
+        
+        Args:
+            environment (str, optional): Environment to build images for. Defaults to all.
+            push_to_registry (bool, optional): Whether to push built images to Docker registry. Defaults to False.
+            service_name (str, optional): The service to build. Defaults to all.
+            credentials (dict, optional): Credentials dictionary for registry auth. Keys:
+                - registry_url: Registry URL (default: docker.io or .env)
+                - registry_username: Registry username
+                - registry_password: Registry password/token
+        
+        Returns:
+            bool: True if build process completed successfully.
+        
+        Example:
+            # Using your credentials from .env
+            build_images(environment="dev", push_to_registry=True)
             
-            for env in self.deployment_configurer.get_environments():
-                if environment is None or environment == env:
-                    for sn, service_config in self.deployment_configurer.get_services(env).items():
-                        if service_name and service_name!=sn:
-                            continue
-
-                        if service_config.get("disabled", False):
-                            log(f"Skipping disabled service: {sn}")
-                            continue
-
-                        if service_config.get("skip_build", False):
-                            log(f"Skipping build for service (skip_build=True): {sn}")
-                            continue
-
-                        # Skip if no dockerfile specified (prebuilt image)
-                        if not service_config.get("dockerfile") and not service_config.get("dockerfile_content"):
-                            log(f"No dockerfile specified for {sn}, skipping build (using prebuilt image)")
-                            continue
-
-                        # Add to build queue
-                        build_tasks.append({
-                            'env': env,
-                            'service_name': sn,
-                            'service_config': service_config
-                        })
-
-            if not build_tasks:
-                log("No images to build")
-                Logger.end()
-                return True
-
-            log(f"Building {len(build_tasks)} service(s) in parallel...")
-            
-            # Build all images in parallel
-            build_results = {}
-            with ThreadPoolExecutor(max_workers=min(len(build_tasks), 10)) as executor:
-                futures = {
-                    executor.submit(
-                        self._build_single_image,
-                        task['env'],
-                        task['service_name'],
-                        task['service_config']
-                    ): task['service_name']
-                    for task in build_tasks
+            # Using client's credentials
+            build_images(
+                environment="prod", 
+                push_to_registry=True,
+                credentials={
+                    'registry_url': 'client-registry.io',
+                    'registry_username': 'client_user',
+                    'registry_password': 'client_token'
                 }
-                
-                for future in as_completed(futures):
-                    sn = futures[future]
-                    try:
-                        tag, success = future.result()
-                        build_results[sn] = {'tag': tag, 'success': success}
-                        
-                        if success:
-                            log(f"✓ {sn} built successfully")
-                        else:
-                            log(f"✗ {sn} build failed")
-                    except Exception as e:
-                        log(f"✗ {sn} build exception: {e}")
-                        build_results[sn] = {'tag': None, 'success': False}
+            )
+        """
+        if not DockerExecuter.check_docker():
+            log("Docker is not available. Please ensure Docker is installed and running.")
+            return False
 
-            # Check if any builds failed
-            failed_builds = [name for name, result in build_results.items() if not result['success']]
-            if failed_builds:
-                log(f"Build failed for services: {', '.join(failed_builds)}")
-                Logger.end()
-                return False
+        log(f"Building images (push={push_to_registry})...")
+        Logger.start()
 
-            # Push images in parallel if requested
-            if push_to_registry:
-                log(f"Pushing {len(build_results)} image(s) to registry in parallel...")
-                
-                with ThreadPoolExecutor(max_workers=min(len(build_results), 10)) as executor:
-                    push_futures = {
-                        executor.submit(
-                            DockerExecuter.push_image,
-                            result['tag']
-                        ): service_name
-                        for service_name, result in build_results.items()
-                        if result['tag']
-                    }
-                    
-                    for future in as_completed(push_futures):
-                        sn = push_futures[future]
-                        try:
-                            future.result()
-                            log(f"✓ {sn} pushed successfully")
-                        except Exception as e:
-                            log(f"✗ {sn} push failed: {e}")
+        # Get registry credentials (provided or from .env)
+        registry_url, registry_username, registry_password = self._get_registry_credentials(credentials)
 
+        # Collect all build tasks
+        build_tasks = []
+        
+        for env in self.deployment_configurer.get_environments():
+            if environment is None or environment == env:
+                for sn, service_config in self.deployment_configurer.get_services(env).items():
+                    if service_name and service_name != sn:
+                        continue
+
+                    if service_config.get("disabled", False):
+                        log(f"Skipping disabled service: {sn}")
+                        continue
+
+                    if service_config.get("skip_build", False):
+                        log(f"Skipping build for service (skip_build=True): {sn}")
+                        continue
+
+                    # Skip if no dockerfile specified (prebuilt image)
+                    if not service_config.get("dockerfile") and not service_config.get("dockerfile_content"):
+                        log(f"No dockerfile specified for {sn}, skipping build (using prebuilt image)")
+                        continue
+
+                    # Add to build queue
+                    build_tasks.append({
+                        'env': env,
+                        'service_name': sn,
+                        'service_config': service_config
+                    })
+
+        if not build_tasks:
+            log("No services to build")
             Logger.end()
-            log('Images built.')        
             return True
+
+        log(f"Building {len(build_tasks)} service(s) in parallel...")
+
+        # Build all images in parallel
+        from concurrent.futures import ThreadPoolExecutor
+        
+        def build_single_image(task):
+            env = task['env']
+            sn = task['service_name']
+            service_config = task['service_config']
+            
+            try:
+                # Generate or use dockerfile
+                dockerfile_path = self._get_dockerfile_path(sn, service_config)
+                
+                if not dockerfile_path:
+                    log(f"No Dockerfile found for {sn}")
+                    return False
+                
+                # Get build context
+                build_context = service_config.get("build_context", ".")
+                
+                # Generate image name
+                docker_hub_user = self.deployment_configurer.get_docker_hub_user()
+                version = self._get_version()
+                image = ResourceResolver.get_image_name(
+                    docker_hub_user, self.user, self.project_name, env, sn, version
+                )
+                
+                # Build image
+                log(f"Building {sn} -> {image}")
+                DockerExecuter.build_image(
+                    dockerfile_path=dockerfile_path,
+                    tag=image,
+                    context_dir=build_context
+                )
+                
+                log(f"✓ Built {image}")
+                return image
+                
+            except Exception as e:
+                log(f"✗ Failed to build {sn}: {e}")
+                return None
+
+        # Build in parallel
+        built_images = []
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = [executor.submit(build_single_image, task) for task in build_tasks]
+            
+            for future in futures:
+                result = future.result()
+                if result:
+                    built_images.append(result)
+
+        # Push images if requested
+        if push_to_registry and built_images:
+            # Login before push
+            if registry_username and registry_password:
+                log(f"Logging into {registry_url or 'docker.io'} for push...")
+                DockerExecuter.docker_login(registry_username, registry_password, registry_url or 'docker.io')
+            
+            # Push all images in parallel
+            log(f"Pushing {len(built_images)} image(s) to registry in parallel...")
+            
+            def push_single_image(image):
+                try:
+                    log(f"Pushing {image}...")
+                    DockerExecuter.push_image(image)
+                    log(f"✓ Pushed {image}")
+                    return True
+                except Exception as e:
+                    log(f"✗ Failed to push {image}: {e}")
+                    return False
+            
+            with ThreadPoolExecutor(max_workers=5) as executor:
+                push_futures = [executor.submit(push_single_image, img) for img in built_images]
+                
+                for future in push_futures:
+                    future.result()
+            
+            # Logout after push (security cleanup)
+            if registry_username:
+                DockerExecuter.docker_logout(registry_url or 'docker.io')
+        
+        Logger.end()
+        log(f"✓ Build complete: {len(built_images)}/{len(build_tasks)} succeeded")
+        return len(built_images) == len(build_tasks)
 
     def _build_single_image(self, env: str, service_name: str, service_config: Dict[str, Any]) -> tuple:
         """
@@ -3915,3 +3965,196 @@ class Deployer:
             log(f"Failed to restore Redis: {e}")        
             log(traceback.format_exc())
             return False
+
+    def _get_credential(self, credentials: dict, key: str, env_key: str = None, required: bool = False) -> str:
+        """
+        Get credential with fallback to .env defaults.
+        
+        Priority:
+        1. credentials dict (client provided)
+        2. .env (your defaults)
+        3. None (not available)
+        
+        Args:
+            credentials: Credentials dictionary (can be None)
+            key: Key in credentials dict
+            env_key: Environment variable name (defaults to key.upper())
+            required: If True, log warning when missing
+        
+        Returns:
+            Credential value or None
+            
+        Example:
+            token = self._get_credential(credentials, 'digitalocean_token', 'DIGITALOCEAN_API_TOKEN')
+        """
+        # Use provided credential
+        if credentials and key in credentials and credentials[key]:
+            return credentials[key]
+        
+        # Fallback to .env
+        env_value = os.getenv(env_key or key.upper())
+        if env_value:
+            return env_value
+        
+        # Not found
+        if required:
+            log(f"⚠️  Credential '{key}' not provided and not in .env")
+        
+        return None
+
+    def _get_registry_credentials(self, credentials: dict = None) -> tuple:
+        """
+        Get Docker registry credentials with fallback to .env defaults.
+        
+        Args:
+            credentials: Credentials dictionary
+        
+        Returns:
+            Tuple of (url, username, password) or (None, None, None)
+            
+        Example:
+            url, user, pwd = self._get_registry_credentials(credentials)
+        """
+        username = self._get_credential(credentials, 'registry_username', 'DOCKER_REGISTRY_USERNAME')
+        password = self._get_credential(credentials, 'registry_password', 'DOCKER_REGISTRY_PASSWORD')
+        
+        # Only return credentials if we have both username and password
+        if username and password:
+            url = self._get_credential(credentials, 'registry_url', 'DOCKER_REGISTRY_URL') or 'docker.io'
+            log(f"Using registry credentials for {url}")
+            return (url, username, password)
+        
+        # No credentials available
+        log("⚠️  No registry credentials - assuming public images or manual docker login")
+        return (None, None, None)
+
+    def _get_git_token(self, service_config: dict, credentials: dict = None) -> str:
+        """
+        Get git token with fallback chain.
+        
+        Priority:
+        1. Service-specific token (service_config['git_token'])
+        2. Global token from credentials dict
+        3. .env default (GIT_TOKEN)
+        4. None (public repo)
+        
+        Args:
+            service_config: Service configuration dict
+            credentials: Credentials dictionary
+        
+        Returns:
+            Git token or None
+        """
+        # Service-specific override
+        if service_config.get('git_token'):
+            return service_config['git_token']
+        
+        # Global from credentials
+        if credentials and credentials.get('git_token'):
+            return credentials['git_token']
+        
+        # .env default
+        return os.getenv('GIT_TOKEN')
+
+    def _login_all_servers(self, env: str, registry_url: str, 
+                        username: str, password: str):
+        """
+        Login to Docker registry on all deployment servers in parallel.
+        
+        Args:
+            env: Environment name
+            registry_url: Registry URL
+            username: Registry username
+            password: Registry password
+        """
+        servers = self._get_deployment_servers(env)
+        
+        if not servers:
+            return
+        
+        log(f"Logging into {registry_url} on {len(servers)} server(s)...")
+        
+        # Login to all servers in parallel
+        from concurrent.futures import ThreadPoolExecutor
+        
+        def login_server(server_ip):
+            try:
+                return DockerExecuter.docker_login(
+                    username=username,
+                    password=password,
+                    registry=registry_url,
+                    server_ip=server_ip
+                )
+            except Exception as e:
+                log(f"⚠️  Failed to login on {server_ip}: {e}")
+                return False
+        
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = {executor.submit(login_server, ip): ip for ip in servers}
+            
+            for future in futures:
+                future.result()  # Wait for all logins
+
+    def _logout_all_servers(self, env: str, registry_url: str):
+        """
+        Logout from Docker registry on all servers (security cleanup).
+        
+        Args:
+            env: Environment name
+            registry_url: Registry URL
+        """
+        servers = self._get_deployment_servers(env)
+        
+        if not servers:
+            return
+        
+        log(f"Logging out from {registry_url} on {len(servers)} server(s)...")
+        
+        # Logout from all servers in parallel
+        from concurrent.futures import ThreadPoolExecutor
+        
+        def logout_server(server_ip):
+            try:
+                DockerExecuter.docker_logout(
+                    registry=registry_url,
+                    server_ip=server_ip
+                )
+            except Exception as e:
+                log(f"⚠️  Failed to logout on {server_ip}: {e}")
+        
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = [executor.submit(logout_server, ip) for ip in servers]
+            
+            for future in futures:
+                future.result()  # Wait for all logouts
+
+    def _get_deployment_servers(self, env: str) -> List[str]:
+        """
+        Get all server IPs for this deployment.
+        
+        Args:
+            env: Environment name
+        
+        Returns:
+            List of server IP addresses
+        """
+        services = self.deployment_configurer.get_services(env)
+        servers = set()
+        
+        for service_name, service_config in services.items():
+            zone = service_config.get("server_zone", "lon1")
+            if zone != "localhost":
+                # Get servers for this zone from inventory
+                try:
+                    # Get all active servers in this zone
+                    server_list = ServerInventory.get_servers(
+                        deployment_status=ServerInventory.STATUS_ACTIVE,
+                        zone=zone
+                    )
+                    servers.update([s['ip'] for s in server_list])
+                except:
+                    pass
+        
+        return list(servers)
+
+

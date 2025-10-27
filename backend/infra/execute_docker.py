@@ -623,3 +623,76 @@ class DockerExecuter:
                 del DockerExecuter._network_cache[cache_key]
         else:
             DockerExecuter._network_cache.clear()
+
+
+    @staticmethod
+    def docker_login(username: str, password: str, 
+                    registry: str = "docker.io",
+                    server_ip: str = 'localhost', user: str = "root") -> bool:
+        """
+        Login to Docker registry (ephemeral - logout after use).
+        
+        Args:
+            username: Registry username
+            password: Registry password or access token
+            registry: Registry URL (default: docker.io)
+            server_ip: Target server (None or 'localhost' = local)
+            user: SSH user for remote operations
+        
+        Returns:
+            True if login successful
+            
+        Example:
+            DockerExecuter.docker_login("user", "dckr_pat_xxx", "docker.io")
+            DockerExecuter.docker_login("user", "token", "registry.client.com", "10.0.0.1")
+        """
+        if not username or not password:
+            log("⚠️  No registry credentials provided - skipping login")
+            return True  # Don't fail deployment
+        
+        # Use stdin to avoid password in process list
+        cmd = f"echo '{password}' | docker login {registry} -u {username} --password-stdin"
+        
+        try:
+            result = CommandExecuter.run_cmd(cmd, server_ip, user)
+            success = "Login Succeeded" in str(result)
+            
+            if success:
+                target = server_ip if server_ip and server_ip != 'localhost' else 'localhost'
+                log(f"✓ Logged into {registry} on {target}")
+            else:
+                log(f"✗ Docker login failed on {server_ip or 'localhost'}: {result}")
+            
+            return success
+        except Exception as e:
+            log(f"✗ Docker login error: {e}")
+            return False
+
+    @staticmethod  
+    def docker_logout(registry: str = "docker.io",
+                    server_ip: str = 'localhost', user: str = "root") -> bool:
+        """
+        Logout from Docker registry (security cleanup).
+        
+        Args:
+            registry: Registry URL (default: docker.io)
+            server_ip: Target server (None or 'localhost' = local)
+            user: SSH user for remote operations
+        
+        Returns:
+            True if logout successful
+            
+        Example:
+            DockerExecuter.docker_logout("docker.io")
+            DockerExecuter.docker_logout("registry.client.com", "10.0.0.1")
+        """
+        cmd = f"docker logout {registry}"
+        
+        try:
+            CommandExecuter.run_cmd(cmd, server_ip, user)
+            target = server_ip if server_ip and server_ip != 'localhost' else 'localhost'
+            log(f"✓ Logged out from {registry} on {target}")
+            return True
+        except Exception as e:
+            log(f"⚠️  Docker logout error (non-critical): {e}")
+            return False
