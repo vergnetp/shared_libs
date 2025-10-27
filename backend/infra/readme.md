@@ -1,23 +1,25 @@
-# ProjectDeployer - Docker Multi-Region Deployment System
+# ProjectDeployer - Multi-Tenant Docker Deployment System
 
-A Python-based deployment system that automates Docker container orchestration across multiple DigitalOcean regions with zero-downtime deployments, automatic SSL, health monitoring, and backups.
+A production-grade Python deployment system that automates Docker container orchestration across multiple DigitalOcean regions with user segregation, zero-downtime deployments, automatic SSL, health monitoring, and backups.
 
 ## Table of Contents
 
 - [Quick Start](#quick-start)
-- [Simplified Service Creation](#simplified-service-creation)
+- [Architecture Overview](#architecture-overview)
+- [Multi-Tenancy & User Segregation](#multi-tenancy--user-segregation)
 - [Prerequisites](#prerequisites)
 - [Basic Usage](#basic-usage)
-- [Architecture Overview](#architecture-overview)
-- [Multi-Zone Deployments](#multi-zone-deployments)
 - [Service Configuration](#service-configuration)
+- [Multi-Zone Deployments](#multi-zone-deployments)
 - [SSL & Domain Management](#ssl--domain-management)
 - [Database Access](#database-access)
-- [Backups & Restore](#backups--restore)
 - [Health Monitoring](#health-monitoring)
-- [Secrets Management](#secrets-management)
+- [Backups & Restore](#backups--restore)
+- [File Synchronization](#file-synchronization)
 - [Auto-Scaling](#auto-scaling)
-- [Advanced Features](#advanced-features)
+- [Troubleshooting](#troubleshooting)
+- [Security & Limitations](#security--limitations)
+- [API Reference](#api-reference)
 
 ---
 
@@ -28,8 +30,8 @@ A Python-based deployment system that automates Docker container orchestration a
 ```python
 from backend.infra.project_deployer import ProjectDeployer
 
-# Create new project
-project = ProjectDeployer.create("myapp", docker_hub_user="myusername")
+# Create new project (user ID must be explicitly provided)
+project = ProjectDeployer.create("u1", "myapp", docker_hub_user="myusername")
 
 # Add services with fluent API
 project.add_postgres() \
@@ -51,8 +53,7 @@ project.add_postgres() \
            git_repo="https://github.com/user/web.git@main",
            git_token="tk8787",
            domain="www.example.com",
-           servers_count=3,
-           auto_scaling=True
+           servers_count=3
        )
 
 # Deploy to production
@@ -62,13 +63,13 @@ project.deploy(env="prod")
 ### 2. Manage Deployments
 
 ```python
-# Load existing project
-project = ProjectDeployer("myapp")
+# Load existing project (with explicit user ID)
+project = ProjectDeployer("u1", "myapp")
 
 # Check status
 project.status()
 
-# View logs
+# View logs with error highlighting
 project.logs(service="api", env="prod", lines=100)
 
 # Rollback if needed
@@ -77,35 +78,234 @@ project.rollback(env="prod", service="api")
 
 ---
 
-## Simplified Service Creation
+## Architecture Overview
 
-The deployer includes convenience methods that automatically generate optimized Dockerfiles:
+### Multi-Tenant Architecture with User Segregation
 
-**Python Services** - `add_python_service()`
+The system provides **complete isolation** between different users through a user-based directory structure:
 
-- Automatically handles requirements.txt installation
-- Supports multiple requirements files
-- Best practices (pip --no-cache-dir, slim images)
+```
+/local/
+├── u1/                           # User 1's isolated space
+│   ├── myapp/
+│   │   ├── prod/
+│   │   │   ├── config/           # Service configurations
+│   │   │   ├── secrets/          # Passwords, certificates
+│   │   │   ├── files/            # Static assets
+│   │   │   ├── data/             # Database files (per-server)
+│   │   │   ├── logs/             # Application logs (per-server)
+│   │   │   └── backups/          # Database backups (per-server)
+│   │   └── uat/
+│   └── otherapp/
+└── u2/                           # User 2's completely separate space
+    └── theirapp/
+```
 
-**Node.js Services** - `add_nodejs_service()`
+**Key Benefits:**
 
-- Supports npm, yarn, or pnpm
-- Optional build step for TypeScript/Next.js
-- Production-optimized dependencies
+- ✅ **Complete isolation** - Users cannot access each other's data
+- ✅ **Resource naming** - All containers, volumes, networks include user prefix (e.g., `u1_myapp_prod_api`)
+- ✅ **Port segregation** - Ports generated from hash include user ID
+- ✅ **Secrets isolation** - Each user has separate credential directories
+- ✅ **Clean multi-tenancy** - Multiple users can deploy the same project name without conflicts
 
-**React/SPA Services** - `add_react_service()`
+### Temporary Build Isolation
 
-- Multi-stage build (Node.js build + Nginx serve)
-- Works with React, Vue, Angular, Svelte
-- Automatic gzip, caching, SPA routing
+Build operations use isolated temporary directories to prevent cross-contamination:
 
-**All Methods Support:**
+**Windows:** `C:\Users\{username}\AppData\Local\Temp\deployment_infra\`
+**Linux:** `/tmp/deployment_infra/`
 
-- ✅ Git repository integration (clone from GitHub/GitLab)
-- ✅ Automatic dependency management (`depends_on`)
-- ✅ Auto-scaling configuration
-- ✅ Service dependency tracking
-- ✅ Custom Dockerfile override
+```
+/tmp/deployment_infra/
+├── dockerfiles/
+│   └── u1/
+│       ├── Dockerfile.myapp-prod-api.tmp        # Temporary Dockerfiles
+│       └── Dockerfile.myapp-prod-worker.tmp
+├── build_contexts/
+│   └── u1/
+│       ├── myapp-prod-api/                      # Isolated build contexts
+│       └── myapp-prod-worker/
+└── git_repos/
+    └── u1/
+        └── myapp-api-{hash}/                     # Temporary Git clones
+```
+
+**Automatic Cleanup:**
+
+- Temporary Dockerfiles removed after build completes
+- Git clones cleaned up after image build
+- Build contexts preserved for debugging (optional cleanup)
+- All temp files properly segregated by user ID
+
+### Three-Tier Port System
+
+The system uses a sophisticated port architecture for zero-downtime deployments:
+
+1. **Container Port** (Fixed)
+
+   - Internal to container (e.g., Postgres: 5432, Redis: 6379)
+   - Never exposed to host
+
+2. **Host Port** (Toggles)
+
+   - Base: `hash(user_project_env_service_port) % 1000 + 8000`
+   - Secondary: `base + 10000`
+   - Range: 8000-8999 (base), 18000-18999 (secondary)
+   - Alternates each deployment for zero-downtime
+
+3. **Internal Port** (Stable)
+   - Generated: `hash(user_project_env_service_internal) % 1000 + 5000`
+   - Range: **5000-5999**
+   - Never changes - apps always connect to this port
+   - Nginx routes to actual backend (base or secondary)
+
+### Service Discovery via Nginx Sidecar
+
+Every server runs an nginx sidecar that provides service mesh functionality:
+
+```
+Your App Container
+  ↓ connects to nginx:5234 (hostname "nginx", internal port - stable)
+  ↓ Docker DNS resolves "nginx" to nginx container
+  ↓
+Nginx Sidecar (same server)
+  ↓ routes to backend
+  ↓
+PostgreSQL Container(s)
+  listening on 8357 or 18357 (toggles each deployment)
+```
+
+**Benefits:**
+
+- ✅ Apps always connect to `nginx:INTERNAL_PORT` (hostname + port)
+- ✅ Zero configuration changes during deployments
+- ✅ Automatic failover between old/new versions
+- ✅ Works across multiple servers transparently
+
+### Deployment Flow
+
+1. **Image Building** - Docker images built in isolated temp directories
+2. **Startup Order Groups** - Services deploy in order (databases first)
+3. **Server Allocation** - Reuses existing servers, creates new as needed
+4. **Parallel Deployment** - Multiple servers deploy simultaneously
+5. **Toggle Deployment** - New container runs alongside old
+6. **Health Check** - Verify new container is healthy (with detailed error logging)
+7. **Nginx Update** - Update all servers' nginx configs
+8. **Traffic Switch** - Nginx redirects to new container
+9. **Cleanup** - Remove old container
+10. **Server Cleanup** - Destroy unused servers, keep active ones
+
+### Default Server Configuration
+
+All services use these defaults unless overridden:
+
+- `servers_count`: 1
+- `server_zone`: "lon1" (London)
+- `server_cpu`: 1 vCPU (~$6/month)
+- `server_memory`: 1024 MB (1GB)
+
+**Available DigitalOcean Zones:**
+
+- `lon1` - London
+- `nyc1`, `nyc3` - New York
+- `sfo3` - San Francisco
+- `sgp1` - Singapore
+- `fra1` - Frankfurt
+- `tor1` - Toronto
+- `ams3` - Amsterdam
+- `blr1` - Bangalore
+
+---
+
+## Multi-Tenancy & User Segregation
+
+### User ID System
+
+Every deployment operation requires a user ID that ensures complete isolation. The user ID must be **explicitly provided** as the first parameter:
+
+```python
+from backend.infra.project_deployer import ProjectDeployer
+
+# User ID must be explicitly passed
+user_id = "u1"  # Your user identifier (e.g., "u1", "u2", "alice", etc.)
+project = ProjectDeployer.create(user_id, "myapp", docker_hub_user="myusername")
+
+# Load existing project
+project = ProjectDeployer(user_id, "myapp")
+```
+
+**User ID Conventions:**
+
+- Use short, alphanumeric identifiers (e.g., "u1", "u2", "alice")
+- Must be consistent across all operations
+- Each user gets completely isolated resources
+- Cannot be changed after project creation
+
+### Resource Naming Convention
+
+All resources include the user ID prefix:
+
+**Container Names:**
+
+```
+u1_myapp_prod_api           # User 1's production API
+u1_myapp_prod_api_secondary # Toggle deployment variant
+u2_myapp_prod_api           # User 2's completely separate API
+```
+
+**Volume Names:**
+
+```
+u1_myapp_prod_data_postgres
+u1_myapp_prod_logs_api
+```
+
+**Network Names:**
+
+```
+deployer_network            # Shared Docker network (isolated by user containers)
+```
+
+**Directory Structure:**
+
+```
+/local/u1/myapp/prod/       # User 1's data
+/local/u2/myapp/prod/       # User 2's data (completely separate)
+```
+
+### Port Isolation
+
+Ports are generated using a hash that includes the user ID:
+
+```python
+def get_host_port(user, project, env, service, container_port):
+    hash_input = f"{user}_{project}_{env}_{service}_{container_port}"
+    return (hash(hash_input) % 1000) + 8000
+
+# Examples:
+get_host_port("u1", "myapp", "prod", "api", "8000")  # → 8357
+get_host_port("u2", "myapp", "prod", "api", "8000")  # → 8821 (different!)
+```
+
+This ensures that even if two users deploy the same project/service, they get different ports with zero collision risk.
+
+### Security Boundaries
+
+**User Isolation:**
+
+- ✅ File system paths segregated by user ID
+- ✅ Container names include user prefix
+- ✅ Ports derived from user-specific hashes
+- ✅ Secrets directories completely separate
+- ✅ Docker volumes namespaced by user
+
+**Server Sharing:**
+
+- Servers are tagged with project/env but can be shared across users
+- Container-level isolation prevents cross-user access
+- Network isolation via Docker networks
+- SSH key management per-user basis
 
 ---
 
@@ -118,6 +318,9 @@ Create a `.env` file in the project root:
 ```bash
 # Required for remote deployments
 DIGITALOCEAN_API_TOKEN=your_do_token_here
+
+# Optional - set custom user ID (defaults to system username)
+DEPLOYMENT_USER_ID=u1
 
 # Optional - for automatic SSL via Cloudflare
 CLOUDFLARE_API_TOKEN=your_cf_token_here
@@ -142,14 +345,15 @@ The deployer handles:
 
 - ✅ Server provisioning via DigitalOcean API
 - ✅ Docker installation on all servers
-- ✅ SSH key generation and deployment
+- ✅ SSH key generation and deployment (per-user)
 - ✅ VPC network setup (per region)
 - ✅ Firewall configuration
 - ✅ SSL certificates (Let's Encrypt or self-signed)
 - ✅ Health monitoring installation
 - ✅ Nginx sidecar for service mesh
-- ✅ Git repository cloning and checkout
+- ✅ Git repository cloning (in isolated temp directories)
 - ✅ Automatic Dockerfile generation
+- ✅ User-segregated directory structures
 
 ---
 
@@ -158,14 +362,15 @@ The deployer handles:
 ### Creating a Project
 
 ```python
-# Create with defaults
-project = ProjectDeployer.create("myapp")
+# Create with defaults (must provide user ID)
+project = ProjectDeployer.create("u1", "myapp")
 
 # Create with Docker Hub user
-project = ProjectDeployer.create("myapp", docker_hub_user="username")
+project = ProjectDeployer.create("u1", "myapp", docker_hub_user="username")
 
 # Create with custom defaults
 project = ProjectDeployer.create(
+    "u1",
     "myapp",
     docker_hub_user="username",
     version="1.0.0",
@@ -204,7 +409,7 @@ project.add_opensearch(
 # Simple Flask/FastAPI app
 project.add_python_service(
     "api",
-    depends_on=["postgres", "redis"],  # Automatic startup order
+    depends_on=["postgres", "redis"],
     command="uvicorn main:app --host 0.0.0.0",
     port=8000,
     git_repo="https://github.com/user/myapp.git@main",
@@ -214,187 +419,51 @@ project.add_python_service(
     auto_scaling=True
 )
 
-# Worker service with multiple requirements files
+# Worker service with schedule
 project.add_python_service(
     "worker",
     depends_on=["redis"],
     command="python worker.py",
-    requirements_files=["requirements.txt", "requirements-worker.txt"],
     build_context="/path/to/code",
+    schedule="*/5 * * * *",  # Every 5 minutes
     servers_count=2
-)
-
-# Gunicorn production setup
-project.add_python_service(
-    "api",
-    python_version="3.11",
-    command="gunicorn app:app --bind 0.0.0.0:8000 --workers 4",
-    port=8000,
-    build_context="/path/to/code",
-    servers_count=3
 )
 ```
 
-**Node.js Services (Auto-Generated Dockerfile):**
+**Node.js Services:**
 
 ```python
-# Express API
 project.add_nodejs_service(
-    "api",
+    "backend",
     depends_on=["postgres"],
     command="node server.js",
     port=3000,
-    git_repo="https://github.com/user/api.git@main",
-    git_token="tk8787",
-    servers_count=3,
-    domain="api.example.com"
-)
-
-# TypeScript app with build step
-project.add_nodejs_service(
-    "api",
-    depends_on=["postgres"],
-    build_command="npm run build",
-    command="node dist/main.js",
-    port=3000,
-    git_repo="https://github.com/user/api.git@main",
-    git_token="tk8787",
-    servers_count=3
-)
-
-# Next.js application
-project.add_nodejs_service(
-    "web",
-    build_command="npm run build",
-    command="npm start",
-    port=3000,
-    git_repo="https://github.com/user/web.git@main",
-    git_token="tk8787",
-    servers_count=3
-)
-
-# Yarn-based project
-project.add_nodejs_service(
-    "api",
+    git_repo="https://github.com/user/backend.git@main",
+    node_version="18",
     package_manager="yarn",
-    command="yarn start",
-    port=3000,
-    build_context="/path/to/code",
-    servers_count=3
+    servers_count=2
 )
 ```
 
-**React/Vue/Angular Websites (Auto-Generated Dockerfile):**
+**React/SPA Services:**
 
 ```python
-# React SPA
 project.add_react_service(
     "web",
     depends_on=["api"],
-    git_repo="https://github.com/user/web.git@main",
-    git_token="tk8787",
+    git_repo="https://github.com/user/frontend.git@main",
+    build_command="npm run build",
     domain="www.example.com",
-    servers_count=3,
-    auto_scaling=True
-)
-
-# Vue app
-project.add_react_service(
-    "web",
-    build_dir="dist",  # Vue outputs to dist/
-    git_repo="https://github.com/user/vue-app.git@main",
-    git_token="tk8787",
-    domain="www.example.com",
-    servers_count=3
-)
-
-# Angular app
-project.add_react_service(
-    "web",
-    build_dir="dist/myapp",  # Angular outputs to dist/project-name/
-    build_command="npm run build -- --configuration production",
-    domain="www.example.com"
-)
-
-# With custom nginx config (API proxy)
-project.add_react_service(
-    "web",
-    nginx_config='''
-        server {
-            listen 80;
-            root /usr/share/nginx/html;
-            location / { try_files $uri $uri/ /index.html; }
-            location /api { proxy_pass http://api:3000; }
-        }
-    ''',
-    git_repo="https://github.com/user/web.git@main",
-    git_token="tk8787",
-    domain="www.example.com"
-)
-```
-
-**Services from Git Repositories:**
-
-```python
-# From public GitHub repo (default branch)
-project.add_service(
-    "api",
-    git_repo="https://github.com/user/myapp.git",
-    git_token="tk8787",
-    dockerfile="Dockerfile",
-    servers_count=3
-)
-
-# From specific branch
-project.add_service(
-    "api",
-    git_repo="https://github.com/user/myapp.git@develop",
-    git_token="tk8787",
-    dockerfile="Dockerfile",
-    servers_count=3
-)
-
-# From specific tag (release)
-project.add_service(
-    "api",
-    git_repo="https://github.com/user/myapp.git@v1.2.3",
-    git_token="tk8787",
-    dockerfile="Dockerfile",
-    servers_count=3
-)
-
-# From specific commit
-project.add_service(
-    "api",
-    git_repo="https://github.com/user/myapp.git@abc123def",
-    git_token="tk8787",
-    dockerfile="Dockerfile",
-    servers_count=3
-)
-
-# From private repo (SSH)
-project.add_service(
-    "api",
-    git_repo="git@github.com:user/private-repo.git@main",
-    git_token="tk8787",
-    dockerfile="Dockerfile",
     servers_count=3
 )
 ```
 
-**Git Checkout Behavior:**
-
-- First build: Clones repository to `C:/local/git_checkouts/{project}/{env}/{service}/`
-- Subsequent builds: Fetches updates and checks out specified ref
-- Different environments can use different branches/tags
-- Cleanup: `project.cleanup_git_checkouts()`
-
-**Custom Services (Manual Dockerfile):**
+**Custom Dockerfile:**
 
 ```python
-# From Dockerfile content
+# From dockerfile_content
 project.add_service(
-    "api",
+    "custom",
     dockerfile_content={
         "1": "FROM python:3.11-slim",
         "2": "WORKDIR /app",
@@ -402,11 +471,10 @@ project.add_service(
         "4": "RUN pip install -r requirements.txt",
         "5": "COPY . .",
         "6": "EXPOSE 8000",
-        "7": "CMD ['python', 'app.py']"
+        "7": "CMD ['python', '-u', 'app.py']"  # -u for unbuffered output (better logging)
     },
     build_context="/path/to/code",
-    servers_count=3,
-    domain="api.example.com"
+    servers_count=2
 )
 
 # From existing Dockerfile
@@ -425,18 +493,6 @@ project.add_service(
 )
 ```
 
-**Scheduled Services (Cron Jobs):**
-
-```python
-project.add_python_service(
-    "cleanup_job",
-    command="python cleanup.py",
-    build_context="/path/to/code",
-    schedule="0 2 * * *",  # 2 AM daily
-    servers_count=1
-)
-```
-
 ### Deployment Operations
 
 ```python
@@ -451,167 +507,10 @@ project.deploy(env="prod", service="api")
 
 # Deploy without rebuilding
 project.deploy(env="prod", build=False)
-```
 
----
-
-## Architecture Overview
-
-### Three-Tier Port System
-
-The system uses a sophisticated port architecture for zero-downtime deployments:
-
-1. **Container Port** (Fixed)
-
-   - Internal to container (e.g., Postgres: 5432, Redis: 6379)
-   - Never exposed to host
-
-2. **Host Port** (Toggles)
-
-   - Base: `hash(project_env_service_port) % 1000 + 8000`
-   - Secondary: `base + 10000`
-   - Range: 8000-8999 (base), 18000-18999 (secondary)
-   - Alternates each deployment for zero-downtime
-
-3. **Internal Port** (Stable)
-   - Generated: `hash(project_env_service_internal) % 1000 + 5000`
-   - Range: **5000-5999**
-   - Never changes - apps always connect to this port
-   - Nginx routes to actual backend (base or secondary)
-
-### Service Discovery via Nginx Sidecar
-
-Every server runs an nginx sidecar that provides service mesh functionality:
-
-```
-Your App Container
-  ↓ connects to nginx:5234 (hostname "nginx", internal port - stable)
-  ↓ Docker DNS resolves "nginx" to nginx container
-  ↓
-Nginx Sidecar (same server)
-  ↓ routes to backend
-  ↓
-PostgreSQL Container(s)
-  listening on 8357 or 18357 (toggles each deployment)
-```
-
-**Benefits:**
-
-- ✅ Apps always connect to `nginx:INTERNAL_PORT` (hostname + port)
-- ✅ Zero configuration changes during deployments
-- ✅ Automatic failover between old/new versions
-- ✅ Works across multiple servers transparently
-
-### Deployment Flow
-
-1. **Startup Order Groups** - Services deploy in order (databases first)
-2. **Server Allocation** - Reuses existing servers, creates new as needed
-3. **Toggle Deployment** - New container runs alongside old
-4. **Health Check** - Verify new container is healthy
-5. **Nginx Update** - Update all servers' nginx configs
-6. **Traffic Switch** - Nginx redirects to new container
-7. **Cleanup** - Remove old container
-8. **Server Cleanup** - Destroy unused servers
-
-### Default Server Configuration
-
-All services use these defaults unless overridden:
-
-- `servers_count`: 1
-- `server_zone`: "lon1" (London)
-- `server_cpu`: 1 vCPU (~$6/month)
-- `server_memory`: 1024 MB (1GB)
-
-**Available DigitalOcean Zones:**
-
-- `lon1` - London
-- `nyc1`, `nyc3` - New York
-- `sfo3` - San Francisco
-- `sgp1` - Singapore
-- `fra1` - Frankfurt
-- `tor1` - Toronto
-- `ams3` - Amsterdam
-- `blr1` - Bangalore
-
----
-
-## Multi-Zone Deployments
-
-Deploy your application across multiple geographic regions with automatic load balancing.
-
-### Requirements
-
-1. **Cloudflare Account** with Load Balancer enabled ($5/month)
-2. **CLOUDFLARE_API_TOKEN** environment variable
-3. **Domain configured** for services
-
-### Configuration
-
-**Option 1: Specify zones per service**
-
-```python
-project.add_python_service(
-    "api",
-    git_repo="https://github.com/user/api.git@main",
-    git_token="tk8787",
-    command="uvicorn main:app",
-    port=8000,
-    domain="api.example.com",
-    server_zone="lon1",  # This service in London
-    servers_count=3
-)
-
-project.add_python_service(
-    "api-us",
-    git_repo="https://github.com/user/api.git@main",
-    git_token="tk8787",
-    command="uvicorn main:app",
-    port=8000,
-    domain="api.example.com",  # Same domain
-    server_zone="nyc3",  # Different zone
-    servers_count=3
-)
-```
-
-**Option 2: Deploy to multiple zones explicitly**
-
-```python
-# Auto-configures from service configs
-project.deploy(env="prod")
-
-# Or specify zones explicitly
+# Deploy to multiple zones
 project.deploy(env="prod", zones=["lon1", "nyc3", "sgp1"])
-
-# Deploy specific service to multiple zones
-project.deploy(env="prod", service="api", zones=["lon1", "nyc3"])
 ```
-
-### How Multi-Zone Works
-
-1. **Parallel Deployment** - Each zone deploys simultaneously
-2. **Health Checks** - Verify all zones are healthy
-3. **Cloudflare Load Balancer** - Automatically configured with:
-   - Health monitoring (HTTPS checks every 60s)
-   - Geo-steering (routes users to nearest zone)
-   - Automatic failover (removes unhealthy origins)
-4. **DNS Management** - Cloudflare handles routing
-
-**User Request Flow:**
-
-```
-User in Australia → api.example.com
-  ↓
-Cloudflare (detects location)
-  ↓
-Routes to Singapore zone (lowest latency)
-  ↓
-Nginx Load Balancer in Singapore
-  ↓
-One of 3 API containers
-```
-
-**Fallback Behavior:**
-If Cloudflare LB is not available or CLOUDFLARE_API_TOKEN is missing, the system automatically falls back to single-zone deployment using the first zone in the list.
 
 ---
 
@@ -622,9 +521,6 @@ If Cloudflare LB is not available or CLOUDFLARE_API_TOKEN is missing, the system
 Control service startup order automatically using `depends_on`:
 
 ```python
-# Create project
-project = ProjectDeployer.create("myapp")
-
 # Databases start first (no dependencies)
 project.add_postgres() \
        .add_redis()
@@ -645,33 +541,9 @@ project.add_python_service(
     command="python worker.py",
     servers_count=2
 )
-
-# Frontend depends on API (automatically gets startup_order=3)
-project.add_react_service(
-    "web",
-    depends_on=["api"],
-    domain="www.example.com"
-)
-```
-
-**How it works:**
-
-- Services with no dependencies default to `startup_order=1`
-- When using `depends_on`, startup order is automatically calculated as max(dependencies) + 1
-- Services with the same startup_order deploy in parallel
-- You can still manually override with `startup_order` parameter if needed
-
-**Manual startup_order (legacy, still supported):**
-
-```python
-project.add_postgres(startup_order=1)
-project.add_service("api", startup_order=2, ...)
-project.add_service("worker", startup_order=3, ...)
 ```
 
 ### Server Resources
-
-Control server size per service:
 
 ```python
 project.add_python_service(
@@ -695,392 +567,78 @@ project.add_python_service(
     "api",
     env_vars={
         "API_KEY": "secret",
-        "DEBUG": "false",
-        "DATABASE_URL": "auto"  # Auto-resolved via ResourceResolver
+        "DEBUG": "false"
     }
 )
 ```
 
-### Volumes
+### Using ResourceResolver for Service Discovery
+
+Your application code should use `ResourceResolver` to connect to services:
 
 ```python
-project.add_python_service(
-    "api",
-    volumes={
-        "/local/myapp/prod/config/api": "/app/config:ro",  # Read-only
-        "/local/myapp/prod/data/api": "/app/data"          # Read-write
-    }
-)
-```
+from shared_libs.backend.infra.resource_resolver import ResourceResolver
 
-### Networks
-
-Services in the same project/environment automatically share a Docker network:
-
-- Network name: `{project}_{env}_network`
-- All containers can communicate via container names
-- VPC network for cross-server communication (automatic)
-
----
-
-## SSL & Domain Management
-
-### Three SSL Modes
-
-**1. Self-Signed (Development)**
-
-```python
-# Automatic for localhost deployments
-project.deploy(env="dev")  # Uses localhost/self-signed
-```
-
-- ✅ Zero configuration
-- ⚠️ Browser warnings expected
-- 🎯 Use for: Local development only
-
-**2. Let's Encrypt Standalone (Production - Basic)**
-
-```bash
-# .env file
-DIGITALOCEAN_API_TOKEN=your_token
-CLOUDFLARE_EMAIL=your@email.com
-```
-
-- ✅ Publicly trusted certificates
-- ⚠️ 5-10 second downtime during issuance
-- ⚠️ No wildcard certificates
-- 🎯 Use for: Simple single-zone production
-
-**3. Let's Encrypt DNS-01 (Production - Advanced)**
-
-```bash
-# .env file
-DIGITALOCEAN_API_TOKEN=your_token
-CLOUDFLARE_API_TOKEN=your_cf_token
-CLOUDFLARE_EMAIL=your@email.com
-```
-
-- ✅ Zero downtime certificate issuance
-- ✅ Wildcard certificates supported
-- ✅ Automatic DNS management
-- ✅ Cloudflare CDN & DDoS protection
-- 🎯 Use for: Production multi-zone deployments
-
-### Certificate Management
-
-**Automatic Issuance:**
-Certificates are automatically issued when you deploy a service with a `domain` parameter.
-
-**Manual Renewal:**
-
-```python
-from backend.infra.nginx_config_generator import NginxConfigGenerator
-
-# Renew all certificates for a project/env
-NginxConfigGenerator._renew_certificates(
-    target_server="164.92.x.x",
-    project="myapp",
-    env="prod",
-    service="api",
-    email="your@email.com",
-    cloudflare_api_token="your_token"
-)
-```
-
-**Certificate Locations:**
-
-- Linux servers: `/local/nginx/certs/letsencrypt/`
-- Windows bastion: `C:/local/nginx/certs/letsencrypt/`
-
----
-
-### Automatic Certificate Renewal
-
-**Zero Configuration Required** - Certificates renew automatically!
-
-The health monitoring system checks certificates **every hour** on every server and automatically renews certificates that are expiring within 30 days.
-
-**How It Works:**
-
-```
-Every Server (independently):
-  ↓
-  Health Monitor runs every minute (via cron)
-  ↓
-  Every 60 minutes:
-    ├─ Parse /local/nginx/configs/*.conf
-    ├─ Check certificate expiry with openssl
-    ├─ If < 30 days remaining:
-    │   └─ Auto-renew with zero downtime (DNS-01)
-    └─ Send email alert if renewal fails
-```
-
-**Certificate Lifecycle:**
-
-```
-Day 0:   Certificate issued (90 days validity)
-Day 60:  Health monitor: ✓ Valid (30 days remaining)
-Day 61:  Health monitor: ⚠️ Expiring soon (29 days)
-         🔄 Auto-renewal triggered
-         ✓ New certificate issued (ZERO DOWNTIME)
-Day 151: Auto-renewal again (automatic forever)
-```
-
-**Zero Downtime Renewal:**
-
-When `CLOUDFLARE_API_TOKEN` is configured:
-
-- Uses DNS-01 challenge validation (via Cloudflare API)
-- No need to stop nginx
-- Certificate renewed in background
-- Nginx reloaded gracefully (no dropped connections)
-
-**Fallback Method:**
-
-Without Cloudflare token:
-
-- Uses standalone HTTP-01 challenge
-- Brief downtime (5-10 seconds) during renewal
-- Still fully automatic
-
-**Monitoring:**
-
-```python
-# Check certificate status manually
-from backend.infra.certificate_manager import CertificateManager
-
-# Check all certificates on this server
-results = CertificateManager.check_and_renew_all()
-
-for domain, status in results.items():
-    if status is True:
-        print(f"✓ {domain}: Renewed successfully")
-    elif status is False:
-        print(f"❌ {domain}: Renewal failed")
-    else:
-        print(f"✓ {domain}: Still valid (no renewal needed)")
-
-# Check specific certificate expiry
-days = CertificateManager.check_expiry("example.com")
-print(f"Certificate expires in {days} days")
-```
-
-**Email Alerts:**
-
-You'll receive email alerts when:
-
-- Certificate renewal fails
-- Certificate is missing for a configured domain
-- Manual intervention is needed
-
-Ensure your `.env` has alert configuration:
-
-```bash
-ADMIN_EMAIL=admin@example.com
-GMAIL_APP_PASSWORD=your_gmail_app_password
-```
-
-**No Manual Intervention Needed:**
-
-✅ Certificates renew automatically every ~60 days
-✅ Each server manages its own certificates independently
-✅ No single point of failure
-✅ Works across all zones/regions
-✅ Email alerts only if something goes wrong
-
-**Best Practices:**
-
-- ✅ **Use Cloudflare DNS-01** for zero downtime (set `CLOUDFLARE_API_TOKEN`)
-- ✅ **Monitor alert emails** for renewal failures
-- ✅ **Test initially** by manually checking certificate expiry after first deployment
-- ⚠️ **Certificates expire in 90 days** - renewal starts at 30 days, so you have plenty of buffer
-
----
-
-## Database Access
-
-### From Your Application Code
-
-Applications use `ResourceResolver` to get database connection details:
-
-```python
-import psycopg2
-from backend.infra.resource_resolver import ResourceResolver
-
+# User ID, project, and environment must match your deployment
+user = "u1"  # Must match the user ID used in deployment
 project = "myapp"
 env = "prod"
 
-# PostgreSQL
-DB_CONFIG = {
-    "host": ResourceResolver.get_service_host(project, env, "postgres"),  # Returns "nginx"
-    "port": ResourceResolver.get_service_port(project, env, "postgres"),  # Returns internal port (e.g., 5234)
-    "database": ResourceResolver.get_db_name(project, env, "postgres"),
-    "user": ResourceResolver.get_db_user(project, "postgres"),
-    "password": ResourceResolver.get_service_password(project, env, "postgres")
+# Connect to PostgreSQL
+db_config = {
+    "host": ResourceResolver.get_service_host(user, project, env, "postgres"),
+    "port": ResourceResolver.get_service_port(user, project, env, "postgres"),
+    "database": ResourceResolver.get_db_name(user, project, env, "postgres"),
+    "user": ResourceResolver.get_db_user(user, project, env, "postgres"),
+    "password": ResourceResolver.get_service_password(user, project, env, "postgres")
 }
-conn = psycopg2.connect(**DB_CONFIG)
 
-# Or use connection string directly
-conn_str = ResourceResolver.get_db_connection_string(project, env, "postgres")
-# Returns: 'postgresql://myapp_user:secret123@nginx:5234/myapp_8e9fb088'
-conn = psycopg2.connect(conn_str)
+# Connect to Redis
+redis_url = ResourceResolver.get_redis_connection_string(user, project, env)
 ```
 
-**Redis:**
-
-```python
-import redis
-
-# Manual configuration
-r = redis.Redis(
-    host=ResourceResolver.get_service_host(project, env, "redis"),  # Returns "nginx"
-    port=ResourceResolver.get_service_port(project, env, "redis"),  # Returns internal port
-    password=ResourceResolver.get_service_password(project, env, "redis")
-)
-
-# Or use connection string
-conn_str = ResourceResolver.get_redis_connection_string(project, env, "redis")
-# Returns: 'redis://:redispass@nginx:6891/0'
-r = redis.from_url(conn_str)
-```
-
-### How Connection Resolution Works
-
-**Behind the Scenes:**
-
-1. **App connects to** `nginx:5234` (hostname "nginx", internal port - stable)
-2. **Docker DNS resolves** "nginx" to the nginx container on the same server
-3. **Nginx sidecar receives** the connection
-4. **Nginx routes based on backend location:**
-   - **Same server:** Routes directly to container via Docker network (e.g., `new_project_prod_postgres:5432`)
-   - **Different server:** Routes to target server IP via VPC network (e.g., `164.92.x.x:8357`)
-5. **Backend container** receives the connection
-
-**Security Features:**
-
-- ✅ VPC network encryption between servers (automatic)
-- ✅ Passwords stored in mounted files (not environment variables)
-- ✅ Secrets copied to all service containers
-- ✅ Docker network isolation
-
-### Database Names & Users
-
-**Automatic Generation:**
-
-- Database name: `{project}_{hash8}` (e.g., `myapp_8e9fb088`)
-- Database user: `{project}_user` (e.g., `myapp_user`)
-- Password: Auto-generated 32-char secure string
-
-**Why hashed names?**
-
-- Prevents collisions across environments
-- Ensures uniqueness when multiple projects share infrastructure
-- Consistent across deployments (based on project/env/service)
+**Important:** All `ResourceResolver` methods require the `user` parameter as the first argument. This must match the user ID used when creating/deploying the project.
 
 ---
 
-## Backups & Restore
+## Multi-Zone Deployments
 
-### Automatic Backups
+Deploy your application across multiple geographic regions with automatic load balancing.
 
-Stateful services (Postgres, Redis, OpenSearch) are automatically backed up.
+### Requirements
 
-**Default Configuration:**
+1. **Cloudflare Account** with Load Balancer enabled ($5/month)
+2. **CLOUDFLARE_API_TOKEN** environment variable
+3. **Domain configured** for services
 
-```python
-BACKUP_ENABLED_SERVICES = {
-    "postgres": {
-        "schedule": "0 2 * * *",  # 2 AM daily
-        "retention_days": 7
-    },
-    "redis": {
-        "schedule": "0 3 * * *",  # 3 AM daily
-        "retention_days": 7
-    },
-    "opensearch": {
-        "schedule": "0 4 * * *",  # 4 AM daily
-        "retention_days": 7
-    }
-}
-```
-
-**Custom Configuration:**
+### Configuration
 
 ```python
-project.add_postgres(
-    version="15",
-    backup_config={
-        "schedule": "0 */6 * * *",  # Every 6 hours
-        "retention_days": 14         # Keep 2 weeks
-    }
+# Deploy to multiple zones explicitly
+project.deploy(env="prod", zones=["lon1", "nyc3", "sgp1"])
+
+# Or configure zones per service
+project.add_python_service(
+    "api",
+    server_zone="lon1",
+    servers_count=3,
+    domain="api.example.com"
 )
 ```
 
-### How Backups Work
+### How Multi-Zone Works
 
-1. **Backup Container Deployed** - Scheduled container on same server as database
-2. **Scheduled Execution** - Runs via cron at specified times
-3. **Backup Creation:**
-   - Postgres: `pg_dump` to `.dump` file
-   - Redis: RDB snapshot copy
-   - OpenSearch: Snapshot API
-4. **Verification** - Integrity check after creation
-5. **Storage** - Saved to `/backups` volume on server
-6. **Cleanup** - Old backups removed per retention policy
-
-### Managing Backups
-
-```python
-project = ProjectDeployer("myapp")
-
-# Pull all backups for an environment
-project.pull_backups(env="prod")
-
-# Pull specific service backups
-project.pull_backups(env="prod", service="postgres")
-
-# List available backups
-backups = project.list_backups(env="prod", service="postgres")
-for backup in backups:
-    print(f"{backup['timestamp']}: {backup['size_mb']}MB, {backup['age_hours']}h old")
-
-# Restore from backup
-project.rollback(env="prod", service="postgres", timestamp="latest")
-project.rollback(env="prod", service="postgres", timestamp="20250120_020000")
-```
-
-```python
-# Restore latest backup
-deployer.rollback(env="prod", service="postgres", timestamp="latest")
-
-# Restore specific backup
-deployer.rollback(env="prod", service="postgres", timestamp="20250120_020000")
-```
-
-**⚠️ Warning:** Restore operations stop the service, replace data, and restart. This causes downtime.
+1. **Parallel Deployment** - Each zone deploys simultaneously
+2. **Health Checks** - Verify all zones are healthy
+3. **Cloudflare Load Balancer** - Automatically configured with:
+   - Health monitoring (HTTPS checks every 60s)
+   - Geo-steering (routes users to nearest zone)
+   - Automatic failover (removes unhealthy origins)
+4. **DNS Management** - Cloudflare handles routing
 
 ---
 
 ## Health Monitoring
-
-### Automatic Installation via Template Snapshot
-
-Health monitoring **is included in the template snapshot** that all servers are created from.
-
-**How it works:**
-
-1. **First-time setup:** When the first server is needed, the system:
-
-   - Creates a template droplet from base Ubuntu
-   - Installs Docker, health monitor cron, **health agent API**, and nginx configs
-   - Takes a snapshot of this fully-provisioned state
-   - Destroys the template droplet (saves cost)
-
-2. **Subsequent servers:** All new servers are created from this template snapshot, so they come with:
-   - Docker pre-installed
-   - Health monitor cron job (runs every minute)
-   - **Health agent API service** (HTTP API on port 9999)
-   - Ready for autonomous management
 
 ### Architecture: Distributed Monitoring + HTTP Agent
 
@@ -1088,666 +646,121 @@ Health monitoring **is included in the template snapshot** that all servers are 
 
 1. **Health Monitor** (Cron Job)
 
-   - **Type:** Cron job running every minute on all servers
-   - **Execution:** Spawns Docker container that runs `HealthMonitor.monitor_and_heal()`
-   - **Purpose:** Detects failures and coordinates healing (leader only)
+   - Runs every minute on all servers
+   - Detects failures and coordinates healing
+   - Only leader server performs actions
 
 2. **Health Agent** (HTTP API Service)
-   - **Type:** Systemd service (always running)
-   - **Port:** 9999 (VPC-only, secured with API key)
-   - **Purpose:** Provides HTTP API for container management
-   - **Technology:** Flask + subprocess (10MB, lightweight)
-   - **Endpoints:**
-     - `GET /health` - Docker status + container list
-     - `POST /containers/<n>/restart` - Restart container
-     - `POST /containers/run` - Deploy new container
-     - `POST /upload/tar/chunked` - Receive config/secrets
-     - `POST /images/<image>/pull` - Pull Docker image
+   - Always-running systemd service
+   - Port 9999 (VPC-only, secured with API key)
+   - Provides HTTP API for container management
+   - Lightweight Flask + subprocess (10MB)
 
-**Communication Flow:**
+**Health Check Features:**
+
+**Advanced Container Health Verification:**
+
+- Multi-method log retrieval (7 different strategies)
+- Intelligent error detection and highlighting
+- Noise filtering (build output, package installation)
+- Error-first logging (shows ❌ critical errors first)
+- Container state analysis (running/restarting/exited/unhealthy)
+- Automatic retry with exponential backoff
+- Startup grace periods for slow-starting containers
+
+**Error Logging Improvements:**
 
 ```
-Health Monitor (every server)
-  ↓ Detects failures via HTTP
-  ↓ http://other-server:9999/health
-  ↓
-Health Agent (every server)
-  ↓ Reports status
-  ↓ Executes commands via Docker CLI
-  ↓
-Docker Daemon
+[server] ⚠️  ERROR LINES DETECTED:
+[server] ❌ Traceback (most recent call last):
+[server] ❌   File "/app/api.py", line 30, in <module>
+[server] ❌ TypeError: ResourceResolver.get_service_host() missing 1 required positional argument
 ```
 
-**Key Benefits:**
-
-- ✅ **No SSH between servers** - all communication via HTTP/VPC
-- ✅ **Fast container restarts** - 10 seconds via agent
-- ✅ **Fully autonomous** - no bastion needed for healing
-- ✅ **Secure** - API key auth, VPC-only access
-- ✅ **Lightweight** - Flask + subprocess (10MB total)
-
-### What It Monitors
+**What It Monitors:**
 
 1. **Server Health:**
 
    - Ping connectivity (ICMP)
-   - Docker daemon status (via agent HTTP)
-   - Container presence (via agent HTTP)
+   - Docker daemon status
+   - Container presence
    - Disk space
 
 2. **Service Health:**
 
-   - Container running status (via agent HTTP)
+   - Container running status
    - Expected vs actual containers
-   - Container restart attempts
+   - Container restart loops
+   - Application startup errors
 
 3. **Cross-Server Checks:**
-
    - All servers monitor each other via VPC
-   - Leader coordinates all healing actions
-   - Followers report but don't act
+   - Leader coordinates healing actions
+   - Automatic failover
 
-4. **SSL Certificates** (every hour):
-   - Certificate expiry dates
-   - Auto-renewal when < 30 days remaining
-   - Zero-downtime renewal (with Cloudflare DNS-01)
-
-### Self-Healing: Two-Stage Recovery
+### Self-Healing
 
 **Stage 1: Container Restart (Fast - 10 seconds)**
 
-When containers fail but server is responsive:
-
-1. Leader detects missing container via `GET /health`
-2. Leader calls `POST /containers/<n>/restart` on agent
-3. Container restarts via Docker CLI
-4. Verification via agent
-5. Alert sent: "Server recovered by restarting containers"
+- Leader detects missing container
+- Restarts via health agent API
+- Verification
 
 **Stage 2: Server Replacement (Full - 5 minutes)**
 
-When server completely fails (no ping/agent response):
-
-1. **Failed Server Detected** (ping timeout or agent unresponsive)
-2. **Leader Creates Replacement:**
-   - Provisions new server via DigitalOcean API (~60 seconds)
-   - Waits for health agent to respond
-3. **Push Config/Secrets via Agent:**
-   - Creates tar.gz of `/local/project/env/config` and `/secrets`
-   - Uploads in 5MB chunks via `POST /upload/tar/chunked`
-   - Agent extracts files locally
-4. **Deploy Services via Agent:**
-   - Leader tells agent: `POST /images/<image>/pull`
-   - Leader tells agent: `POST /containers/run` (with volumes, ports, env)
-   - Agent starts containers via Docker CLI
-5. **Health Check via Agent:**
-   - Verify Docker running: `GET /health`
-   - Verify containers present
-6. **If Healthy:**
-   - Promote to active status
-   - Update deployment state
-   - Destroy failed server via DO API
-   - Alert sent: "Server replaced successfully - fully autonomous"
-7. **If Unhealthy:**
-   - Destroy replacement
-   - Retry (up to 3 attempts)
-   - Alert administrator if all attempts fail
-
-**Leader Election:**
-
-- Lowest healthy IP becomes leader (lexicographic sort)
-- Leader is responsible for healing actions
-- Followers monitor but don't take action
-- If leader fails, new leader elected automatically
-
-**Complete Autonomy:**
-
-- ✅ Container crashes → Leader restarts via agent (no human)
-- ✅ Server crashes → Leader replaces and redeploys via agent (no human)
-- ✅ Leader crashes → New leader elected, continues healing (no human)
-- ⏳ All servers crash → Alerts sent, manual intervention required
-
-### Security Model
-
-**VPC Network Isolation:**
-
-```
-Internet
-  ↓
-  Port 443 only (HTTPS, Cloudflare IPs only)
-  ↓
-Servers in VPC (10.0.0.0/16)
-  ↓
-  Port 9999: Health agent (VPC only, API key required)
-  Port 22: SSH (Bastion IP only)
-  ↓
-Firewall rules (ufw):
-  - Allow 9999 from 10.0.0.0/16
-  - Allow 22 from bastion IP only
-  - Allow 443 from Cloudflare IPs
-  - Deny all other inbound
-```
-
-**Authentication:**
-
-- Health agent requires `X-API-Key` header
-- API key generated during template creation
-- Same key on all servers (acceptable in private VPC)
-- Stored in `/etc/health-agent/api-key` (mode 600)
-
-**Command Restriction:**
-
-- Agent only accepts specific Docker operations
-- No arbitrary shell command execution
-- No SSH access granted
-- File uploads restricted to `/local/*` paths
-
-### Alert System
-
-**Email Alerts Sent When:**
-
-- ✅ Server failures and recoveries
-- ✅ Container restarts
-- ✅ Server replacements (success/failure)
-- ✅ SSL certificate renewals
-- ✅ Backup failures
-- ✅ Auto-scaling events
-
-**Configuration:**
-
-```bash
-# .env file
-ADMIN_EMAIL=admin@example.com
-GMAIL_APP_PASSWORD=your_gmail_app_password
-```
-
-**Example Alert:**
-
-```
-Subject: [Health Monitor] Server Replacement Successful
-
-Failed server 10.0.1.5 replaced with 10.0.1.8
-Services redeployed: 3
-All autonomous - no manual intervention required.
-```
-
-### Manual Health Check
-
-```python
-project = ProjectDeployer("myapp")
-
-# Run health check once
-project.check_health()
-
-# Get server health status
-status = project.get_health_status()
-print(f"Healthy: {len(status['healthy'])}, Unhealthy: {len(status['unhealthy'])}")
-
-# List all servers
-servers = project.list_servers()
-for server in servers:
-    print(f"{server['ip']}: {server['deployment_status']} - {server['zone']}")
-
-# Filter servers by environment and zone
-servers = project.list_servers(env="prod", zone="lon1")
-```
+- Provisions new server
+- Pushes config/secrets
+- Deploys services
+- Health check
+- Destroys failed server
 
 ---
 
-## Secrets Management
+## Backups & Restore
 
-### Automatic Password Generation
+### Automatic Backups
 
-Passwords are automatically generated for stateful services (Postgres, Redis, OpenSearch) during first deployment:
-
-- 32 characters
-- Alphanumeric (letters + digits)
-- Cryptographically secure
-
-**Storage Location:**
-
-- Servers: `/local/{project}/{env}/secrets/{service}/`
-- Files: `{service}_password` (e.g., `postgres_password`)
-
-### Manual Rotation
-
-Secrets should be rotated periodically:
+Backups are scheduled automatically for stateful services:
 
 ```python
-project = ProjectDeployer("myapp")
+# PostgreSQL - daily at 2 AM
+project.add_postgres()  # Backup schedule auto-configured
 
-# Rotate all secrets (with automatic redeployment)
-project.rotate_secrets(env="prod", auto_deploy=True)
-
-# Rotate specific services only
-project.rotate_secrets(env="prod", services=["postgres", "redis"])
-
-# Rotate without automatic redeployment (must deploy manually)
-project.rotate_secrets(env="prod")
-project.deploy(env="prod")  # Manual redeploy
-
-# List all secrets
-secrets = project.list_secrets(env="prod")
-for service, files in secrets.items():
-    print(f"{service}:")
-    for file in files:
-        print(f"  - {file}")
+# Redis - daily at 3 AM
+project.add_redis()  # Backup schedule auto-configured
 ```
 
-### Security Best Practices
-
-✅ **Implemented:**
-
-- Passwords stored in files (not environment variables)
-- Files mounted read-only where possible
-- Automatic backups before rotation
-- All secrets copied to all containers (for cross-service communication)
-
-⚠️ **Recommendations:**
-
-- Rotate passwords every 90 days
-- Use different passwords per environment
-- Back up secrets independently of server backups
-- Consider using a secrets management service for production
-
----
-
-## Auto-Scaling
-
-The system provides intelligent auto-scaling capabilities that automatically adjust your infrastructure based on real-time metrics.
-
-### Overview
-
-Auto-scaling monitors your services and can:
-
-- **Vertical Scaling**: Upgrade/downgrade server specs (CPU/Memory) based on resource usage
-- **Horizontal Scaling**: Add/remove servers based on request traffic (RPS)
-
-**Key Features:**
-
-- ✅ Automatic metric collection (CPU, Memory, RPS)
-- ✅ Configurable thresholds per service
-- ✅ Cooldown periods to prevent flapping
-- ✅ Smart averaging over 10-minute windows
-- ✅ Priority-based scaling (vertical first, then horizontal)
-
-### Enabling Auto-Scaling
-
-**Enable with defaults (both vertical and horizontal):**
+### Manual Backup Operations
 
 ```python
-project.add_python_service(
-    "api",
-    command="uvicorn main:app",
-    port=8000,
-    servers_count=2,
-    auto_scaling=True  # Enables both with default thresholds
+# Trigger immediate backup
+project.backup(env="prod", service="postgres")
+
+# List available backups
+backups = project.list_backups(env="prod", service="postgres")
+
+# Restore from backup
+project.restore(
+    env="prod",
+    service="postgres",
+    backup_file="postgres_backup_20240115_020000.sql"
 )
 ```
 
-**Custom thresholds:**
+### Backup Storage
 
-```python
-project.add_python_service(
-    "api",
-    command="uvicorn main:app",
-    port=8000,
-    servers_count=2,
-    auto_scaling={
-        "vertical": {
-            "cpu_scale_up": 80,      # Scale up when CPU > 80%
-            "cpu_scale_down": 25,    # Scale down when CPU < 25%
-            "memory_scale_up": 85,   # Scale up when Memory > 85%
-            "memory_scale_down": 30  # Scale down when Memory < 30%
-        },
-        "horizontal": {
-            "rps_scale_up": 1000,    # Add server when RPS > 1000
-            "rps_scale_down": 100    # Remove server when RPS < 100
-        }
-    }
-)
-```
+Backups are stored in user-segregated directories:
 
-**Only vertical scaling:**
+**Local:**
 
-```python
-project.add_python_service(
-    "api",
-    auto_scaling={
-        "vertical": {
-            "cpu_scale_up": 75,
-            "memory_scale_up": 80
-        }
-    }
-)
-```
+- Windows: `C:/local/{user}/{project}/{env}/backups/`
+- Linux: `/local/{user}/{project}/{env}/backups/`
 
-**Only horizontal scaling:**
+**Remote:**
 
-```python
-project.add_python_service(
-    "api",
-    auto_scaling={
-        "horizontal": {
-            "rps_scale_up": 500,
-            "rps_scale_down": 50
-        }
-    }
-)
-```
+- `/local/{user}/{project}/{env}/backups/{server_ip}/`
 
-### Default Thresholds
-
-When `auto_scaling=True` or thresholds not specified:
-
-**Vertical Scaling (Resource-based):**
-
-- CPU scale up: 75%
-- CPU scale down: 20%
-- Memory scale up: 80%
-- Memory scale down: 30%
-
-**Horizontal Scaling (Traffic-based):**
-
-- RPS scale up: 500 requests/second
-- RPS scale down: 50 requests/second
-
-### How It Works
-
-**Architecture:**
-
-1. **Metrics Collection** (Every 60 seconds):
-
-   - All servers collect their own metrics
-   - Metrics stored in rolling 10-minute window
-   - CPU, Memory, and RPS tracked per service
-
-2. **Scaling Decisions** (Every 5 minutes):
-
-   - Leader server analyzes aggregated metrics
-   - Averages across all servers running the service
-   - Compares against configured thresholds
-   - Makes scaling decision if needed
-
-3. **Scaling Execution**:
-   - Vertical: Updates server specs, redeploys service
-   - Horizontal: Adds/removes servers, zero-downtime deployment
-
-**Scaling Priority:**
-
-Vertical scaling (resource optimization) takes priority over horizontal scaling (traffic handling). If both are needed, vertical scaling happens first, then horizontal on the next check cycle.
-
-**Cooldown Periods:**
-
-- Scale up: 5 minutes (react quickly to load spikes)
-- Scale down: 10 minutes (be conservative to avoid flapping)
-
-**Constraints:**
-
-- Minimum servers: 1
-- Maximum servers: 20
-- Server size tiers follow DigitalOcean's available sizes (1-32 vCPU, 1GB-64GB RAM)
-
-### Monitoring Auto-Scaling
-
-**Check auto-scaling status:**
-
-```python
-from backend.infra.auto_scaling_coordinator import AutoScalingCoordinator
-
-coordinator = AutoScalingCoordinator()
-
-# Collect current metrics (happens automatically every minute)
-coordinator.collect_all_metrics()
-
-# Manual scaling check (happens automatically every 5 minutes via leader)
-coordinator.check_and_scale_all_services()
-```
-
-**View scaling history in logs:**
-
-```python
-project.logs(service="api", env="prod", lines=200)
-# Look for entries like:
-# "Auto-scaling check for myapp/prod/api (3 servers)"
-# "Metrics: CPU=82.3% Memory=65.1% RPS=723.4"
-# "Triggering vertical scaling for api"
-# "✓ Vertical scaling completed for api"
-```
-
-### Example Scenarios
-
-**Scenario 1: High CPU usage**
-
-```
-Current: 2 servers, 2 vCPU each, CPU at 85%
-Action: Vertical scale up to 4 vCPU per server
-Result: 2 servers, 4 vCPU each, CPU drops to ~42%
-```
-
-**Scenario 2: Traffic spike**
-
-```
-Current: 3 servers, RPS at 650 per server (1950 total)
-Action: Horizontal scale up, add 1 server
-Result: 4 servers, RPS ~487 per server (1950 total distributed)
-```
-
-**Scenario 3: Low utilization**
-
-```
-Current: 5 servers, 4 vCPU each, CPU at 15%, RPS at 30 per server
-Actions (over time):
-1. Horizontal scale down: 5 → 4 servers (wait 10 min)
-2. Horizontal scale down: 4 → 3 servers (wait 10 min)
-3. Vertical scale down: 4 vCPU → 2 vCPU per server
-```
-
-### Cost Optimization
-
-Auto-scaling helps optimize costs by:
-
-- ✅ Scaling down during low-traffic periods
-- ✅ Right-sizing server specs to actual usage
-- ✅ Avoiding over-provisioning
-
-**Example monthly savings:**
-
-```
-Without auto-scaling:
-- 5 servers × 4 vCPU/8GB × $48/month = $240/month
-
-With auto-scaling (average):
-- 3 servers × 2 vCPU/4GB × $24/month = $72/month
-- Scales up to 5×4vCPU during peak hours only
-- Savings: ~$168/month (70%)
-```
-
-### Disabling Auto-Scaling
-
-```python
-# Remove auto-scaling from existing service
-project.update_service("api", auto_scaling=False)
-project.deploy(env="prod", service="api")
-```
-
-### Best Practices
-
-**✅ Do:**
-
-- Start with default thresholds and adjust based on observation
-- Use vertical scaling for predictable workloads
-- Use horizontal scaling for variable traffic patterns
-- Monitor scaling decisions via logs
-- Set reasonable min/max server counts for cost control
-
-**❌ Don't:**
-
-- Set thresholds too tight (causes flapping)
-- Enable auto-scaling without monitoring
-- Scale down too aggressively (can cause service degradation)
-- Use auto-scaling for databases (use vertical scaling only if needed)
-
-### Troubleshooting
-
-**"Auto-scaling not triggering"**
-
-- Check if service has `auto_scaling` enabled in config
-- Verify metrics are being collected: check logs for "Auto-scaling check"
-- Ensure leader server is healthy (oldest server becomes leader)
-- Check if cooldown period is still active
-
-**"Too many scale events"**
-
-- Increase cooldown periods in `AutoScaler` class
-- Widen threshold gaps (e.g., scale_up=80, scale_down=20 instead of 75/30)
-- Increase metrics averaging window (default: 10 minutes)
-
-**"Scaling in wrong direction"**
-
-- Check metric collection: `coordinator.collect_all_metrics()`
-- Review aggregated metrics in logs
-- Verify thresholds are correctly configured
-- Check if multiple services competing for resources
-
----
-
-## Advanced Features
-
-### Rollback
-
-Rollback to previous deployment version:
-
-```python
-# Rollback to previous version
-project.rollback(env="prod", service="api")
-
-# Rollback to specific version
-project.rollback(env="prod", service="api", version="1.2.3")
-```
-
-**How It Works:**
-
-1. Retrieves previous deployment state
-2. Redeploys using old image version
-3. Uses zero-downtime toggle deployment
-4. Old version becomes "new" deployment
-
-### Deployment Status
-
-```python
-# Get status for all zones
-status = project.status()
-print(status)
-# {
-#   'lon1': {'active': 3, 'reserve': 1, 'destroying': 0, 'total': 4},
-#   'nyc3': {'active': 2, 'reserve': 0, 'destroying': 0, 'total': 2}
-# }
-
-# Filter by environment
-status = project.status(env="prod")
-```
-
-**Server States:**
-
-- `active` - Running one or more services
-- `reserve` - Provisioned but not running any services
-- `destroying` - Being removed
-
-**Note:** Server inventory is **stateless** - it always queries DigitalOcean directly for current state. Status is stored as droplet tags (e.g., `"status:active"`), not in local files.
-
-### Logs
-
-```python
-# Tail logs
-project.logs(service="api", env="prod", lines=100)
-
-# Print directly to console
-project.print_logs(service="api", env="prod", lines=100)
-```
-
-### Update Service Configuration
-
-```python
-# Update existing service
-project.update_service(
-    "api",
-    servers_count=5,           # Scale up
-    domain="new.example.com",  # Change domain
-    env_vars={"DEBUG": "true"} # Update env vars
-)
-
-# Deploy changes
-project.deploy(env="prod", service="api")
-```
-
-### Remove Service
-
-```python
-project.delete_service("old-api")
-```
-
-**⚠️ Note:** This removes from configuration only. Run deploy to remove running containers.
-
-### Template Snapshot System
-
-**Production servers use pre-baked snapshots for speed:**
-
-- `DOManager.create_server()` - Uses template snapshot (FAST, ~60 seconds)
-- `DOManager.create_droplet()` - Full provisioning from scratch (LEGACY, ~5-10 minutes)
-
-**Template Creation Process (first deployment only):**
-
-```python
-# Happens automatically on first deployment
-snapshot_id = DOManager.get_or_create_template(region="lon1")
-# 1. Creates template droplet from base Ubuntu
-# 2. Installs Docker (via apt)
-# 3. Installs health monitor (via HealthMonitorInstaller)
-# 4. Creates nginx config directories
-# 5. Takes snapshot (~5-10 minutes)
-# 6. Destroys template droplet
-# 7. Returns snapshot ID for use
-```
-
-**Subsequent server creation:**
-
-```python
-# Fast! Just clone from snapshot
-server = DOManager.create_server("myserver", "lon1", cpu=2, memory=4096)
-# Ready in ~60 seconds with Docker + health monitor already installed
-```
-
-**Rebuilding the template:**
-
-```python
-# If you need to update the base template
-DOManager.delete_template()  # Removes snapshot and any template droplets
-# Next deployment will create fresh template
-```
-
-### Parallel vs Sequential Deployment
-
-```python
-# Parallel (default, faster)
-project.deploy(env="prod", zones=["lon1", "nyc3", "sgp1"], parallel=True)
-
-# Sequential (easier debugging)
-project.deploy(env="prod", zones=["lon1", "nyc3", "sgp1"], parallel=False)
-```
-
-### Build Without Deploy
-
-```python
-# Build and push to registry
-project.build(env="prod", push=True)
-
-# Build locally only
-project.build(env="prod", push=False)
-
-# Then deploy without rebuilding
-project.deploy(env="prod", build=False)
-```
+Backups are automatically pulled to local storage during sync operations.
 
 ---
 
@@ -1765,12 +778,10 @@ push.bat
 pull.bat
 ```
 
-Both scripts automatically discover servers and prompt for project name.
-
 ### Manual Sync Operations
 
 ```python
-project = ProjectDeployer("myapp")
+project = ProjectDeployer("u1", "myapp")
 
 # Push local files to servers
 project.push_config(env="prod")
@@ -1780,25 +791,14 @@ project.pull_data(env="prod")
 
 # Full bidirectional sync
 project.sync_files(env="prod")
-
-# Common workflows
-# 1. Config change workflow
-# Edit: C:/local/myapp/prod/config/api/settings.json
-project.push_config(env="prod")
-project.deploy(env="prod", service="api", build=False)
-
-# 2. Retrieve backups
-project.pull_data(env="prod")
-# Backups in: C:/local/myapp/prod/backups/{server_ip}/
-
-# 3. Analyze logs
-project.pull_data(env="prod")
-# Logs in: C:/local/myapp/prod/logs/{server_ip}/
 ```
 
 ### Directory Structure
 
-**Local (Windows: `C:/local/{project}/{env}/`, Linux: `/local/{project}/{env}/`):**
+**Local Structure:**
+
+Windows: `C:/local/{user}/{project}/{env}/`
+Linux: `/local/{user}/{project}/{env}/`
 
 ```
 ├── config/     # Service configs (PUSH →)
@@ -1810,11 +810,56 @@ project.pull_data(env="prod")
 └── monitoring/ # Metrics (← PULL, per-server)
 ```
 
-**Sync Behavior:**
+**Server Structure:**
 
-- **Push**: Single archive, parallel to all servers, auto-distributes secrets
-- **Pull**: Server-separated (e.g., `logs/192_168_1_100/`), parallel retrieval
-- **Automatic**: Secrets from databases copied to all consumer services
+`/local/{user}/{project}/{env}/`
+
+Same structure as local, but data/logs/backups/monitoring are server-specific.
+
+---
+
+## Auto-Scaling
+
+### Enabling Auto-Scaling
+
+```python
+project.add_python_service(
+    "api",
+    command="uvicorn main:app",
+    port=8000,
+    servers_count=2,
+    auto_scaling=True  # Enables both vertical and horizontal
+)
+
+# Custom thresholds
+project.add_python_service(
+    "api",
+    auto_scaling={
+        "vertical": {
+            "cpu_scale_up": 80,
+            "cpu_scale_down": 25,
+            "memory_scale_up": 85,
+            "memory_scale_down": 30
+        },
+        "horizontal": {
+            "rps_scale_up": 1000,
+            "rps_scale_down": 100
+        }
+    }
+)
+```
+
+### How It Works
+
+1. **Metrics Collection** (Every 60 seconds)
+2. **Scaling Decisions** (Every 5 minutes)
+3. **Scaling Execution** (Zero-downtime)
+
+**Default Thresholds:**
+
+- CPU scale up: 75% / down: 20%
+- Memory scale up: 80% / down: 30%
+- RPS scale up: 500 / down: 50
 
 ---
 
@@ -1822,77 +867,219 @@ project.pull_data(env="prod")
 
 ### Common Issues
 
-**1. "No zones configured"**
+**1. "No logs available"**
 
-- Ensure services have `server_zone` parameter
-- Or services default to "lon1"
-- Check config file syntax
+This typically means the container crashed before producing output. The system now tries 7 different methods to retrieve logs:
 
-**2. "Cloudflare Load Balancer not enabled"**
+- Standard docker logs
+- Logs with timestamps
+- Logs since container start
+- Direct log file access
+- Container exec to check error files
+- Historical container instances
+- System journal logs
 
-- Multi-zone requires Cloudflare LB ($5/month)
-- Enable at: https://dash.cloudflare.com
-- Or deploy to single zone only
+**2. "Health check failed"**
 
-**3. "Health check failed"**
+The health check now provides detailed error output:
 
-- Service may not be responding on expected port
-- Check container logs: `project.logs(service="api", env="prod")`
-- Verify Dockerfile exposes correct port
+- Container state (running/restarting/exited)
+- Exit code
+- Full error logs with highlighting
+- Specific error patterns detected
 
-**4. "Cannot connect to database"**
+Check the deployment logs for ❌ marked error lines showing the exact problem.
 
-- Ensure shared_libs is in your code path
-- Verify ResourceResolver import path
-- Check secrets exist: `/local/{project}/{env}/secrets/`
+**3. "Container in bad state: Restarting"**
 
-**5. "SSL certificate not trusted"**
+Your application is crashing immediately. Common causes:
 
-- Self-signed certs on localhost are expected
-- For production, ensure CLOUDFLARE_EMAIL is set
-- Check certificate renewal: `_renew_certificates()`
+- Missing environment variables
+- Import errors (wrong user parameter in ResourceResolver)
+- Missing dependencies
+- Syntax errors in code
 
-**6. "Git checkout failed"**
+The deployment logs will show the exact Python traceback or error message.
 
-- Ensure Git is installed on your system
-- Verify repository URL is correct
-- For private repos, ensure SSH keys are configured
-- Check network connectivity to Git hosting service
+**4. "Port conflict"**
 
-**7. "Requirements file not found"**
+Extremely rare due to user-based port hashing. If it occurs:
 
-- Ensure requirements files exist in build_context or git_repo
-- Check file paths are relative to repository root
-- Verify files are committed to Git repository
+- Check if another user is using the same port manually
+- Verify user ID is correctly set
+- Check for hardcoded ports in config
+
+**5. "Git checkout failed"**
+
+- Ensure Git is installed
+- Verify repository URL and token
+- Check network connectivity
+- Verify branch/tag exists
+
+**6. "Build context not found"**
+
+The build context path must exist and contain your code:
+
+```python
+build_context="/path/to/code"  # Must exist
+```
+
+Git repositories are automatically cloned to temp directories.
 
 ### Debug Mode
 
 ```python
-project = ProjectDeployer("myapp")
-
 # Enable verbose logging
 import logging
 logging.basicConfig(level=logging.DEBUG)
+
+# Load project with user ID
+project = ProjectDeployer("u1", "myapp")
 
 # Check deployment state
 state = project.get_deployment_state(env="prod", service="api")
 print(state)
 
-# Get deployment history
-history = project.get_deployment_history(env="prod", service="api", limit=10)
-for deployment in history:
-    print(f"{deployment['timestamp']}: version {deployment['version']}")
-
-# Check server inventory
+# Get detailed server info
 servers = project.list_servers(env="prod")
 for s in servers:
     print(f"{s['ip']}: {s['deployment_status']} - {s['zone']}")
-
-# Get health status
-status = project.get_health_status()
-print(f"Healthy servers: {len(status['healthy'])}")
-print(f"Unhealthy servers: {len(status['unhealthy'])}")
 ```
+
+### Improved Error Reporting
+
+The system now includes:
+
+- **Multi-method log retrieval** - tries 7 different ways to get logs
+- **Error highlighting** - ❌ markers on critical errors
+- **Noise filtering** - removes build output and package installation spam
+- **Traceback detection** - automatically highlights Python errors
+- **Container state analysis** - detailed diagnosis of container health
+- **Exit code reporting** - shows why containers crashed
+
+---
+
+## Security & Limitations
+
+### Multi-Tenancy Security
+
+**Isolation Levels:**
+
+✅ **Strong Isolation:**
+
+- File system paths (complete separation)
+- Container names (user-prefixed)
+- Volume names (user-prefixed)
+- Secrets directories (separate per-user)
+- Port allocation (hash includes user ID)
+
+⚠️ **Shared Resources:**
+
+- Physical servers (container-level isolation only)
+- Docker daemon (shared but isolated via namespaces)
+- VPC network (filtered by container names)
+
+### Bastion Server Security Risk
+
+**CRITICAL LIMITATION:**
+
+The deployment system requires a **bastion server** (your local machine or a dedicated deployment server) that has SSH access to all production servers. This creates a significant security risk:
+
+**Risk:** If the bastion server is compromised, an attacker can:
+
+- SSH into all production servers
+- Access all user data across all tenants
+- Read secrets and credentials
+- Modify or destroy containers
+- Exfiltrate database backups
+- Pivot to other infrastructure
+
+**Mitigation Strategies:**
+
+1. **Bastion Hardening:**
+
+   - Keep bastion offline when not deploying
+   - Use hardware security key for SSH
+   - Enable full disk encryption
+   - Regular security audits
+   - Minimal software installation
+   - No browsing/email on bastion
+
+2. **SSH Key Management:**
+
+   - Use separate SSH keys per environment
+   - Rotate SSH keys regularly
+   - Store keys in hardware security modules (HSM)
+   - Never commit keys to version control
+   - Use ssh-agent forwarding instead of copying keys
+
+3. **Network Isolation:**
+
+   - Bastion in separate VLAN/VPC
+   - Firewall rules limiting bastion access
+   - VPN required to reach bastion
+   - IP whitelisting for bastion connections
+   - Monitor all SSH connections from bastion
+
+4. **Access Control:**
+
+   - Multi-factor authentication for bastion
+   - Time-limited access tokens
+   - Audit all bastion access
+   - Principle of least privilege
+   - Separate bastions per environment (dev/prod)
+
+5. **Alternative Architecture (Future Enhancement):**
+   - **Agent-based deployment** - Servers pull configs instead of bastion pushing
+   - **Zero-trust networking** - Mutual TLS between all components
+   - **Secrets management service** - HashiCorp Vault or similar
+   - **Ephemeral bastion** - Temporary bastion created per-deployment and destroyed
+
+**Best Practice:** Treat the bastion server as your **most critical security asset**. Its compromise means complete infrastructure compromise across all users.
+
+### Additional Security Considerations
+
+**Container Security:**
+
+- Containers run as root by default (can be overridden)
+- Docker socket not exposed to containers
+- Network policies via Docker networks
+- Read-only mounts for configs/secrets
+
+**Secret Management:**
+
+- Secrets stored on filesystem (not in environment vars)
+- Mounted read-only into containers
+- Separate secrets directory per user
+- Automatic secret rotation supported
+
+**Network Security:**
+
+- VPC network for inter-server communication
+- Firewall rules auto-configured
+- Only necessary ports exposed
+- SSL/TLS for external traffic
+
+### Known Limitations
+
+1. **Bastion Compromise Risk** - Single point of failure (see above)
+2. **Shared Docker Daemon** - Users share the same Docker daemon on servers
+3. **No Pod-Level Isolation** - Unlike Kubernetes, no strong pod isolation
+4. **File System Permissions** - Relies on Unix permissions (not SELinux/AppArmor)
+5. **No Network Policies** - Basic Docker network isolation only
+6. **Limited RBAC** - No fine-grained role-based access control
+7. **Server Sharing** - Multiple users can have containers on same server
+
+### Compliance Considerations
+
+This system may **not** be suitable for:
+
+- PCI-DSS Level 1 (payment card data)
+- HIPAA (healthcare data) without additional controls
+- FedRAMP (government cloud services)
+- High-security government workloads
+
+Consider Kubernetes with proper RBAC, network policies, and pod security policies for these use cases.
 
 ---
 
@@ -1900,48 +1087,132 @@ print(f"Unhealthy servers: {len(status['unhealthy'])}")
 
 **Key Classes:**
 
-Key Classes:
+- `ProjectDeployer` - Unified interface for ALL operations (single import needed)
+- `ResourceResolver` - Service discovery and connection details (automatic)
+- `GitManager` - Git repository checkout and management (automatic)
 
-ProjectDeployer - Unified interface for ALL operations (single import needed)
-ResourceResolver - Service discovery and connection details (automatic)
-GitManager - Git repository checkout and management (automatic)
+**Note:** You no longer need to import `Deployer`, `SecretsRotator`, `HealthMonitor`, `ServerInventory`, or `DeploymentStateManager` directly. All functionality is accessible through `ProjectDeployer`.
 
-Note: You no longer need to import Deployer, SecretsRotator, HealthMonitor, ServerInventory, or DeploymentStateManager directly. All functionality is accessible through ProjectDeployer.
+### class `ProjectDeployer`
 
-ProjectDeployer Methods:
-Service Management:
+Primary interface for deployment operations.
 
-add\_\*() - Add services (postgres, redis, python, nodejs, react, etc.)
-update_service() - Modify service configuration
-delete_service() - Remove service from configuration
-deploy() - Deploy services to servers
-rollback() - Rollback to previous version
-status() - Get deployment status
-logs() - View service logs
+<details>
+<summary><strong>Service Management Methods</strong></summary>
 
-File Operations:
+| Method               | Args                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | Returns           | Description                                                                                          |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------- | ---------------------------------------------------------------------------------------------------- |
+| `create`             | `user: str`, `project: str`, `docker_hub_user: str=None`, `version: str="latest"`, `default_server_ip: str="localhost"`                                                                                                                                                                                                                                                                                                                                                                                                                                                          | `ProjectDeployer` | Create a new project with default configuration. Static method. User ID must be provided explicitly. |
+| `add_service`        | `name: str`, `image: str=None`, `dockerfile: str=None`, `dockerfile_content: Dict=None`, `build_context: str=None`, `git_repo: str=None`, `git_token: str=None`, `command: str=None`, `ports: List[int]=None`, `env_vars: Dict=None`, `volumes: Dict=None`, `depends_on: List[str]=None`, `servers_count: int=1`, `server_zone: str="lon1"`, `server_cpu: int=1`, `server_memory: int=1024`, `domain: str=None`, `ssl_mode: str=None`, `schedule: str=None`, `health_check: bool=True`, `restart: bool=True`, `startup_order: int=None`, `auto_scaling: Union[bool, Dict]=False` | `ProjectDeployer` | Add a generic service to the project. Returns self for chaining.                                     |
+| `add_postgres`       | `version: str="15"`, `servers_count: int=1`, `server_zone: str="lon1"`, `**kwargs`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | `ProjectDeployer` | Add PostgreSQL database service.                                                                     |
+| `add_redis`          | `version: str="7-alpine"`, `servers_count: int=1`, `server_zone: str="lon1"`, `**kwargs`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | `ProjectDeployer` | Add Redis cache service.                                                                             |
+| `add_opensearch`     | `version: str="2"`, `servers_count: int=1`, `server_zone: str="lon1"`, `**kwargs`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | `ProjectDeployer` | Add OpenSearch service.                                                                              |
+| `add_python_service` | `name: str`, `command: str`, `port: int=None`, `python_version: str="3.11"`, `requirements_files: List[str]=["requirements.txt"]`, `depends_on: List[str]=None`, `build_context: str=None`, `git_repo: str=None`, `git_token: str=None`, `servers_count: int=1`, `server_zone: str="lon1"`, `domain: str=None`, `schedule: str=None`, `auto_scaling: Union[bool, Dict]=False`, `**kwargs`                                                                                                                                                                                        | `ProjectDeployer` | Add Python service with auto-generated Dockerfile.                                                   |
+| `add_nodejs_service` | `name: str`, `command: str`, `port: int=None`, `node_version: str="18"`, `package_manager: str="npm"`, `build_command: str=None`, `depends_on: List[str]=None`, `build_context: str=None`, `git_repo: str=None`, `git_token: str=None`, `servers_count: int=1`, `server_zone: str="lon1"`, `domain: str=None`, `auto_scaling: Union[bool, Dict]=False`, `**kwargs`                                                                                                                                                                                                               | `ProjectDeployer` | Add Node.js service with auto-generated Dockerfile.                                                  |
+| `add_react_service`  | `name: str`, `node_version: str="18"`, `package_manager: str="npm"`, `build_command: str="npm run build"`, `output_dir: str="build"`, `nginx_config: str=None`, `depends_on: List[str]=None`, `build_context: str=None`, `git_repo: str=None`, `git_token: str=None`, `servers_count: int=1`, `server_zone: str="lon1"`, `domain: str=None`, `**kwargs`                                                                                                                                                                                                                          | `ProjectDeployer` | Add React/SPA service with multi-stage Dockerfile (build + nginx).                                   |
+| `update_service`     | `name: str`, `**kwargs`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | `ProjectDeployer` | Update existing service configuration.                                                               |
+| `delete_service`     | `name: str`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | `ProjectDeployer` | Remove service from configuration.                                                                   |
+| `build`              | `env: str=None`, `service: str=None`, `push: bool=True`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | `bool`            | Build Docker images (in isolated temp directories).                                                  |
+| `deploy`             | `env: str=None`, `service: str=None`, `zones: List[str]=None`, `build: bool=True`, `parallel: bool=True`                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | `bool`            | Deploy services to servers.                                                                          |
+| `rollback`           | `env: str`, `service: str`, `to_version: str=None`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | `bool`            | Rollback service to previous version.                                                                |
+| `status`             | `env: str=None`, `service: str=None`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | `Dict`            | Get deployment status.                                                                               |
+| `logs`               | `service: str`, `env: str`, `lines: int=100`, `follow: bool=False`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | `str`             | View service logs (with error highlighting).                                                         |
 
-push_config() - Push config/secrets to servers
-pull_data() - Pull logs/backups from servers
-pull_backups() - Pull backups specifically
-sync_files() - Bidirectional sync
-list_backups() - List available backups
+</details>
 
-Secrets Management:
+<details>
+<summary><strong>File Operations Methods</strong></summary>
 
-rotate_secrets() - Rotate passwords (with auto-deploy option)
-list_secrets() - List all secrets
+| Method         | Args                                                            | Returns      | Description                       |
+| -------------- | --------------------------------------------------------------- | ------------ | --------------------------------- |
+| `push_config`  | `env: str=None`, `targets: List[str]=None`                      | `bool`       | Push config/secrets to servers.   |
+| `pull_data`    | `env: str=None`, `targets: List[str]=None`                      | `bool`       | Pull logs/backups from servers.   |
+| `pull_backups` | `env: str=None`, `service: str=None`, `targets: List[str]=None` | `bool`       | Pull backups specifically.        |
+| `sync_files`   | `env: str=None`, `targets: List[str]=None`                      | `bool`       | Bidirectional sync (push + pull). |
+| `list_backups` | `env: str`, `service: str`                                      | `List[Dict]` | List available backups.           |
 
-Health & Monitoring:
+</details>
 
-check_health() - Run health check once
-get_health_status() - Get current health status of all servers
+<details>
+<summary><strong>Secrets Management Methods</strong></summary>
 
-Server Management:
+| Method           | Args                                                             | Returns     | Description                                   |
+| ---------------- | ---------------------------------------------------------------- | ----------- | --------------------------------------------- |
+| `rotate_secrets` | `env: str`, `services: List[str]=None`, `auto_deploy: bool=True` | `bool`      | Rotate passwords (with optional auto-deploy). |
+| `list_secrets`   | `env: str`                                                       | `List[str]` | List all secrets.                             |
 
-list_servers() - List servers (with filtering by env/zone/status)
-destroy_server() - Destroy specific server
-get_deployment_state() - Get current deployment state
-get_deployment_history() - Get deployment history
+</details>
+
+<details>
+<summary><strong>Health & Monitoring Methods</strong></summary>
+
+| Method              | Args            | Returns | Description                               |
+| ------------------- | --------------- | ------- | ----------------------------------------- |
+| `check_health`      | `env: str=None` | `Dict`  | Run health check once.                    |
+| `get_health_status` | `env: str=None` | `Dict`  | Get current health status of all servers. |
+
+</details>
+
+<details>
+<summary><strong>Server Management Methods</strong></summary>
+
+| Method                   | Args                                                  | Returns      | Description                    |
+| ------------------------ | ----------------------------------------------------- | ------------ | ------------------------------ |
+| `list_servers`           | `env: str=None`, `zone: str=None`, `status: str=None` | `List[Dict]` | List servers (with filtering). |
+| `destroy_server`         | `server_ip: str`                                      | `bool`       | Destroy specific server.       |
+| `get_deployment_state`   | `env: str`, `service: str`                            | `Dict`       | Get current deployment state.  |
+| `get_deployment_history` | `env: str`, `service: str`, `limit: int=10`           | `List[Dict]` | Get deployment history.        |
+
+</details>
 
 ---
+
+### class `ResourceResolver`
+
+Service discovery and connection management (used within application code).
+
+<details>
+<summary><strong>Public Methods</strong></summary>
+
+| Method                           | Args                                                                                                     | Returns | Category          | Description                                                          |
+| -------------------------------- | -------------------------------------------------------------------------------------------------------- | ------- | ----------------- | -------------------------------------------------------------------- |
+| `get_service_host`               | `user: str`, `project: str`, `env: str`, `service: str`                                                  | `str`   | Service Discovery | Get hostname for service (returns "nginx" for service mesh routing). |
+| `get_service_port`               | `user: str`, `project: str`, `env: str`, `service: str`                                                  | `int`   | Service Discovery | Get internal port for service (stable, hash-based).                  |
+| `get_service_password`           | `user: str`, `project: str`, `env: str`, `service: str`                                                  | `str`   | Credentials       | Get service password from secrets.                                   |
+| `get_db_name`                    | `user: str`, `project: str`, `env: str`, `service: str`                                                  | `str`   | Database          | Get database name.                                                   |
+| `get_db_user`                    | `user: str`, `project: str`, `service: str`                                                              | `str`   | Database          | Get database user.                                                   |
+| `get_postgres_connection_string` | `user: str`, `project: str`, `env: str`, `service: str="postgres"`                                       | `str`   | Database          | Get complete PostgreSQL connection string.                           |
+| `get_redis_connection_string`    | `user: str`, `project: str`, `env: str`, `service: str="redis"`, `db: int=0`                             | `str`   | Database          | Get complete Redis connection string.                                |
+| `get_container_name`             | `user: str`, `project: str`, `env: str`, `service: str`                                                  | `str`   | Naming            | Get container name (includes user prefix).                           |
+| `get_image_name`                 | `docker_hub_user: str`, `user: str`, `project: str`, `env: str`, `service: str`, `version: str="latest"` | `str`   | Naming            | Get Docker image name.                                               |
+| `detect_target_os`               | `server_ip: str=None`, `user: str="root"`                                                                | `str`   | System            | Detect OS of target server ("windows" or "linux").                   |
+
+</details>
+
+---
+
+## Contributing
+
+Contributions are welcome! Please ensure:
+
+- User segregation is maintained in all new features
+- Temporary files use the isolated temp directory structure
+- Error logging includes detailed diagnostics
+- Health checks handle edge cases gracefully
+- Documentation is updated for user-visible changes
+
+---
+
+## License
+
+[Your License Here]
+
+---
+
+## Support
+
+For issues, questions, or feature requests:
+
+- GitHub Issues: [Your Repo]
+- Documentation: [Your Docs URL]
+- Email: [Support Email]
