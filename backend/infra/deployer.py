@@ -1240,7 +1240,7 @@ class Deployer:
             {"port": 8357, "name": "base_name"} or
             {"port": 18357, "name": "base_name_secondary"}
         """
-        existing = DockerExecuter.find_service_container(self.user, self.project_name, env, service, server_ip, self.user)
+        existing = DockerExecuter.find_service_container(self.user, self.project_name, env, service, server_ip)
         
         if not existing:
             # First deployment - use base
@@ -1297,49 +1297,49 @@ class Deployer:
 
 
     def _write_deployment_config(self, env: str):
-        """
-        Write deployment config to local directory for health monitor.
-        
-        Uses standard PathResolver to get config path, ensuring consistency
-        with rest of system. Config is synced to servers automatically via
-        DeploymentSyncer.push_directory() (no extra SSH needed).
-        
-        Args:
-            env: Environment name
-        """
-        try:
-            # Get local config path for "health_monitor" virtual service
-            # This uses the standard /local/{user}/{project}/{env}/config/health_monitor structure
-            config_dir = PathResolver.get_volume_host_path(
-                self.user,
-                self.project_name,
-                env,
-                "health_monitor",  # Virtual service for health monitor
-                "config",
-                "localhost" # goes to the bastion before being pushed
-            )
+            """
+            Write deployment config to local directory for health monitor.
             
-            config_file = Path(config_dir) / "deployment.json"
-            config_file.parent.mkdir(parents=True, exist_ok=True)
+            Uses centralized constants and PathResolver for proper path resolution.
+            Config is synced to servers automatically via DeploymentSyncer.push_directory().
             
-            # Build full config (same as before, but now using standard paths)
-            full_config = {
-                "project": {
-                    "name": self.project_name,
-                    "docker_hub_user": self.deployment_configurer.get_docker_hub_user(),
-                    "version": self._get_version(),
-                    "user": self.user
-                },
-                "env": env,
-                "services": self.deployment_configurer.get_services(env)
-            }
-            
-            config_file.write_text(json.dumps(full_config, indent=2), encoding='utf-8')
-            log(f"✓ Wrote deployment config: {config_file}")
-            
-        except Exception as e:
-            log(f"⚠️ Failed to write deployment config: {e}")
-            # Don't fail deployment - health monitor falls back to nginx configs
+            Args:
+                env: Environment name
+            """
+            try:
+                from .deployment_constants import DEPLOYMENT_CONFIG_SERVICE_NAME, DEPLOYMENT_CONFIG_FILENAME
+                
+                # Get local config path using centralized constants
+                config_dir = PathResolver.get_volume_host_path(
+                    self.user,
+                    self.project_name,
+                    env,
+                    DEPLOYMENT_CONFIG_SERVICE_NAME,  # From constants - no hardcoding!
+                    "config",
+                    "localhost"  # Goes to bastion before being pushed
+                )
+                
+                config_file = Path(config_dir) / DEPLOYMENT_CONFIG_FILENAME  # From constants!
+                config_file.parent.mkdir(parents=True, exist_ok=True)
+                
+                # Build full config
+                full_config = {
+                    "project": {
+                        "name": self.project_name,
+                        "docker_hub_user": self.deployment_configurer.get_docker_hub_user(),
+                        "version": self._get_version(),
+                        "user": self.user
+                    },
+                    "env": env,
+                    "services": self.deployment_configurer.get_services(env)
+                }
+                
+                config_file.write_text(json.dumps(full_config, indent=2), encoding='utf-8')
+                log(f"✓ Wrote deployment config: {config_file}")
+                
+            except Exception as e:
+                log(f"⚠️ Failed to write deployment config: {e}")
+                # Don't fail deployment - health monitor falls back to nginx configs
 
     def _generate_nginx_backends(
         self,
@@ -1716,7 +1716,7 @@ class Deployer:
                 # STEP 3: Get volumes (directories already created by _batch_prepare_servers)
                 volumes = PathResolver.generate_all_volume_mounts(
                     self.user, self.project_name, env, service_name, target_ip,
-                    use_docker_volumes=True, user=self.user,
+                    use_docker_volumes=True,
                     auto_create_dirs=False  # Already created in batch!
                 )
                 
@@ -2852,7 +2852,7 @@ class Deployer:
         
         # Get actual container name from first server
         container = DockerExecuter.find_service_container(
-            self.project_name, env, service, servers[0]
+            self.user, self.project_name, env, service, servers[0]
         )
         
         if not container:

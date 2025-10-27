@@ -1,4 +1,11 @@
-from typing import Dict
+# backend/infra/deployment_naming.py
+"""
+Centralized naming functions for all deployment artifacts.
+
+CRITICAL: This is the SINGLE source of truth for all naming conventions.
+If the naming pattern changes (e.g., adding org prefix), only update this file.
+"""
+from typing import Dict, Optional
 
 
 class DeploymentNaming:
@@ -52,6 +59,49 @@ class DeploymentNaming:
         """
         base_name = DeploymentNaming.get_container_name(user, project, env, service_name)
         return f"{base_name}*"
+
+    @staticmethod
+    def parse_container_name(container_name: str) -> Optional[Dict[str, str]]:
+        """
+        Parse container name to extract components.
+        
+        CRITICAL: This is the INVERSE of get_container_name().
+        If you change get_container_name() format, update this method too!
+        
+        Current format: {user}_{project}_{env}_{service}
+        Service may contain underscores (e.g., "cleanup_job").
+        
+        Args:
+            container_name: Container name (e.g., "u1_myapp_prod_api" or "u1_myapp_prod_cleanup_job")
+            
+        Returns:
+            Dict with keys: user, project, env, service
+            Or None if parsing fails
+            
+        Examples:
+            >>> DeploymentNaming.parse_container_name("u1_myapp_prod_api")
+            {"user": "u1", "project": "myapp", "env": "prod", "service": "api"}
+            
+            >>> DeploymentNaming.parse_container_name("u1_myapp_prod_cleanup_job")
+            {"user": "u1", "project": "myapp", "env": "prod", "service": "cleanup_job"}
+            
+            >>> DeploymentNaming.parse_container_name("invalid")
+            None
+        """
+        parts = container_name.split('_')
+        
+        # Minimum: user_project_env_service (4 parts)
+        if len(parts) < 4:
+            return None
+        
+        # Format: {user}_{project}_{env}_{service}
+        # Service is everything after the third underscore (may contain underscores)
+        return {
+            "user": parts[0],
+            "project": parts[1],
+            "env": parts[2],
+            "service": '_'.join(parts[3:])  # Join remaining parts for service name
+        }
 
     @staticmethod
     def get_image_name(
@@ -117,7 +167,7 @@ class DeploymentNaming:
 
     @staticmethod
     def get_all_names(
-        docker_hub_user: str, user:str, project: str, env: str,
+        docker_hub_user: str, user: str, project: str, env: str,
         service_name: str, version: str = "latest"
     ) -> Dict[str, str]:
         """Get all naming artifacts for a service in one call.

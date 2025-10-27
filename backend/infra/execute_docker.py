@@ -451,11 +451,11 @@ class DockerExecuter:
 
     @staticmethod
     def find_service_container(
+        user: str,
         project: str,
         env: str,
         service: str,
-        server_ip: str,
-        user: str = "root"
+        server_ip: str
     ) -> Optional[Dict[str, Any]]:
         """
         Find existing container for a service (primary or secondary).
@@ -463,17 +463,17 @@ class DockerExecuter:
         Used during toggle deployment to determine which container is currently running.
         
         Args:
+            user: user id ("u1")
             project: Project name
             env: Environment
             service: Service name
-            server_ip: Target server IP
-            user: SSH user
+            server_ip: Target server IP           
             
         Returns:
             {"name": "container_name", "port": 8357} or None if not found
             
         Examples:
-            find_service_container("myproj", "dev", "postgres", "localhost")
+            find_service_container("u1", "myproj", "dev", "postgres", "localhost")
             Returns: {"name": "myproj_dev_postgres", "port": 8357}
             
             Or if secondary is running:
@@ -483,7 +483,7 @@ class DockerExecuter:
             Returns: None
         """       
         # Get base container name
-        base_name = DeploymentNaming.get_container_name(project, env, service)
+        base_name = DeploymentNaming.get_container_name(user, project, env, service)
         
         # Check for primary container
         if DockerExecuter.is_container_running(base_name, server_ip, user):
