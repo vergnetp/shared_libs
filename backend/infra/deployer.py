@@ -1461,12 +1461,12 @@ class Deployer:
             try:
                 # Determine mode FOR THIS SPECIFIC SERVER
                 mode = self._determine_backend_mode_for_service(
-                     env, service, deployed_servers, server_ip
+                    service, deployed_servers, server_ip
                 )
                 
                 # Generate backends FOR THIS SPECIFIC SERVER
                 backends = self._generate_nginx_backends(
-                    mode, self.project_name, env, service, deployed_servers, server_ip
+                    mode, env, service, deployed_servers, server_ip
                 )
                 
                 if not backends:
@@ -1858,23 +1858,32 @@ class Deployer:
         else:
             # TCP service - check if container is running
             log(f"[{server_ip}] TCP service - verifying container is running")
-            time.sleep(1)
-            
+            time.sleep(2)  # Give container time to fully start
+
             try:
+                # Use docker ps -a to catch all states
                 result = CommandExecuter.run_cmd(
-                    f"docker ps --filter 'name={container_name}' --format '{{{{.Status}}}}'",
+                    f"docker ps -a --filter 'name={container_name}' --format '{{{{.Status}}}}'",
                     server_ip, self.user
                 )
                 status = result.stdout.strip() if hasattr(result, 'stdout') else str(result).strip()
                 
-                if status and 'Up' in status:
-                    log(f"[{server_ip}] TCP service container running successfully")
-                    return True
-                else:
-                    log(f"[{server_ip}] Container not running - checking why...")
-                    # NEW: Get actual container logs to show the error
+                if not status:
+                    log(f"[{server_ip}] Container not found")
                     self._log_container_failure(container_name, server_ip)
                     return False
+                
+                status_lower = status.lower()
+                
+                # Check for good state
+                if 'up' in status_lower and 'restarting' not in status_lower:
+                    log(f"[{server_ip}] TCP service container running: {status}")
+                    return True
+                else:
+                    log(f"[{server_ip}] Container in bad state: {status}")
+                    self._log_container_failure(container_name, server_ip)
+                    return False
+                    
             except Exception as e:
                 log(f"[{server_ip}] Could not check container status: {e}")
                 return False
@@ -1882,51 +1891,117 @@ class Deployer:
     def _log_container_failure(self, container_name: str, server_ip: str, lines: int = 100):
         """
         Log container failure details including logs and inspect output.
-        IMPROVED: Get more lines and prioritize error messages.
-        
-        Args:
-            container_name: Name of the failed container
-            server_ip: Server IP where container is running
-            lines: Number of log lines to fetch (increased default to 100)
+        IMPROVED: Multiple log retrieval methods + intelligent filtering.
         """
         log(f"[{server_ip}] ═══════════════════════════════════════════════")
         log(f"[{server_ip}] Container '{container_name}' failure details:")
         log(f"[{server_ip}] ═══════════════════════════════════════════════")
         
         try:
-            # Get container state
-            inspect_cmd = f"docker inspect {container_name} --format '{{{{json .State}}}}'"
-            inspect_result = CommandExecuter.run_cmd(inspect_cmd, server_ip, self.user)
+            # Get container status
+            inspect_result = CommandExecuter.run_cmd(
+                f"docker inspect {container_name} --format '{{{{.State.Status}}}}' 2>/dev/null || echo 'not found'",
+                server_ip, self.user
+            )
+            status = inspect_result.stdout.strip() if hasattr(inspect_result, 'stdout') else str(inspect_result).strip()
+            log(f"[{server_ip}] Status: {status}")
             
-            if inspect_result:               
-                state_str = inspect_result.stdout.strip() if hasattr(inspect_result, 'stdout') else str(inspect_result).strip()
-                try:
-                    state = json.loads(state_str)
-                    log(f"[{server_ip}] Status: {state.get('Status', 'unknown')}")
-                    log(f"[{server_ip}] Exit Code: {state.get('ExitCode', 'unknown')}")
-                    if state.get('Error'):
-                        log(f"[{server_ip}] Error: {state.get('Error')}")
-                    if state.get('OOMKilled'):
-                        log(f"[{server_ip}] ⚠ Container was killed by OOM (Out of Memory)")
-                except:
-                    log(f"[{server_ip}] State: {state_str}")
-        except Exception as e:
-            log(f"[{server_ip}] Could not inspect container: {e}")
-        
-        try:
-            # Get container logs (fetch more lines to capture errors)
+            # Get exit code
+            exit_code_result = CommandExecuter.run_cmd(
+                f"docker inspect {container_name} --format '{{{{.State.ExitCode}}}}' 2>/dev/null || echo '-1'",
+                server_ip, self.user
+            )
+            exit_code = exit_code_result.stdout.strip() if hasattr(exit_code_result, 'stdout') else str(exit_code_result).strip()
+            log(f"[{server_ip}] Exit Code: {exit_code}")
+            
+            # Get error message from State.Error
+            error_result = CommandExecuter.run_cmd(
+                f"docker inspect {container_name} --format '{{{{.State.Error}}}}' 2>/dev/null || echo ''",
+                server_ip, self.user
+            )
+            error_msg = error_result.stdout.strip() if hasattr(error_result, 'stdout') else str(error_result).strip()
+            if error_msg:
+                log(f"[{server_ip}] Error: {error_msg}")
+            
             log(f"[{server_ip}] Container logs (last {lines} lines):")
             log(f"[{server_ip}] ───────────────────────────────────────────────")
             
-            logs_result = DockerExecuter.get_container_logs(container_name, lines=lines, server_ip=server_ip, user=self.user)
+            # Try multiple methods to get logs
+            logs_result = None
             
+            # METHOD 1: Standard docker logs
+            try:
+                result = CommandExecuter.run_cmd(
+                    f"docker logs --tail {lines} {container_name} 2>&1",
+                    server_ip, self.user
+                )
+                logs_result = result.stdout if hasattr(result, 'stdout') else str(result)
+            except:
+                pass
+            
+            # METHOD 2: With timestamps
+            if not logs_result or not logs_result.strip():
+                try:
+                    result = CommandExecuter.run_cmd(
+                        f"docker logs --timestamps --tail {lines} {container_name} 2>&1",
+                        server_ip, self.user
+                    )
+                    logs_result = result.stdout if hasattr(result, 'stdout') else str(result)
+                except:
+                    pass
+            
+            # METHOD 3: Direct log file access
+            if not logs_result or not logs_result.strip():
+                try:
+                    id_result = CommandExecuter.run_cmd(
+                        f"docker inspect {container_name} --format '{{{{.Id}}}}' 2>/dev/null",
+                        server_ip, self.user
+                    )
+                    container_id = id_result.stdout.strip() if hasattr(id_result, 'stdout') else ""
+                    
+                    if container_id and len(container_id) > 10:
+                        log_file = f"/var/lib/docker/containers/{container_id}/{container_id}-json.log"
+                        result = CommandExecuter.run_cmd(
+                            f"tail -n {lines} {log_file} 2>&1",
+                            server_ip, self.user
+                        )
+                        logs_result = result.stdout if hasattr(result, 'stdout') else str(result)
+                except:
+                    pass
+            
+            # METHOD 4: Check all containers with same name
+            if not logs_result or not logs_result.strip():
+                try:
+                    ps_result = CommandExecuter.run_cmd(
+                        f"docker ps -a --filter 'name={container_name}' --format '{{{{.ID}}}}' --no-trunc",
+                        server_ip, self.user
+                    )
+                    output = ps_result.stdout if hasattr(ps_result, 'stdout') else str(ps_result)
+                    container_ids = [cid.strip() for cid in output.strip().split('\n') if cid.strip()]
+                    
+                    for cid in container_ids:
+                        try:
+                            result = CommandExecuter.run_cmd(
+                                f"docker logs --tail {lines} {cid} 2>&1",
+                                server_ip, self.user
+                            )
+                            temp_logs = result.stdout if hasattr(result, 'stdout') else str(result)
+                            if temp_logs and temp_logs.strip():
+                                logs_result = temp_logs
+                                break
+                        except:
+                            continue
+                except:
+                    pass
+            
+            # Process logs with intelligent filtering
             if logs_result:
                 logs = logs_result.strip() if isinstance(logs_result, str) else str(logs_result).strip()
                 
                 # Split into lines for processing
                 all_lines = logs.split('\n')
                 
-                # IMPROVED: Define noise patterns (package installation)
+                # Define noise patterns (package installation, build output)
                 noise_patterns = [
                     'fetch https://dl-cdn.alpinelinux.org',
                     'fetch http://dl-cdn.alpinelinux.org',
@@ -1938,7 +2013,7 @@ class Deployer:
                     'packages'
                 ]
                 
-                # IMPROVED: Define error patterns (what we WANT to see)
+                # Define error patterns (what we WANT to see)
                 error_patterns = [
                     'Error',
                     'ERROR',
@@ -1961,7 +2036,8 @@ class Deployer:
                     'permission denied',
                     'cannot',
                     'fatal',
-                    'FATAL'
+                    'FATAL',
+                    'EXIT CODE:'
                 ]
                 
                 # Separate lines into categories
@@ -1979,7 +2055,7 @@ class Deployer:
                     else:
                         clean_lines.append(line)
                 
-                # IMPROVED: Show error lines first (most important)
+                # Show error lines first (most important)
                 if error_lines:
                     log(f"[{server_ip}] ⚠️  ERROR LINES DETECTED:")
                     for line in error_lines[-50:]:  # Last 50 error lines
@@ -1998,7 +2074,7 @@ class Deployer:
                     for line in all_lines[-30:]:
                         log(f"[{server_ip}] {line}")
             else:
-                log(f"[{server_ip}] No logs available")
+                log(f"[{server_ip}] No logs available from any method")
                 
         except Exception as e:
             log(f"[{server_ip}] Could not get container logs: {e}")
@@ -2603,17 +2679,17 @@ class Deployer:
                 # Pull image if remote
                 if server_ip != 'localhost':
                     log(f"Pulling image {image} to {server_ip}...")
-                    DockerExecuter.pull_image(image, server_ip, self.user)
+                    DockerExecuter.pull_image(image, server_ip)
                 
                 # Parallel directory and volume creation (like normal services)
                 with ThreadPoolExecutor(max_workers=2) as executor:
                     dir_future = executor.submit(
                         PathResolver.ensure_host_directories,
-                        self.user, self.project_name, env, service_name, server_ip, self.user
+                        self.user, self.project_name, env, service_name, server_ip
                     )
                     vol_future = executor.submit(
                         PathResolver.ensure_docker_volumes,
-                        self.user, self.project_name, env, service_name, server_ip, self.user
+                        self.user, self.project_name, env, service_name, server_ip
                     )
                     
                     # Wait for both to complete
@@ -3239,7 +3315,7 @@ class Deployer:
                 for server_ip in deployed_servers:
                     future = executor.submit(
                         self._install_backup_on_server,
-                        self.project_name, env, backup_service_name, backup_service_config,
+                        env, backup_service_name, backup_service_config,
                         parent_service_name, server_ip
                     )
                     futures[future] = server_ip
