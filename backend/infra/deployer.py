@@ -856,7 +856,7 @@ class Deployer:
 
 
 
-    def deploy(self, env: str = None, service_name: str = None, build: bool = True, target_version: str = None) -> bool:
+    def deploy(self, env: str = None, service_name: str = None, build: bool = True, target_version: str = None, credentials: dict = None) -> bool:
         """
         Deploy services with immutable infrastructure and parallel execution.
         
@@ -865,6 +865,10 @@ class Deployer:
             service_name: Specific service (None = all services)
             build: Whether to build images first
             target_version: Override version for rollback (None = use config version)
+            credentials: Credentials dictionary (optional)
+                Keys: registry_url, registry_username, registry_password, git_token,
+                  digitalocean_token, cloudflare_token, cloudflare_email,
+                  postgres_password, redis_password, opensearch_password
         
         Behavior:
         - deploy(env="dev")              → build dev + deploy dev
@@ -891,7 +895,8 @@ class Deployer:
             if is_remote:
                 log("Remote servers detected - images will be pushed to registry")
             
-            build_success = self.build_images(environment=env, push_to_registry=is_remote, service_name=service_name)
+            build_success = self.build_images(environment=env, push_to_registry=is_remote, 
+                                  service_name=service_name, credentials=credentials)
             Logger.end()
             
             if not build_success:
@@ -903,7 +908,7 @@ class Deployer:
         log(f'Deploying {self.project_name}, env: {env or "all"}, service: {service_name or "all"}')
         Logger.start()
 
-        self.pre_provision_servers(env, service_name)
+        self.pre_provision_servers(env, service_name, credentials=credentials)
 
         if env:
             self._write_deployment_config(env)
@@ -913,7 +918,7 @@ class Deployer:
         
         for environment in environments:
             # Get all servers that will receive deployments
-            all_servers = ServerInventory.list_all_servers()
+            all_servers = ServerInventory.list_all_servers(credentials=credentials)
             
             # Filter to servers in zones used by this environment
             target_ips = []
@@ -953,7 +958,7 @@ class Deployer:
             zone = svc_config.get("server_zone", "lon1")
             if zone != "localhost":
                 servers_count = svc_config.get("servers_count", 1)
-                all_servers = ServerInventory.list_all_servers()
+                all_servers = ServerInventory.list_all_servers(credentials=credentials)
                 zone_servers = [s['ip'] for s in all_servers if s['zone'] == zone]
                 all_target_servers.update(zone_servers[:servers_count])
         
@@ -1037,7 +1042,7 @@ class Deployer:
                     for svc_name, config in service_group:
                         future = executor.submit(
                             self._deploy_single_service,
-                            env or 'dev', svc_name, config
+                            env or 'dev', svc_name, config, credentials
                         )
                         service_futures[future] = svc_name
                     
@@ -1062,7 +1067,7 @@ class Deployer:
         
         # Cleanup empty servers
         log("Performing server cleanup...")
-        self._cleanup_empty_servers(env=env or 'dev')
+        self._cleanup_empty_servers(env=env or 'dev', credentials=credentials)
         
         # Check for nginx automation
         log("Checking for nginx automation...")
@@ -1619,7 +1624,8 @@ class Deployer:
         self,       
         env: str,
         svc_name: str,
-        config: Dict[str, Any]
+        config: Dict[str, Any],
+        credentials: dict = None
     ) -> Dict[str, Any]:
         """
         Deploy a single service (called in parallel with other services of same startup_order).
@@ -1668,7 +1674,7 @@ class Deployer:
                 result['success'] = True
                 
             else:
-                success = self._deploy_immutable(env, svc_name, config)
+                success = self._deploy_immutable(env, svc_name, config, credentials)
                 
                 if success:
                     result['success'] = True
@@ -2131,7 +2137,7 @@ class Deployer:
         
         log(f"[{server_ip}] ═══════════════════════════════════════════════")
 
-    def _cleanup_empty_servers(self, env: str):
+    def _cleanup_empty_servers(self, env: str, credentials: dict = None):
             """
             Find servers with no services deployed and destroy/release them.
             
@@ -2145,7 +2151,7 @@ class Deployer:
             Args:                
                 env: Environment name
             """       
-            all_servers = ServerInventory.list_all_servers()
+            all_servers = ServerInventory.list_all_servers(credentials=credentials)
             container_pattern = f"{self.project_name}_{env}_"
             
             empty_servers = []
@@ -2211,25 +2217,26 @@ class Deployer:
                 
                 if destroy_empty:
                     log(f"Destroying {len(empty_servers)} empty servers: {empty_servers}")
-                    ServerInventory.release_servers(empty_servers, destroy=True)
+                    ServerInventory.release_servers(empty_servers, destroy=True, credentials=credentials)
                 else:
                     log(f"Returning {len(empty_servers)} empty servers to reserve pool: {empty_servers}")
-                    ServerInventory.release_servers(empty_servers, destroy=False)
+                    ServerInventory.release_servers(empty_servers, destroy=False, credentials=credentials)
             else:
                 log("No empty servers found")
 
-    def _get_servers_running_service(self, env: str, service_name: str) -> List[str]:
+    def _get_servers_running_service(self, env: str, service_name: str, credentials: Dict=None) -> List[str]:
         """
         Get list of server IPs that have containers for this service.
         
         Args:           
             env: Environment name
             service_name: Service name
+            credentials: Optional Dict of credentials
             
         Returns:
             List of server IPs that have containers for this service
         """
-        all_servers = ServerInventory.list_all_servers()
+        all_servers = ServerInventory.list_all_servers(credentials=credentials)
         servers_with_service = []
         
         container_pattern = f"{self.project_name}_{env}_{service_name}"
@@ -2318,7 +2325,8 @@ class Deployer:
                 self,                
                 env: str,
                 service_name: str,
-                service_config: Dict[str, Any]
+                service_config: Dict[str, Any],
+                credentials: dict = None
             ) -> bool:
                 """
                 Deploy with immutable infrastructure - MATCHES YOUR PLAN 100%.
@@ -2345,6 +2353,11 @@ class Deployer:
                 Returns:
                     True if deployment successful
                 """
+                # Apply client credentials for password provisioning if provided
+                if credentials:
+                    log(f"[{service_name}] Applying client credentials...")
+                    self.deployment_configurer.rebuild_config(credentials)
+
                 log(f"Immutable deployment for {service_name}")
                 Logger.start()
                 
@@ -2429,7 +2442,8 @@ class Deployer:
                             count=needed,
                             zone=zone,
                             cpu=cpu,
-                            memory=memory
+                            memory=memory,
+                            credentials=credentials
                         )
                         log(f"Created {len(new_ips)} new servers: {new_ips}")
                     except Exception as e:
@@ -2537,7 +2551,7 @@ class Deployer:
                     # Release newly created servers back to pool
                     if new_ips:
                         log(f"Releasing {len(new_ips)} newly created servers back to pool")
-                        ServerInventory.release_servers(new_ips, destroy=False)
+                        ServerInventory.release_servers(new_ips, destroy=False, credentials=credentials)
                     
                     Logger.end()
                     return False
@@ -3034,7 +3048,7 @@ class Deployer:
             # New is secondary, old is base
             return base_name
         
-    def pre_provision_servers(self, env: str, service_name: str = None) -> Dict[str, List[str]]:
+    def pre_provision_servers(self, env: str, service_name: str = None, credentials: Dict=None) -> Dict[str, List[str]]:
         """
         Pre-provision all servers needed for deployment based on service requirements.
         
@@ -3044,6 +3058,7 @@ class Deployer:
         Args:
             env: Environment to provision for
             service_name: Optional specific service, otherwise all services
+            credentials: Optional Dict of secrets
             
         Returns:
             Dictionary mapping "cpu_memory_zone" -> list of provisioned server IPs
@@ -3170,7 +3185,8 @@ class Deployer:
                             ServerInventory.TAG_PREFIX, 
                             f"zone:{task['zone']}", 
                             f"status:{ServerInventory.STATUS_RESERVE}"
-                        ]
+                        ],
+                        credentials=credentials
                     )
                     futures[future] = task
                 

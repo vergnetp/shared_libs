@@ -525,7 +525,7 @@ class HealthMonitor:
         }
 
     @staticmethod
-    def replace_server_sequential(failed_server: Dict[str, Any]) -> bool:
+    def replace_server_sequential(failed_server: Dict[str, Any], credentials: Dict=None) -> bool:
         """
         Replace a failed server using health agent (no SSH needed).
         
@@ -564,7 +564,8 @@ class HealthMonitor:
                     region=failed_server['zone'],
                     cpu=failed_server['cpu'],
                     memory=failed_server['memory'],
-                    tags=["deployer", f"replacement_for:{failed_server['ip']}"]
+                    tags=["deployer", f"replacement_for:{failed_server['ip']}"],
+                    credentials=credentials
                 )
                 
                 if not new_droplets:
@@ -601,8 +602,8 @@ class HealthMonitor:
                 
                 if not agent_ready:
                     log(f"Health agent not responding on {new_server['ip']}")
-                    DOManager.destroy_droplet(new_server['droplet_id'])
-                    ServerInventory.release_servers([new_server['ip']], destroy=False)
+                    DOManager.destroy_droplet(new_server['droplet_id'], credentials=credentials)
+                    ServerInventory.release_servers([new_server['ip']], destroy=False, credentials=credentials)
                     continue
                 
                 # STEP 3: Push config/secrets to new server via agent
@@ -619,8 +620,8 @@ class HealthMonitor:
                         env
                     ):
                         log("Failed to push files to new server")
-                        DOManager.destroy_droplet(new_server['droplet_id'])
-                        ServerInventory.release_servers([new_server['ip']], destroy=False)
+                        DOManager.destroy_droplet(new_server['droplet_id'], credentials=credentials)
+                        ServerInventory.release_servers([new_server['ip']], destroy=False, credentials=credentials)
                         continue
                     
                     log("✓ Files pushed successfully")
@@ -688,8 +689,8 @@ class HealthMonitor:
                     
                     if not deployment_success:
                         log("Deployment failed")
-                        DOManager.destroy_droplet(new_server['droplet_id'])
-                        ServerInventory.release_servers([new_server['ip']], destroy=False)
+                        DOManager.destroy_droplet(new_server['droplet_id'], credentials=credentials)
+                        ServerInventory.release_servers([new_server['ip']], destroy=False, credentials=credentials)
                         continue
                     
                     log("✓ All services deployed successfully")
@@ -704,7 +705,7 @@ class HealthMonitor:
                         log(f"✓ Replacement {new_server['ip']} is healthy")
                         
                         # STEP 6: Promote to green (active)
-                        ServerInventory.update_server_status([new_server['ip']], ServerInventory.STATUS_ACTIVE)
+                        ServerInventory.update_server_status([new_server['ip']], ServerInventory.STATUS_ACTIVE, credentials=credentials)
                         
                         # Update deployment state
                         DeploymentStateManager.remove_server_from_all_services(failed_server['ip'])
@@ -719,8 +720,8 @@ class HealthMonitor:
                         
                         # STEP 7: Destroy failed server
                         log(f"Destroying failed server {failed_server['ip']}...")
-                        DOManager.destroy_droplet(failed_server['droplet_id'])
-                        ServerInventory.release_servers([failed_server['ip']], destroy=False)
+                        DOManager.destroy_droplet(failed_server['droplet_id'], credentials=credentials)
+                        ServerInventory.release_servers([failed_server['ip']], destroy=False, credentials=credentials)
                         
                         HealthMonitor.record_replacement_attempt(
                             failed_server['ip'],
@@ -746,8 +747,8 @@ class HealthMonitor:
                 
                 # Unhealthy - destroy and retry
                 log("Replacement unhealthy, destroying and retrying...")
-                DOManager.destroy_droplet(new_server['droplet_id'])
-                ServerInventory.release_servers([new_server['ip']], destroy=False)
+                DOManager.destroy_droplet(new_server['droplet_id'], credentials=credentials)
+                ServerInventory.release_servers([new_server['ip']], destroy=False, credentials=credentials)
                 
                 if attempt == HealthMonitor.MAX_REPLACEMENT_ATTEMPTS:
                     HealthMonitor.record_replacement_attempt(

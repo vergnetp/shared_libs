@@ -75,13 +75,14 @@ class UnifiedDeployer:
     # PUBLIC API - Simple interface
     # =========================================================================
     
-    def build(self, env: str = None, push: bool = True) -> bool:
+    def build(self, env: str = None, push: bool = True, credentials: dict = None) -> bool:
         """
         Build Docker images for all services.
         
         Args:
             env: Environment to build (default: all environments)
             push: Push images to registry (required for multi-zone)
+            credentials: Credentials dictionary (optional)
             
         Returns:
             True if build successful
@@ -92,7 +93,8 @@ class UnifiedDeployer:
         log(f"Building images for {self.project}/{env or 'all'}")
         Logger.start()        
         
-        success = self.deployer.build_images(environment=env, push_to_registry=push)
+        success = self.deployer.build_images(environment=env, push_to_registry=push,
+                                    credentials=credentials)
         
         Logger.end()
         status = "✓ Build complete" if success else "✗ Build failed"
@@ -106,7 +108,8 @@ class UnifiedDeployer:
         zones: List[str] = None,
         service: str = None,
         build: bool = True,
-        parallel: bool = True
+        parallel: bool = True,
+        credentials: dict = None
     ) -> Dict[str, bool]:
         """
         Deploy services - automatically handles single-zone or multi-zone.
@@ -122,6 +125,7 @@ class UnifiedDeployer:
             service: Deploy specific service only (optional, all otherwise)
             build: Whether to build images before deploying. Default to True.
             parallel: Whether to deploy zones in parallel (faster, default) or sequentially (safer)
+            credentials: Credentials dictionary (optional)
             
         Returns:
             Dict mapping zone -> success/failure
@@ -156,12 +160,12 @@ class UnifiedDeployer:
         if is_multi_zone:
             log(f"Multi-zone deployment: {target_zones}")
             results = self._deploy_multi_zone(
-                env, target_zones, service, build, parallel
+                env, target_zones, service, build, parallel, credentials
             )
         else:
             log(f"Single-zone deployment: {target_zones[0]}")
             results = self._deploy_single_zone(
-                env, target_zones[0], service, build
+                env, target_zones[0], service, build, credentials
             )
         
         # Summary
@@ -170,12 +174,13 @@ class UnifiedDeployer:
         Logger.end()
         return results
     
-    def status(self, env: str = None) -> Dict[str, Any]:
+    def status(self, env: str = None, credentials: Dict=None) -> Dict[str, Any]:
         """
         Get deployment status across all zones.
         
         Args:
             env: Filter by environment (optional)
+            credentials: Optional dict of credentials
             
         Returns:
             Dict with zone-level status information
@@ -188,7 +193,7 @@ class UnifiedDeployer:
         Logger.start()
         
         ServerInventory.sync_with_digitalocean()
-        servers = ServerInventory.list_all_servers()
+        servers = ServerInventory.list_all_servers(credentials=credentials)
         
         zone_summary = {}
         for server in servers:
@@ -256,14 +261,16 @@ class UnifiedDeployer:
         env: str,
         zone: str,
         service: str,
-        build: bool
+        build: bool,
+        credentials: dict = None
     ) -> Dict[str, bool]:
         """Deploy to a single zone using standard Deployer"""       
         
         success = self.deployer.deploy(
             env=env,
             service_name=service,
-            build=build
+            build=build,
+            credentials=credentials
         )
         
         return {zone: success}
@@ -274,12 +281,16 @@ class UnifiedDeployer:
         zones: List[str],
         service: str,
         build: bool,
-        parallel: bool
+        parallel: bool,
+        credentials: dict = None
     ) -> Dict[str, bool]:
         """Deploy to multiple zones"""
         
         # Check if Cloudflare LB is available
-        cloudflare_api_token = os.getenv("CLOUDFLARE_API_TOKEN")
+        if credentials:
+            cloudflare_api_token = credentials.get('cloudflare_token') or os.getenv("CLOUDFLARE_API_TOKEN")            
+        else:
+            cloudflare_api_token = os.getenv("CLOUDFLARE_API_TOKEN")
         
         if not cloudflare_api_token:
             log("WARNING: Multi-zone deployment without CLOUDFLARE_API_TOKEN")
@@ -301,9 +312,9 @@ class UnifiedDeployer:
         
         # Deploy to each zone
         if parallel:
-            results = self._deploy_parallel(env, zones, service)
+            results = self._deploy_parallel(env, zones, service, credentials)
         else:
-            results = self._deploy_sequential(env, zones, service)
+            results = self._deploy_sequential(env, zones, service, credentials)
         
         # Setup global load balancing if multi-zone
         if len(zones) > 1 and cloudflare_api_token:
@@ -315,7 +326,8 @@ class UnifiedDeployer:
         self,
         env: str,
         zones: List[str],
-        service: Optional[str]
+        service: Optional[str],
+        credentials: dict = None
     ) -> Dict[str, bool]:
         """Deploy to zones in parallel"""
         log(f"Deploying to {len(zones)} zones in parallel...")
@@ -326,7 +338,7 @@ class UnifiedDeployer:
             futures = {
                 executor.submit(
                     self._deploy_to_zone,
-                    env, zone, service
+                    env, zone, service, credentials
                 ): zone
                 for zone in zones
             }
@@ -348,7 +360,8 @@ class UnifiedDeployer:
         self,
         env: str,
         zones: List[str],
-        service: Optional[str]
+        service: Optional[str],
+        credentials: dict = None
     ) -> Dict[str, bool]:
         """Deploy to zones sequentially"""
         log(f"Deploying to {len(zones)} zones sequentially...")
@@ -362,7 +375,7 @@ class UnifiedDeployer:
             Logger.start()
             
             try:
-                success = self._deploy_to_zone(env, zone, service)
+                success = self._deploy_to_zone(env, zone, service, credentials)
                 results[zone] = success
                 
                 status = "✓" if success else "✗"
@@ -380,7 +393,8 @@ class UnifiedDeployer:
         self,
         env: str,
         zone: str,
-        service: Optional[str]
+        service: Optional[str],
+        credentials: dict = None
     ) -> bool:
         """Deploy to a specific zone"""
         try:
@@ -398,7 +412,8 @@ class UnifiedDeployer:
                 success = self.deployer.deploy(
                     env=env,
                     service_name=svc_name,
-                    build=False  # Already built globally
+                    build=False,  # Already built globally
+                    credentials=credentials
                 )
                 
                 if not success:

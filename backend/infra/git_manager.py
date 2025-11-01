@@ -100,7 +100,11 @@ class GitManager:
             original_url = url  # Keep original for logging
             if url.startswith('https://'):
                 # Try provided token first, then fallback to environment variable
-                token = git_token or os.getenv('GIT_TOKEN')
+                # Git token fallback chain: service-specific → credentials → .env → None
+                token = None
+
+                if git_token is None:                
+                    token = os.getenv('GIT_TOKEN')
                 
                 if token:
                     # Support multiple Git platforms

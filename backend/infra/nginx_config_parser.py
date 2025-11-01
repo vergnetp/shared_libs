@@ -312,7 +312,8 @@ class NginxConfigParser:
     def get_backend_servers_for_service(
         project: str,
         env: str,
-        service: str
+        service: str,
+        credentials: Dict=None
     ) -> List[str]:
         """
         Get list of server IPs where a service is deployed by querying
@@ -324,11 +325,12 @@ class NginxConfigParser:
             project: Project name
             env: Environment name
             service: Service name
+            credentials: optional dict of credentials
             
         Returns:
             List of server IPs where this service has backends configured
         """       
-        all_servers = ServerInventory.list_all_servers()
+        all_servers = ServerInventory.list_all_servers(credentials=credentials)
         backend_servers = []
         
         for server in all_servers:

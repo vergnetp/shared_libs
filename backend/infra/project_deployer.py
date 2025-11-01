@@ -1381,7 +1381,8 @@ class ProjectDeployer:
         self, 
         env: str = None, 
         zone: str = None,
-        status: str = None
+        status: str = None,
+        credentials: Dict=None
     ) -> List[Dict[str, Any]]:
         """
         List servers with optional filtering.
@@ -1390,6 +1391,7 @@ class ProjectDeployer:
             env: Filter by environment (e.g., "prod")
             zone: Filter by zone (e.g., "lon1")
             status: Filter by status ("active", "blue", "destroying")
+            credentials: optional dict of credentials
             
         Returns:
             List of server dicts
@@ -1399,7 +1401,7 @@ class ProjectDeployer:
         if status:
             servers = ServerInventory.get_servers(deployment_status=status)
         else:
-            servers = ServerInventory.list_all_servers()
+            servers = ServerInventory.list_all_servers(credentials=credentials)
         
         # Filter by zone if specified
         if zone:
@@ -1421,18 +1423,19 @@ class ProjectDeployer:
         
         return servers
     
-    def destroy_server(self, server_ip: str) -> bool:
+    def destroy_server(self, server_ip: str, credentials: dict = None) -> bool:
         """
         Destroy a specific server.
         
         Args:
             server_ip: IP address of server to destroy
+            credentials: optional dict of credentials
             
         Returns:
-            True i successful
+            True if successful
         """        
         # Find server
-        servers = ServerInventory.list_all_servers()
+        servers = ServerInventory.list_all_servers(credentials=credentials)
         server = next((s for s in servers if s['ip'] == server_ip), None)
         
         if not server:
@@ -1440,10 +1443,10 @@ class ProjectDeployer:
             return False
         
         # Destroy via DO API
-        DOManager.destroy_droplet(server['droplet_id'])
+        DOManager.destroy_droplet(server['droplet_id'], credentials=credentials)
         
         # Release from inventory
-        ServerInventory.release_servers([server_ip], destroy=False)
+        ServerInventory.release_servers([server_ip], destroy=False, credentials=credentials)
         
         return True
     

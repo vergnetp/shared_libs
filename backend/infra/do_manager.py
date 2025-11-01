@@ -66,9 +66,9 @@ class DOManager:
     }
     
     @staticmethod
-    def _get_headers() -> Dict[str, str]:
+    def _get_headers(credentials: dict = None) -> Dict[str, str]:
         """Get API request headers with authorization"""
-        token = os.getenv("DIGITALOCEAN_API_TOKEN")
+        token = DOManager._get_do_token(credentials)
         if not token:
             raise ValueError("DIGITALOCEAN_API_TOKEN not found in environment")
         
@@ -78,10 +78,39 @@ class DOManager:
         }
     
     @staticmethod
-    def _api_request(method: str, endpoint: str, data: Dict = None) -> Dict:
+    def _get_do_token(credentials: dict = None) -> str:
+        """
+        Get DigitalOcean API token with fallback chain.
+        
+        Priority:
+        1. credentials dict (client-provided token)
+        2. .env DIGITALOCEAN_API_TOKEN (your default token)
+        
+        Args:
+            credentials: Credentials dictionary (optional)
+        
+        Returns:
+            DigitalOcean API token
+        
+        Raises:
+            ValueError: If token not found
+        """
+        # Priority 1: Check credentials dict
+        if credentials and credentials.get('digitalocean_token'):
+            return credentials['digitalocean_token']
+        
+        # Priority 2: Check .env
+        token = os.getenv('DIGITALOCEAN_API_TOKEN')
+        if token:
+            return token
+        
+        raise ValueError("DigitalOcean API token not found in credentials or .env")
+
+    @staticmethod
+    def _api_request(method: str, endpoint: str, data: Dict = None, credentials: dict = None) -> Dict:
         """Make API request to DigitalOcean"""
         url = f"{DOManager.API_BASE}{endpoint}"
-        headers = DOManager._get_headers()
+        headers = DOManager._get_headers(credentials)
         
         try:
             if method == "GET":
@@ -112,15 +141,15 @@ class DOManager:
     # ========================================
     
     @staticmethod
-    def list_snapshots() -> List[Dict[str, Any]]:
+    def list_snapshots(credentials: dict = None) -> List[Dict[str, Any]]:
         """List all snapshots"""
-        response = DOManager._api_request("GET", "/snapshots?resource_type=droplet")
+        response = DOManager._api_request("GET", "/snapshots?resource_type=droplet", credentials=credentials)
         return response.get('snapshots', [])
     
     @staticmethod
-    def find_template_snapshot() -> Optional[str]:
+    def find_template_snapshot(credentials: dict = None) -> Optional[str]:
         """Find existing template snapshot by name prefix"""
-        snapshots = DOManager.list_snapshots()
+        snapshots = DOManager.list_snapshots(credentials=credentials)
         
         for snapshot in snapshots:
             if snapshot['name'].startswith(DOManager.TEMPLATE_SNAPSHOT_PREFIX):
@@ -130,13 +159,14 @@ class DOManager:
         return None
     
     @staticmethod
-    def create_snapshot_from_droplet(droplet_id: str, snapshot_name: str = None) -> Optional[str]:
+    def create_snapshot_from_droplet(droplet_id: str, snapshot_name: str = None, credentials: dict = None) -> Optional[str]:
         """
         Create a snapshot from a droplet.
         
         Args:
             droplet_id: Droplet to snapshot
             snapshot_name: Optional custom name
+            credentials: optional dict 
             
         Returns:
             Snapshot ID or None if failed
@@ -153,7 +183,7 @@ class DOManager:
             log(f"Powering off droplet {droplet_id}...")
             response = DOManager._api_request("POST", f"/droplets/{droplet_id}/actions", {
                 "type": "power_off"
-            })
+            }, credentials=credentials)
             action_id = response['action']['id']
             
             # Wait for power off
@@ -164,14 +194,14 @@ class DOManager:
             response = DOManager._api_request("POST", f"/droplets/{droplet_id}/actions", {
                 "type": "snapshot",
                 "name": snapshot_name
-            })
+            }, credentials=credentials)
             action_id = response['action']['id']
             
             # Wait for snapshot completion
             DOManager._wait_for_action(action_id, timeout=600)
             
             # Get snapshot ID from droplet's snapshots
-            response = DOManager._api_request("GET", f"/droplets/{droplet_id}/snapshots")
+            response = DOManager._api_request("GET", f"/droplets/{droplet_id}/snapshots", credentials=credentials)
             snapshots = response.get('snapshots', [])
             
             if not snapshots:
@@ -193,13 +223,13 @@ class DOManager:
             return None
     
     @staticmethod
-    def _wait_for_action(action_id: str, timeout: int = 300) -> bool:
+    def _wait_for_action(action_id: str, timeout: int = 300, credentials: dict = None) -> bool:
         """Wait for a DigitalOcean action to complete"""
         start_time = time.time()
         
         while time.time() - start_time < timeout:
             try:
-                response = DOManager._api_request("GET", f"/actions/{action_id}")
+                response = DOManager._api_request("GET", f"/actions/{action_id}", credentials=credentials)
                 status = response['action']['status']
                 
                 if status == "completed":
@@ -217,11 +247,11 @@ class DOManager:
         return False
     
     @staticmethod
-    def delete_snapshot(snapshot_id: str) -> bool:
+    def delete_snapshot(snapshot_id: str, credentials: dict = None) -> bool:
         """Delete a snapshot"""
         try:
             log(f"Deleting snapshot {snapshot_id}")
-            DOManager._api_request("DELETE", f"/snapshots/{snapshot_id}")
+            DOManager._api_request("DELETE", f"/snapshots/{snapshot_id}", credentials=credentials)
             log(f"Snapshot {snapshot_id} deleted")
             return True
         except Exception as e:
@@ -270,13 +300,13 @@ class DOManager:
         log("Image pre-baking complete")
 
     @staticmethod
-    def get_or_create_template(region: str = "lon1") -> str:
+    def get_or_create_template(region: str = "lon1", credentials: dict = None) -> str:
         """
         Get existing template snapshot or create a new one.
         """
         with DOManager._template_lock:
             # Check if we already have a snapshot
-            snapshot_id = DOManager.find_template_snapshot()
+            snapshot_id = DOManager.find_template_snapshot(credentials=credentials)
             if snapshot_id:
                 log(f"Using existing template snapshot: {snapshot_id}")
                 return snapshot_id
@@ -290,7 +320,8 @@ class DOManager:
                 cpu=1,
                 memory=1024,
                 tags=[DOManager.TEMPLATE_TAG],
-                use_base_os=True
+                use_base_os=True,
+                credentials=credentials
             )
             
             if not template_id:
@@ -298,8 +329,8 @@ class DOManager:
                 return DOManager.DROPLET_OS
             
             # Wait for droplet to be ready
-            DOManager.wait_for_droplet_active(template_id)
-            info = DOManager.get_droplet_info(template_id)
+            DOManager.wait_for_droplet_active(template_id, credentials=credentials)
+            info = DOManager.get_droplet_info(template_id, credentials=credentials)
             ip = info['ip']
             
             # Wait for SSH
@@ -322,22 +353,22 @@ class DOManager:
             log(f"Template droplet {template_id} fully provisioned")
             
             # Create snapshot
-            snapshot_id = DOManager.create_snapshot_from_droplet(template_id)
+            snapshot_id = DOManager.create_snapshot_from_droplet(template_id, credentials=credentials)
             
             if not snapshot_id:
                 log("Failed to create snapshot from template")
-                DOManager.destroy_droplet(template_id)
+                DOManager.destroy_droplet(template_id, credentials=credentials)
                 return DOManager.DROPLET_OS
             
             # Destroy template droplet (save $6/month)
             log(f"Destroying template droplet {template_id}")
-            DOManager.destroy_droplet(template_id)
+            DOManager.destroy_droplet(template_id, credentials=credentials)
             
             log(f"Template snapshot ready: {snapshot_id}")
             return snapshot_id
 
     @staticmethod
-    def delete_template():
+    def delete_template(credentials: dict = None):
         """
         Delete template snapshot and any template droplets.
         Use this when you want to rebuild the template from scratch.
@@ -346,15 +377,15 @@ class DOManager:
             log("Deleting template resources...")
             
             # Delete template droplets
-            droplets = DOManager.list_droplets(tags=[DOManager.TEMPLATE_TAG])
+            droplets = DOManager.list_droplets(tags=[DOManager.TEMPLATE_TAG], credentials=credentials)
             for droplet in droplets:
-                DOManager.destroy_droplet(droplet['droplet_id'])
+                DOManager.destroy_droplet(droplet['droplet_id'], credentials=credentials)
             
             # Delete template snapshots
             snapshots = DOManager.list_snapshots()
             for snapshot in snapshots:
                 if snapshot['name'].startswith(DOManager.TEMPLATE_SNAPSHOT_PREFIX):
-                    DOManager.delete_snapshot(str(snapshot['id']))
+                    DOManager.delete_snapshot(str(snapshot['id']), credentials=credentials)
             
             log("Template resources deleted")
 
@@ -363,7 +394,7 @@ class DOManager:
     # ========================================
     
     @staticmethod
-    def get_or_create_ssh_key() -> str:
+    def get_or_create_ssh_key(credentials: Dict=None) -> str:
         """Get or create SSH key for droplet access (thread-safe)"""
         with DOManager._ssh_key_lock:
             ssh_key_name = "deployer_key"
@@ -376,7 +407,7 @@ class DOManager:
             public_key = public_key_path.read_text().strip()
             
             # Check if key exists
-            response = DOManager._api_request("GET", "/account/keys")
+            response = DOManager._api_request("GET", "/account/keys", credentials=credentials)
             for key in response.get('ssh_keys', []):
                 if key['name'] == ssh_key_name:
                     log(f"Using existing SSH key: {ssh_key_name}")
@@ -391,14 +422,14 @@ class DOManager:
                 response = DOManager._api_request("POST", "/account/keys", {
                     "name": ssh_key_name,
                     "public_key": public_key
-                })
+                }, credentials=credentials)
                 log(f"Created new SSH key: {ssh_key_name}")
                 return str(response['ssh_key']['id'])
             except Exception as e:
                 # If creation fails, try to find it again (race condition)
                 if "422" in str(e) or "Unprocessable Entity" in str(e):
                     log("SSH key creation returned 422, checking if it exists now...")
-                    response = DOManager._api_request("GET", "/account/keys")
+                    response = DOManager._api_request("GET", "/account/keys", credentials=credentials)
                     for key in response.get('ssh_keys', []):
                         if key['name'] == ssh_key_name or key.get('public_key') == public_key:
                             log(f"Found SSH key after 422: {key['name']}")
@@ -438,15 +469,15 @@ class DOManager:
     # ========================================
     
     @staticmethod
-    def list_vpcs() -> List[Dict[str, Any]]:
+    def list_vpcs(credentials: Dict=None) -> List[Dict[str, Any]]:
         """List all VPCs in DO account"""
         if os.getenv("DIGITALOCEAN_API_TOKEN") is None:
             return []
-        response = DOManager._api_request("GET", "/vpcs")
+        response = DOManager._api_request("GET", "/vpcs", credentials=credentials)
         return response.get("vpcs", [])
     
     @staticmethod
-    def get_or_create_vpc(region: str, ip_range: str = "10.0.0.0/16") -> str:
+    def get_or_create_vpc(region: str, ip_range: str = "10.0.0.0/16", credentials:Dict=None) -> str:
         """Thread-safe VPC creation"""
         vpc_name = f"deployer-vpc-{region}"
         
@@ -466,7 +497,7 @@ class DOManager:
                 "name": vpc_name,
                 "region": region,
                 "ip_range": ip_range
-            })
+            }, credentials=credentials)
             
             vpc_id = response['vpc']['id']
             log(f"VPC created successfully (ID: {vpc_id})")
@@ -483,7 +514,8 @@ class DOManager:
         cpu: int,
         memory: int,
         tags: List[str] = None,
-        use_base_os: bool = False
+        use_base_os: bool = False,
+        credentials: Dict=None
     ) -> Optional[str]:
         """
         Create a raw droplet via API (no provisioning).
@@ -493,8 +525,8 @@ class DOManager:
             use_base_os: If True, use base Ubuntu instead of template snapshot
         """
         # Get prerequisites
-        ssh_key_id = DOManager.get_or_create_ssh_key()
-        vpc_uuid = DOManager.get_or_create_vpc(region)
+        ssh_key_id = DOManager.get_or_create_ssh_key(credentials=credentials)
+        vpc_uuid = DOManager.get_or_create_vpc(region, credentials=credentials)
         size = DOManager.specs_to_size(cpu, memory)
         
         # Determine image to use
@@ -515,7 +547,7 @@ class DOManager:
         }
         
         log(f"Creating droplet '{name}' in {region} ({cpu} CPU, {memory}MB RAM)")
-        response = DOManager._api_request("POST", "/droplets", droplet_config)
+        response = DOManager._api_request("POST", "/droplets", droplet_config, credentials=credentials)
         
         droplet_id = str(response['droplet']['id'])
         log(f"Droplet creation initiated (ID: {droplet_id})")
@@ -528,7 +560,8 @@ class DOManager:
         region: str,
         cpu: int,
         memory: int,
-        tags: List[str] = None
+        tags: List[str] = None,
+        credentials: Dict=None
     ) -> str:
         """
         Create a single droplet and provision it completely.
@@ -546,29 +579,29 @@ class DOManager:
         Returns:
             droplet_id (str)
         """
-        droplet_id = DOManager._create_raw_droplet(name, region, cpu, memory, tags, use_base_os=True)
+        droplet_id = DOManager._create_raw_droplet(name, region, cpu, memory, tags, use_base_os=True, credentials=credentials)
         
         if not droplet_id:
             raise Exception("Failed to create droplet")
         
         # Wait for droplet to become active
-        DOManager.wait_for_droplet_active(droplet_id)
+        DOManager.wait_for_droplet_active(droplet_id, credentials=credentials)
         
         # Get droplet info (includes IP)
-        info = DOManager.get_droplet_info(droplet_id)
+        info = DOManager.get_droplet_info(droplet_id, credentials=credentials)
         ip = info['ip']
         
         # Wait for SSH
-        DOManager.wait_for_ssh_ready(ip)
+        DOManager.wait_for_ssh_ready(ip, credentials=credentials)
         
         # Install Docker
-        DOManager.install_docker(ip)
+        DOManager.install_docker(ip, credentials=credentials)
         
         # Install health monitor        
-        HealthMonitorInstaller.install_on_server(ip)
+        HealthMonitorInstaller.install_on_server(ip, credentials=credentials)
         
         # Install basic nginx
-        DOManager._install_basic_nginx(ip)
+        DOManager._install_basic_nginx(ip, credentials=credentials)
 
         log(f"Droplet {droplet_id} ({ip}) fully provisioned")
         
@@ -580,7 +613,8 @@ class DOManager:
         region: str,
         cpu: int,
         memory: int,
-        tags: List[str] = None
+        tags: List[str] = None,
+        credentials:Dict=None
     ) -> str:
         """
         Create a server from pre-baked template snapshot (FAST).
@@ -597,7 +631,7 @@ class DOManager:
             droplet_id (str)
         """
         # Ensure we have a template snapshot
-        snapshot_id = DOManager.get_or_create_template(region)
+        snapshot_id = DOManager.get_or_create_template(region, credentials=credentials)
         
         # Temporarily override DROPLET_OS to use snapshot
         original_os = DOManager.DROPLET_OS
@@ -605,16 +639,16 @@ class DOManager:
         
         try:
             # Create droplet from snapshot
-            droplet_id = DOManager._create_raw_droplet(name, region, cpu, memory, tags)
+            droplet_id = DOManager._create_raw_droplet(name, region, cpu, memory, tags, credentials=credentials)
             
             if not droplet_id:
                 raise Exception("Failed to create server")
             
             # Wait for droplet to become active
-            DOManager.wait_for_droplet_active(droplet_id)
+            DOManager.wait_for_droplet_active(droplet_id, credentials=credentials)
             
             # Get droplet info
-            info = DOManager.get_droplet_info(droplet_id)
+            info = DOManager.get_droplet_info(droplet_id, credentials=credentials)
             ip = info['ip']
             
             # Wait for SSH (much faster with snapshot!)
@@ -659,7 +693,8 @@ class DOManager:
         region: str,
         cpu: int,
         memory: int,
-        tags: List[str] = None
+        tags: List[str] = None,
+        credentials: Dict=None
     ) -> List[Dict[str, Any]]:
         """
         Create multiple servers in parallel using template snapshot.
@@ -680,7 +715,7 @@ class DOManager:
                 name = f"server-{region}-{int(time.time())}-{i}"
                 future = executor.submit(
                     DOManager.create_server,
-                    name, region, cpu, memory, tags
+                    name, region, cpu, memory, tags, credentials=credentials
                 )
                 futures.append(future)
             
@@ -696,7 +731,7 @@ class DOManager:
         # Gather all server info
         servers_info = []
         for droplet_id in droplet_ids:
-            info = DOManager.get_droplet_info(droplet_id)
+            info = DOManager.get_droplet_info(droplet_id, credentials=credentials)
             servers_info.append(info)
         
         Logger.end()
@@ -710,7 +745,8 @@ class DOManager:
         region: str,
         cpu: int,
         memory: int,
-        tags: List[str] = None
+        tags: List[str] = None,
+        credentials: Dict=None
     ) -> List[Dict[str, Any]]:
         """
         LEGACY: Create multiple droplets in parallel (slow, full provisioning).
@@ -732,7 +768,7 @@ class DOManager:
                 name = f"droplet-{region}-{int(time.time())}-{i}"
                 future = executor.submit(
                     DOManager.create_droplet,
-                    name, region, cpu, memory, tags
+                    name, region, cpu, memory, tags, credentials=credentials
                 )
                 futures.append(future)
             
@@ -748,7 +784,7 @@ class DOManager:
         # Gather all droplet info
         droplets_info = []
         for droplet_id in droplet_ids:
-            info = DOManager.get_droplet_info(droplet_id)
+            info = DOManager.get_droplet_info(droplet_id, credentials=credentials)
             droplets_info.append(info)
         
         Logger.end()
@@ -757,11 +793,11 @@ class DOManager:
         return droplets_info
     
     @staticmethod
-    def destroy_droplet(droplet_id: str) -> bool:
+    def destroy_droplet(droplet_id: str, credentials: Dict=None) -> bool:
         """Destroy a droplet"""
         try:
             log(f"Destroying droplet {droplet_id}")
-            DOManager._api_request("DELETE", f"/droplets/{droplet_id}")
+            DOManager._api_request("DELETE", f"/droplets/{droplet_id}", credentials=credentials)
             log(f"Droplet {droplet_id} destroyed")
             return True
         except Exception as e:
@@ -769,13 +805,13 @@ class DOManager:
             return False
     
     @staticmethod
-    def wait_for_droplet_active(droplet_id: str, timeout: int = 180) -> bool:
+    def wait_for_droplet_active(droplet_id: str, timeout: int = 180, credentials: Dict=None) -> bool:
         """Wait for droplet to reach 'active' status"""
         log(f"Waiting for droplet {droplet_id} to become active...")
         start_time = time.time()
         
         while time.time() - start_time < timeout:
-            info = DOManager.get_droplet_info(droplet_id)
+            info = DOManager.get_droplet_info(droplet_id, credentials=credentials)
             status = info['status']
             
             if status == 'active':
@@ -859,9 +895,9 @@ class DOManager:
     # ========================================
     
     @staticmethod
-    def get_droplet_info(droplet_id: str) -> Dict[str, Any]:
+    def get_droplet_info(droplet_id: str, credentials: Dict=None) -> Dict[str, Any]:
         """Get droplet details"""
-        response = DOManager._api_request("GET", f"/droplets/{droplet_id}")
+        response = DOManager._api_request("GET", f"/droplets/{droplet_id}", credentials=credentials)
         droplet = response['droplet']
         
         # Extract IPs
@@ -893,7 +929,7 @@ class DOManager:
         }
 
     @staticmethod
-    def list_droplets(tags: List[str] = None) -> List[Dict[str, Any]]:
+    def list_droplets(tags: List[str] = None, credentials: dict = None) -> List[Dict[str, Any]]:
         """List all droplets, optionally filtered by tags"""
         if os.getenv("DIGITALOCEAN_API_TOKEN") is None:
             return []
@@ -908,7 +944,7 @@ class DOManager:
             tag_query = "&".join([f"tag_name={tag}" for tag in tags])
             endpoint = f"/droplets?{tag_query}"
         
-        response = DOManager._api_request("GET", endpoint)
+        response = DOManager._api_request("GET", endpoint, credentials=credentials)
         droplets = response.get('droplets', [])
         
         # Double-check filtering
@@ -923,7 +959,7 @@ class DOManager:
         return [DOManager.get_droplet_info(str(d['id'])) for d in droplets]
 
     @staticmethod
-    def update_droplet_tags(droplet_id: int, add_tags: List[str] = None, remove_tags: List[str] = None):
+    def update_droplet_tags(droplet_id: int, add_tags: List[str] = None, remove_tags: List[str] = None, credentials: dict = None):
         """Update tags for a droplet using DigitalOcean's tag resource API"""
         try:
             droplet_id_str = str(droplet_id)
@@ -953,7 +989,7 @@ class DOManager:
                 for tag in add_tags:
                     try:
                         # Ensure tag exists
-                        DOManager._api_request("POST", "/tags", {"name": tag})
+                        DOManager._api_request("POST", "/tags", {"name": tag}, credentials=credentials)
                     except:
                         pass  # Tag might already exist
                     

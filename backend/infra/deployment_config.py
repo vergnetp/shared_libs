@@ -15,6 +15,13 @@ try:
     from .encryption import Encryption
 except ImportError:
     from encryption import Encryption
+try:
+    from .logger import Logger
+except ImportError:
+    from logger import Logger
+
+def log(msg):
+    Logger.log(msg)
 
 
 def replace_env(obj: Any, env: str) -> Any:
@@ -77,7 +84,7 @@ def prepare_raw_config(config):
     """Add volumes to base services and provision standard services"""
     pass
 
-def provision_standard_service(user: str, project: str, env: str, service: str, existing_config: Dict[str, Any]) -> Dict[str, Any]:
+def provision_standard_service(user: str, project: str, env: str, service: str, existing_config: Dict[str, Any], credentials: dict = None) -> Dict[str, Any]:
     """Auto-generate configuration for standard services, respecting existing config"""
        
     def merge_config(default_config: Dict[str, Any]) -> Dict[str, Any]:
@@ -106,9 +113,31 @@ def provision_standard_service(user: str, project: str, env: str, service: str, 
     Path(secrets_path).mkdir(parents=True, exist_ok=True)
     secret_filename = ResourceResolver._get_secret_filename(service)
     password_file = Path(secrets_path) / secret_filename    
-    if not password_file.exists():
-        password = Encryption.generate_password() 
-        password_file.write_text(password, encoding='utf-8')
+    
+    # Determine password with priority chain
+    password = None
+
+    # Priority 1: Check credentials dict for client-provided password
+    if credentials:
+        credential_key = f'{service}_password'
+        if credential_key in credentials and credentials[credential_key]:
+            password = credentials[credential_key]
+            log(f"✓ Using client-provided password for {service}")
+
+    # Priority 2: Check if password file already exists
+    if not password and password_file.exists():
+        password = password_file.read_text(encoding='utf-8').strip()
+
+    # Priority 3: Auto-generate password (default behavior)
+    if not password:
+        password = Encryption.generate_password()
+        log(f"✓ Auto-generated password for {service}")
+
+    # Always write password to file (creates or updates)
+    password_file.write_text(password, encoding='utf-8') 
+
+    # Always write password to file (creates or updates)
+    password_file.write_text(password, encoding='utf-8')
     container_secrets_path = ResourceResolver.get_volume_container_path(service, "secrets")
     
     if service == "postgres":
@@ -271,7 +300,7 @@ class DeploymentConfigurer:
         storage = ConfigStorage.get_instance()
         return storage.list_projects(user)
     
-    def rebuild_config(self):
+    def rebuild_config(self, credentials: dict = None):
         """
         Build derived config (self.config) from self.raw_config.
 
@@ -296,7 +325,7 @@ class DeploymentConfigurer:
                     if service_name in ["postgres", "redis", "opensearch", "nginx"]:
                         print(f"Auto-provisioning standard service: {service_name} for {env_name}")
                         provisioned_config = provision_standard_service(
-                            self.user, self.project_name, env_name, service_name, service_config
+                            self.user, self.project_name, env_name, service_name, service_config, credentials
                         )
                         merged_services[service_name] = provisioned_config
             

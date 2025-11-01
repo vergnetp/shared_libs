@@ -104,7 +104,8 @@ class LiveDeploymentQuery:
         user: str,
         project: str,
         env: str,
-        service: str
+        service: str,
+        credentials: Dict=None
     ) -> List[str]:
         """
         Find all servers that have containers running for a service.
@@ -116,11 +117,12 @@ class LiveDeploymentQuery:
             project: Project name
             env: Environment name
             service: Service name
+            credentials: optional dict of credentials
             
         Returns:
             List of server IPs where the service is running
         """
-        all_servers = ServerInventory.list_all_servers()
+        all_servers = ServerInventory.list_all_servers(credentials=credentials)
         servers_with_service = []
         
         # Use ResourceResolver for container naming pattern
