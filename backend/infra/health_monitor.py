@@ -207,7 +207,13 @@ class HealthMonitor:
                 unhealthy_servers.append(server)
                 continue
             
-            # Docker health check via agent
+            # CRITICAL FIX: Check and heal agent FIRST before any other agent-dependent checks
+            if not HealthMonitor.check_and_heal_agent(server_ip):
+                log(f"Server {server_ip} - agent unavailable after healing attempt")
+                unhealthy_servers.append(server)
+                continue
+            
+            # Docker health check via agent (agent now guaranteed to be responding)
             if not HealthMonitor.check_docker_healthy(server_ip):
                 log(f"Server {server_ip} failed Docker health check")
                 unhealthy_servers.append(server)
@@ -278,6 +284,13 @@ class HealthMonitor:
                     server_ip = server['ip']
                     missing_containers = server['missing_containers']
                     
+                    # CRITICAL FIX: Re-verify agent is still responding before restart attempts
+                    # (Agent could have gone down between STEP 4 and now)
+                    if not HealthMonitor.check_and_heal_agent(server_ip):
+                        log(f"Agent no longer responding on {server_ip}, escalating to server replacement")
+                        servers_completely_failed.append(server)
+                        continue
+                    
                     log(f"Server {server_ip} - attempting to restart {len(missing_containers)} containers")
                     
                     restart_success_count = 0
@@ -299,7 +312,7 @@ class HealthMonitor:
                             
                             HealthMonitor.send_alert(
                                 "Server Recovered",
-                                f"Server {server_ip} recovered by restarting containers:\n"
+                                f"Server {server_ip} recovered by restarting containers:\\n"
                                 f"Restarted: {', '.join(missing_containers)}"
                             )
                         else:
@@ -483,21 +496,17 @@ class HealthMonitor:
         """
         Check if Docker is healthy on server via agent.
         
-        UPDATED: Now includes agent self-healing.
+        NOTE: Caller must ensure agent is healthy before calling this method.
+        Agent health should be verified in STEP 4 via check_and_heal_agent().
         
         Args:
             server_ip: Target server IP
             
         Returns:
-            True if Docker is healthy (and agent is working)
+            True if Docker is healthy
         """
         try:
-            # NEW: First check/heal the agent itself
-            if not HealthMonitor.check_and_heal_agent(server_ip):
-                log(f"Agent unavailable on {server_ip} - cannot check Docker")
-                return False
-            
-            # Original check continues as before
+            # Agent health already verified by caller in STEP 4
             response = HealthMonitor.agent_request(
                 server_ip,
                 "GET",
