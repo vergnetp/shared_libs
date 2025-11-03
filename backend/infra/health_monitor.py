@@ -86,6 +86,7 @@ class HealthMonitor:
     MAX_REPLACEMENT_ATTEMPTS = 3  # Try 3 times before giving up
     MIN_HEALTHY_SERVERS = 1  # Never replace last healthy server
     REPLACEMENT_HISTORY_FILE = Path("config/replacement_history.json")
+    AGENT_RESTART_TIMEOUT = 10  # Seconds to wait for agent restart
     
     # Email alert configuration
     ALERT_EMAIL = None  # Set via environment variable ALERT_EMAIL
@@ -328,6 +329,114 @@ class HealthMonitor:
         # STEP 7: Leader handles auto-scaling (only if system is stable - no failures)
         coordinator.check_and_scale_all_services()
 
+
+
+    @staticmethod
+    def check_and_heal_agent(server_ip: str, user: str = "root") -> bool:
+        """
+        Check if health agent is running and try to restart if needed.
+        
+        This prevents false positives where the server is healthy but
+        only the health agent service is down.
+        
+        Args:
+            server_ip: Server to check
+            user: SSH user
+            
+        Returns:
+            True if agent is running (or was successfully restarted)
+        """
+        log(f"Checking health agent on {server_ip}...")
+        
+        try:
+            # 1. Try to ping agent
+            try:
+                response = HealthMonitor.agent_request(
+                    server_ip,
+                    "GET",
+                    "/ping",
+                    timeout=5
+                )
+                
+                if response.get('status') == 'alive':
+                    log(f"✓ Agent responding on {server_ip}")
+                    return True
+                    
+            except Exception as e:
+                log(f"Agent not responding on {server_ip}: {e}")
+            
+            # 2. Agent not responding - check if service exists
+            log(f"Checking if agent service exists on {server_ip}...")
+            
+            try:
+                from .execute_cmd import CommandExecuter
+            except ImportError:
+                from execute_cmd import CommandExecuter
+            
+            service_check = CommandExecuter.run_cmd(
+                "systemctl list-units --type=service | grep -q 'health-agent' && echo 'EXISTS' || echo 'MISSING'",
+                server_ip, user
+            )
+            
+            if 'MISSING' in str(service_check):
+                log(f"Health agent service not installed on {server_ip}")
+                return False
+            
+            # 3. Service exists - check its status
+            log(f"Checking agent service status on {server_ip}...")
+            
+            status_check = CommandExecuter.run_cmd(
+                "systemctl is-active health-agent || echo 'INACTIVE'",
+                server_ip, user
+            )
+            
+            if 'inactive' in str(status_check).lower() or 'failed' in str(status_check).lower():
+                log(f"Agent service is down on {server_ip}, attempting restart...")
+                
+                # 4. Try to restart service
+                try:
+                    CommandExecuter.run_cmd(
+                        "systemctl restart health-agent",
+                        server_ip, user
+                    )
+                    
+                    log(f"Waiting {HealthMonitor.AGENT_RESTART_TIMEOUT}s for agent to start...")
+                    time.sleep(HealthMonitor.AGENT_RESTART_TIMEOUT)
+                    
+                    # 5. Verify agent is now responding
+                    response = HealthMonitor.agent_request(
+                        server_ip,
+                        "GET",
+                        "/ping",
+                        timeout=5
+                    )
+                    
+                    if response.get('status') == 'alive':
+                        log(f"✓ Agent successfully restarted on {server_ip}")
+                        
+                        HealthMonitor.send_alert(
+                            "Health Agent Auto-Healed",
+                            f"Health agent on {server_ip} was down and has been automatically restarted.\n"
+                            f"Server is healthy - no replacement needed."
+                        )
+                        
+                        return True
+                    else:
+                        log(f"Agent restart failed - still not responding on {server_ip}")
+                        return False
+                        
+                except Exception as e:
+                    log(f"Failed to restart agent on {server_ip}: {e}")
+                    return False
+            else:
+                log(f"Agent service is running but not responding on {server_ip}")
+                return False
+                
+        except Exception as e:
+            log(f"Error checking agent on {server_ip}: {e}")
+            return False
+
+
     # ========================================
     # SERVER HEALTH CHECKS
     # ========================================
@@ -370,13 +479,36 @@ class HealthMonitor:
             return False
     
     @staticmethod
-    def check_docker_healthy(ip: str) -> bool:
-        """Check if Docker is running on server via health agent"""
+    def check_docker_healthy(server_ip: str) -> bool:
+        """
+        Check if Docker is healthy on server via agent.
+        
+        UPDATED: Now includes agent self-healing.
+        
+        Args:
+            server_ip: Target server IP
+            
+        Returns:
+            True if Docker is healthy (and agent is working)
+        """
         try:
-            response = HealthMonitor.agent_request(ip, "GET", "/health", timeout=5)
-            return response.get('docker_running', False)
+            # NEW: First check/heal the agent itself
+            if not HealthMonitor.check_and_heal_agent(server_ip):
+                log(f"Agent unavailable on {server_ip} - cannot check Docker")
+                return False
+            
+            # Original check continues as before
+            response = HealthMonitor.agent_request(
+                server_ip,
+                "GET",
+                "/docker/health",
+                timeout=10
+            )
+            
+            return response.get('status') == 'healthy'
+            
         except Exception as e:
-            log(f"Docker health check failed for {ip}: {e}")
+            log(f"Docker health check failed for {server_ip}: {e}")
             return False
     
     @staticmethod
@@ -433,20 +565,38 @@ class HealthMonitor:
 
     @staticmethod
     def is_server_healthy(server: Dict[str, Any]) -> bool:
-        """Check if server is healthy (ping + docker + containers)"""
-        ip = server['ip']
+        """
+        Check if a server is healthy.
         
-        if not HealthMonitor.ping_server(ip):
-            log(f"Server {ip} failed ping check")
+        UPDATED: Now includes agent healing before declaring unhealthy.
+        
+        Args:
+            server: Server dict with ip, zone, etc.
+            
+        Returns:
+            True if server passes all health checks
+        """
+        server_ip = server['ip']
+        
+        # 1. Ping check
+        if not HealthMonitor.ping_server(server_ip):
+            log(f"Server {server_ip} failed ping check")
             return False
         
-        if not HealthMonitor.check_docker_healthy(ip):
-            log(f"Server {ip} failed Docker check")
+        # 2. Agent check (with auto-healing)
+        if not HealthMonitor.check_and_heal_agent(server_ip):
+            log(f"Server {server_ip} - agent unavailable after healing attempt")
             return False
         
+        # 3. Docker health check
+        if not HealthMonitor.check_docker_healthy(server_ip):
+            log(f"Server {server_ip} failed Docker health check")
+            return False
+        
+        # 4. Container health check
         missing_containers = HealthMonitor.check_service_containers(server)
         if missing_containers:
-            log(f"Server {ip} missing {len(missing_containers)} containers")
+            log(f"Server {server_ip} missing containers: {missing_containers}")
             return False
         
         return True
@@ -747,7 +897,32 @@ class HealthMonitor:
                     
                     log("✓ All services deployed successfully")
                     
-                    # STEP 5: Final health check
+                    # STEP 5: Install health monitor on new server
+                    log(f"Installing health monitor on {new_server['ip']}...")
+                    
+                    try:
+                        # Import here to avoid circular dependency issues
+                        try:
+                            from .health_monitor_installer import HealthMonitorInstaller
+                        except ImportError:
+                            from health_monitor_installer import HealthMonitorInstaller
+                        
+                        monitor_installed = HealthMonitorInstaller.install_on_server(
+                            new_server['ip'],
+                            user='root'
+                        )
+                        
+                        if not monitor_installed:
+                            log(f"Warning: Health monitor installation failed on {new_server['ip']}")
+                            # Don't fail the replacement - monitor can be installed later manually
+                        else:
+                            log(f"✓ Health monitor installed on {new_server['ip']}")
+                    
+                    except Exception as e:
+                        log(f"Warning: Could not install health monitor: {e}")
+                        # Don't fail the replacement - monitor can be installed later manually
+                    
+                    # STEP 6: Final health check
                     time.sleep(10)  # Let everything stabilize
                     
                     if HealthMonitor.check_docker_healthy(new_server['ip']):
@@ -756,7 +931,7 @@ class HealthMonitor:
                         if not missing:
                             log(f"✓ Replacement {new_server['ip']} is healthy")
                             
-                            # STEP 6: Promote to ACTIVE
+                            # Promote to ACTIVE
                             ServerInventory.update_server_status([new_server['ip']], ServerInventory.STATUS_ACTIVE, credentials=credentials)
                             
                             # Update deployment state
@@ -847,7 +1022,7 @@ class HealthMonitor:
     # ========================================
     # UTILITIES
     # ========================================
-    
+
     @staticmethod
     def _check_my_certificates():
         """
