@@ -1012,3 +1012,123 @@ class DOManager:
                         
         except Exception as e:
             log(f"Failed to update tags for droplet {droplet_id}: {e}")
+
+    # -------------------------
+    #      LOCKS  
+    #--------------------------
+
+    @staticmethod
+    def acquire_infrastructure_lock(server_ip: str, credentials: dict = None) -> bool:
+        """
+        Acquire infrastructure modification lock by tagging the leader server.
+        
+        Prevents race conditions between healing and auto-scaling operations.
+        
+        Args:
+            server_ip: IP of leader server acquiring the lock
+            credentials: Optional credentials dict
+            
+        Returns:
+            True if lock acquired successfully
+        """
+        try:
+            timestamp = int(time.time())
+            lock_tag = f"infrastructure-modify-in-progress:{timestamp}"
+            
+            # Find the leader's droplet
+            droplets = DOManager.list_droplets(tags=["Infra"], credentials=credentials)
+            leader_droplet = None
+            for d in droplets:
+                if d['ip'] == server_ip:
+                    leader_droplet = d
+                    break
+            
+            if not leader_droplet:
+                log(f"Warning: Could not find droplet for leader {server_ip}")
+                return False
+            
+            # Tag the leader droplet with lock
+            DOManager.update_droplet_tags(
+                leader_droplet['droplet_id'],
+                add_tags=[lock_tag],
+                credentials=credentials
+            )
+            
+            log(f"✓ Infrastructure lock acquired by {server_ip}")
+            return True
+            
+        except Exception as e:
+            log(f"Failed to acquire infrastructure lock: {e}")
+            return False
+
+    @staticmethod
+    def is_infrastructure_locked(credentials: dict = None) -> bool:
+        """
+        Check if any infrastructure modification is in progress.
+        
+        Returns:
+            True if infrastructure is locked, False otherwise
+        """
+        try:
+            droplets = DOManager.list_droplets(tags=["Infra"], credentials=credentials)
+            
+            for droplet in droplets:
+                for tag in droplet.get('tags', []):
+                    if tag.startswith("infrastructure-modify-in-progress:"):
+                        # Found a lock - check if it's stale (>10 minutes)
+                        try:
+                            timestamp = int(tag.split(':')[1])
+                            age_seconds = int(time.time()) - timestamp
+                            if age_seconds > 600:  # 10 minutes
+                                log(f"Warning: Found stale lock (age: {age_seconds}s) on {droplet['ip']}")
+                                # Still return True - operator should investigate
+                        except:
+                            pass
+                        return True
+            
+            return False
+            
+        except Exception as e:
+            log(f"Error checking infrastructure lock: {e}")
+            return False
+
+    @staticmethod
+    def release_infrastructure_lock(server_ip: str, credentials: dict = None):
+        """
+        Release infrastructure modification lock from leader server.
+        
+        Args:
+            server_ip: IP of leader server releasing the lock
+            credentials: Optional credentials dict
+        """
+        try:
+            # Find the leader's droplet
+            droplets = DOManager.list_droplets(tags=["Infra"], credentials=credentials)
+            leader_droplet = None
+            for d in droplets:
+                if d['ip'] == server_ip:
+                    leader_droplet = d
+                    break
+            
+            if not leader_droplet:
+                log(f"Warning: Could not find droplet for leader {server_ip}")
+                return
+            
+            # Find and remove all lock tags
+            lock_tags = [
+                tag for tag in leader_droplet.get('tags', []) 
+                if tag.startswith("infrastructure-modify-in-progress:")
+            ]
+            
+            if lock_tags:
+                DOManager.update_droplet_tags(
+                    leader_droplet['droplet_id'],
+                    remove_tags=lock_tags,
+                    credentials=credentials
+                )
+                log(f"✓ Infrastructure lock released by {server_ip}")
+            
+        except Exception as e:
+            log(f"Failed to release infrastructure lock: {e}")
+
+

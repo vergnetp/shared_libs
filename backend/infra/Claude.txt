@@ -1,5 +1,11 @@
 ✅ Search the actual code FIRST before any instruction
-✅ Show you the search results I'm using
+✅ Show me the search results you're using
 ✅ Quote exact lines from your codebase
-✅ Verify my instructions match reality
+✅ Verify everything match reality
 ❌ NO assumptions, "or similar", generalizations
+constants need to go to deployment_constants
+paths need to be built in PathResolver
+Do not swear
+------------------
+
+

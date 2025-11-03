@@ -525,93 +525,157 @@ class HealthMonitor:
         }
 
     @staticmethod
-    def replace_server_sequential(failed_server: Dict[str, Any], credentials: Dict=None) -> bool:
+    def replace_server_sequential(failed_server: Dict[str, Any], user: str, credentials: Dict=None) -> bool:
         """
         Replace a failed server using health agent (no SSH needed).
         
-        Process:
-        1. Get services that were on the failed server
-        2. Create replacement with same specs (DO API)
-        3. Wait for it to become active
-        4. Push config/secrets via agent HTTP
-        5. Deploy services via agent HTTP
-        6. Health check via agent HTTP
-        7. If healthy: destroy old, update state
-        8. If unhealthy: destroy replacement, retry (max 3 attempts)
+        NEW: Uses shortfall detection to deploy all needed services, not just what failed.
+        NEW: Coordinates with auto-scaling via infrastructure lock.
         
+        Process:
+        1. Check and acquire infrastructure lock
+        2. Calculate what SHOULD be deployed (shortfall detection)
+        3. Create replacement with same specs (DO API)
+        4. Wait for it to become active
+        5. Push config/secrets via agent HTTP
+        6. Deploy services via agent HTTP
+        7. Health check via agent HTTP
+        8. If healthy: destroy old, update state
+        9. Release infrastructure lock
+        
+        Args:
+            failed_server: Server info dict with ip, zone, cpu, memory, droplet_id
+            user: User ID for this infrastructure
+            credentials: Optional credentials dict
+            
         Returns:
             True if replacement successful
         """        
         log(f"Replacing failed server {failed_server['ip']}")
         Logger.start()
         
-        # Get services that were on the failed server        
-        failed_services = LiveDeploymentQuery.get_services_on_server(failed_server['ip'])
-
-        if failed_services:
-            log(f"Server had {len(failed_services)} services: {[s['service'] for s in failed_services]}")
-        else:
-            log("Server had no services deployed")
+        # NEW: Check if infrastructure is already being modified
+        if DOManager.is_infrastructure_locked(credentials):
+            log("Infrastructure modification in progress (healing or auto-scaling), skipping replacement")
+            Logger.end()
+            return False
         
-        for attempt in range(1, HealthMonitor.MAX_REPLACEMENT_ATTEMPTS + 1):
-            log(f"Replacement attempt {attempt}/{HealthMonitor.MAX_REPLACEMENT_ATTEMPTS}")
+        # NEW: Acquire infrastructure lock
+        leader_ip = HealthMonitor.get_my_ip()
+        if not DOManager.acquire_infrastructure_lock(leader_ip, credentials):
+            log("Failed to acquire infrastructure lock")
+            Logger.end()
+            return False
+        
+        try:
+            # Get services that were on the failed server (for context)
+            failed_services = LiveDeploymentQuery.get_services_on_server(
+                server_ip=failed_server['ip'],
+                user=user
+            )
+
+            if not failed_services:
+                log("Server had no services deployed")
+                return True
             
-            try:
-                # STEP 1: Create replacement with same specs (DO API)
-                log("Creating replacement server via DigitalOcean API...")
-                new_droplets = DOManager.create_servers(
-                    count=1,
-                    region=failed_server['zone'],
-                    cpu=failed_server['cpu'],
-                    memory=failed_server['memory'],
-                    tags=["deployer", f"replacement_for:{failed_server['ip']}"],
-                    credentials=credentials
+            log(f"Server had {len(failed_services)} services: {[s['service'] for s in failed_services]}")
+            
+            # Get project/env from first service
+            project = failed_services[0]['project']
+            env = failed_services[0]['env']
+            
+            # NEW: SHORTFALL DETECTION
+            # Instead of just deploying what failed, calculate what SHOULD be deployed
+            log(f"Calculating service shortfall for {project}/{env}...")
+            
+            configurer = DeploymentConfigurer(user, project)
+            all_services = configurer.get_services(env)
+            
+            services_to_deploy = []
+            for service_name, service_config in all_services.items():
+                required = service_config.get('servers_count', 1)
+                
+                # Query live infrastructure for current count
+                current_servers = LiveDeploymentQuery.get_servers_running_service(
+                    user, project, env, service_name, credentials
                 )
+                current_count = len(current_servers)
                 
-                if not new_droplets:
-                    log("Failed to create replacement droplet")
-                    continue
+                shortfall = required - current_count
                 
-                new_server = new_droplets[0]
-                log(f"✓ Created replacement: {new_server['ip']}")
+                if shortfall > 0:
+                    log(f"  {service_name}: required={required}, current={current_count}, shortfall={shortfall}")
+                    services_to_deploy.append({
+                        'name': service_name,
+                        'project': project,
+                        'env': env,
+                        'config': service_config
+                    })
+                else:
+                    log(f"  {service_name}: OK (required={required}, current={current_count})")
+            
+            if not services_to_deploy:
+                log("✓ No service shortfall detected - all services at required count")
+                Logger.end()
+                return True
+            
+            log(f"Will deploy {len(services_to_deploy)} services to new server: {[s['name'] for s in services_to_deploy]}")
+            
+            # Attempt replacement with retry logic
+            for attempt in range(1, HealthMonitor.MAX_REPLACEMENT_ATTEMPTS + 1):
+                log(f"Replacement attempt {attempt}/{HealthMonitor.MAX_REPLACEMENT_ATTEMPTS}")
                 
-                # Add to inventory as blue (not active yet)
-                ServerInventory.add_servers([new_server], ServerInventory.STATUS_BLUE)
-                
-                # STEP 2: Wait for server to be ready (comes from template snapshot)                
-                log("Waiting for server to boot...")
-                time.sleep(30)  # Give it time to fully boot
-                
-                # Verify agent is responding
-                agent_ready = False
-                for i in range(10):  # Try for 50 seconds
-                    try:
-                        response = HealthMonitor.agent_request(
-                            new_server['ip'],
-                            "GET",
-                            "/ping",
-                            timeout=5
-                        )
-                        if response.get('status') == 'alive':
-                            log(f"✓ Health agent responding on {new_server['ip']}")
-                            agent_ready = True
-                            break
-                    except:
-                        log(f"Waiting for agent to respond... ({i+1}/10)")
-                        time.sleep(5)
-                
-                if not agent_ready:
-                    log(f"Health agent not responding on {new_server['ip']}")
-                    DOManager.destroy_droplet(new_server['droplet_id'], credentials=credentials)
-                    ServerInventory.release_servers([new_server['ip']], destroy=False, credentials=credentials)
-                    continue
-                
-                # STEP 3: Push config/secrets to new server via agent
-                if failed_services:
-                    # Get project/env from first service
-                    project = failed_services[0]['project']
-                    env = failed_services[0]['env']
+                try:
+                    # STEP 1: Create replacement with same specs (DO API)
+                    log("Creating replacement server via DigitalOcean API...")
+                    new_droplets = DOManager.create_servers(
+                        count=1,
+                        region=failed_server['zone'],
+                        cpu=failed_server['cpu'],
+                        memory=failed_server['memory'],
+                        tags=["deployer", f"replacement_for:{failed_server['ip']}"],
+                        credentials=credentials
+                    )
                     
+                    if not new_droplets:
+                        log("Failed to create replacement droplet")
+                        continue
+                    
+                    new_server = new_droplets[0]
+                    log(f"✓ Created replacement: {new_server['ip']}")
+                    
+                    # Add to inventory as RESERVE (not active yet)
+                    ServerInventory.update_server_status([new_server['ip']], ServerInventory.STATUS_RESERVE, credentials=credentials)
+                    
+                    # STEP 2: Wait for server to be ready
+                    log("Waiting for server to boot...")
+                    time.sleep(30)  # Give it time to fully boot
+                    
+                    # Verify agent is responding
+                    agent_ready = False
+                    for i in range(10):  # Try for 50 seconds
+                        try:
+                            response = HealthMonitor.agent_request(
+                                new_server['ip'],
+                                "GET",
+                                "/ping",
+                                timeout=5
+                            )
+                            if response.get('status') == 'alive':
+                                log(f"✓ Health agent responding on {new_server['ip']}")
+                                agent_ready = True
+                                break
+                        except:
+                            log(f"Waiting for agent to respond... ({i+1}/10)")
+                            time.sleep(5)
+                    
+                    if not agent_ready:
+                        log(f"Health agent not responding on {new_server['ip']}")
+                        DOManager.destroy_droplet(new_server['droplet_id'], credentials=credentials)
+                        ServerInventory.release_servers([new_server['ip']], destroy=False, credentials=credentials)
+                        continue
+                    
+                    # STEP 3: Push config/secrets to new server via agent
                     log(f"Pushing config/secrets for {project}/{env} via agent...")
                     
                     if not AgentDeployer.push_files_to_server(
@@ -627,31 +691,17 @@ class HealthMonitor:
                     log("✓ Files pushed successfully")
                     
                     # STEP 4: Deploy services to new server via agent
-                    log(f"Deploying {len(failed_services)} services via agent...")
+                    log(f"Deploying {len(services_to_deploy)} services via agent...")
                     
-                    # Group services by startup_order      
+                    # Group services by startup_order
                     services_by_order = {}
-                    for service_info in failed_services:
-                        service_name = service_info['service']
-                        project = service_info['project']
-                        env = service_info['env']
-                        
-                        # Get full service config
-                        configurer = DeploymentConfigurer(project)
-                        all_services = configurer.get_services(env)
-                        service_config = all_services.get(service_name, {})
-                        
-                        startup_order = service_config.get('startup_order', 1)
+                    for service_info in services_to_deploy:
+                        startup_order = service_info['config'].get('startup_order', 1)
                         
                         if startup_order not in services_by_order:
                             services_by_order[startup_order] = []
                         
-                        services_by_order[startup_order].append({
-                            'name': service_name,
-                            'project': project,
-                            'env': env,
-                            'config': service_config
-                        })
+                        services_by_order[startup_order].append(service_info)
                     
                     # Deploy in startup order
                     deployment_success = True
@@ -673,7 +723,9 @@ class HealthMonitor:
                                 break
                             
                             # Verify container started
-                            container_name = f"{service['project']}_{service['env']}_{service['name']}"
+                            container_name = DeploymentNaming.get_container_name(
+                                service['project'], service['env'], service['name']
+                            )
                             if not AgentDeployer.verify_container_running(new_server['ip'], container_name):
                                 log(f"Container {container_name} did not start properly")
                                 deployment_success = False
@@ -694,91 +746,103 @@ class HealthMonitor:
                         continue
                     
                     log("✓ All services deployed successfully")
-                
-                # STEP 5: Final health check
-                time.sleep(10)  # Let everything stabilize
-                
-                if HealthMonitor.check_docker_healthy(new_server['ip']):
-                    missing = HealthMonitor.check_service_containers(new_server)
                     
-                    if not missing:
-                        log(f"✓ Replacement {new_server['ip']} is healthy")
+                    # STEP 5: Final health check
+                    time.sleep(10)  # Let everything stabilize
+                    
+                    if HealthMonitor.check_docker_healthy(new_server['ip']):
+                        missing = HealthMonitor.check_service_containers(new_server)
                         
-                        # STEP 6: Promote to green (active)
-                        ServerInventory.update_server_status([new_server['ip']], ServerInventory.STATUS_ACTIVE, credentials=credentials)
-                        
-                        # Update deployment state
-                        DeploymentStateManager.remove_server_from_all_services(failed_server['ip'])
-                        
-                        for service in failed_services:
-                            DeploymentStateManager.add_server_to_service(
-                                service['project'],
-                                service['env'],
-                                service['service'],
-                                new_server['ip']
+                        if not missing:
+                            log(f"✓ Replacement {new_server['ip']} is healthy")
+                            
+                            # STEP 6: Promote to ACTIVE
+                            ServerInventory.update_server_status([new_server['ip']], ServerInventory.STATUS_ACTIVE, credentials=credentials)
+                            
+                            # Update deployment state
+                            for service in services_to_deploy:
+                                DeploymentStateManager.add_server_to_service(
+                                    user,
+                                    service['project'],
+                                    service['env'],
+                                    service['name'],
+                                    new_server['ip']
+                                )
+                            
+                            # Remove failed server from all services
+                            DeploymentStateManager.remove_server_from_all_services(user, failed_server['ip'])
+                            
+                            # STEP 7: Destroy failed server
+                            log(f"Destroying failed server {failed_server['ip']}...")
+                            DOManager.destroy_droplet(failed_server['droplet_id'], credentials=credentials)
+                            ServerInventory.release_servers([failed_server['ip']], destroy=False, credentials=credentials)
+                            
+                            HealthMonitor.record_replacement_attempt(
+                                failed_server['ip'],
+                                True,
+                                f"Replaced with {new_server['ip']}"
                             )
-                        
-                        # STEP 7: Destroy failed server
-                        log(f"Destroying failed server {failed_server['ip']}...")
-                        DOManager.destroy_droplet(failed_server['droplet_id'], credentials=credentials)
-                        ServerInventory.release_servers([failed_server['ip']], destroy=False, credentials=credentials)
-                        
+                            
+                            Logger.end()
+                            log(f"✓ Successfully replaced {failed_server['ip']} with {new_server['ip']}")
+                            
+                            HealthMonitor.send_alert(
+                                "Server Replacement Successful",
+                                f"Failed server {failed_server['ip']} replaced with {new_server['ip']}\n"
+                                f"Services deployed: {len(services_to_deploy)}\n"
+                                f"Services: {', '.join([s['name'] for s in services_to_deploy])}\n"
+                                f"All autonomous - no manual intervention required."
+                            )
+                            
+                            return True
+                        else:
+                            log(f"Replacement {new_server['ip']} missing containers: {missing}")
+                    else:
+                        log(f"Replacement {new_server['ip']} failed Docker health check")
+                    
+                    # Unhealthy - destroy and retry
+                    log("Replacement unhealthy, destroying and retrying...")
+                    DOManager.destroy_droplet(new_server['droplet_id'], credentials=credentials)
+                    ServerInventory.release_servers([new_server['ip']], destroy=False, credentials=credentials)
+                    
+                    if attempt == HealthMonitor.MAX_REPLACEMENT_ATTEMPTS:
                         HealthMonitor.record_replacement_attempt(
                             failed_server['ip'],
-                            True,
-                            f"Replaced with {new_server['ip']}"
+                            False,
+                            f"Failed after {attempt} attempts"
                         )
-                        
-                        Logger.end()
-                        log(f"✓ Successfully replaced {failed_server['ip']} with {new_server['ip']}")
-                        
-                        HealthMonitor.send_alert(
-                            "Server Replacement Successful",
-                            f"Failed server {failed_server['ip']} replaced with {new_server['ip']}\n"
-                            f"Services redeployed: {len(failed_services)}\n"
-                            f"All autonomous - no manual intervention required."
+                
+                except Exception as e:
+                    log(f"Replacement attempt {attempt} failed: {e}")                
+                    traceback.print_exc()
+                    
+                    if attempt == HealthMonitor.MAX_REPLACEMENT_ATTEMPTS:
+                        HealthMonitor.record_replacement_attempt(
+                            failed_server['ip'],
+                            False,
+                            f"Exception: {str(e)}"
                         )
-                        
-                        return True
-                    else:
-                        log(f"Replacement {new_server['ip']} missing containers: {missing}")
-                else:
-                    log(f"Replacement {new_server['ip']} failed Docker health check")
-                
-                # Unhealthy - destroy and retry
-                log("Replacement unhealthy, destroying and retrying...")
-                DOManager.destroy_droplet(new_server['droplet_id'], credentials=credentials)
-                ServerInventory.release_servers([new_server['ip']], destroy=False, credentials=credentials)
-                
-                if attempt == HealthMonitor.MAX_REPLACEMENT_ATTEMPTS:
-                    HealthMonitor.record_replacement_attempt(
-                        failed_server['ip'],
-                        False,
-                        f"Failed after {attempt} attempts"
-                    )
             
-            except Exception as e:
-                log(f"Replacement attempt {attempt} failed: {e}")                
-                traceback.print_exc()
-                
-                if attempt == HealthMonitor.MAX_REPLACEMENT_ATTEMPTS:
-                    HealthMonitor.record_replacement_attempt(
-                        failed_server['ip'],
-                        False,
-                        f"Exception: {str(e)}"
-                    )
+            Logger.end()
+            log(f"❌ Failed to replace {failed_server['ip']} after {HealthMonitor.MAX_REPLACEMENT_ATTEMPTS} attempts")
+            
+            HealthMonitor.send_alert(
+                "Server Replacement FAILED",
+                f"CRITICAL: Failed to replace server {failed_server['ip']}\n"
+                f"Services affected: {len(services_to_deploy)}\n"
+                f"Manual intervention required."
+            )
+            
+            return False
         
-        Logger.end()
-        log(f"❌ Failed to replace {failed_server['ip']} after {HealthMonitor.MAX_REPLACEMENT_ATTEMPTS} attempts")
-        
-        HealthMonitor.send_alert(
-            "Server Replacement FAILED",
-            f"CRITICAL: Failed to replace server {failed_server['ip']}\n"
-            f"Services affected: {len(failed_services)}\n"
-            f"Manual intervention required."
-        )
-        
-        return False
+        finally:
+            # ALWAYS release lock, even if replacement failed
+            DOManager.release_infrastructure_lock(leader_ip, credentials)
+            log("Infrastructure lock released")
+
+
+
+
 
     # ========================================
     # UTILITIES

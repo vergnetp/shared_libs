@@ -28,6 +28,14 @@ try:
     from .logger import Logger
 except ImportError:
     from logger import Logger
+try:
+    from .do_manager import DOManager
+except ImportError:
+    from do_manager import DOManager
+try:
+    from .health_monitor import HealthMonitor
+except ImportError:
+    from health_monitor import HealthMonitor
 
 
 def log(msg):
@@ -133,50 +141,71 @@ class AutoScalingCoordinator:
         MIGRATED: Now uses LiveDeploymentQuery to discover services
         instead of reading from JSON.
         """        
-        log("Checking auto-scaling for all services...")
+        if DOManager.is_infrastructure_locked():
+            log("Infrastructure modification in progress (healing), skipping auto-scaling this cycle")
+            return
+        
+        # NEW: Acquire infrastructure lock
+        leader_ip = HealthMonitor.get_my_ip()
+        if not DOManager.acquire_infrastructure_lock(leader_ip):
+            log("Failed to acquire infrastructure lock for auto-scaling")
+            return
         
         try:
-            # Get summary of all running services
-            summary = LiveDeploymentQuery.get_deployment_summary(None)  # All projects
+            # ===== EXISTING AUTO-SCALING LOGIC (NO CHANGES) =====
             
-            # Group by project
-            projects_envs = {}
-            for server_ip in summary['servers']:
-                services = LiveDeploymentQuery.get_services_on_server(server_ip)
-                for svc in services:
-                    project = svc['project']
-                    env = svc['env']
-                    
-                    if project not in projects_envs:
-                        projects_envs[project] = set()
-                    projects_envs[project].add(env)
+            log("Checking auto-scaling for all services...")
             
-            # Process each project/env
-            for project, envs in projects_envs.items():
-                # Load project config
-                try:
-                    config = DeploymentConfigurer(project)
-                except Exception as e:
-                    log(f"Could not load config for project {project}: {e}")
-                    continue
+            try:
+                # Get summary of all running services
+                summary = LiveDeploymentQuery.get_deployment_summary(None)  # All projects
                 
-                # Get or create AutoScaler for this project
-                scaler = self._get_auto_scaler(project)
+                # Group by project
+                projects_envs = {}
+                for server_ip in summary['servers']:
+                    services = LiveDeploymentQuery.get_services_on_server(server_ip)
+                    for svc in services:
+                        project = svc['project']
+                        env = svc['env']
+                        
+                        if project not in projects_envs:
+                            projects_envs[project] = set()
+                        projects_envs[project].add(env)
                 
-                for env in envs:
-                    services = config.get_services(env)
+                # Process each project/env
+                for project, envs in projects_envs.items():
+                    # Load project config
+                    try:
+                        config = DeploymentConfigurer(project)
+                    except Exception as e:
+                        log(f"Could not load config for project {project}: {e}")
+                        continue
                     
-                    for service_name, service_config in services.items():
-                        # Check if this service is actually running
-                        if LiveDeploymentQuery.is_service_running(project, env, service_name):
-                            self._check_service_scaling(
-                                project, env, service_name,
-                                service_config, scaler
-                            )
+                    # Get or create AutoScaler for this project
+                    scaler = self._get_auto_scaler(project)
+                    
+                    for env in envs:
+                        services = config.get_services(env)
+                        
+                        for service_name, service_config in services.items():
+                            # Check if this service is actually running
+                            if LiveDeploymentQuery.is_service_running(project, env, service_name):
+                                self._check_service_scaling(
+                                    project, env, service_name,
+                                    service_config, scaler
+                                )
+            
+            except Exception as e:
+                log(f"Error in auto-scaling check: {e}")
         
-        except Exception as e:
-            log(f"Error in auto-scaling check: {e}")
-    
+        finally:
+            # NEW: ALWAYS release lock, even if auto-scaling failed
+            DOManager.release_infrastructure_lock(leader_ip)
+            log("Auto-scaling complete - infrastructure lock released")
+
+
+
+
     def _check_service_scaling(
             self,
             project: str,
