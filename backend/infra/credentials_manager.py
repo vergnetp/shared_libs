@@ -1,4 +1,20 @@
-# todo: fix imports and use PathResolver instead of hard coded paths
+# todo: use PathResolver, deployment constants or whatever instead of hard coded paths
+import os
+import json
+from pathlib import Path
+from typing import Dict
+try:
+    from .execute_cmd import CommandExecuter
+except ImportError:
+    from execute_cmd import CommandExecuter
+try:
+    from .logger import Logger
+except ImportError:
+    from logger import Logger
+
+
+def log(msg):
+    Logger.log(msg)
 
 
 class CredentialsManager:
