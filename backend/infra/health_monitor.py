@@ -65,6 +65,14 @@ try:
     from .certificate_manager import CertificateManager
 except ImportError:
     from certificate_manager import CertificateManager
+try:
+    from .do_state_manager import DOStateManager
+except ImportError:
+    from do_state_manager import DOStateManager
+try:
+    from .credentials_manager import CredentialsManager
+except ImportError:
+    from credentials_manager import CredentialsManager
 
 
 def log(msg):
@@ -326,14 +334,57 @@ class HealthMonitor:
             if servers_completely_failed:
                 log(f"Replacing {len(servers_completely_failed)} failed servers...")
                 
+                credentials = CredentialsManager.get_credentials()
+                
                 for failed_server in servers_completely_failed:
-                    log(f"Detected failed server: {failed_server['ip']}")
+                    server_ip = failed_server['ip']
+                    log(f"Detected failed server: {server_ip}")
                     
-                    success = HealthMonitor.replace_server_sequential(failed_server)
+                    # CRITICAL: Query DO tags to get users on failed server
+                    # This works even if server is completely down!
+                    users_on_server = DOStateManager.get_users_on_server(
+                        server_ip, 
+                        credentials=credentials,
+                        use_cache=False  # Don't cache during failure recovery
+                    )
                     
-                    if not success:
-                        log(f"Failed to replace {failed_server['ip']} - stopping replacements")
-                        break
+                    if not users_on_server:
+                        log(f"WARNING: No users found on {server_ip} (no service tags in DO)")
+                        log(f"Skipping replacement - server had no tagged services")
+                        continue
+                    
+                    log(f"Server {server_ip} has services from {len(users_on_server)} user(s): {users_on_server}")
+                    
+                    # Get all services for logging
+                    services_on_server = DOStateManager.get_services_on_server(
+                        server_ip,
+                        credentials=credentials,
+                        use_cache=False
+                    )
+                    log(f"Services to restore: {services_on_server}")
+                    
+                    # Replace server for EACH user separately
+                    # Each user's services will be redeployed independently
+                    replacement_success = True
+                    
+                    for user in users_on_server:
+                        log(f"Replacing services for user '{user}' on failed server {server_ip}")
+                        
+                        success = HealthMonitor.replace_server_sequential(
+                            failed_server,
+                            user=user,
+                            services_on_failed_server=services_on_server,  # Pass DO tags data
+                            credentials=credentials
+                        )
+                        
+                        if not success:
+                            log(f"Failed to replace server for user '{user}'")
+                            replacement_success = False
+                            # Continue trying other users - don't fail fast
+                    
+                    if not replacement_success:
+                        log(f"Failed to fully replace {server_ip} for all users")
+                        # Continue to next server rather than stopping all replacements
                 
                 # Don't scale after replacements - let system stabilize
                 log("Skipping auto-scaling after server replacements (let system stabilize)")
@@ -684,7 +735,12 @@ class HealthMonitor:
         }
 
     @staticmethod
-    def replace_server_sequential(failed_server: Dict[str, Any], user: str, credentials: Dict=None) -> bool:
+    def replace_server_sequential(
+    failed_server: Dict[str, Any], 
+    user: str, 
+    services_on_failed_server: List[Dict[str, str]] = None,
+    credentials: Dict = None
+) -> bool:
         """
         Replace a failed server using health agent (no SSH needed).
         
@@ -705,6 +761,7 @@ class HealthMonitor:
         Args:
             failed_server: Server info dict with ip, zone, cpu, memory, droplet_id
             user: User ID for this infrastructure
+            services_on_failed_server: Services from DO tags (avoids querying dead server)
             credentials: Optional credentials dict
             
         Returns:
@@ -727,21 +784,32 @@ class HealthMonitor:
             return False
         
         try:
-            # Get services that were on the failed server (for context)
-            failed_services = LiveDeploymentQuery.get_services_on_server(
-                server_ip=failed_server['ip'],
-                user=user
-            )
-
-            if not failed_services:
-                log("Server had no services deployed")
+            # Get services from DO tags (passed from STEP 6b or fallback query)
+            if services_on_failed_server is None:
+                # Fallback: query DO tags if not provided
+                log("Services not provided, querying DO tags...")
+                services_on_failed_server = DOStateManager.get_services_on_server(
+                    failed_server['ip'],
+                    credentials=credentials,
+                    use_cache=False
+                )
+            
+            # Filter to only this user's services
+            user_services = [s for s in services_on_failed_server if s['user'] == user]
+            
+            if not user_services:
+                log(f"No services found for user '{user}' on failed server")
+                Logger.end()
+                DOManager.release_infrastructure_lock(leader_ip, credentials)
                 return True
             
-            log(f"Server had {len(failed_services)} services: {[s['service'] for s in failed_services]}")
+            log(f"User '{user}' had {len(user_services)} services on failed server:")
+            for svc in user_services:
+                log(f"  - {svc['project']}:{svc['env']}:{svc['service']}")
             
             # Get project/env from first service
-            project = failed_services[0]['project']
-            env = failed_services[0]['env']
+            project = user_services[0]['project']
+            env = user_services[0]['env']
             
             # NEW: SHORTFALL DETECTION
             # Instead of just deploying what failed, calculate what SHOULD be deployed
@@ -941,10 +1009,22 @@ class HealthMonitor:
                             log(f"✓ Replacement {new_server['ip']} is healthy")
                             
                             # Promote to ACTIVE
-                            ServerInventory.update_server_status([new_server['ip']], ServerInventory.STATUS_ACTIVE, credentials=credentials)
-                            
+                            ServerInventory.update_server_status([new_server['ip']], ServerInventory.STATUS_ACTIVE, credentials=credentials)  
+
                             # Update deployment state
                             for service in services_to_deploy:
+                                try:
+                                    DOStateManager.add_service_to_server(
+                                        server_ip=new_server['ip'],
+                                        user=user,
+                                        project=service['project'],
+                                        env=service['env'],
+                                        service=service['name'],
+                                        credentials=credentials
+                                    )
+                                    
+                                except Exception as e:
+                                    log(f"Warning: Could not add tag for {service['name']}: {e}")
                                 DeploymentStateManager.add_server_to_service(
                                     user,
                                     service['project'],

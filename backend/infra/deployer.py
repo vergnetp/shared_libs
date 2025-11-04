@@ -87,6 +87,10 @@ try:
     from .path_resolver import PathResolver
 except ImportError:
     from path_resolver import PathResolver
+try:
+    from .do_state_manager import DOStateManager
+except ImportError:
+    from do_state_manager import DOStateManager
 
 
 def log(msg):
@@ -2305,7 +2309,19 @@ class Deployer:
                 if c.strip() and c.strip().startswith(container_pattern)
             ]
             
-            for container_name in containers:
+            for container_name in containers:                
+                try:
+                    # Update DigitalOcean tags before cleanup
+                    DOStateManager.remove_service_from_server(
+                        server_ip=server_ip,
+                        user=self.user,
+                        project=self.project_name,
+                        env=env,
+                        service=service_name,
+                        credentials=None  # Uses env vars
+                    )
+                except Exception as e:
+                    log(f"Warning: Could not update DO tags for {server_ip}: {e}")
                 try:
                     DockerExecuter.stop_and_remove_container(
                         container_name,
@@ -2580,6 +2596,19 @@ class Deployer:
                     container_name=base_name,
                     version=self._get_version()
                 )   
+
+                # Update DigitalOcean tags to track service deployment
+                try: 
+                    DOStateManager.add_service_to_server(
+                        server_ip=target_ip,
+                        user=self.user,
+                        project=self.project_name,
+                        env=env,
+                        service=service_name,
+                        credentials=None  # Uses env vars
+                    )
+                except Exception as e:
+                    log(f"Warning: Could not update DO tags for {target_ip}: {e}")
                 
                 Logger.end()
                 log(f"Immutable deployment successful")

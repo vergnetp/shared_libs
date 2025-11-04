@@ -18,6 +18,10 @@ try:
     from .deployment_syncer import DeploymentSyncer
 except ImportError:
     from deployment_syncer import DeploymentSyncer
+try:
+    from .credentials_manager import CredentialsManager
+except ImportError:
+    from credentials_manager import CredentialsManager
 
 
 def log(msg):
@@ -133,6 +137,15 @@ class HealthMonitorInstaller:
                 user=user
             )
             
+            credentials = CredentialsManager.get_credentials()
+
+            # Push to server
+            CredentialsManager.push_credentials_to_server(
+                server_ip,
+                credentials,
+                user
+            )
+
             if not success:
                 log(f"Warning: Failed to schedule health monitor on {server_ip}")
                 Logger.end()
