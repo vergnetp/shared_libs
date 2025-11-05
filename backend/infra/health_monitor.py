@@ -73,6 +73,10 @@ try:
     from .credentials_manager import CredentialsManager
 except ImportError:
     from credentials_manager import CredentialsManager
+try:
+    from .deployment_constants import DEPLOYMENT_CONFIG_SERVICE_NAME, DEPLOYMENT_CONFIG_FILENAME
+except ImportError: 
+    from deployment_constants import DEPLOYMENT_CONFIG_SERVICE_NAME, DEPLOYMENT_CONFIG_FILENAME
 
 
 def log(msg):
@@ -161,7 +165,62 @@ class HealthMonitor:
             raise Exception(f"Health agent returned error: {e.response.status_code}")
         except Exception as e:
             raise Exception(f"Health agent request failed: {e}")
+
+
+    @staticmethod
+    def _discover_deployment_contexts() -> List[Dict[str, str]]:
+        """
+        Discover all user/project/env contexts on this server.
         
+        Scans /app/local for deployment.json files at:
+        /app/local/{user}/{project}/{env}/config/health_monitor/deployment.json
+        
+        Returns:
+            List of dicts with user/project/env keys
+        """
+        
+        contexts = []
+        local_base = Path("/app/local")
+        
+        if not local_base.exists():
+            log("Warning: /app/local not mounted")
+            return contexts
+        
+        # Scan directory structure
+        for user_dir in local_base.iterdir():
+            if not user_dir.is_dir() or user_dir.name.startswith('.'):
+                continue
+            
+            user = user_dir.name
+            
+            for project_dir in user_dir.iterdir():
+                if not project_dir.is_dir() or project_dir.name.startswith('.'):
+                    continue
+                
+                project = project_dir.name
+                
+                for env_dir in project_dir.iterdir():
+                    if not env_dir.is_dir() or env_dir.name.startswith('.'):
+                        continue
+                    
+                    env = env_dir.name
+                    
+                    # Check if deployment.json exists
+                    deployment_json = (
+                        env_dir / "config" / DEPLOYMENT_CONFIG_SERVICE_NAME / 
+                        DEPLOYMENT_CONFIG_FILENAME
+                    )
+                    
+                    if deployment_json.exists():
+                        contexts.append({
+                            'user': user,
+                            'project': project,
+                            'env': env
+                        })
+                        log(f"Discovered: {user}/{project}/{env}")
+        
+        return contexts
+
     # ========================================
     # CORE MONITORING LOOP
     # ========================================
@@ -170,15 +229,79 @@ class HealthMonitor:
     def monitor_and_heal():
         """
         Main monitoring loop - runs on every server.
-        Only leader takes action.
+        
+        Discovers all deployment contexts on this server and monitors
+        each context's infrastructure independently using context-specific credentials.
         
         Flow:
-        1. Collect metrics (all servers)
-        2. Check health via agent HTTP (all servers)
-        3. Determine leader (all servers)
-        4. Leader tries to restart failed containers (leader only)
-        5. Leader replaces unreachable servers (leader only)
-        6. Leader handles auto-scaling (leader only, if system is stable)
+        1. Discover contexts by scanning /app/local
+        2. Group contexts by credentials (DO account)
+        3. For each DO account, monitor all its servers
+        """
+        log("Discovering deployment contexts...")
+        contexts = HealthMonitor._discover_deployment_contexts()
+        
+        if not contexts:
+            log("No deployment contexts found")
+            return
+        
+        log(f"Found {len(contexts)} deployment context(s)")
+        
+        # Group contexts by DO token (same account)
+        credentials_map = {}
+        
+        for context in contexts:
+            user = context['user']
+            project = context['project']
+            env = context['env']
+            
+            try:
+                # Load credentials for this context
+                creds = CredentialsManager.get_credentials(user, project, env)
+                token = creds['digitalocean_token']
+                
+                if token not in credentials_map:
+                    credentials_map[token] = {
+                        'credentials': creds,
+                        'contexts': []
+                    }
+                
+                credentials_map[token]['contexts'].append(context)
+                
+            except Exception as e:
+                log(f"Error loading credentials for {user}/{project}/{env}: {e}")
+                continue
+        
+        # Monitor each DO account independently
+        for token_key, data in credentials_map.items():
+            credentials = data['credentials']
+            contexts = data['contexts']
+            
+            log(f"\n{'='*60}")
+            log(f"Monitoring DO account with {len(contexts)} context(s)")
+            for ctx in contexts:
+                log(f"  - {ctx['user']}/{ctx['project']}/{ctx['env']}")
+            log(f"{'='*60}")
+            
+            # Use the monitoring logic with these credentials
+            HealthMonitor._monitor_with_credentials(credentials)
+
+
+    @staticmethod
+    def _monitor_with_credentials(credentials: Dict):
+        """
+        Execute the monitoring loop with specific credentials.
+        
+        This contains all the core health monitoring logic:
+        1. Collect metrics
+        2. Sync with DigitalOcean
+        3. Check health of all servers
+        4. Determine leader
+        5. Leader heals failures
+        6. Leader handles auto-scaling
+        
+        Args:
+            credentials: DO credentials for this account
         """
         log("Checking certificates...")
         HealthMonitor._check_my_certificates()
@@ -191,12 +314,15 @@ class HealthMonitor:
         
         # STEP 2: Sync inventory with DigitalOcean to get fresh state
         try:
-            ServerInventory.sync_with_digitalocean()
+            ServerInventory.sync_with_digitalocean(credentials=credentials)
         except Exception as e:
             log(f"Warning: Could not sync with DigitalOcean: {e}")
         
         # STEP 3: Get all active servers
-        all_servers = ServerInventory.get_servers(deployment_status=ServerInventory.STATUS_ACTIVE)
+        all_servers = ServerInventory.get_servers(
+            deployment_status=ServerInventory.STATUS_ACTIVE,
+            credentials=credentials
+        )
         
         if not all_servers:
             log("No active servers in inventory")
@@ -320,7 +446,7 @@ class HealthMonitor:
                             
                             HealthMonitor.send_alert(
                                 "Server Recovered",
-                                f"Server {server_ip} recovered by restarting containers:\\n"
+                                f"Server {server_ip} recovered by restarting containers:\n"
                                 f"Restarted: {', '.join(missing_containers)}"
                             )
                         else:
@@ -333,8 +459,6 @@ class HealthMonitor:
             # STEP 6b: Replace servers that cannot be recovered
             if servers_completely_failed:
                 log(f"Replacing {len(servers_completely_failed)} failed servers...")
-                
-                credentials = CredentialsManager.get_credentials()
                 
                 for failed_server in servers_completely_failed:
                     server_ip = failed_server['ip']
@@ -538,26 +662,30 @@ class HealthMonitor:
             )
             
             return result.returncode == 0
+            
         except Exception as e:
             log(f"Ping failed for {ip}: {e}")
             return False
     
     @staticmethod
+    def am_i_leader(healthy_servers: List[Dict]) -> bool:
+        """
+        Check if this server should be the leader.
+        Leader is determined by lowest IP address among healthy servers.
+        """
+        my_ip = HealthMonitor.get_my_ip()
+        
+        if not healthy_servers:
+            return False
+        
+        # Sort IPs and check if mine is the lowest
+        sorted_ips = sorted([s['ip'] for s in healthy_servers])
+        return my_ip == sorted_ips[0]
+    
+    @staticmethod
     def check_docker_healthy(server_ip: str) -> bool:
-        """
-        Check if Docker is healthy on server via agent.
-        
-        NOTE: Caller must ensure agent is healthy before calling this method.
-        Agent health should be verified in STEP 4 via check_and_heal_agent().
-        
-        Args:
-            server_ip: Target server IP
-            
-        Returns:
-            True if Docker is healthy
-        """
+        """Check if Docker daemon is healthy via agent"""
         try:
-            # Agent health already verified by caller in STEP 4
             response = HealthMonitor.agent_request(
                 server_ip,
                 "GET",
@@ -565,125 +693,103 @@ class HealthMonitor:
                 timeout=10
             )
             
-            return response.get('status') == 'healthy'
+            is_healthy = response.get('healthy', False)
+            
+            if not is_healthy:
+                log(f"Docker unhealthy on {server_ip}: {response.get('error', 'unknown')}")
+            
+            return is_healthy
             
         except Exception as e:
-            log(f"Docker health check failed for {server_ip}: {e}")
+            log(f"Failed to check Docker health on {server_ip}: {e}")
             return False
     
     @staticmethod
     def check_service_containers(server: Dict[str, Any]) -> List[str]:
         """
-        Check if all expected service containers are running on a server.
+        Check if expected containers are running on server.
         
-        Returns list of missing container names.
-        """      
-        ip = server['ip']
+        Returns list of missing container names (empty if all healthy).
+        """
+        server_ip = server['ip']
         
-        # Use live query to compare expected vs actual
-        diff = LiveDeploymentQuery.compare_expected_vs_actual(ip)
-        
-        # Log details
-        if diff['missing']:
-            for container_name in diff['missing']:
-                log(f"Missing container on {ip}: {container_name}")
-        
-        return diff['missing']
-
+        try:
+            # Query running containers from server
+            response = HealthMonitor.agent_request(
+                server_ip,
+                "GET",
+                "/containers/list",
+                timeout=10
+            )
+            
+            running_containers = set(response.get('containers', []))
+            
+            # Get expected containers from DO tags
+            expected_services = DOStateManager.get_services_on_server(server_ip, use_cache=True)
+            
+            if not expected_services:
+                log(f"No expected services found for {server_ip} in DO tags")
+                return []
+            
+            # Build expected container names
+            expected_containers = set()
+            for svc in expected_services:
+                container_name = DeploymentNaming.get_container_name(
+                    svc['project'], svc['env'], svc['service']
+                )
+                expected_containers.add(container_name)
+            
+            # Find missing
+            missing = expected_containers - running_containers
+            
+            if missing:
+                log(f"Missing containers on {server_ip}: {missing}")
+            
+            return list(missing)
+            
+        except Exception as e:
+            log(f"Failed to check containers on {server_ip}: {e}")
+            # Assume all missing if we can't check
+            return []
+    
     @staticmethod
     def restart_container_via_agent(server_ip: str, container_name: str) -> bool:
-        """
-        Restart a container via health agent.
-        
-        Args:
-            server_ip: Target server IP
-            container_name: Container name to restart
-            
-        Returns:
-            True if restart successful
-        """
+        """Restart a container via health agent"""
         try:
-            log(f"Restarting {container_name} on {server_ip} via agent...")
+            log(f"Restarting container {container_name} on {server_ip}...")
             
             response = HealthMonitor.agent_request(
                 server_ip,
                 "POST",
-                f"/containers/{container_name}/restart",
-                timeout=60
+                "/containers/restart",
+                json_data={'name': container_name},
+                timeout=30
             )
             
-            if response.get('status') == 'restarted':
-                log(f"✓ Successfully restarted {container_name} on {server_ip}")
+            if response.get('status') == 'success':
+                log(f"✓ Container {container_name} restarted successfully")
                 return True
             else:
-                log(f"Unexpected response when restarting {container_name}: {response}")
+                log(f"✗ Failed to restart {container_name}: {response.get('message', 'unknown')}")
                 return False
                 
         except Exception as e:
-            log(f"Failed to restart {container_name} on {server_ip}: {e}")
+            log(f"Error restarting {container_name} on {server_ip}: {e}")
             return False
 
-    @staticmethod
-    def is_server_healthy(server: Dict[str, Any]) -> bool:
-        """
-        Check if a server is healthy.
-        
-        UPDATED: Now includes agent healing before declaring unhealthy.
-        
-        Args:
-            server: Server dict with ip, zone, etc.
-            
-        Returns:
-            True if server passes all health checks
-        """
-        server_ip = server['ip']
-        
-        # 1. Ping check
-        if not HealthMonitor.ping_server(server_ip):
-            log(f"Server {server_ip} failed ping check")
-            return False
-        
-        # 2. Agent check (with auto-healing)
-        if not HealthMonitor.check_and_heal_agent(server_ip):
-            log(f"Server {server_ip} - agent unavailable after healing attempt")
-            return False
-        
-        # 3. Docker health check
-        if not HealthMonitor.check_docker_healthy(server_ip):
-            log(f"Server {server_ip} failed Docker health check")
-            return False
-        
-        # 4. Container health check
-        missing_containers = HealthMonitor.check_service_containers(server)
-        if missing_containers:
-            log(f"Server {server_ip} missing containers: {missing_containers}")
-            return False
-        
-        return True
-    
-    @staticmethod
-    def am_i_leader(healthy_servers: List[Dict[str, Any]]) -> bool:
-        """Determine if this server is the leader (lowest IP)"""
-        if not healthy_servers:
-            return False
-        
-        my_ip = HealthMonitor.get_my_ip()
-        leader_ip = sorted([s['ip'] for s in healthy_servers])[0]
-        
-        return my_ip == leader_ip
-    
     # ========================================
     # SERVER REPLACEMENT
     # ========================================
 
     @staticmethod
-    def _build_container_config(service: Dict[str, Any], server_ip: str) -> Dict[str, Any]:
+    def _build_container_config(service: Dict[str, Any], server_ip: str, user: str) -> Dict[str, Any]:
         """
         Build container configuration for agent deployment.
         
         Args:
             service: Service info dict with name, project, env, config
             server_ip: Target server IP
+            user: User ID
             
         Returns:
             Container config dict for agent
@@ -708,12 +814,12 @@ class HealthMonitor:
         ports = {}
         if config.get('port'):
             # Get host port from hash            
-            host_port = DeploymentPortResolver.get_host_port(project, env, service_name)
+            host_port = DeploymentPortResolver.get_host_port(user, project, env, service_name)
             container_port = config['port']
             ports[str(host_port)] = str(container_port)
         
         # Volumes
-        volumes = PathResolver.generate_all_volume_mounts(project, env, service_name, server_ip)
+        volumes = PathResolver.generate_all_volume_mounts(user, project, env, service_name, server_ip)
         
         # Environment variables
         env_vars = config.get('env_vars', {})
@@ -903,45 +1009,44 @@ class HealthMonitor:
                         continue
                     
                     # STEP 3: Push config/secrets to new server via agent
-                    log(f"Pushing config/secrets for {project}/{env} via agent...")
+                    log(f"Pushing config/secrets to {new_server['ip']}...")
                     
-                    if not AgentDeployer.push_files_to_server(
+                    push_success = AgentDeployer.push_files_to_server(
                         new_server['ip'],
+                        user,
                         project,
-                        env
-                    ):
-                        log("Failed to push files to new server")
+                        env,
+                        directories=['config', 'secrets', 'files']
+                    )
+                    
+                    if not push_success:
+                        log("Failed to push files to replacement server")
                         DOManager.destroy_droplet(new_server['droplet_id'], credentials=credentials)
                         ServerInventory.release_servers([new_server['ip']], destroy=False, credentials=credentials)
                         continue
                     
-                    log("✓ Files pushed successfully")
+                    log("✓ Config/secrets pushed")
                     
                     # STEP 4: Deploy services to new server via agent
                     log(f"Deploying {len(services_to_deploy)} services via agent...")
                     
-                    # Group services by startup_order
+                    # Group by startup_order
                     services_by_order = {}
-                    for service_info in services_to_deploy:
-                        startup_order = service_info['config'].get('startup_order', 1)
-                        
-                        if startup_order not in services_by_order:
-                            services_by_order[startup_order] = []
-                        
-                        services_by_order[startup_order].append(service_info)
+                    for service in services_to_deploy:
+                        order = service['config'].get('startup_order', 0)
+                        if order not in services_by_order:
+                            services_by_order[order] = []
+                        services_by_order[order].append(service)
                     
-                    # Deploy in startup order
+                    # Deploy in order
                     deployment_success = True
-                    
                     for startup_order in sorted(services_by_order.keys()):
-                        services = services_by_order[startup_order]
+                        log(f"Deploying services with startup_order={startup_order}...")
                         
-                        log(f"Deploying startup_order {startup_order}: {[s['name'] for s in services]}")
-                        
-                        for service in services:
+                        for service in services_by_order[startup_order]:
                             success = AgentDeployer.deploy_container(
                                 new_server['ip'],
-                                HealthMonitor._build_container_config(service, new_server['ip'])
+                                HealthMonitor._build_container_config(service, new_server['ip'], user)
                             )
                             
                             if not success:
@@ -984,85 +1089,77 @@ class HealthMonitor:
                         except ImportError:
                             from health_monitor_installer import HealthMonitorInstaller
                         
-                        monitor_installed = HealthMonitorInstaller.install_on_server(
-                            new_server['ip'],
-                            user='root'
-                        )
-                        
-                        if not monitor_installed:
-                            log(f"Warning: Health monitor installation failed on {new_server['ip']}")
-                            # Don't fail the replacement - monitor can be installed later manually
-                        else:
-                            log(f"✓ Health monitor installed on {new_server['ip']}")
-                    
+                        HealthMonitorInstaller.install_on_server(new_server['ip'])
+                        log("✓ Health monitor installed")
                     except Exception as e:
-                        log(f"Warning: Could not install health monitor: {e}")
-                        # Don't fail the replacement - monitor can be installed later manually
+                        log(f"Warning: Failed to install health monitor: {e}")
+                        # Continue anyway - monitor can be installed later
                     
-                    # STEP 6: Final health check
-                    time.sleep(10)  # Let everything stabilize
+                    # STEP 6: Health check replacement
+                    log("Performing health check on replacement...")
+                    time.sleep(10)  # Wait for services to fully start
                     
-                    if HealthMonitor.check_docker_healthy(new_server['ip']):
-                        missing = HealthMonitor.check_service_containers(new_server)
-                        
-                        if not missing:
-                            log(f"✓ Replacement {new_server['ip']} is healthy")
+                    if HealthMonitor.ping_server(new_server['ip']):
+                        if HealthMonitor.check_docker_healthy(new_server['ip']):
+                            missing = HealthMonitor.check_service_containers(new_server)
                             
-                            # Promote to ACTIVE
-                            ServerInventory.update_server_status([new_server['ip']], ServerInventory.STATUS_ACTIVE, credentials=credentials)  
-
-                            # Update deployment state
-                            for service in services_to_deploy:
-                                try:
-                                    DOStateManager.add_service_to_server(
-                                        server_ip=new_server['ip'],
-                                        user=user,
-                                        project=service['project'],
-                                        env=service['env'],
-                                        service=service['name'],
-                                        credentials=credentials
+                            if not missing:
+                                log("✓ Replacement is healthy!")
+                                
+                                # Mark as ACTIVE
+                                ServerInventory.update_server_status([new_server['ip']], ServerInventory.STATUS_ACTIVE, credentials=credentials)
+                                
+                                # Update DO tags for each service
+                                for service in services_to_deploy:
+                                    try:
+                                        DOManager.add_droplet_tag(
+                                            new_server['droplet_id'],
+                                            f"service:{user}:{service['project']}:{service['env']}:{service['name']}",
+                                            credentials=credentials
+                                        )
+                                        
+                                    except Exception as e:
+                                        log(f"Warning: Could not add tag for {service['name']}: {e}")
+                                    DeploymentStateManager.add_server_to_service(
+                                        user,
+                                        service['project'],
+                                        service['env'],
+                                        service['name'],
+                                        new_server['ip']
                                     )
-                                    
-                                except Exception as e:
-                                    log(f"Warning: Could not add tag for {service['name']}: {e}")
-                                DeploymentStateManager.add_server_to_service(
-                                    user,
-                                    service['project'],
-                                    service['env'],
-                                    service['name'],
-                                    new_server['ip']
+                                
+                                # Remove failed server from all services
+                                DeploymentStateManager.remove_server_from_all_services(user, failed_server['ip'])
+                                
+                                # STEP 7: Destroy failed server
+                                log(f"Destroying failed server {failed_server['ip']}...")
+                                DOManager.destroy_droplet(failed_server['droplet_id'], credentials=credentials)
+                                ServerInventory.release_servers([failed_server['ip']], destroy=False, credentials=credentials)
+                                
+                                HealthMonitor.record_replacement_attempt(
+                                    failed_server['ip'],
+                                    True,
+                                    f"Replaced with {new_server['ip']}"
                                 )
-                            
-                            # Remove failed server from all services
-                            DeploymentStateManager.remove_server_from_all_services(user, failed_server['ip'])
-                            
-                            # STEP 7: Destroy failed server
-                            log(f"Destroying failed server {failed_server['ip']}...")
-                            DOManager.destroy_droplet(failed_server['droplet_id'], credentials=credentials)
-                            ServerInventory.release_servers([failed_server['ip']], destroy=False, credentials=credentials)
-                            
-                            HealthMonitor.record_replacement_attempt(
-                                failed_server['ip'],
-                                True,
-                                f"Replaced with {new_server['ip']}"
-                            )
-                            
-                            Logger.end()
-                            log(f"✓ Successfully replaced {failed_server['ip']} with {new_server['ip']}")
-                            
-                            HealthMonitor.send_alert(
-                                "Server Replacement Successful",
-                                f"Failed server {failed_server['ip']} replaced with {new_server['ip']}\n"
-                                f"Services deployed: {len(services_to_deploy)}\n"
-                                f"Services: {', '.join([s['name'] for s in services_to_deploy])}\n"
-                                f"All autonomous - no manual intervention required."
-                            )
-                            
-                            return True
+                                
+                                Logger.end()
+                                log(f"✓ Successfully replaced {failed_server['ip']} with {new_server['ip']}")
+                                
+                                HealthMonitor.send_alert(
+                                    "Server Replacement Successful",
+                                    f"Failed server {failed_server['ip']} replaced with {new_server['ip']}\n"
+                                    f"Services deployed: {len(services_to_deploy)}\n"
+                                    f"Services: {', '.join([s['name'] for s in services_to_deploy])}\n"
+                                    f"All autonomous - no manual intervention required."
+                                )
+                                
+                                return True
+                            else:
+                                log(f"Replacement {new_server['ip']} missing containers: {missing}")
                         else:
-                            log(f"Replacement {new_server['ip']} missing containers: {missing}")
+                            log(f"Replacement {new_server['ip']} failed Docker health check")
                     else:
-                        log(f"Replacement {new_server['ip']} failed Docker health check")
+                        log(f"Replacement {new_server['ip']} failed ping check")
                     
                     # Unhealthy - destroy and retry
                     log("Replacement unhealthy, destroying and retrying...")
