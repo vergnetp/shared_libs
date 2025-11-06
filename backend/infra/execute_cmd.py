@@ -1,9 +1,35 @@
-import subprocess
-from pathlib import Path
-import shlex
-from typing import Union, List, Any
-import platform
+"""
+Command executor with HTTP agent support for specific operations and SSH for general commands.
 
+SECURITY MODEL:
+- Generic commands → SSH (safer, no RCE risk if API key compromised)
+- Specific operations → Agent endpoints (file writes, mkdir, service control)
+- localhost operations → Direct subprocess calls (unchanged)
+
+ARCHITECTURE:
+- localhost operations: Direct subprocess calls
+- Remote generic commands: SSH (default, secure)
+- Remote file/directory ops: HTTP agent (specific endpoints only)
+
+USAGE:
+    # Generic commands (uses SSH for security)
+    CommandExecuter.run_cmd("systemctl status nginx", server_ip)
+    
+    # Specific operations (use agent with purpose-built endpoints)
+    CommandExecuter.write_file(path, content, server_ip)  # Uses /files/write
+    CommandExecuter.mkdir(path, server_ip)  # Uses /files/mkdir
+"""
+
+import subprocess
+import shlex
+import platform
+from pathlib import Path
+from typing import Union, List, Any, Optional
+
+try:
+    from .health_monitor import HealthMonitor
+except ImportError:
+    from health_monitor import HealthMonitor
 try:
     from .logger import Logger
 except ImportError:
@@ -14,80 +40,82 @@ def log(msg):
     Logger.log(msg)
 
 
-def parse_docker_error(error_text: str, cmd: List[str]) -> str:
-    """
-    Parse Docker error and provide user-friendly messages without overwriting actual errors.
-
-    Logic:
-    - Detect Docker not installed
-    - Detect Docker Desktop connectivity issues (Windows/WSL2)
-    - Detect Docker daemon not running
-    - Detect Docker permission issues (Linux)
-    - Always show the real error for other Docker commands
-    """
-
-    if not error_text:
-        error_text = ""
-
-    error_lower = error_text.lower()
-
-    MAX_CHARS = 2000
+def parse_docker_error(error_text: str, cmd: Union[List[str], str]) -> str:
+    """Parse Docker error messages for better user feedback"""
+    MAX_CHARS = 500
     
-    # Docker not installed
-    if "no such file or directory" in error_lower or "command not found" in error_lower:
-        return (
-            "Docker is not installed.\n\n"
-            "Please install Docker:\n"
-            "- Linux: https://docs.docker.com/engine/install/\n"
-            "- macOS/Windows: https://docs.docker.com/desktop/\n"
-            f"Error: {error_text[:MAX_CHARS]}"
-        )
-
-    # Docker Desktop connectivity issues (Windows)
-    if "dockerdesktoplinuxengine" in error_lower and "pipe" in error_lower:
-        return (
-            f"Docker command failed.\nCommand: {' '.join(cmd)}\nError: {error_text[:MAX_CHARS]}\n\n"
-            "Docker Desktop connectivity issue (Windows).\n"
-            "Try:\n"
-            "1. Start Docker Desktop\n"
-            "2. Wait for whale icon to show 'running'\n"
-            "3. If already running, restart Docker Desktop\n"
-            "4. Run `wsl --update` in PowerShell (admin)"
-        )
-
-    # Docker daemon not running
-    if ("cannot connect to the docker daemon" in error_lower or 
-        "docker daemon is not running" in error_lower or
-        "connection refused" in error_lower):
-        return (
-            f"Docker command failed.\nCommand: {' '.join(cmd)}\nError: {error_text[:MAX_CHARS]}\n\n"
-            "Docker daemon is not running.\n"
-            "Start Docker:\n"
-            "- Linux: sudo systemctl start docker\n"
-            "- macOS: Start Docker Desktop\n"
-            "- Windows: Start Docker Desktop"
-        )
-
-    # Permission issues (Linux)
-    if "permission denied" in error_lower and "docker.sock" in error_lower:
-        return (
-            f"Docker command failed.\nCommand: {' '.join(cmd)}\nError: {error_text[:MAX_CHARS]}\n\n"
-            "Docker permission issue.\nFix with:\n"
-            "- sudo usermod -aG docker $USER\n"
-            "- Log out/in or run: newgrp docker\n"
-            "- Or use sudo (not recommended)"
-        )
-
-    # Generic Docker command errors
-    if cmd and cmd[0] == "docker":
-        return f"Docker command failed.\nCommand: {' '.join(cmd)}\nError: {error_text[:MAX_CHARS]}"
-
+    if "Cannot connect to the Docker daemon" in error_text:
+        system = platform.system()
+        if system == "Windows":
+            return ("Docker error: Cannot connect to Docker daemon.\n"
+                   "Please ensure Docker Desktop is running:\n"
+                   "1. Start Docker Desktop application\n"
+                   "2. Wait for it to fully start\n"
+                   "3. Try your command again")
+        else:
+            return ("Docker error: Cannot connect to Docker daemon.\n"
+                   "Please ensure Docker is installed and running:\n"
+                   "- Check: sudo systemctl status docker\n"
+                   "- Start: sudo systemctl start docker")
+    
+    if "no such file or directory" in error_text.lower() and "dockerfile" in error_text.lower():
+        return f"Docker error: Dockerfile not found.\n{error_text[:MAX_CHARS]}"
+    
+    if "not found" in error_text.lower():
+        if isinstance(cmd, list) and len(cmd) > 1:
+            image = cmd[-1] if ":" in str(cmd[-1]) else "unknown"
+            return f"Docker error: Image not found: {image}\n{error_text[:MAX_CHARS]}"
+    
     # Fallback for other commands
     return f"Command failed: {error_text[:MAX_CHARS]}"
 
 
 class CommandExecuter:
-    """Execute commands locally or via SSH with robust argument handling"""
+    """
+    Execute commands locally or remotely.
+    
+    SECURITY MODEL:
+    - Generic commands: SSH (secure, no arbitrary command execution via API)
+    - Specific operations: Agent endpoints (file writes, mkdir, service control)
+    - localhost: Direct subprocess calls
+    
+    The agent provides specific, safe endpoints rather than generic command execution
+    to minimize security risk if the API key is ever compromised.
+    """
+    
+    # Feature flag for agent-based operations (file writes, mkdir, etc.)
+    USE_AGENT = True
+    
+    # Cache for agent availability per server
+    _agent_available_cache = {}
+    
+    @staticmethod
+    def is_agent_available(server_ip: str) -> bool:
+        """
+        Check if health agent is available on server.
+        Caches result to avoid repeated checks.
+        """
+        if server_ip == 'localhost' or server_ip is None:
+            return False
+        
+        # Check cache first
+        if server_ip in CommandExecuter._agent_available_cache:
+            return CommandExecuter._agent_available_cache[server_ip]
+        
+        # Try to ping agent
+        try:
+            response = HealthMonitor.agent_request(
+                server_ip,
+                "GET",
+                "/ping",
+                timeout=2
+            )
+            available = response.get('status') == 'alive'
+            CommandExecuter._agent_available_cache[server_ip] = available
+            return available
+        except Exception:
+            CommandExecuter._agent_available_cache[server_ip] = False
+            return False
 
     @staticmethod
     def check_docker_available() -> bool:
@@ -99,9 +127,26 @@ class CommandExecuter:
             return False
 
     @staticmethod
-    def run_cmd(cmd: Union[List[str], str], server_ip: str = 'localhost', user: str = "root") -> Any:
-        """Run command(s) locally or via SSH depending on server_ip"""
-        user='root' # todo: clean that
+    def run_cmd(
+        cmd: Union[List[str], str], 
+        server_ip: str = 'localhost', 
+        user: str = "root",
+        use_ssh: bool = False  # Kept for API compatibility but always uses SSH for remote
+    ) -> Any:
+        """
+        Run command locally or remotely.
+        
+        Args:
+            cmd: Command to run (string or list)
+            server_ip: Target server IP (localhost for local)
+            user: SSH user (default: root)
+            use_ssh: Kept for compatibility (remote commands always use SSH)
+        
+        Returns:
+            Command output or subprocess.CompletedProcess
+        """
+        user = 'root'  # todo: clean that
+        
         # Handle multiple commands case
         if isinstance(cmd, list) and len(cmd) > 0 and isinstance(cmd[0], str) and any(' ' in c for c in cmd):
             # This looks like a list of complete command strings
@@ -110,7 +155,7 @@ class CommandExecuter:
                 if server_ip == 'localhost' or server_ip is None:
                     result = CommandExecuter._run_cmd_local(single_cmd)
                 else:
-                    result = CommandExecuter._run_ssh_cmd(single_cmd, server_ip, user)
+                    result = CommandExecuter._run_cmd_remote(single_cmd, server_ip, user, use_ssh)
                 results.append(result)
             return results
         
@@ -118,7 +163,31 @@ class CommandExecuter:
         if server_ip == 'localhost' or server_ip is None:
             return CommandExecuter._run_cmd_local(cmd)
         else:
-            return CommandExecuter._run_ssh_cmd(cmd, server_ip, user)
+            return CommandExecuter._run_cmd_remote(cmd, server_ip, user, use_ssh)
+
+    @staticmethod
+    def _run_cmd_remote(
+        cmd: Union[List[str], str], 
+        server_ip: str, 
+        user: str = "root",
+        use_ssh: bool = False
+    ) -> str:
+        """
+        Run command on remote server.
+        
+        For security, we use SSH for most operations.
+        Agent is only used for specific operations via high-level methods.
+        """
+        # Normalize command to string
+        if isinstance(cmd, list):
+            cmd_list = CommandExecuter._normalize_command(cmd)
+            cmd_str = " ".join(cmd_list)
+        else:
+            cmd_str = cmd
+        
+        # Use SSH for command execution
+        # (Agent only used for specific operations like file writes, mkdir, etc.)
+        return CommandExecuter._run_ssh_cmd(cmd_str, server_ip, user)
 
     @staticmethod
     def _normalize_command(cmd: Union[List[str], str]) -> List[str]:
@@ -182,7 +251,8 @@ class CommandExecuter:
     @staticmethod
     def _run_ssh_cmd(cmd: Union[List[str], str], server_ip: str, user: str = "root") -> str:
         """Run command via SSH with cross-platform support (Docker on Windows)"""        
-        user='root' # todo: clean that
+        user = 'root'  # todo: clean that
+        
         # If it's already a string, use it as-is (it may contain shell operators)
         if isinstance(cmd, str):
             remote_cmd = cmd
@@ -237,7 +307,8 @@ class CommandExecuter:
                     raise Exception(error_msg)
                 return result.stdout.strip()
             except FileNotFoundError:
-                raise FileNotFoundError("Docker not found. Please ensure Docker Desktop is installed and running.")
+                raise FileNotFoundError("Docker not found. "
+                                      "Please ensure Docker Desktop is installed and running.")
         else:
             # Native SSH on Linux/macOS
             ssh_cmd = ["ssh", "-o", "StrictHostKeyChecking=no", 
@@ -255,11 +326,101 @@ class CommandExecuter:
                 return result.stdout.strip()
             except FileNotFoundError:
                 raise FileNotFoundError("SSH client not found. Please install SSH.")
-            
+
     @staticmethod
-    def run_cmd_with_stdin(remote_cmd: str, data: bytes, server_ip: str, user: str = "root") -> None:
-        """Run a remote command and stream data to its stdin (avoids huge base64 echoes)."""
-        user='root' # todo: clean that
+    def run_cmd_with_stdin(
+        remote_cmd: str, 
+        data: bytes, 
+        server_ip: str, 
+        user: str = "root",
+        use_ssh: bool = False
+    ) -> None:
+        """
+        Run a remote command and stream data to its stdin.
+        
+        MIGRATED: Uses agent for tar extraction and file writes if agent available.
+        """
+        user = 'root'  # todo: clean that
+        
+        # Check if agent is available (skip if use_ssh=True or agent not available)
+        agent_available = (
+            CommandExecuter.USE_AGENT and 
+            not use_ssh and 
+            CommandExecuter.is_agent_available(server_ip)
+        )
+        
+        # Detect tar extraction operation
+        if agent_available and 'tar -xzf -' in remote_cmd:
+            try:
+                # Extract path from command like "cd /path && tar -xzf -"
+                import re
+                cd_match = re.search(r'cd\s+([^\s&]+)', remote_cmd)
+                if cd_match:
+                    extract_path = cd_match.group(1)
+                    
+                    # Use agent's tar upload endpoint
+                    import base64
+                    tar_base64 = base64.b64encode(data).decode('utf-8')
+                    
+                    response = HealthMonitor.agent_request(
+                        server_ip,
+                        "POST",
+                        "/files/upload",
+                        json_data={
+                            'tar_data': tar_base64,
+                            'extract_path': extract_path,
+                            'set_permissions': False  # Will be set separately if needed
+                        },
+                        timeout=120  # Longer timeout for large uploads
+                    )
+                    
+                    if response.get('status') == 'success':
+                        log(f"✓ Uploaded via agent: {response.get('files_extracted')} files")
+                        return
+                    else:
+                        raise Exception(f"Tar upload failed: {response.get('error', 'unknown')}")
+                        
+            except Exception as e:
+                log(f"Agent call failed for tar upload, falling back to SSH: {e}")
+                # Fall through to SSH
+        
+        # Try to detect if this is a file write operation
+        if agent_available and 'cat >' in remote_cmd:
+            try:
+                # Extract file path from command like "cat > /path/to/file"
+                parts = remote_cmd.split('cat >')
+                if len(parts) == 2:
+                    file_path = parts[1].split('&&')[0].strip()
+                    content = data.decode('utf-8')
+                    
+                    # Use agent's file write endpoint
+                    response = HealthMonitor.agent_request(
+                        server_ip,
+                        "POST",
+                        "/files/write",
+                        json_data={
+                            'path': file_path,
+                            'content': content,
+                            'permissions': '644'  # Default, can be overridden
+                        },
+                        timeout=30
+                    )
+                    
+                    if response.get('status') == 'success':
+                        return
+                    else:
+                        raise Exception(f"File write failed: {response.get('error', 'unknown')}")
+                        
+            except Exception as e:
+                log(f"Agent call failed for file write, falling back to SSH: {e}")
+                # Fall through to SSH
+        
+        # Use SSH (fallback or agent not available)
+        CommandExecuter._run_ssh_cmd_with_stdin(remote_cmd, data, server_ip, user)
+
+    @staticmethod
+    def _run_ssh_cmd_with_stdin(remote_cmd: str, data: bytes, server_ip: str, user: str = "root") -> None:
+        """Run a remote command via SSH and stream data to its stdin"""
         ssh_key_path = Path.home() / ".ssh" / "deployer_id_rsa"
         system = platform.system()
 
@@ -290,3 +451,137 @@ class CommandExecuter:
         result = subprocess.run(ssh_wrapper, input=data, capture_output=True)
         if result.returncode != 0:
             raise Exception(f"SSH stdin transfer failed: {result.stderr.decode('utf-8', 'replace')}")
+
+    # =========================================================================
+    # HIGH-LEVEL FILE OPERATIONS (use agent automatically)
+    # =========================================================================
+
+    @staticmethod
+    def write_file(
+        path: str, 
+        content: str, 
+        server_ip: str = 'localhost',
+        permissions: str = '644',
+        use_ssh: bool = False
+    ) -> bool:
+        """
+        Write file to server.
+        
+        MIGRATED: Uses HTTP agent for remote operations if available.
+        
+        Args:
+            path: File path
+            content: File content
+            server_ip: Target server
+            permissions: File permissions (octal string like '644')
+            use_ssh: Force SSH instead of agent
+        
+        Returns:
+            True on success
+        """
+        # Localhost - direct write
+        if server_ip == 'localhost' or server_ip is None:
+            file_path = Path(path)
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            file_path.write_text(content)
+            file_path.chmod(int(permissions, 8))
+            return True
+        
+        # Remote - try agent if available
+        agent_available = (
+            CommandExecuter.USE_AGENT and 
+            not use_ssh and 
+            CommandExecuter.is_agent_available(server_ip)
+        )
+        
+        if agent_available:
+            try:
+                response = HealthMonitor.agent_request(
+                    server_ip,
+                    "POST",
+                    "/files/write",
+                    json_data={
+                        'path': path,
+                        'content': content,
+                        'permissions': permissions
+                    },
+                    timeout=30
+                )
+                
+                if response.get('status') == 'success':
+                    return True
+                else:
+                    raise Exception(f"File write failed: {response.get('error', 'unknown')}")
+                    
+            except Exception as e:
+                log(f"Agent call failed for file write, falling back to SSH: {e}")
+                # Fall through to SSH
+        
+        # SSH fallback
+        CommandExecuter.run_cmd_with_stdin(
+            f"mkdir -p $(dirname {path}) && cat > {path} && chmod {permissions} {path}",
+            content.encode('utf-8'),
+            server_ip
+        )
+        return True
+
+    @staticmethod
+    def mkdir(
+        path: str, 
+        server_ip: str = 'localhost',
+        mode: str = '755',
+        use_ssh: bool = False
+    ) -> bool:
+        """
+        Create directory on server.
+        
+        MIGRATED: Uses HTTP agent for remote operations if available.
+        
+        Args:
+            path: Directory path
+            server_ip: Target server
+            mode: Directory permissions (octal string like '755')
+            use_ssh: Force SSH instead of agent
+        
+        Returns:
+            True on success
+        """
+        # Localhost - direct creation
+        if server_ip == 'localhost' or server_ip is None:
+            dir_path = Path(path)
+            dir_path.mkdir(parents=True, exist_ok=True)
+            dir_path.chmod(int(mode, 8))
+            return True
+        
+        # Remote - try agent if available
+        agent_available = (
+            CommandExecuter.USE_AGENT and 
+            not use_ssh and 
+            CommandExecuter.is_agent_available(server_ip)
+        )
+        
+        if agent_available:
+            try:
+                response = HealthMonitor.agent_request(
+                    server_ip,
+                    "POST",
+                    "/files/mkdir",
+                    json_data={
+                        'paths': [path],
+                        'mode': mode
+                    },
+                    timeout=30
+                )
+                
+                if response.get('status') == 'success':
+                    return True
+                else:
+                    raise Exception(f"mkdir failed: {response.get('error', 'unknown')}")
+                    
+            except Exception as e:
+                log(f"Agent call failed for mkdir, falling back to SSH: {e}")
+                # Fall through to SSH
+        
+        # SSH fallback
+        CommandExecuter.run_cmd(f'mkdir -p {path} && chmod {mode} {path}', server_ip)
+        return True

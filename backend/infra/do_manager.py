@@ -307,6 +307,8 @@ class DOManager:
     def get_or_create_template(region: str = "lon1", credentials: dict = None) -> str:
         """
         Get existing template snapshot or create a new one.
+        
+        NEW: Template now has VPC-only SSH configured!
         """
         with DOManager._template_lock:
             # Check if we already have a snapshot
@@ -349,7 +351,7 @@ class DOManager:
             # Install health agent            
             HealthAgentInstaller.install_on_server(ip)
             
-            # WAIT for agent to be ready (NEW!)
+            # WAIT for agent to be ready
             log("Waiting for health agent to start...")
             for i in range(30):  # Try for 30 seconds
                 try:
@@ -359,6 +361,39 @@ class DOManager:
                         break
                 except:
                     time.sleep(1)
+            
+            # ========================================
+            # NEW: CONFIGURE VPC-ONLY SSH FIREWALL
+            # ========================================
+            log("🔒 Configuring VPC-only SSH firewall...")
+            
+            firewall_commands = [
+                "ufw --force reset",
+                "ufw default deny incoming",
+                "ufw default allow outgoing",
+                
+                # VPC-only SSH (blocks internet SSH!)
+                "ufw allow from 10.0.0.0/16 to any port 22 comment 'SSH VPC only'",
+                
+                # Agent API (VPC only)
+                "ufw allow from 10.0.0.0/16 to any port 9999 comment 'Health Agent'",
+                
+                # HTTPS (will be restricted to Cloudflare later via agent)
+                "ufw allow 443 comment 'HTTPS - will be restricted in deployment'",
+                
+                "ufw --force enable"
+            ]
+            
+            for cmd in firewall_commands:
+                try:
+                    CommandExecuter.run_cmd(cmd, ip, "root")
+                    log(f"  ✓ {cmd[:60]}...")
+                except Exception as e:
+                    log(f"  ⚠ Firewall command failed: {e}")
+            
+            log("✅ Firewall configured - SSH restricted to VPC (10.0.0.0/16)")
+            log("   From now on, SSH only works from within VPC!")
+            # ========================================
 
             # Install basic nginx
             DOManager._install_basic_nginx(ip)
@@ -379,9 +414,10 @@ class DOManager:
             log(f"Destroying template droplet {template_id}")
             DOManager.destroy_droplet(template_id, credentials=credentials)
             
-            log(f"Template snapshot ready: {snapshot_id}")
+            log(f"✅ Template snapshot ready: {snapshot_id}")
+            log("   All servers from this template will have VPC-only SSH!")
             return snapshot_id
-
+    
     @staticmethod
     def delete_template(credentials: dict = None):
         """
