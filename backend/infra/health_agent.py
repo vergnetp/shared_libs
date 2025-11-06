@@ -4,8 +4,9 @@ Health Agent - HTTP API for remote server management
 This file should be copied to: /usr/local/bin/health_agent.py on each server
 
 NEW in this version:
+- Added /credentials/write endpoint for secure credentials management (no SSH needed)
 - Added /deploy/cron endpoint for cron container deployment
-- Added /cron/<name> DELETE endpoint for cron removal
+- Added /cron/<n> DELETE endpoint for cron removal
 """
 
 from flask import Flask, request, jsonify
@@ -13,6 +14,7 @@ from functools import wraps
 from pathlib import Path
 import subprocess
 import json
+import os
 
 
 app = Flask(__name__)
@@ -176,144 +178,219 @@ def run_container():
             cmd.extend(['--network', data['network']])
         
         # Add restart policy
-        restart_policy = data.get('restart_policy', 'unless-stopped')
-        cmd.extend(['--restart', restart_policy])
+        if data.get('restart_policy'):
+            cmd.extend(['--restart', data['restart_policy']])
         
         # Add image
         cmd.append(data['image'])
         
-        # Run command
+        # Add command (if any)
+        if data.get('command'):
+            cmd.extend(data['command'].split())
+        
+        # Run container
         container_id = run_docker_cmd(cmd)
         
-        return jsonify({'status': 'started', 'container_id': container_id})
+        return jsonify({
+            'status': 'started',
+            'container_id': container_id
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/containers/<name>/logs', methods=['GET'])
+@require_api_key
+def get_container_logs(name):
+    """Get container logs"""
+    try:
+        lines = request.args.get('lines', '100')
+        output = run_docker_cmd(['docker', 'logs', '--tail', lines, name])
+        return jsonify({'logs': output})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 @app.route('/images/<path:image>/pull', methods=['POST'])
 @require_api_key
 def pull_image(image):
+    """Pull Docker image"""
     try:
         run_docker_cmd(['docker', 'pull', image])
-        return jsonify({'status': 'pulled', 'image': image})
+        return jsonify({'status': 'pulled'})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+
 # ========================================
-# NEW ENDPOINTS FOR FIX #2
+# CREDENTIALS MANAGEMENT (NEW!)
+# ========================================
+
+@app.route('/credentials/write', methods=['POST'])
+@require_api_key
+def write_credentials():
+    """
+    Write credentials file securely (no SSH needed).
+    
+    Request JSON:
+    {
+        "path": "/local/userB/myapp/prod/secrets/infra/credentials.json",
+        "content": "{...json content...}",
+        "permissions": "600"
+    }
+    
+    Returns:
+    {
+        "status": "success",
+        "path": "/local/..."
+    }
+    
+    Security:
+    - Requires API key authentication
+    - Sets file permissions to 600 (owner read/write only)
+    - Creates parent directories if needed
+    - Path must be under /local/ or /app/local/
+    """
+    try:
+        data = request.get_json()
+        
+        # Validate required fields
+        if not data.get('path') or not data.get('content'):
+            return jsonify({'error': 'path and content required'}), 400
+        
+        file_path = Path(data['path'])
+        content = data['content']
+        permissions = data.get('permissions', '600')
+        
+        # Security check: Only allow writes to /local/ or /app/local/
+        allowed_bases = ['/local/', '/app/local/']
+        path_str = str(file_path.resolve())
+        
+        if not any(path_str.startswith(base) for base in allowed_bases):
+            return jsonify({
+                'error': f'Path must be under {" or ".join(allowed_bases)}'
+            }), 403
+        
+        # Create parent directory if needed
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Write file
+        file_path.write_text(content)
+        
+        # Set permissions (convert octal string to int)
+        perm_int = int(permissions, 8)
+        file_path.chmod(perm_int)
+        
+        return jsonify({
+            'status': 'success',
+            'path': str(file_path),
+            'permissions': permissions
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+
+
+# ========================================
+# CRON DEPLOYMENT
 # ========================================
 
 @app.route('/deploy/cron', methods=['POST'])
 @require_api_key
-def deploy_cron_container():
+def deploy_cron():
     """
-    Deploy a container with cron schedule.
+    Deploy a container via cron.
     
     Request JSON:
     {
-        "image": "username/health-monitor:latest",
-        "schedule": "* * * * *",
-        "name": "health_monitor_system",
-        "volumes": ["/local:/app/local:ro"],
-        "env_vars": {},
+        "name": "backup_prod",
+        "schedule": "0 2 * * *",
+        "image": "myapp/backup:latest",
+        "command": "python backup.py",
+        "env_vars": {"DB_HOST": "localhost"},
+        "volumes": ["/data:/app/data"],
+        "network": "myapp_network",
         "user": "root"
     }
     
     Returns:
     {
         "status": "success",
-        "message": "Cron container deployed",
-        "details": {
-            "image": "...",
-            "schedule": "...",
-            "log_file": "/var/log/..."
-        }
+        "cron_entry": "0 2 * * * ..."
     }
     """
     try:
-        data = request.json
+        data = request.get_json()
         
-        image = data.get('image')
-        schedule = data.get('schedule')
-        name = data.get('name')
-        volumes = data.get('volumes', [])
+        # Validate required fields
+        required = ['name', 'schedule', 'image']
+        missing = [f for f in required if not data.get(f)]
+        if missing:
+            return jsonify({'error': f'Missing required fields: {missing}'}), 400
+        
+        name = data['name']
+        schedule = data['schedule']
+        image = data['image']
+        command = data.get('command', '')
         env_vars = data.get('env_vars', {})
+        volumes = data.get('volumes', [])
+        network = data.get('network', '')
         user = data.get('user', 'root')
         
-        if not image or not schedule or not name:
-            return jsonify({
-                'status': 'error',
-                'message': 'Missing required fields: image, schedule, name'
-            }), 400
+        # Build docker run command
+        docker_cmd = f'docker run --rm --name {name}'
         
-        # 1. Pull image
-        result = subprocess.run(
-            ['docker', 'pull', image],
-            capture_output=True,
-            text=True,
-            timeout=300
-        )
-        
-        if result.returncode != 0:
-            return jsonify({
-                'status': 'error',
-                'message': f'Failed to pull image: {result.stderr}'
-            }), 500
-        
-        # 2. Build docker run command
-        docker_cmd_parts = ['docker', 'run', '--rm']
-        
-        # Add volumes
-        for volume in volumes:
-            docker_cmd_parts.extend(['-v', volume])
-        
-        # Add env vars
         for key, value in env_vars.items():
-            docker_cmd_parts.extend(['-e', f'{key}={value}'])
+            docker_cmd += f' -e {key}="{value}"'
         
-        # Add image
-        docker_cmd_parts.append(image)
+        for volume in volumes:
+            docker_cmd += f' -v {volume}'
         
-        # Build complete command
-        docker_cmd = ' '.join(
-            f'"{part}"' if ' ' in str(part) else str(part) 
-            for part in docker_cmd_parts
-        )
+        if network:
+            docker_cmd += f' --network {network}'
         
-        # 3. Create cron entry
-        log_file = f"/var/log/cron_{user}_{name}.log"
-        cron_entry = f"{schedule} {docker_cmd} >> {log_file} 2>&1"
-        identifier = f"# MANAGED_CRON_{user}_{name}"
+        docker_cmd += f' {image}'
         
-        # 4. Install cron job
-        # Remove old cron with same identifier
-        subprocess.run(
-            f"crontab -l 2>/dev/null | grep -v '{identifier}' | crontab - 2>/dev/null || true",
+        if command:
+            docker_cmd += f' {command}'
+        
+        # Create cron entry with identifier for management
+        identifier = f'# MANAGED_CRON_{user}_{name}'
+        cron_entry = f'{schedule} {docker_cmd} {identifier}'
+        
+        # Get existing crontab
+        result = subprocess.run(
+            'crontab -l 2>/dev/null || echo ""',
             shell=True,
-            check=False
+            capture_output=True,
+            text=True
         )
+        existing_crontab = result.stdout
         
-        # Add new cron
+        # Remove old entry for this job if it exists
+        lines = [line for line in existing_crontab.split('\n') 
+                if identifier not in line]
+        
+        # Add new entry
+        lines.append(cron_entry)
+        
+        # Install new crontab
+        new_crontab = '\n'.join(lines)
         subprocess.run(
-            f"(crontab -l 2>/dev/null; echo '{identifier}'; echo '{cron_entry}') | crontab -",
+            'crontab -',
+            input=new_crontab,
             shell=True,
+            text=True,
             check=True
         )
         
         return jsonify({
             'status': 'success',
-            'message': 'Cron container deployed',
-            'details': {
-                'image': image,
-                'schedule': schedule,
-                'log_file': log_file
-            }
+            'cron_entry': cron_entry
         })
         
-    except subprocess.TimeoutExpired:
-        return jsonify({
-            'status': 'error',
-            'message': 'Image pull timed out'
-        }), 500
     except Exception as e:
         return jsonify({
             'status': 'error',
@@ -323,9 +400,9 @@ def deploy_cron_container():
 
 @app.route('/cron/<name>', methods=['DELETE'])
 @require_api_key
-def remove_cron_container(name):
+def remove_cron(name):
     """
-    Remove a cron container.
+    Remove cron container deployment.
     
     Args:
         name: Cron job name (from deployment)
@@ -374,23 +451,23 @@ def upload_tar_chunked():
     
     Request JSON:
     {
-        "chunk": "<base64_data>",
+        "chunk_data": "<base64_data>",
         "chunk_index": 0,
         "total_chunks": 5,
         "upload_id": "unique-id",
-        "target_path": "/path/to/extract"
+        "extract_path": "/local/myapp/prod"
     }
     """
     try:
         data = request.json
         
-        chunk = data.get('chunk')
+        chunk_data = data.get('chunk_data')
         chunk_index = data.get('chunk_index')
         total_chunks = data.get('total_chunks')
         upload_id = data.get('upload_id')
-        target_path = data.get('target_path')
+        extract_path = data.get('extract_path')
         
-        if not all([chunk, chunk_index is not None, total_chunks, upload_id, target_path]):
+        if not all([chunk_data, chunk_index is not None, total_chunks, upload_id, extract_path]):
             return jsonify({'error': 'Missing required fields'}), 400
         
         # Create temp directory for chunks
@@ -400,7 +477,7 @@ def upload_tar_chunked():
         # Save chunk
         chunk_file = temp_dir / f'chunk_{chunk_index}'
         import base64
-        chunk_file.write_bytes(base64.b64decode(chunk))
+        chunk_file.write_bytes(base64.b64decode(chunk_data))
         
         # If this is the last chunk, assemble and extract
         if chunk_index == total_chunks - 1:
@@ -414,7 +491,7 @@ def upload_tar_chunked():
             # Extract tar
             import tarfile
             with tarfile.open(tar_file, 'r:gz') as tar:
-                tar.extractall(target_path)
+                tar.extractall(extract_path)
             
             # Cleanup
             import shutil
@@ -435,4 +512,9 @@ def upload_tar_chunked():
 
 
 if __name__ == '__main__':
+    # Disable Flask request logging (reduces log noise)
+    import logging
+    log = logging.getLogger('werkzeug')
+    log.setLevel(logging.ERROR)
+    
     app.run(host='0.0.0.0', port=9999)

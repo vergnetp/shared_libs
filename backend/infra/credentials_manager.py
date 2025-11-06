@@ -5,10 +5,6 @@ from pathlib import Path
 from typing import Dict
 
 try:
-    from .execute_cmd import CommandExecuter
-except ImportError:
-    from execute_cmd import CommandExecuter
-try:
     from .logger import Logger
 except ImportError:
     from logger import Logger
@@ -37,6 +33,11 @@ class CredentialsManager:
     - Users can provide different DO tokens per project or environment
     - Health monitor discovers contexts and uses appropriate credentials
     - Complete isolation per DO account
+    
+    Security:
+    - Uses HTTP agent (no SSH required)
+    - File permissions: 600 (owner read/write only)
+    - Credentials never logged in full
     """
     
     @staticmethod
@@ -89,10 +90,11 @@ class CredentialsManager:
         if credentials_file.exists():
             try:
                 creds = json.loads(credentials_file.read_text())
-                log(f"Loaded credentials from {credentials_file}")
+                # Security: Don't log the actual file path or contents
+                log(f"✓ Loaded credentials for {user}/{project}/{env}")
                 return creds
             except Exception as e:
-                log(f"Error reading credentials file {credentials_file}: {e}")
+                log(f"Error reading credentials for {user}/{project}/{env}: {e}")
         
         # Fallback to environment variables (development/platform defaults)
         do_token = os.getenv('DIGITALOCEAN_API_TOKEN')
@@ -100,10 +102,10 @@ class CredentialsManager:
         if not do_token:
             raise ValueError(
                 f"No credentials found for {user}/{project}/{env}! "
-                f"Expected at {credentials_file} or DIGITALOCEAN_API_TOKEN env var"
+                f"Provide credentials dict or set DIGITALOCEAN_API_TOKEN"
             )
         
-        log(f"Using credentials from environment variables for {user}/{project}/{env}")
+        log(f"Using environment variables for {user}/{project}/{env}")
         
         return {
             'digitalocean_token': do_token,
@@ -117,46 +119,55 @@ class CredentialsManager:
         project: str,
         env: str,
         server_ip: str,
-        credentials: Dict[str, str],
-        ssh_user: str = 'root'
+        credentials: Dict[str, str]
     ) -> bool:
         """
-        Push credentials to server.
+        Push credentials to server via HTTP agent (no SSH required).
         
         Args:
             user: User ID
             project: Project name
             env: Environment name
             server_ip: Target server IP
-            credentials: Credentials dict
-            ssh_user: SSH user (default: 'root')
+            credentials: Credentials dict            
             
         Returns:
             True if successful
+            
+        Security:
+        - Uses HTTP agent with API key authentication
+        - Sets file permissions to 600 (owner read/write only)
+        - Credentials transmitted over VPC-only connection
         """
         try:
+            # Import here to avoid circular dependency
+            try:
+                from .health_monitor import HealthMonitor
+            except ImportError:
+                from health_monitor import HealthMonitor
+            
             credentials_file = CredentialsManager._get_credentials_path(
                 user, project, env, server_ip
             )
-            credentials_dir = credentials_file.parent
             
-            # Create directory
-            CommandExecuter.run_cmd(
-                f"mkdir -p {credentials_dir}",
-                server_ip, ssh_user
-            )
-            
-            # Write credentials (secure permissions)
+            # Prepare credentials JSON
             creds_json = json.dumps(credentials, indent=2)
             
-            CommandExecuter.run_cmd_with_stdin(
-                f"cat > {credentials_file} && "
-                f"chmod 600 {credentials_file}",
-                creds_json.encode('utf-8'),
-                server_ip, ssh_user
+            # Push via HTTP agent (no SSH!)
+            HealthMonitor.agent_request(
+                server_ip,
+                "POST",
+                "/credentials/write",
+                json_data={
+                    'path': str(credentials_file),
+                    'content': creds_json,
+                    'permissions': '600'
+                },
+                timeout=30
             )
             
-            log(f"✓ Credentials pushed to {server_ip}:{credentials_file}")
+            # Security: Don't log the actual path or contents
+            log(f"✓ Credentials pushed to {server_ip} for {user}/{project}/{env}")
             return True
             
         except Exception as e:

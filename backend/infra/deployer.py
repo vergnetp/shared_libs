@@ -91,6 +91,10 @@ try:
     from .do_state_manager import DOStateManager
 except ImportError:
     from do_state_manager import DOStateManager
+try:
+    from .credentials_manager import CredentialsManager
+except ImportError:
+    from credentials_manager import CredentialsManager
 
 
 def log(msg):
@@ -913,6 +917,31 @@ class Deployer:
         Logger.start()
 
         self.pre_provision_servers(env, service_name, credentials=credentials)
+
+        if credentials:
+            log("Pushing credentials to all servers...")
+            environments = [env] if env else self.deployment_configurer.get_environments()
+            
+            for environment in environments:
+                all_servers = ServerInventory.list_all_servers(credentials=credentials)
+                target_ips = []
+                
+                for svc_name, svc_config in self.deployment_configurer.get_services(environment).items():
+                    zone = svc_config.get("server_zone", "lon1")
+                    if zone != "localhost":
+                        zone_servers = [s['ip'] for s in all_servers if s['zone'] == zone]
+                        target_ips.extend(zone_servers)
+                
+                target_ips = list(set(target_ips))
+                
+                for server_ip in target_ips:
+                    CredentialsManager.push_credentials_to_server(
+                        self.user, 
+                        self.project_name, 
+                        environment, 
+                        server_ip, 
+                        credentials
+                    )
 
         if env:
             self._write_deployment_config(env)

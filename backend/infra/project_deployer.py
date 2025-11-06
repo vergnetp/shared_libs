@@ -1304,6 +1304,127 @@ class ProjectDeployer:
     # SECRETS MANAGEMENT (delegate to SecretsRotator)
     # ========================================
     
+    def update_credentials_for_env(
+    self,
+    env: str,
+    new_credentials: Dict[str, str],
+    verify: bool = True
+) -> Dict[str, bool]:
+        """
+        Update credentials for a specific environment.
+        
+        Args:
+            env: Environment name (e.g., "prod", "dev")
+            new_credentials: New credentials dict
+            verify: If True, verify new DO token works
+            
+        Returns:
+            Dict mapping server IP to success status
+            
+        Example:
+            project = ProjectDeployer("userB", "my-api")
+            
+            # Update production credentials
+            project.update_credentials_for_env("prod", {
+                'digitalocean_token': 'dop_v1_NEW_PROD_TOKEN'
+            })
+            
+            # Update dev credentials (can be different token!)
+            project.update_credentials_for_env("dev", {
+                'digitalocean_token': 'dop_v1_NEW_DEV_TOKEN'
+            })
+        """
+        from backend.infra.credentials_updater import CredentialsUpdater
+        
+        return CredentialsUpdater.update_credentials(
+            self.user,
+            self.project_name,
+            env,
+            new_credentials,
+            verify=verify
+        )
+
+
+    def rotate_token(
+        self,
+        env: str,
+        old_token: str,
+        new_token: str
+    ) -> bool:
+        """
+        Safely rotate DigitalOcean API token.
+        
+        This is a secure wrapper that:
+        1. Verifies old token matches stored token
+        2. Verifies new token works
+        3. Updates all servers
+        4. Updates local storage
+        
+        Args:
+            env: Environment name
+            old_token: Current token (security check)
+            new_token: New token after rotation
+            
+        Returns:
+            True if rotation successful
+            
+        Example:
+            project = ProjectDeployer("userB", "my-api")
+            
+            success = project.rotate_token(
+                env="prod",
+                old_token="dop_v1_OLD_TOKEN",
+                new_token="dop_v1_NEW_TOKEN"
+            )
+            
+            if success:
+                print("✓ Token rotated successfully!")
+                print("  Health monitor will use new token")
+                print("  Future deployments will use new token")
+        """
+        from backend.infra.credentials_updater import CredentialsUpdater
+        
+        return CredentialsUpdater.rotate_token(
+            self.user,
+            self.project_name,
+            env,
+            old_token,
+            new_token
+        )
+
+
+    def list_stored_credentials(self, env: str) -> Dict[str, str]:
+        """
+        List which credentials are stored (values are masked).
+        
+        Args:
+            env: Environment name
+            
+        Returns:
+            Dict with credential keys and masked values
+            
+        Example:
+            project = ProjectDeployer("userB", "my-api")
+            creds = project.list_stored_credentials("prod")
+            
+            print(creds)
+            # {
+            #   'digitalocean_token': '****....(64 chars)',
+            #   'docker_hub_user': 'userb',
+            #   'docker_hub_password': '****....(12 chars)'
+            # }
+        """
+        from backend.infra.credentials_updater import CredentialsUpdater
+        
+        return CredentialsUpdater.list_stored_credentials(
+            self.user,
+            self.project_name,
+            env
+        )
+
+
+
+
     def rotate_secrets(
         self, 
         env: str, 
