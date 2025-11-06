@@ -93,8 +93,16 @@ Type=simple
 User=root
 WorkingDirectory=/usr/local/bin
 ExecStart=/usr/bin/python3 /usr/local/bin/health_agent.py
+
+# Auto-restart configuration (ELIMINATES NEED FOR SSH)
 Restart=always
-RestartSec=10
+RestartSec=5
+StartLimitBurst=10
+StartLimitIntervalSec=60
+
+# If service fails 10 times in 60 seconds, systemd gives up
+# (Server will be replaced by health monitor at this point)
+
 StandardOutput=journal
 StandardError=journal
 

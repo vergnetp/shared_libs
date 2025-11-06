@@ -518,111 +518,69 @@ class HealthMonitor:
         coordinator.check_and_scale_all_services()
 
 
-
     @staticmethod
     def check_and_heal_agent(server_ip: str, user: str = "root") -> bool:
         """
-        Check if health agent is running and try to restart if needed.
+        Check if health agent is responding.
         
-        This prevents false positives where the server is healthy but
-        only the health agent service is down.
+        NO SSH FALLBACK - relies on systemd auto-restart (Restart=always).
+        
+        Flow:
+        1. Try HTTP ping to agent
+        2. If fails, wait 20s for systemd auto-restart
+        3. Try HTTP ping again
+        4. If still fails, mark server unhealthy (will be replaced)
         
         Args:
             server_ip: Server to check
-            user: SSH user
+            user: SSH user (UNUSED - kept for API compatibility)
             
         Returns:
-            True if agent is running (or was successfully restarted)
+            True if agent is running or recovers via systemd auto-restart
         """
         log(f"Checking health agent on {server_ip}...")
         
+        # STEP 1: Try to ping agent via HTTP
         try:
-            # 1. Try to ping agent
-            try:
-                response = HealthMonitor.agent_request(
-                    server_ip,
-                    "GET",
-                    "/ping",
-                    timeout=5
-                )
-                
-                if response.get('status') == 'alive':
-                    log(f"✓ Agent responding on {server_ip}")
-                    return True
-                    
-            except Exception as e:
-                log(f"Agent not responding on {server_ip}: {e}")
-            
-            # 2. Agent not responding - check if service exists
-            log(f"Checking if agent service exists on {server_ip}...")
-            
-            try:
-                from .execute_cmd import CommandExecuter
-            except ImportError:
-                from execute_cmd import CommandExecuter
-            
-            service_check = CommandExecuter.run_cmd(
-                "systemctl list-units --type=service | grep -q 'health-agent' && echo 'EXISTS' || echo 'MISSING'",
-                server_ip, user
+            response = HealthMonitor.agent_request(
+                server_ip,
+                "GET",
+                "/ping",
+                timeout=5
             )
             
-            if 'MISSING' in str(service_check):
-                log(f"Health agent service not installed on {server_ip}")
-                return False
-            
-            # 3. Service exists - check its status
-            log(f"Checking agent service status on {server_ip}...")
-            
-            status_check = CommandExecuter.run_cmd(
-                "systemctl is-active health-agent || echo 'INACTIVE'",
-                server_ip, user
-            )
-            
-            if 'inactive' in str(status_check).lower() or 'failed' in str(status_check).lower():
-                log(f"Agent service is down on {server_ip}, attempting restart...")
-                
-                # 4. Try to restart service
-                try:
-                    CommandExecuter.run_cmd(
-                        "systemctl restart health-agent",
-                        server_ip, user
-                    )
-                    
-                    log(f"Waiting {HealthMonitor.AGENT_RESTART_TIMEOUT}s for agent to start...")
-                    time.sleep(HealthMonitor.AGENT_RESTART_TIMEOUT)
-                    
-                    # 5. Verify agent is now responding
-                    response = HealthMonitor.agent_request(
-                        server_ip,
-                        "GET",
-                        "/ping",
-                        timeout=5
-                    )
-                    
-                    if response.get('status') == 'alive':
-                        log(f"✓ Agent successfully restarted on {server_ip}")
-                        
-                        HealthMonitor.send_alert(
-                            "Health Agent Auto-Healed",
-                            f"Health agent on {server_ip} was down and has been automatically restarted.\n"
-                            f"Server is healthy - no replacement needed."
-                        )
-                        
-                        return True
-                    else:
-                        log(f"Agent restart failed - still not responding on {server_ip}")
-                        return False
-                        
-                except Exception as e:
-                    log(f"Failed to restart agent on {server_ip}: {e}")
-                    return False
-            else:
-                log(f"Agent service is running but not responding on {server_ip}")
-                return False
+            if response.get('status') == 'alive':
+                log(f"✓ Agent responding on {server_ip}")
+                return True
                 
         except Exception as e:
-            log(f"Error checking agent on {server_ip}: {e}")
-            return False
+            log(f"Agent not responding on {server_ip}: {e}")
+        
+        # STEP 2: Agent not responding - wait for systemd auto-restart
+        log(f"Waiting 20s for systemd auto-restart...")
+        time.sleep(20)  # RestartSec=5 + startup time (~15s buffer)
+        
+        # STEP 3: Try again after waiting for auto-restart
+        try:
+            response = HealthMonitor.agent_request(
+                server_ip,
+                "GET",
+                "/ping",
+                timeout=5
+            )
+            
+            if response.get('status') == 'alive':
+                log(f"✓ Agent recovered via systemd auto-restart on {server_ip}")
+                return True
+                
+        except Exception as e:
+            log(f"Agent still not responding after auto-restart wait: {e}")
+        
+        # STEP 4: Agent truly broken - mark server for replacement
+        log(f"❌ Agent failed on {server_ip}")
+        log(f"Server will be marked unhealthy and replaced (~5 minutes)")
+        return False
+
 
 
     # ========================================
