@@ -7,6 +7,8 @@ NEW in this version:
 - Added /credentials/write endpoint for secure credentials management (no SSH needed)
 - Added /deploy/cron endpoint for cron container deployment
 - Added /cron/<n> DELETE endpoint for cron removal
+- Added /files/write endpoint for general file operations (nginx configs, etc.)
+- Added /files/mkdir endpoint for directory creation
 """
 
 from flask import Flask, request, jsonify
@@ -18,6 +20,14 @@ import os
 
 
 app = Flask(__name__)
+
+# Security: Allowed paths for file write operations
+ALLOWED_WRITE_PATHS = [
+    '/local/',           # User data directories
+    '/app/local/',       # Container-mounted user data
+    '/etc/nginx/',       # Nginx configurations
+    '/tmp/',             # Temporary files
+]
 
 def run_docker_cmd(cmd_list):
     """Run docker command and return output"""
@@ -103,7 +113,7 @@ def list_containers():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-@app.route('/containers/<name>', methods=['GET'])
+@app.route('/containers/<n>', methods=['GET'])
 @require_api_key
 def get_container(name):
     """Get container status"""
@@ -122,7 +132,7 @@ def get_container(name):
     except Exception as e:
         return jsonify({'error': str(e)}), 404
 
-@app.route('/containers/<name>/restart', methods=['POST'])
+@app.route('/containers/<n>/restart', methods=['POST'])
 @require_api_key
 def restart_container(name):
     try:
@@ -131,7 +141,7 @@ def restart_container(name):
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-@app.route('/containers/<name>/stop', methods=['POST'])
+@app.route('/containers/<n>/stop', methods=['POST'])
 @require_api_key
 def stop_container(name):
     try:
@@ -140,7 +150,7 @@ def stop_container(name):
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-@app.route('/containers/<name>/remove', methods=['POST'])
+@app.route('/containers/<n>/remove', methods=['POST'])
 @require_api_key
 def remove_container(name):
     try:
@@ -199,7 +209,7 @@ def run_container():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-@app.route('/containers/<name>/logs', methods=['GET'])
+@app.route('/containers/<n>/logs', methods=['GET'])
 @require_api_key
 def get_container_logs(name):
     """Get container logs"""
@@ -222,7 +232,152 @@ def pull_image(image):
 
 
 # ========================================
-# CREDENTIALS MANAGEMENT (NEW!)
+# FILE OPERATIONS (NEW!)
+# ========================================
+
+@app.route('/files/write', methods=['POST'])
+@require_api_key
+def write_file():
+    """
+    Write file to allowed locations (no SSH needed).
+    
+    Request JSON:
+    {
+        "path": "/etc/nginx/nginx.conf",
+        "content": "...",
+        "permissions": "644"  # Optional, octal string
+    }
+    
+    Returns:
+    {
+        "status": "success",
+        "path": "/etc/nginx/nginx.conf"
+    }
+    
+    Security:
+    - Requires API key authentication
+    - Only allows writes to whitelisted paths
+    - Creates parent directories if needed
+    - Supports setting permissions
+    """
+    try:
+        data = request.get_json()
+        
+        # Validate required fields
+        if not data.get('path') or 'content' not in data:
+            return jsonify({'error': 'path and content required'}), 400
+        
+        file_path = Path(data['path'])
+        content = data['content']
+        permissions = data.get('permissions')
+        
+        # Security check: Only allow writes to whitelisted paths
+        path_str = str(file_path.resolve())
+        
+        if not any(path_str.startswith(base) for base in ALLOWED_WRITE_PATHS):
+            return jsonify({
+                'error': f'Path not allowed. Must be under: {", ".join(ALLOWED_WRITE_PATHS)}'
+            }), 403
+        
+        # Create parent directory if needed
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Write file
+        file_path.write_text(content)
+        
+        # Set permissions if specified
+        if permissions:
+            try:
+                perm_int = int(permissions, 8)
+                file_path.chmod(perm_int)
+            except ValueError:
+                return jsonify({'error': 'Invalid permissions format (use octal like "644")'}), 400
+        
+        return jsonify({
+            'status': 'success',
+            'path': str(file_path)
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+
+@app.route('/files/mkdir', methods=['POST'])
+@require_api_key
+def make_directories():
+    """
+    Create directories (no SSH needed).
+    
+    Request JSON:
+    {
+        "paths": ["/etc/nginx/conf.d", "/etc/nginx/stream.d"],
+        "mode": "755"  # Optional, octal string
+    }
+    
+    Returns:
+    {
+        "status": "success",
+        "created": ["/etc/nginx/conf.d", "/etc/nginx/stream.d"]
+    }
+    
+    Security:
+    - Requires API key authentication
+    - Only allows creation under whitelisted paths
+    - Creates parent directories automatically (mkdir -p behavior)
+    """
+    try:
+        data = request.get_json()
+        
+        # Validate required fields
+        if not data.get('paths'):
+            return jsonify({'error': 'paths required'}), 400
+        
+        paths = data['paths']
+        mode = data.get('mode', '755')
+        
+        if not isinstance(paths, list):
+            paths = [paths]
+        
+        created = []
+        
+        for path_str in paths:
+            dir_path = Path(path_str)
+            
+            # Security check: Only allow creation under whitelisted paths
+            resolved = str(dir_path.resolve())
+            if not any(resolved.startswith(base) for base in ALLOWED_WRITE_PATHS):
+                return jsonify({
+                    'error': f'Path not allowed: {path_str}. Must be under: {", ".join(ALLOWED_WRITE_PATHS)}'
+                }), 403
+            
+            # Create directory (mkdir -p behavior)
+            dir_path.mkdir(parents=True, exist_ok=True)
+            
+            # Set permissions
+            try:
+                mode_int = int(mode, 8)
+                dir_path.chmod(mode_int)
+            except ValueError:
+                return jsonify({'error': 'Invalid mode format (use octal like "755")'}), 400
+            
+            created.append(str(dir_path))
+        
+        return jsonify({
+            'status': 'success',
+            'created': created
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+
+
+# ========================================
+# CREDENTIALS MANAGEMENT
 # ========================================
 
 @app.route('/credentials/write', methods=['POST'])
@@ -305,104 +460,74 @@ def deploy_cron():
     
     Request JSON:
     {
-        "name": "backup_prod",
         "schedule": "0 2 * * *",
-        "image": "myapp/backup:latest",
-        "command": "python backup.py",
-        "env_vars": {"DB_HOST": "localhost"},
-        "volumes": ["/data:/app/data"],
-        "network": "myapp_network",
-        "user": "root"
-    }
-    
-    Returns:
-    {
-        "status": "success",
-        "cron_entry": "0 2 * * * ..."
+        "name": "backup",
+        "image": "postgres:15",
+        "command": "pg_dump ...",
+        "volumes": [...],
+        "env_vars": {...},
+        "network": "myapp-prod-network"
     }
     """
     try:
-        data = request.get_json()
+        data = request.json
         
-        # Validate required fields
-        required = ['name', 'schedule', 'image']
-        missing = [f for f in required if not data.get(f)]
-        if missing:
-            return jsonify({'error': f'Missing required fields: {missing}'}), 400
+        # Build docker run command for cron
+        cmd_parts = ['docker', 'run', '--rm', '--name', data['name']]
         
-        name = data['name']
+        if data.get('network'):
+            cmd_parts.extend(['--network', data['network']])
+        
+        for volume in data.get('volumes', []):
+            cmd_parts.extend(['-v', volume])
+        
+        for key, value in data.get('env_vars', {}).items():
+            cmd_parts.extend(['-e', f'{key}={value}'])
+        
+        cmd_parts.append(data['image'])
+        
+        if data.get('command'):
+            if isinstance(data['command'], list):
+                cmd_parts.extend(data['command'])
+            else:
+                cmd_parts.extend(data['command'].split())
+        
+        docker_cmd = ' '.join(f'"{part}"' if ' ' in part else part for part in cmd_parts)
+        
+        # Add to crontab
         schedule = data['schedule']
-        image = data['image']
-        command = data.get('command', '')
-        env_vars = data.get('env_vars', {})
-        volumes = data.get('volumes', [])
-        network = data.get('network', '')
         user = data.get('user', 'root')
-        
-        # Build docker run command
-        docker_cmd = f'docker run --rm --name {name}'
-        
-        for key, value in env_vars.items():
-            docker_cmd += f' -e {key}="{value}"'
-        
-        for volume in volumes:
-            docker_cmd += f' -v {volume}'
-        
-        if network:
-            docker_cmd += f' --network {network}'
-        
-        docker_cmd += f' {image}'
-        
-        if command:
-            docker_cmd += f' {command}'
-        
-        # Create cron entry with identifier for management
-        identifier = f'# MANAGED_CRON_{user}_{name}'
-        cron_entry = f'{schedule} {docker_cmd} {identifier}'
+        identifier = f"# MANAGED_CRON_{user}_{data['name']}"
+        cron_line = f"{schedule} {docker_cmd} {identifier}"
         
         # Get existing crontab
-        result = subprocess.run(
-            'crontab -l 2>/dev/null || echo ""',
-            shell=True,
-            capture_output=True,
-            text=True
-        )
-        existing_crontab = result.stdout
+        result = subprocess.run(['crontab', '-l'], capture_output=True, text=True, check=False)
+        existing = result.stdout if result.returncode == 0 else ""
         
-        # Remove old entry for this job if it exists
-        lines = [line for line in existing_crontab.split('\n') 
-                if identifier not in line]
+        # Remove old entry if exists
+        lines = [line for line in existing.split('\n') if identifier not in line]
         
         # Add new entry
-        lines.append(cron_entry)
+        lines.append(cron_line)
         
         # Install new crontab
-        new_crontab = '\n'.join(lines)
-        subprocess.run(
-            'crontab -',
-            input=new_crontab,
-            shell=True,
-            text=True,
-            check=True
-        )
+        new_crontab = '\n'.join(lines) + '\n'
+        subprocess.run(['crontab', '-'], input=new_crontab.encode(), check=True)
         
         return jsonify({
             'status': 'success',
-            'cron_entry': cron_entry
+            'schedule': schedule,
+            'command': docker_cmd
         })
         
     except Exception as e:
-        return jsonify({
-            'status': 'error',
-            'message': str(e)
-        }), 500
+        return jsonify({'error': str(e)}), 500
 
-
-@app.route('/cron/<name>', methods=['DELETE'])
+@app.route('/cron/<n>', methods=['DELETE'])
 @require_api_key
 def remove_cron(name):
     """
-    Remove cron container deployment.
+    Remove cron job by name.
     
     Args:
         name: Cron job name (from deployment)

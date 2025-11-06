@@ -27,6 +27,10 @@ try:
     from .health_agent_installer import HealthAgentInstaller
 except ImportError:
     from health_agent_installer import HealthAgentInstaller
+try:
+    from .health_monitor import HealthMonitor
+except ImportError:
+    from health_monitor import HealthMonitor
 
 
 def log(msg):
@@ -345,6 +349,17 @@ class DOManager:
             # Install health agent            
             HealthAgentInstaller.install_on_server(ip)
             
+            # WAIT for agent to be ready (NEW!)
+            log("Waiting for health agent to start...")
+            for i in range(30):  # Try for 30 seconds
+                try:
+                    response = HealthMonitor.agent_request(ip, "GET", "/ping", timeout=2)
+                    if response.get('status') == 'alive':
+                        log("✓ Health agent ready")
+                        break
+                except:
+                    time.sleep(1)
+
             # Install basic nginx
             DOManager._install_basic_nginx(ip)
             

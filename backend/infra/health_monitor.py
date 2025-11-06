@@ -1037,23 +1037,8 @@ class HealthMonitor:
                     
                     log("✓ All services deployed successfully")
                     
-                    # STEP 5: Install health monitor on new server
-                    log(f"Installing health monitor on {new_server['ip']}...")
-                    
-                    try:
-                        # Import here to avoid circular dependency issues
-                        try:
-                            from .health_monitor_installer import HealthMonitorInstaller
-                        except ImportError:
-                            from health_monitor_installer import HealthMonitorInstaller
-                        
-                        HealthMonitorInstaller.install_on_server(new_server['ip'])
-                        log("✓ Health monitor installed")
-                    except Exception as e:
-                        log(f"Warning: Failed to install health monitor: {e}")
-                        # Continue anyway - monitor can be installed later
-                    
-                    # STEP 6: Health check replacement
+                   
+                    # STEP 5: Health check replacement
                     log("Performing health check on replacement...")
                     time.sleep(10)  # Wait for services to fully start
                     
@@ -1089,7 +1074,7 @@ class HealthMonitor:
                                 # Remove failed server from all services
                                 DeploymentStateManager.remove_server_from_all_services(user, failed_server['ip'])
                                 
-                                # STEP 7: Destroy failed server
+                                # STEP 6: Destroy failed server
                                 log(f"Destroying failed server {failed_server['ip']}...")
                                 DOManager.destroy_droplet(failed_server['droplet_id'], credentials=credentials)
                                 ServerInventory.release_servers([failed_server['ip']], destroy=False, credentials=credentials)

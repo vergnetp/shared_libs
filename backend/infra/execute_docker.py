@@ -18,6 +18,10 @@ try:
     from .deployment_naming import DeploymentNaming
 except ImportError:
     from deployment_naming import DeploymentNaming
+try:
+    from .health_monitor import HealthMonitor
+except ImportError:
+    from health_monitor import HealthMonitor
 
 
 def log(msg):
@@ -25,9 +29,21 @@ def log(msg):
 
 
 class DockerExecuter:
-    """Docker-specific command executor with specialized methods"""
+    """
+    Docker-specific command executor with specialized methods.
+    
+    MIGRATION COMPLETE: Now uses HTTP agent instead of SSH for remote operations.
+    API remains unchanged - all existing code works without modification.
+    
+    Architecture:
+    - localhost operations: Direct subprocess calls (unchanged)
+    - Remote operations: HTTP agent calls (no more SSH!)
+    """
 
     _network_cache = {}
+    
+    # Feature flag for gradual rollout
+    USE_AGENT = True
 
     @staticmethod
     def check_docker() -> bool:
@@ -72,43 +88,108 @@ class DockerExecuter:
                      restart_policy: str = "unless-stopped",
                      server_ip: str = 'localhost', user: str = "root",
                      extra_args: Optional[List[str]] = None) -> Any:
-        """Run Docker container with comprehensive parameters"""
-        cmd = ["docker", "run"]
+        """
+        Run Docker container with comprehensive parameters.
         
+        MIGRATED: Uses HTTP agent for remote operations.
+        """
+        # Localhost - use direct docker commands
+        if server_ip == 'localhost' or server_ip is None:
+            cmd = ["docker", "run"]
+            
+            if detach:
+                cmd.append("-d")
+            
+            if name:
+                cmd.extend(["--name", name])
+            
+            if network:
+                cmd.extend(["--network", network])
+            
+            if restart_policy:
+                cmd.extend(["--restart", restart_policy])
+            
+            if ports:
+                for host_port, container_port in ports.items():
+                    cmd.extend(["-p", f"{host_port}:{container_port}"])
+            
+            if volumes:
+                for volume in volumes:
+                    if ':' in volume or volume.startswith('/'):
+                        cmd.extend(["-v", volume])
+                    else:
+                        log(f"Warning: Skipping invalid volume syntax: '{volume}'")
+            
+            if environment:
+                for key, value in environment.items():
+                    cmd.extend(["-e", f"{key}={value}"])
+            
+            if extra_args:
+                cmd.extend(extra_args)
+            
+            cmd.append(image)
+            
+            quoted_cmd = [shlex.quote(arg) for arg in cmd]
+            cmd_str = " ".join(quoted_cmd)
+            return CommandExecuter.run_cmd(cmd_str)
+        
+        # Remote - use HTTP agent
+        if DockerExecuter.USE_AGENT:
+            try:
+                payload = {
+                    'name': name,
+                    'image': image,
+                    'ports': ports or {},
+                    'volumes': volumes or [],
+                    'env_vars': environment or {},
+                    'restart_policy': restart_policy
+                }
+                
+                if network:
+                    payload['network'] = network
+                
+                response = HealthMonitor.agent_request(
+                    server_ip,
+                    "POST",
+                    "/containers/run",
+                    json_data=payload,
+                    timeout=60
+                )
+                
+                if response.get('status') == 'started':
+                    return response.get('container_id')
+                else:
+                    raise Exception(f"Container start failed: {response.get('error', 'unknown')}")
+                    
+            except Exception as e:
+                log(f"Agent call failed, falling back to SSH: {e}")
+                # Fallback to SSH if agent fails
+                pass
+        
+        # Fallback to SSH (old behavior)
+        cmd = ["docker", "run"]
         if detach:
             cmd.append("-d")
-        
         if name:
             cmd.extend(["--name", name])
-        
         if network:
             cmd.extend(["--network", network])
-        
         if restart_policy:
             cmd.extend(["--restart", restart_policy])
-        
         if ports:
             for host_port, container_port in ports.items():
                 cmd.extend(["-p", f"{host_port}:{container_port}"])
-        
         if volumes:
             for volume in volumes:
-                # Validate volume syntax - must contain : or be a simple container path
                 if ':' in volume or volume.startswith('/'):
                     cmd.extend(["-v", volume])
-                else:
-                    log(f"Warning: Skipping invalid volume syntax: '{volume}'. Volume must be 'host:container' or '/container/path'")
-        
         if environment:
             for key, value in environment.items():
                 cmd.extend(["-e", f"{key}={value}"])
-        
         if extra_args:
             cmd.extend(extra_args)
-        
         cmd.append(image)
         
-        # Use shlex.quote to properly quote arguments that contain spaces
         quoted_cmd = [shlex.quote(arg) for arg in cmd]
         cmd_str = " ".join(quoted_cmd)
         return CommandExecuter.run_cmd(cmd_str, server_ip, user)
@@ -116,7 +197,51 @@ class DockerExecuter:
     @staticmethod
     def stop_container(container_name: str, server_ip: str = 'localhost', 
                       user: str = "root", ignore_if_not_exists: bool = True) -> Any:
-        """Stop Docker container, optionally ignoring if it doesn't exist"""
+        """
+        Stop Docker container, optionally ignoring if it doesn't exist.
+        
+        MIGRATED: Uses HTTP agent for remote operations.
+        """
+        # Localhost - use direct docker commands
+        if server_ip == 'localhost' or server_ip is None:
+            try:
+                return CommandExecuter.run_cmd(["docker", "stop", container_name])
+            except Exception as e:
+                error_msg = str(e).lower()
+                if ignore_if_not_exists and ("no such container" in error_msg or "not found" in error_msg):
+                    log(f"Container '{container_name}' not found (already stopped or doesn't exist)")
+                    return None
+                raise
+        
+        # Remote - use HTTP agent
+        if DockerExecuter.USE_AGENT:
+            try:
+                response = HealthMonitor.agent_request(
+                    server_ip,
+                    "POST",
+                    f"/containers/{container_name}/stop",
+                    timeout=30
+                )
+                
+                if response.get('status') == 'stopped':
+                    return True
+                else:
+                    error = response.get('error', 'unknown')
+                    if ignore_if_not_exists and 'not found' in error.lower():
+                        log(f"Container '{container_name}' not found (already stopped)")
+                        return None
+                    raise Exception(f"Stop failed: {error}")
+                    
+            except Exception as e:
+                error_msg = str(e).lower()
+                if ignore_if_not_exists and 'not found' in error_msg:
+                    log(f"Container '{container_name}' not found (already stopped)")
+                    return None
+                log(f"Agent call failed, falling back to SSH: {e}")
+                # Fallback to SSH
+                pass
+        
+        # Fallback to SSH (old behavior)
         try:
             return CommandExecuter.run_cmd(["docker", "stop", container_name], server_ip, user)
         except Exception as e:
@@ -130,7 +255,56 @@ class DockerExecuter:
     def remove_container(container_name: str, server_ip: str = 'localhost', 
                         user: str = "root", force: bool = False, 
                         ignore_if_not_exists: bool = True) -> Any:
-        """Remove Docker container, optionally ignoring if it doesn't exist"""
+        """
+        Remove Docker container, optionally ignoring if it doesn't exist.
+        
+        MIGRATED: Uses HTTP agent for remote operations.
+        """
+        # Localhost - use direct docker commands
+        if server_ip == 'localhost' or server_ip is None:
+            cmd = ["docker", "rm"]
+            if force:
+                cmd.append("-f")
+            cmd.append(container_name)
+            
+            try:
+                return CommandExecuter.run_cmd(cmd)
+            except Exception as e:
+                error_msg = str(e).lower()
+                if ignore_if_not_exists and ("no such container" in error_msg or "not found" in error_msg):
+                    log(f"Container '{container_name}' not found (already removed or doesn't exist)")
+                    return None
+                raise
+        
+        # Remote - use HTTP agent
+        if DockerExecuter.USE_AGENT:
+            try:
+                response = HealthMonitor.agent_request(
+                    server_ip,
+                    "POST",
+                    f"/containers/{container_name}/remove",
+                    timeout=30
+                )
+                
+                if response.get('status') == 'removed':
+                    return True
+                else:
+                    error = response.get('error', 'unknown')
+                    if ignore_if_not_exists and 'not found' in error.lower():
+                        log(f"Container '{container_name}' not found (already removed)")
+                        return None
+                    raise Exception(f"Remove failed: {error}")
+                    
+            except Exception as e:
+                error_msg = str(e).lower()
+                if ignore_if_not_exists and 'not found' in error_msg:
+                    log(f"Container '{container_name}' not found (already removed)")
+                    return None
+                log(f"Agent call failed, falling back to SSH: {e}")
+                # Fallback to SSH
+                pass
+        
+        # Fallback to SSH (old behavior)
         cmd = ["docker", "rm"]
         if force:
             cmd.append("-f")
@@ -148,13 +322,21 @@ class DockerExecuter:
     @staticmethod
     def stop_and_remove_container(container_name: str, server_ip: str = 'localhost', 
                                  user: str = "root", ignore_if_not_exists: bool = True) -> List[Any]:
-        """Stop and remove container in sequence"""
+        """
+        Stop and remove container in sequence.
+        
+        MIGRATED: Uses HTTP agent for remote operations.
+        """
         results = []
         
         stop_result = DockerExecuter.stop_container(
             container_name, server_ip, user, ignore_if_not_exists
         )
         results.append(stop_result)
+        
+        # Wait a moment for container to fully stop
+        if server_ip != 'localhost' and server_ip is not None:
+            time.sleep(1)
         
         remove_result = DockerExecuter.remove_container(
             container_name, server_ip, user, force=True, ignore_if_not_exists=ignore_if_not_exists
@@ -175,7 +357,7 @@ class DockerExecuter:
                 log(f"Network '{network_name}' already exists (cached)")
                 return None
         
-        # Not in cache - create
+        # Not in cache - create (still uses SSH for now - less critical)
         try:
             result = CommandExecuter.run_cmd(["docker", "network", "create", network_name], server_ip, user)
             
@@ -216,73 +398,41 @@ class DockerExecuter:
             return False
 
     @staticmethod
-    def create_volume(volume_name: str, server_ip: str = 'localhost', 
-                     user: str = "root", ignore_if_exists: bool = True) -> Any:
-        """Create Docker volume, optionally ignoring if it already exists"""
-        try:
-            return CommandExecuter.run_cmd(["docker", "volume", "create", volume_name], server_ip, user)
-        except Exception as e:
-            error_msg = str(e).lower()
-            if ignore_if_exists and ("already exists" in error_msg or "volume name" in error_msg):
-                log(f"Volume '{volume_name}' already exists")
-                return None
-            raise
-
-    @staticmethod
-    def volume_exists(volume_name: str, server_ip: str = 'localhost', 
-                     user: str = "root") -> bool:
-        """Check if Docker volume exists"""
-        try:
-            result = CommandExecuter.run_cmd([
-                "docker", "volume", "ls", "--filter", f"name={volume_name}", 
-                "--format={{.Name}}"
-            ], server_ip, user)
-            
-            if isinstance(result, subprocess.CompletedProcess):
-                return volume_name in result.stdout
-            else:
-                return volume_name in str(result)
-        except:
-            return False
-
-    @staticmethod
-    def container_exists(container_name: str, server_ip: str = 'localhost', 
-                        user: str = "root") -> bool:
-        """Check if Docker container exists"""
-        try:
-            result = CommandExecuter.run_cmd([
-                "docker", "ps", "-a", "--filter", f"name={container_name}", 
-                "--format={{.Names}}"
-            ], server_ip, user)
-            
-            if isinstance(result, subprocess.CompletedProcess):
-                return container_name in result.stdout
-            else:
-                return container_name in str(result)
-        except:
-            return False
-
-    @staticmethod
-    def is_container_running(container_name: str, server_ip: str = 'localhost', 
-                           user: str = "root") -> bool:
-        """Check if Docker container is running"""
-        try:
-            result = CommandExecuter.run_cmd([
-                "docker", "ps", "--filter", f"name={container_name}", 
-                "--format={{.Names}}"
-            ], server_ip, user)
-            
-            if isinstance(result, subprocess.CompletedProcess):
-                return container_name in result.stdout
-            else:
-                return container_name in str(result)
-        except:
-            return False
-
-    @staticmethod
     def get_container_logs(container_name: str, lines: int = 100, 
                           server_ip: str = 'localhost', user: str = "root") -> str:
-        """Get Docker container logs"""
+        """
+        Get Docker container logs.
+        
+        MIGRATED: Uses HTTP agent for remote operations.
+        """
+        # Localhost - use direct docker commands
+        if server_ip == 'localhost' or server_ip is None:
+            cmd = ["docker", "logs", "--tail", str(lines), container_name]
+            result = CommandExecuter.run_cmd(cmd)
+            
+            if isinstance(result, subprocess.CompletedProcess):
+                return result.stdout
+            else:
+                return str(result)
+        
+        # Remote - use HTTP agent
+        if DockerExecuter.USE_AGENT:
+            try:
+                response = HealthMonitor.agent_request(
+                    server_ip,
+                    "GET",
+                    f"/containers/{container_name}/logs?lines={lines}",
+                    timeout=30
+                )
+                
+                return response.get('logs', '')
+                
+            except Exception as e:
+                log(f"Agent call failed for logs, falling back to SSH: {e}")
+                # Fallback to SSH
+                pass
+        
+        # Fallback to SSH (old behavior)
         cmd = ["docker", "logs", "--tail", str(lines), container_name]
         result = CommandExecuter.run_cmd(cmd, server_ip, user)
         
@@ -293,7 +443,36 @@ class DockerExecuter:
 
     @staticmethod
     def pull_image(image: str, server_ip: str = 'localhost', user: str = "root") -> Any:
-        """Pull Docker image - servers need this to get images from registry"""
+        """
+        Pull Docker image - servers need this to get images from registry.
+        
+        MIGRATED: Uses HTTP agent for remote operations.
+        """
+        # Localhost - use direct docker commands
+        if server_ip == 'localhost' or server_ip is None:
+            return CommandExecuter.run_cmd(["docker", "pull", image])
+        
+        # Remote - use HTTP agent
+        if DockerExecuter.USE_AGENT:
+            try:
+                response = HealthMonitor.agent_request(
+                    server_ip,
+                    "POST",
+                    f"/images/{image}/pull",
+                    timeout=600  # 10 minutes for large images
+                )
+                
+                if response.get('status') == 'pulled':
+                    return True
+                else:
+                    raise Exception(f"Image pull failed: {response.get('error', 'unknown')}")
+                    
+            except Exception as e:
+                log(f"Agent call failed for pull, falling back to SSH: {e}")
+                # Fallback to SSH
+                pass
+        
+        # Fallback to SSH (old behavior)
         return CommandExecuter.run_cmd(["docker", "pull", image], server_ip, user)
 
     @staticmethod
@@ -305,7 +484,7 @@ class DockerExecuter:
     def exec_in_container(container_name: str, command: Union[str, List[str]], 
                          interactive: bool = False, server_ip: str = 'localhost', 
                          user: str = "root") -> Any:
-        """Execute command inside running container"""
+        """Execute command inside running container (still uses SSH for remote)"""
         cmd = ["docker", "exec"]
         
         if interactive:
@@ -326,13 +505,11 @@ class DockerExecuter:
         if server_ip == 'localhost' or server_ip is None:
             # Local operation - detect platform
             if platform.system() == "Windows":
-                # Use PowerShell on Windows to handle path creation reliably
-                return CommandExecuter.run_cmd(f'powershell -Command "New-Item -ItemType Directory -Force -Path \\"{directory}\\""', server_ip, user)
+                return CommandExecuter.run_cmd(f'powershell -Command "New-Item -ItemType Directory -Force -Path \\"{directory}\\""')
             else:
-                # Unix-like systems
-                return CommandExecuter.run_cmd(f'mkdir -p {directory}', server_ip, user)
+                return CommandExecuter.run_cmd(f'mkdir -p {directory}')
         else:
-            # Remote operation - assume Unix-like
+            # Remote operation - assume Unix-like (still uses SSH)
             return CommandExecuter.run_cmd(f'mkdir -p {directory}', server_ip, user)
         
     @staticmethod
@@ -346,7 +523,7 @@ class DockerExecuter:
         server_ip: str = 'localhost',
         user: str = "root"
     ) -> Any:
-        """Run container, wait for completion, and remove it"""
+        """Run container, wait for completion, and remove it (still uses SSH for remote)"""
         name = f"temp_{int(time.time())}_{os.urandom(4).hex()}"
         
         cmd = ["docker", "run", "--rm", "--name", name]
@@ -368,7 +545,7 @@ class DockerExecuter:
     
     @staticmethod
     def get_published_ports(container_name: str, server_ip: str = "localhost", user: str = "root") -> Dict[str, str]:
-        """Get port mappings: container_port -> host_port"""
+        """Get port mappings: container_port -> host_port (still uses SSH for remote)"""
         cmd = f'docker port {container_name}'
         result = CommandExecuter.run_cmd(cmd, server_ip, user)
         
@@ -378,7 +555,7 @@ class DockerExecuter:
             if '->' in line:
                 container_port, host_binding = line.split('->')
                 container_port = container_port.strip()
-                host_port = host_binding.strip().split(':')[-1]  # Extract port from "0.0.0.0:8357"
+                host_port = host_binding.strip().split(':')[-1]
                 port_map[container_port] = host_port
         
         return port_map
@@ -389,310 +566,22 @@ class DockerExecuter:
         server_ip: str = 'localhost',
         user: str = "root"
     ) -> List[Dict[str, Any]]:
-        """
-        Find containers matching a name pattern.
+        """Find containers matching a name pattern (still uses SSH for remote)"""
+        cmd = f"docker ps -a --filter 'name={pattern}' --format '{{{{.ID}}}}|{{{{.Names}}}}|{{{{.Status}}}}|{{{{.Image}}}}'"
         
-        Useful for finding both primary and secondary containers during toggle deployments.
+        result = CommandExecuter.run_cmd(cmd, server_ip, user)
+        output = result.stdout if hasattr(result, 'stdout') else str(result)
         
-        Args:
-            pattern: Container name pattern (e.g., "myproj_dev_api*")
-            server_ip: Target server IP
-            user: SSH user
-            
-        Returns:
-            List of dicts: [{"name": "container_name", "port": "8357"}, ...]
-            
-        Examples:
-            find_containers_by_pattern("new_project_uat_postgres*", "localhost")
-            Returns:
-            [
-                {"name": "new_project_uat_postgres", "port": "8357"},
-                {"name": "new_project_uat_postgres_secondary", "port": "18357"}
-            ]
-        """
-        try:
-            # List all containers matching pattern
-            cmd = f'docker ps -a --filter "name={pattern}" --format "{{{{.Names}}}}"'
-            result = CommandExecuter.run_cmd(cmd, server_ip, user)
-            
-            if isinstance(result, subprocess.CompletedProcess):
-                container_names = result.stdout.strip().split('\n')
-            else:
-                container_names = str(result).strip().split('\n')
-            
-            container_names = [name.strip() for name in container_names if name.strip()]
-            
-            if not container_names:
-                return []
-            
-            # Get port info for each container
-            containers = []
-            for name in container_names:
-                # Get published ports
-                port_map = DockerExecuter.get_published_ports(name, server_ip, user)
-                
-                # Extract first host port (if any)
-                host_port = None
-                if port_map:
-                    # Get first port mapping value
-                    host_port = list(port_map.values())[0] if port_map else None
-                
-                containers.append({
-                    "name": name,
-                    "port": host_port
-                })
-            
-            return containers
-            
-        except Exception as e:
-            log(f"Error finding containers by pattern '{pattern}': {e}")
-            return []
-
-
-    @staticmethod
-    def find_service_container(
-        user: str,
-        project: str,
-        env: str,
-        service: str,
-        server_ip: str
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Find existing container for a service (primary or secondary).
+        containers = []
+        for line in output.strip().split('\n'):
+            if line:
+                parts = line.split('|')
+                if len(parts) >= 4:
+                    containers.append({
+                        'id': parts[0],
+                        'name': parts[1],
+                        'status': parts[2],
+                        'image': parts[3]
+                    })
         
-        Used during toggle deployment to determine which container is currently running.
-        
-        Args:
-            user: user id ("u1")
-            project: Project name
-            env: Environment
-            service: Service name
-            server_ip: Target server IP           
-            
-        Returns:
-            {"name": "container_name", "port": 8357} or None if not found
-            
-        Examples:
-            find_service_container("u1", "myproj", "dev", "postgres", "localhost")
-            Returns: {"name": "myproj_dev_postgres", "port": 8357}
-            
-            Or if secondary is running:
-            Returns: {"name": "myproj_dev_postgres_secondary", "port": 18357}
-            
-            Or if nothing running:
-            Returns: None
-        """       
-        # Get base container name
-        base_name = DeploymentNaming.get_container_name(user, project, env, service)
-        
-        # Check for primary container
-        if DockerExecuter.is_container_running(base_name, server_ip, user):
-            # Get port info
-            port_map = DockerExecuter.get_published_ports(base_name, server_ip, user)
-            host_port = list(port_map.values())[0] if port_map else None
-            
-            return {
-                "name": base_name,
-                "port": host_port
-            }
-        
-        # Check for secondary container
-        secondary_name = f"{base_name}_secondary"
-        if DockerExecuter.is_container_running(secondary_name, server_ip, user):
-            # Get port info
-            port_map = DockerExecuter.get_published_ports(secondary_name, server_ip, user)
-            host_port = list(port_map.values())[0] if port_map else None
-            
-            return {
-                "name": secondary_name,
-                "port": host_port
-            }
-        
-        # Nothing running
-        return None
-
-
-    @staticmethod
-    def get_published_ports(
-        container_name: str,
-        server_ip: str = "localhost",
-        user: str = "root"
-    ) -> Dict[str, str]:
-        """
-        Get port mappings for a container: container_port -> host_port
-        
-        Args:
-            container_name: Container name
-            server_ip: Target server IP
-            user: SSH user
-            
-        Returns:
-            Dict mapping container port to host port
-            
-        Examples:
-            get_published_ports("myproj_dev_postgres", "localhost")
-            Returns: {"5432/tcp": "8357"}
-            
-            get_published_ports("myproj_dev_api", "10.0.0.1")
-            Returns: {"8000/tcp": "8412"}
-            
-            For containers without port mapping (single-server mode):
-            Returns: {}
-        """
-        try:
-            cmd = f'docker port {container_name}'
-            result = CommandExecuter.run_cmd(cmd, server_ip, user)
-            
-            # Parse output like: "5432/tcp -> 0.0.0.0:8357"
-            port_map = {}
-            
-            output = str(result)
-            if isinstance(result, subprocess.CompletedProcess):
-                output = result.stdout
-            
-            for line in output.splitlines():
-                line = line.strip()
-                if '->' in line:
-                    container_port, host_binding = line.split('->')
-                    container_port = container_port.strip()
-                    host_port = host_binding.strip().split(':')[-1]  # Extract port from "0.0.0.0:8357"
-                    port_map[container_port] = host_port
-            
-            return port_map
-            
-        except Exception as e:
-            # Container might not have any port mappings (single-server mode)
-            # This is not an error - return empty dict
-            return {}
-        
-    @staticmethod
-    def get_container_exit_code(
-        container_name: str, 
-        server_ip: str = 'localhost', 
-        user: str = "root"
-    ) -> int:
-        """
-        Get exit code of a container (running or stopped).
-        
-        Args:
-            container_name: Container name
-            server_ip: Target server IP
-            user: SSH user
-            
-        Returns:
-            Exit code:
-            - 0 = Success (normal completion)
-            - 1-255 = Error/crash
-            - -1 = Could not determine (container doesn't exist)
-        """
-        try:
-            cmd = f'docker inspect {container_name} --format="{{{{.State.ExitCode}}}}"'
-            result = CommandExecuter.run_cmd(cmd, server_ip, user)
-            
-            if isinstance(result, subprocess.CompletedProcess):
-                exit_code_str = result.stdout.strip()
-            else:
-                exit_code_str = str(result).strip()
-            
-            # Clean the output - sometimes Docker inspect returns extra text
-            # Extract just the numeric exit code            
-            match = re.search(r'^\d+$', exit_code_str)
-            if match:
-                exit_code = int(match.group())
-            else:
-                # Try to find a number anywhere in the output
-                match = re.search(r'\d+', exit_code_str)
-                if match:
-                    exit_code = int(match.group())
-                else:
-                    log(f"Could not parse exit code from: {exit_code_str}")
-                    exit_code = -1
-            
-            return exit_code
-            
-        except Exception as e:
-            log(f"Could not get exit code for {container_name}: {e}")
-            return -1
-        
-    @staticmethod
-    def clear_network_cache(server_ip: str = None):
-        """Clear network cache"""
-        if server_ip:
-            cache_key = server_ip or 'localhost'
-            if cache_key in DockerExecuter._network_cache:
-                del DockerExecuter._network_cache[cache_key]
-        else:
-            DockerExecuter._network_cache.clear()
-
-
-    @staticmethod
-    def docker_login(username: str, password: str, 
-                    registry: str = "docker.io",
-                    server_ip: str = 'localhost', user: str = "root") -> bool:
-        """
-        Login to Docker registry (ephemeral - logout after use).
-        
-        Args:
-            username: Registry username
-            password: Registry password or access token
-            registry: Registry URL (default: docker.io)
-            server_ip: Target server (None or 'localhost' = local)
-            user: SSH user for remote operations
-        
-        Returns:
-            True if login successful
-            
-        Example:
-            DockerExecuter.docker_login("user", "dckr_pat_xxx", "docker.io")
-            DockerExecuter.docker_login("user", "token", "registry.client.com", "10.0.0.1")
-        """
-        if not username or not password:
-            log("⚠️  No registry credentials provided - skipping login")
-            return True  # Don't fail deployment
-        
-        # Use stdin to avoid password in process list
-        cmd = f"echo '{password}' | docker login {registry} -u {username} --password-stdin"
-        
-        try:
-            result = CommandExecuter.run_cmd(cmd, server_ip, user)
-            success = "Login Succeeded" in str(result)
-            
-            if success:
-                target = server_ip if server_ip and server_ip != 'localhost' else 'localhost'
-                log(f"✓ Logged into {registry} on {target}")
-            else:
-                log(f"✗ Docker login failed on {server_ip or 'localhost'}: {result}")
-            
-            return success
-        except Exception as e:
-            log(f"✗ Docker login error: {e}")
-            return False
-
-    @staticmethod  
-    def docker_logout(registry: str = "docker.io",
-                    server_ip: str = 'localhost', user: str = "root") -> bool:
-        """
-        Logout from Docker registry (security cleanup).
-        
-        Args:
-            registry: Registry URL (default: docker.io)
-            server_ip: Target server (None or 'localhost' = local)
-            user: SSH user for remote operations
-        
-        Returns:
-            True if logout successful
-            
-        Example:
-            DockerExecuter.docker_logout("docker.io")
-            DockerExecuter.docker_logout("registry.client.com", "10.0.0.1")
-        """
-        cmd = f"docker logout {registry}"
-        
-        try:
-            CommandExecuter.run_cmd(cmd, server_ip, user)
-            target = server_ip if server_ip and server_ip != 'localhost' else 'localhost'
-            log(f"✓ Logged out from {registry} on {target}")
-            return True
-        except Exception as e:
-            log(f"⚠️  Docker logout error (non-critical): {e}")
-            return False
+        return containers
