@@ -241,6 +241,152 @@ def get_container_logs(name):
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+# ========================================
+# DOCKER PS OPERATION (NEW - REQUIRED BY INTERCEPTOR)
+# ========================================
+
+@app.route('/docker/ps', methods=['GET'])
+@require_api_key
+def docker_ps():
+    """
+    Run docker ps with customizable filters and format.
+    Supports the patterns used by execute_cmd.py interceptor.
+    """
+    try:
+        # Parse query parameters
+        all_containers = request.args.get('all', 'false').lower() == 'true'
+        filter_name = request.args.get('filter_name', '')
+        format_str = request.args.get('format', '')
+        
+        # Build docker ps command
+        cmd = ['docker', 'ps']
+        
+        if all_containers:
+            cmd.append('-a')
+        
+        if filter_name:
+            cmd.extend(['--filter', f'name={filter_name}'])
+        
+        if format_str:
+            cmd.extend(['--format', format_str])
+        
+        # Execute command
+        output = run_docker_cmd(cmd)
+        
+        return jsonify({
+            'output': output,
+            'status': 'success'
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# ========================================
+# DOCKER INSPECT OPERATION (NEW - REQUIRED BY INTERCEPTOR)
+# ========================================
+
+@app.route('/containers/<name>/inspect', methods=['GET'])
+@require_api_key
+def inspect_container(name):
+    """
+    Inspect container and optionally apply format string.
+    Supports the patterns used by execute_cmd.py interceptor.
+    """
+    try:
+        format_str = request.args.get('format', '')
+        
+        # Build docker inspect command
+        cmd = ['docker', 'inspect', name]
+        
+        if format_str:
+            cmd.extend(['--format', format_str])
+        
+        # Execute command
+        output = run_docker_cmd(cmd)
+        
+        return jsonify({
+            'output': output,
+            'status': 'success'
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# ========================================
+# DOCKER PORT OPERATION (NEW - REQUIRED BY INTERCEPTOR)
+# ========================================
+
+@app.route('/containers/<name>/port', methods=['GET'])
+@require_api_key
+def get_container_ports(name):
+    """
+    Get port mappings for a container.
+    Returns dict of container_port -> host_port mappings.
+    """
+    try:
+        # Run docker port command
+        output = run_docker_cmd(['docker', 'port', name])
+        
+        # Parse output like: "5432/tcp -> 0.0.0.0:8357"
+        port_map = {}
+        for line in output.split('\n'):
+            if '->' in line:
+                container_port, host_binding = line.split('->')
+                container_port = container_port.strip()
+                host_port = host_binding.strip().split(':')[-1]
+                port_map[container_port] = host_port
+        
+        return jsonify({
+            'ports': port_map,
+            'status': 'success'
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# ========================================
+# DOCKER START OPERATION (NEW - REQUIRED BY INTERCEPTOR)
+# ========================================
+
+@app.route('/containers/<name>/start', methods=['POST'])
+@require_api_key
+def start_container(name):
+    """Start a stopped container"""
+    try:
+        run_docker_cmd(['docker', 'start', name])
+        return jsonify({
+            'status': 'started',
+            'container': name
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# ========================================
+# DOCKER REMOVE OPERATION (ALIAS - REQUIRED BY INTERCEPTOR)
+# ========================================
+
+@app.route('/containers/<name>/remove', methods=['DELETE'])
+@require_api_key
+def remove_container_alias(name):
+    """
+    Remove container (alias endpoint for interceptor compatibility).
+    The existing DELETE /containers/<name> endpoint serves the same purpose,
+    but interceptor expects /containers/<name>/remove path.
+    """
+    try:
+        run_docker_cmd(['docker', 'rm', '-f', name])
+        return jsonify({
+            'status': 'removed',
+            'container': name
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 
 # ========================================
 # IMAGE OPERATIONS

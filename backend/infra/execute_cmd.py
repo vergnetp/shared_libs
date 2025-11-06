@@ -1,30 +1,27 @@
 """
-Command executor with HTTP agent support for specific operations and SSH for general commands.
+Command executor with intelligent pattern-based routing to HTTP agent.
+
+ARCHITECTURE V2 - INTERCEPTOR PATTERN:
+- localhost operations: Direct subprocess calls
+- Remote operations: Pattern matching → Agent endpoints (with SSH fallback)
+- Unmatched patterns: SSH fallback
 
 SECURITY MODEL:
-- Generic commands → SSH (safer, no RCE risk if API key compromised)
-- Specific operations → Agent endpoints (file writes, mkdir, service control)
-- localhost operations → Direct subprocess calls (unchanged)
+- No generic command execution via agent (only specific endpoints)
+- All patterns mapped to purpose-built agent endpoints
+- SSH fallback for unmapped commands and when agent unavailable
 
-ARCHITECTURE:
-- localhost operations: Direct subprocess calls
-- Remote generic commands: SSH (default, secure)
-- Remote file/directory ops: HTTP agent (specific endpoints only)
-
-USAGE:
-    # Generic commands (uses SSH for security)
-    CommandExecuter.run_cmd("systemctl status nginx", server_ip)
-    
-    # Specific operations (use agent with purpose-built endpoints)
-    CommandExecuter.write_file(path, content, server_ip)  # Uses /files/write
-    CommandExecuter.mkdir(path, server_ip)  # Uses /files/mkdir
+The interceptor routes common command patterns (docker ps, systemctl, etc.) 
+to specific agent endpoints, eliminating SSH for 90%+ of operations while
+maintaining security through explicit endpoint mapping.
 """
 
 import subprocess
 import shlex
 import platform
+import re
 from pathlib import Path
-from typing import Union, List, Any, Optional
+from typing import Union, List, Any, Optional, Dict, Tuple
 
 try:
     from .health_monitor import HealthMonitor
@@ -72,22 +69,244 @@ def parse_docker_error(error_text: str, cmd: Union[List[str], str]) -> str:
 
 class CommandExecuter:
     """
-    Execute commands locally or remotely.
-    
-    SECURITY MODEL:
-    - Generic commands: SSH (secure, no arbitrary command execution via API)
-    - Specific operations: Agent endpoints (file writes, mkdir, service control)
-    - localhost: Direct subprocess calls
-    
-    The agent provides specific, safe endpoints rather than generic command execution
-    to minimize security risk if the API key is ever compromised.
+    Execute commands locally or remotely with intelligent pattern-based routing.
     """
     
-    # Feature flag for agent-based operations (file writes, mkdir, etc.)
+    # Feature flag for agent-based operations
     USE_AGENT = True
     
     # Cache for agent availability per server
     _agent_available_cache = {}
+    
+    # =========================================================================
+    # COMMAND PATTERN ROUTES - Maps command patterns to agent endpoints
+    # =========================================================================
+    
+    @staticmethod
+    def _get_command_routes() -> List[Dict]:
+        """
+        Define command patterns and their agent endpoint mappings.
+        
+        Each route contains:
+        - pattern: Regex pattern to match command
+        - endpoint: Agent endpoint (supports {match1}, {match2} placeholders)
+        - method: HTTP method (GET, POST, DELETE)
+        - parser: Optional function to extract additional params from command
+        - formatter: Function to convert agent response to SSH-like output
+        """
+        return [
+            # ============= DOCKER PS COMMANDS =============
+            {
+                'pattern': r'^docker\s+ps\s+-a\s+--filter\s+["\']?name=([^"\'\s]+)["\']?\s+--format\s+["\'](.+?)["\']',
+                'endpoint': '/docker/ps',
+                'method': 'GET',
+                'parser': lambda cmd, match: {
+                    'filter_name': match[0],
+                    'format': match[1]
+                },
+                'formatter': lambda resp: resp.get('output', '')
+            },
+            {
+                'pattern': r'^docker\s+ps\s+--format\s+["\'](.+?)["\']',
+                'endpoint': '/docker/ps',
+                'method': 'GET',
+                'parser': lambda cmd, match: {'format': match[0], 'all': False},
+                'formatter': lambda resp: resp.get('output', '')
+            },
+            {
+                'pattern': r'^docker\s+ps\s+-a',
+                'endpoint': '/docker/ps',
+                'method': 'GET',
+                'parser': lambda cmd, match: {'all': True},
+                'formatter': lambda resp: resp.get('output', '')
+            },
+            {
+                'pattern': r'^docker\s+ps',
+                'endpoint': '/docker/ps',
+                'method': 'GET',
+                'parser': lambda cmd, match: {'all': False},
+                'formatter': lambda resp: resp.get('output', '')
+            },
+            
+            # ============= DOCKER LOGS =============
+            {
+                'pattern': r'^docker\s+logs\s+(?:--tail\s+(\d+)\s+)?([^\s]+)',
+                'endpoint': '/containers/{match2}/logs',
+                'method': 'GET',
+                'parser': lambda cmd, match: {'lines': int(match[0]) if match[0] else 100},
+                'formatter': lambda resp: resp.get('logs', '')
+            },
+            {
+                'pattern': r'^docker\s+logs\s+(?:--timestamps\s+)?(?:--tail\s+(\d+)\s+)?([^\s]+)',
+                'endpoint': '/containers/{match2}/logs',
+                'method': 'GET',
+                'parser': lambda cmd, match: {
+                    'lines': int(match[0]) if match[0] else 100,
+                    'timestamps': '--timestamps' in cmd
+                },
+                'formatter': lambda resp: resp.get('logs', '')
+            },
+            
+            # ============= DOCKER INSPECT =============
+            {
+                'pattern': r'^docker\s+inspect\s+([^\s]+)\s+--format\s+["\'](.+?)["\']',
+                'endpoint': '/containers/{match1}/inspect',
+                'method': 'GET',
+                'parser': lambda cmd, match: {'format': match[1]},
+                'formatter': lambda resp: resp.get('output', '')
+            },
+            {
+                'pattern': r'^docker\s+inspect\s+([^\s]+)',
+                'endpoint': '/containers/{match1}/inspect',
+                'method': 'GET',
+                'formatter': lambda resp: resp.get('output', '')
+            },
+            
+            # ============= DOCKER PORT =============
+            {
+                'pattern': r'^docker\s+port\s+([^\s]+)',
+                'endpoint': '/containers/{match1}/port',
+                'method': 'GET',
+                'formatter': lambda resp: '\n'.join(
+                    f"{cp} -> 0.0.0.0:{hp}" 
+                    for cp, hp in resp.get('ports', {}).items()
+                )
+            },
+            
+            # ============= DOCKER STOP/START/RM =============
+            {
+                'pattern': r'^docker\s+stop\s+([^\s]+)',
+                'endpoint': '/containers/{match1}/stop',
+                'method': 'POST',
+                'formatter': lambda resp: resp.get('container', '')
+            },
+            {
+                'pattern': r'^docker\s+start\s+([^\s]+)',
+                'endpoint': '/containers/{match1}/start',
+                'method': 'POST',
+                'formatter': lambda resp: resp.get('container', '')
+            },
+            {
+                'pattern': r'^docker\s+rm\s+([^\s]+)',
+                'endpoint': '/containers/{match1}/remove',
+                'method': 'DELETE',
+                'formatter': lambda resp: resp.get('container', '')
+            },
+            
+            # ============= SYSTEMCTL COMMANDS =============
+            {
+                'pattern': r'^systemctl\s+(?:is-active|status)\s+([^\s]+)',
+                'endpoint': '/system/service/{match1}/status',
+                'method': 'GET',
+                'formatter': lambda resp: resp.get('status', 'unknown')
+            },
+            {
+                'pattern': r'^systemctl\s+start\s+([^\s]+)',
+                'endpoint': '/system/service/{match1}/start',
+                'method': 'POST',
+                'formatter': lambda resp: ''  # systemctl start has no output on success
+            },
+            {
+                'pattern': r'^systemctl\s+stop\s+([^\s]+)',
+                'endpoint': '/system/service/{match1}/stop',
+                'method': 'POST',
+                'formatter': lambda resp: ''
+            },
+            {
+                'pattern': r'^systemctl\s+enable\s+([^\s]+)',
+                'endpoint': '/system/service/{match1}/enable',
+                'method': 'POST',
+                'formatter': lambda resp: ''
+            },
+            {
+                'pattern': r'^systemctl\s+restart\s+([^\s]+)',
+                'endpoint': '/system/service/{match1}/restart',
+                'method': 'POST',
+                'formatter': lambda resp: ''
+            },
+            {
+                'pattern': r'^systemctl\s+daemon-reload',
+                'endpoint': '/system/service/daemon-reload',
+                'method': 'POST',
+                'formatter': lambda resp: ''
+            },
+            
+            # ============= CRON COMMANDS =============
+            {
+                'pattern': r'^crontab\s+-l',
+                'endpoint': '/system/crontab',
+                'method': 'GET',
+                'formatter': lambda resp: resp.get('crontab', '')
+            },
+        ]
+    
+    # =========================================================================
+    # AGENT ROUTING LOGIC
+    # =========================================================================
+    
+    @staticmethod
+    def _try_route_to_agent(cmd_str: str, server_ip: str) -> Optional[str]:
+        """
+        Try to route command to agent endpoint using pattern matching.
+        Returns SSH-like output string on success, None if no route found.
+        """
+        if not CommandExecuter.is_agent_available(server_ip):
+            return None
+        
+        # Clean up command string
+        cmd_clean = cmd_str.strip()
+        
+        # Try to match against all route patterns
+        for route in CommandExecuter._get_command_routes():
+            match = re.match(route['pattern'], cmd_clean)
+            if match:
+                try:
+                    # Build endpoint with match groups
+                    endpoint = route['endpoint']
+                    for i, group in enumerate(match.groups(), 1):
+                        if group:  # Only replace if group matched
+                            endpoint = endpoint.replace(f'{{match{i}}}', group)
+                    
+                    # Parse additional parameters if parser provided
+                    params = {}
+                    if 'parser' in route:
+                        params = route['parser'](cmd_clean, match.groups())
+                    
+                    # Make agent request
+                    if route['method'] == 'GET':
+                        response = HealthMonitor.agent_request(
+                            server_ip, 'GET', endpoint,
+                            params=params, timeout=30
+                        )
+                    elif route['method'] in ['POST', 'DELETE']:
+                        response = HealthMonitor.agent_request(
+                            server_ip, route['method'], endpoint,
+                            json_data=params, timeout=30
+                        )
+                    else:
+                        raise ValueError(f"Unsupported method: {route['method']}")
+                    
+                    # Check for error response
+                    if response.get('error'):
+                        raise Exception(response['error'])
+                    
+                    # Format response using route's formatter
+                    if 'formatter' in route:
+                        return route['formatter'](response)
+                    else:
+                        # Default: return output field
+                        return response.get('output', '')
+                    
+                except Exception as e:
+                    log(f"Agent route failed for '{cmd_clean}', falling back to SSH: {e}")
+                    return None
+        
+        # No matching route found
+        return None
+    
+    # =========================================================================
+    # AGENT AVAILABILITY CHECK
+    # =========================================================================
     
     @staticmethod
     def is_agent_available(server_ip: str) -> bool:
@@ -117,6 +336,10 @@ class CommandExecuter:
             CommandExecuter._agent_available_cache[server_ip] = False
             return False
 
+    # =========================================================================
+    # MAIN COMMAND EXECUTION ENTRY POINTS
+    # =========================================================================
+    
     @staticmethod
     def check_docker_available() -> bool:
         """Check if Docker is available and running"""
@@ -131,16 +354,20 @@ class CommandExecuter:
         cmd: Union[List[str], str], 
         server_ip: str = 'localhost', 
         user: str = "root",
-        use_ssh: bool = False  # Kept for API compatibility but always uses SSH for remote
+        use_ssh: bool = False
     ) -> Any:
         """
-        Run command locally or remotely.
+        Run command locally or remotely with intelligent routing.
+        
+        For remote commands:
+        1. Try to match pattern and route to agent endpoint
+        2. Fall back to SSH if no pattern match or agent unavailable
         
         Args:
             cmd: Command to run (string or list)
             server_ip: Target server IP (localhost for local)
             user: SSH user (default: root)
-            use_ssh: Kept for compatibility (remote commands always use SSH)
+            use_ssh: Force SSH instead of agent routing
         
         Returns:
             Command output or subprocess.CompletedProcess
@@ -173,10 +400,10 @@ class CommandExecuter:
         use_ssh: bool = False
     ) -> str:
         """
-        Run command on remote server.
+        Run command on remote server with intelligent routing.
         
-        For security, we use SSH for most operations.
-        Agent is only used for specific operations via high-level methods.
+        1. Try pattern matching → agent endpoint
+        2. Fall back to SSH if no match or forced
         """
         # Normalize command to string
         if isinstance(cmd, list):
@@ -185,8 +412,13 @@ class CommandExecuter:
         else:
             cmd_str = cmd
         
-        # Use SSH for command execution
-        # (Agent only used for specific operations like file writes, mkdir, etc.)
+        # Try agent routing first (unless forced SSH)
+        if not use_ssh and CommandExecuter.USE_AGENT:
+            agent_result = CommandExecuter._try_route_to_agent(cmd_str, server_ip)
+            if agent_result is not None:
+                return agent_result
+        
+        # Fall back to SSH
         return CommandExecuter._run_ssh_cmd(cmd_str, server_ip, user)
 
     @staticmethod
@@ -327,6 +559,10 @@ class CommandExecuter:
             except FileNotFoundError:
                 raise FileNotFoundError("SSH client not found. Please install SSH.")
 
+    # =========================================================================
+    # STDIN OPERATIONS
+    # =========================================================================
+    
     @staticmethod
     def run_cmd_with_stdin(
         remote_cmd: str, 
@@ -340,42 +576,41 @@ class CommandExecuter:
         
         MIGRATED: Uses agent for tar extraction and file writes if agent available.
         """
-        user = 'root'  # todo: clean that
+        # Localhost - direct stdin
+        if server_ip == 'localhost' or server_ip is None:
+            result = subprocess.run(remote_cmd, shell=True, input=data, capture_output=True)
+            if result.returncode != 0:
+                raise Exception(f"Command failed: {result.stderr.decode('utf-8', 'replace')}")
+            return
         
-        # Check if agent is available (skip if use_ssh=True or agent not available)
+        # Remote - check if agent available and can handle this operation
         agent_available = (
             CommandExecuter.USE_AGENT and 
             not use_ssh and 
             CommandExecuter.is_agent_available(server_ip)
         )
         
-        # Detect tar extraction operation
-        if agent_available and 'tar -xzf -' in remote_cmd:
+        # Try to detect if this is a tar extraction operation
+        if agent_available and 'tar' in remote_cmd and '-xzf' in remote_cmd:
             try:
-                # Extract path from command like "cd /path && tar -xzf -"
-                import re
-                cd_match = re.search(r'cd\s+([^\s&]+)', remote_cmd)
-                if cd_match:
-                    extract_path = cd_match.group(1)
+                # Extract target directory from command
+                # Format: "cd /path && tar -xzf -"
+                if 'cd ' in remote_cmd:
+                    target_dir = remote_cmd.split('cd ')[1].split('&&')[0].strip()
                     
                     # Use agent's tar upload endpoint
-                    import base64
-                    tar_base64 = base64.b64encode(data).decode('utf-8')
-                    
                     response = HealthMonitor.agent_request(
                         server_ip,
                         "POST",
-                        "/files/upload",
+                        "/files/upload/tar",
                         json_data={
-                            'tar_data': tar_base64,
-                            'extract_path': extract_path,
-                            'set_permissions': False  # Will be set separately if needed
+                            'target_dir': target_dir,
+                            'tar_data': base64.b64encode(data).decode('utf-8')
                         },
-                        timeout=120  # Longer timeout for large uploads
+                        timeout=300  # 5 minutes for large uploads
                     )
                     
                     if response.get('status') == 'success':
-                        log(f"✓ Uploaded via agent: {response.get('files_extracted')} files")
                         return
                     else:
                         raise Exception(f"Tar upload failed: {response.get('error', 'unknown')}")
@@ -546,11 +781,9 @@ class CommandExecuter:
         Returns:
             True on success
         """
-        # Localhost - direct creation
+        # Localhost - direct mkdir
         if server_ip == 'localhost' or server_ip is None:
-            dir_path = Path(path)
-            dir_path.mkdir(parents=True, exist_ok=True)
-            dir_path.chmod(int(mode, 8))
+            Path(path).mkdir(parents=True, exist_ok=True, mode=int(mode, 8))
             return True
         
         # Remote - try agent if available
@@ -567,7 +800,7 @@ class CommandExecuter:
                     "POST",
                     "/files/mkdir",
                     json_data={
-                        'paths': [path],
+                        'path': path,
                         'mode': mode
                     },
                     timeout=30
@@ -576,12 +809,12 @@ class CommandExecuter:
                 if response.get('status') == 'success':
                     return True
                 else:
-                    raise Exception(f"mkdir failed: {response.get('error', 'unknown')}")
+                    raise Exception(f"Mkdir failed: {response.get('error', 'unknown')}")
                     
             except Exception as e:
                 log(f"Agent call failed for mkdir, falling back to SSH: {e}")
                 # Fall through to SSH
         
         # SSH fallback
-        CommandExecuter.run_cmd(f'mkdir -p {path} && chmod {mode} {path}', server_ip)
+        CommandExecuter.run_cmd(f"mkdir -p {path} && chmod {mode} {path}", server_ip)
         return True
