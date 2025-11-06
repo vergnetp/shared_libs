@@ -6,6 +6,9 @@
 constants need to go to deployment_constants
 paths need to be built in PathResolver
 Do not swear
+Do not code until I give the green light (we are brainstorming)
+Do not write a ton of MD
 ------------------
+
 
 

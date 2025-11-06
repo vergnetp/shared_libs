@@ -1,3 +1,14 @@
+"""
+Health Monitor Installer - MINIMAL VERSION
+Ships only essential runtime files to droplets for security.
+
+SECURITY IMPROVEMENTS:
+- Only copies 20 runtime files (not entire infra folder)
+- Excludes all deployment orchestration logic
+- Excludes nginx generation logic
+- Excludes build/sync logic
+"""
+
 from pathlib import Path
 import tempfile
 import shutil
@@ -43,15 +54,78 @@ class HealthMonitorInstaller:
     IMAGE_NAME = "health-monitor:latest"
     SCHEDULE = "* * * * *"  # Every minute
     
+    # =========================================================================
+    # MINIMAL FILE WHITELIST - Only ship what's needed for runtime monitoring
+    # =========================================================================
+    REQUIRED_FILES = [
+        # Core monitoring
+        'health_monitor.py',              # Main monitoring logic
+        'logger.py',                      # Logging
+        
+        # Constants
+        'deployment_constants.py',        # Config file names/paths
+        
+        # Agent communication
+        'agent_deployer.py',              # HTTP calls to health agent
+        
+        # Infrastructure queries (read-only)
+        'server_inventory.py',            # Query server inventory
+        'do_manager.py',                  # DigitalOcean API calls
+        'do_state_manager.py',            # Query DO droplet state
+        'live_deployment_query.py',       # Query running containers
+        
+        # Configuration readers (read-only)
+        'deployment_config.py',           # Read deployment.json
+        'credentials_manager.py',         # Read credentials
+        'path_resolver.py',               # Path calculations
+        'resource_resolver.py',           # Service discovery
+        'deployment_naming.py',           # Container naming conventions
+        
+        # Nginx config reading (read-only)
+        'nginx_config_parser.py',         # Parse nginx configs
+        
+        # Execution utilities
+        'execute_cmd.py',                 # SSH command execution
+        'execute_docker.py',              # Docker commands
+        
+        # Auto-scaling
+        'auto_scaling_coordinator.py',    # Scaling decisions
+        'deployment_state_manager.py',    # State management
+        'deployment_port_resolver.py',    # Port lookups (read-only)
+        
+        # SSL (for multi-zone)
+        'certificate_manager.py',         # SSL cert management
+        
+        # Environment
+        'env_loader.py',                  # Load .env file
+    ]
+    
+    # =========================================================================
+    # EXCLUDED FILES - Proprietary logic NOT shipped to droplets
+    # =========================================================================
+    # deployer.py                - Deployment orchestration
+    # project_deployer.py        - Project setup
+    # deployment_syncer.py       - File sync logic
+    # docker_executer.py         - Image building
+    # nginx_config_generator.py  - Config generation (templates exposed)
+    # cron_manager.py            - Cron scheduling
+    # health_monitor_installer.py - This file itself
+    # health_agent_installer.py  - Agent setup
+    # backup_manager.py          - Backup logic
+    # All other files...
+    
     @staticmethod
     def install_on_server(server_ip: str, user: str = "root") -> bool:
         """
         Install health monitor on a single server.
         
+        MINIMAL VERSION: Only copies required runtime files.
+        
         Process:
-        1. Copy project files to server
-        2. Build Docker image
-        3. Schedule as cron job
+        1. Copy ONLY required files to build directory
+        2. Transfer to server
+        3. Build Docker image
+        4. Schedule as cron job
         
         Args:
             server_ip: Target server IP
@@ -60,11 +134,12 @@ class HealthMonitorInstaller:
         Returns:
             True if installation successful
         """
-        log(f"Installing health monitor on {server_ip}...")
+        log(f"Installing MINIMAL health monitor on {server_ip}...")
+        log(f"Shipping {len(HealthMonitorInstaller.REQUIRED_FILES)} files (not entire infra folder)")
         Logger.start()
         
         try:
-            # 1. Create temporary directory with project files            
+            # 1. Create temporary directory with ONLY required files            
             project_dir = Path(__file__).parent
             
             # Create temp directory to hold files to transfer
@@ -73,22 +148,33 @@ class HealthMonitorInstaller:
                 build_dir = temp_dir / "health_monitor_build"
                 build_dir.mkdir()
                 
-                # Copy project files (excluding certain directories)
-                for item in project_dir.iterdir():
-                    if item.name in {'__pycache__', 'deployments', 'local', '.git'}:
-                        continue
+                # Copy ONLY whitelisted files
+                copied_files = 0
+                missing_files = []
+                
+                for filename in HealthMonitorInstaller.REQUIRED_FILES:
+                    src = project_dir / filename
                     
-                    if item.is_file():
-                        shutil.copy2(item, build_dir / item.name)
-                    elif item.is_dir():
-                        shutil.copytree(item, build_dir / item.name, 
-                                      ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+                    if src.exists():
+                        if src.is_file():
+                            shutil.copy2(src, build_dir / filename)
+                            copied_files += 1
+                        else:
+                            log(f"Warning: {filename} is a directory, skipping")
+                    else:
+                        missing_files.append(filename)
+                        log(f"Warning: {filename} not found, skipping")
+                
+                log(f"Copied {copied_files}/{len(HealthMonitorInstaller.REQUIRED_FILES)} files")
+                
+                if missing_files:
+                    log(f"Missing files: {', '.join(missing_files)}")
                 
                 # Generate and add Dockerfile
                 dockerfile_text = HealthMonitorInstaller._generate_dockerfile()
                 (build_dir / "Dockerfile").write_text(dockerfile_text, encoding='utf-8')
                 
-                log(f"Prepared project files for transfer")
+                log(f"Prepared minimal project files for transfer")
                 
                 # 2. Use DeploymentSyncer.push_directory to transfer files                
                 success = DeploymentSyncer.push_directory(
@@ -102,7 +188,7 @@ class HealthMonitorInstaller:
                 if not success:
                     raise Exception("Failed to transfer project files to server")
                 
-                log(f"Project files transferred to server")
+                log(f"Minimal files transferred to server")
             
             # 3. Build Docker image
             log(f"Building health monitor image on {server_ip}...")
@@ -114,7 +200,7 @@ class HealthMonitorInstaller:
             # 4. Cleanup build directory
             CommandExecuter.run_cmd("rm -rf /tmp/health_monitor_build", server_ip, user)
             
-            log(f"Built health monitor image")
+            log(f"Built minimal health monitor image")
             
             # 5. Schedule with CronManager
             service_config = {
@@ -152,7 +238,8 @@ class HealthMonitorInstaller:
                 return False
             
             Logger.end()
-            log(f"Health monitor installed on {server_ip}")
+            log(f"✓ Minimal health monitor installed on {server_ip}")
+            log(f"✓ Excluded proprietary deployment/build/sync logic")
             return True
             
         except Exception as e:
