@@ -27,15 +27,18 @@ try:
     from .health_agent_installer import HealthAgentInstaller
 except ImportError:
     from health_agent_installer import HealthAgentInstaller
-try:
-    from .health_monitor import HealthMonitor
-except ImportError:
-    from health_monitor import HealthMonitor
+
 
 
 def log(msg):
     Logger.log(msg)
 
+def get_agent():
+    try:
+        from .health_monitor import HealthMonitor
+    except ImportError:
+        from health_monitor import HealthMonitor
+    return HealthMonitor
 
 class DOManager:
     """Manage DigitalOcean droplets and resources via API"""
@@ -355,7 +358,7 @@ class DOManager:
             log("Waiting for health agent to start...")
             for i in range(30):  # Try for 30 seconds
                 try:
-                    response = HealthMonitor.agent_request(ip, "GET", "/ping", timeout=2)
+                    response = get_agent().agent_request(ip, "GET", "/ping", timeout=2)
                     if response.get('status') == 'alive':
                         log("✓ Health agent ready")
                         break
