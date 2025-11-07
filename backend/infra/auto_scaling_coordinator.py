@@ -32,10 +32,14 @@ try:
     from .do_manager import DOManager
 except ImportError:
     from do_manager import DOManager
-try:
-    from .health_monitor import HealthMonitor
-except ImportError:
-    from health_monitor import HealthMonitor
+
+
+def get_agent():
+    try:
+        from .health_monitor import HealthMonitor
+    except ImportError:
+        from health_monitor import HealthMonitor
+    return HealthMonitor
 
 
 def log(msg):
@@ -146,7 +150,7 @@ class AutoScalingCoordinator:
             return
         
         # NEW: Acquire infrastructure lock
-        leader_ip = HealthMonitor.get_my_ip()
+        leader_ip = get_agent().get_my_ip()
         if not DOManager.acquire_infrastructure_lock(leader_ip):
             log("Failed to acquire infrastructure lock for auto-scaling")
             return

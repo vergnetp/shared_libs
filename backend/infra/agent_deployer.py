@@ -11,10 +11,14 @@ try:
     from .logger import Logger
 except ImportError:
     from logger import Logger
-try:
-    from .health_monitor import HealthMonitor
-except ImportError:
-    from health_monitor import HealthMonitor
+
+
+def get_agent():
+    try:
+        from .health_monitor import HealthMonitor
+    except ImportError:
+        from health_monitor import HealthMonitor
+    return HealthMonitor
 
 def log(msg):
     Logger.log(msg)
@@ -104,7 +108,7 @@ class AgentDeployer:
             if command:
                 payload['command'] = command
             
-            response = HealthMonitor.agent_request(
+            response = get_agent().agent_request(
                 server_ip,
                 "POST",
                 "/containers/run",
@@ -148,7 +152,7 @@ class AgentDeployer:
         log(f"[{server_ip}] Stopping container: {name}")
         
         try:
-            response = HealthMonitor.agent_request(
+            response = get_agent().agent_request(
                 server_ip,
                 "POST",
                 f"/containers/{name}/stop",
@@ -198,7 +202,7 @@ class AgentDeployer:
         log(f"[{server_ip}] Removing container: {name}")
         
         try:
-            response = HealthMonitor.agent_request(
+            response = get_agent().agent_request(
                 server_ip,
                 "POST",
                 f"/containers/{name}/remove",
@@ -283,7 +287,7 @@ class AgentDeployer:
         log(f"[{server_ip}] Restarting container: {name}")
         
         try:
-            response = HealthMonitor.agent_request(
+            response = get_agent().agent_request(
                 server_ip,
                 "POST",
                 f"/containers/{name}/restart",
@@ -321,7 +325,7 @@ class AgentDeployer:
             List of container dicts with name, status, image
         """
         try:
-            response = HealthMonitor.agent_request(
+            response = get_agent().agent_request(
                 server_ip,
                 "GET",
                 "/containers",
@@ -354,7 +358,7 @@ class AgentDeployer:
             Container info dict or None if not found
         """
         try:
-            response = HealthMonitor.agent_request(
+            response = get_agent().agent_request(
                 server_ip,
                 "GET",
                 f"/containers/{name}",
@@ -416,7 +420,7 @@ class AgentDeployer:
             Log output as string
         """
         try:
-            response = HealthMonitor.agent_request(
+            response = get_agent().agent_request(
                 server_ip,
                 "GET",
                 f"/containers/{name}/logs?lines={lines}",
@@ -453,7 +457,7 @@ class AgentDeployer:
         log(f"[{server_ip}] Pulling image: {image}")
         
         try:
-            response = HealthMonitor.agent_request(
+            response = get_agent().agent_request(
                 server_ip,
                 "POST",
                 f"/images/{image}/pull",

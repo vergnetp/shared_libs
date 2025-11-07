@@ -6,10 +6,7 @@ try:
     from .metrics_collector import MetricsCollector
 except ImportError:
     from metrics_collector import MetricsCollector
-try:
-    from .project_deployer import ProjectDeployer
-except ImportError:
-    from project_deployer import ProjectDeployer
+
 try:
     from .logger import Logger
 except ImportError:
@@ -19,6 +16,13 @@ except ImportError:
 def log(msg):
     Logger.log(msg)
 
+def get_project_deployer():
+    """Lazy import ProjectDeployer to avoid circular dependency"""
+    try:
+        from .project_deployer import ProjectDeployer
+    except ImportError:
+        from project_deployer import ProjectDeployer
+    return ProjectDeployer
 
 class AutoScaler:
     """
@@ -154,7 +158,7 @@ class AutoScaler:
             log(f"[{service}] Horizontal scaling: {current_count} → {new_count} servers")
             
             # Update service configuration
-            project = ProjectDeployer(self.project)
+            project = get_project_deployer()(self.project)
             project.update_service(service, servers_count=new_count)
             
             # Deploy changes (no build, just infrastructure changes)
@@ -275,7 +279,7 @@ class AutoScaler:
             log(f"[{service}] Vertical scaling: {cpu}vCPU/{memory}MB")
             
             # Update service configuration
-            project = ProjectDeployer(self.project)
+            project = get_project_deployer()(self.project)
             project.update_service(
                 service,
                 server_cpu=cpu,
