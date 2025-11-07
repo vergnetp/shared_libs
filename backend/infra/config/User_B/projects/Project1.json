@@ -1,6 +1,7 @@
 {
     "project": {
         "name": "Project1",
+        "docker_hub_user": "vergnetp",
         "services": {
             "api": {
                 "dockerfile_content": {

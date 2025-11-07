@@ -329,7 +329,7 @@ class CommandExecuter:
         
         # Try to ping agent
         try:
-            response = HealthMonitor.agent_request(
+            response = get_agent().agent_request(
                 server_ip,
                 "GET",
                 "/ping",
@@ -635,7 +635,7 @@ class CommandExecuter:
                     content = data.decode('utf-8')
                     
                     # Use agent's file write endpoint
-                    response = HealthMonitor.agent_request(
+                    response = get_agent().agent_request(
                         server_ip,
                         "POST",
                         "/files/write",

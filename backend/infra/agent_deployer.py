@@ -679,7 +679,7 @@ class AgentDeployer:
                 log(f"[{server_ip}] Uploading chunk {chunk_index + 1}/{total_chunks} ({len(chunk_data) / 1024:.0f} KB)...")
                 
                 # Upload chunk
-                response = HealthMonitor.agent_request(
+                response = get_agent().agent_request(
                     server_ip,
                     "POST",
                     "/upload/tar/chunked",
