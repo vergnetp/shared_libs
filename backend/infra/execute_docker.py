@@ -18,15 +18,19 @@ try:
     from .deployment_naming import DeploymentNaming
 except ImportError:
     from deployment_naming import DeploymentNaming
-try:
-    from .health_monitor import HealthMonitor
-except ImportError:
-    from health_monitor import HealthMonitor
+
 
 
 def log(msg):
     Logger.log(msg)
 
+
+def get_agent():
+    try:
+        from .health_monitor import HealthMonitor
+    except ImportError:
+        from health_monitor import HealthMonitor
+    return HealthMonitor
 
 class DockerExecuter:
     """
@@ -148,7 +152,7 @@ class DockerExecuter:
                 if network:
                     payload['network'] = network
                 
-                response = HealthMonitor.agent_request(
+                response = get_agent().agent_request(
                     server_ip,
                     "POST",
                     "/containers/run",
@@ -216,7 +220,7 @@ class DockerExecuter:
         # Remote - use HTTP agent
         if DockerExecuter.USE_AGENT:
             try:
-                response = HealthMonitor.agent_request(
+                response = get_agent().agent_request(
                     server_ip,
                     "POST",
                     f"/containers/{container_name}/stop",
@@ -279,7 +283,7 @@ class DockerExecuter:
         # Remote - use HTTP agent
         if DockerExecuter.USE_AGENT:
             try:
-                response = HealthMonitor.agent_request(
+                response = get_agent().agent_request(
                     server_ip,
                     "POST",
                     f"/containers/{container_name}/remove",
@@ -418,7 +422,7 @@ class DockerExecuter:
         # Remote - use HTTP agent
         if DockerExecuter.USE_AGENT:
             try:
-                response = HealthMonitor.agent_request(
+                response = get_agent().agent_request(
                     server_ip,
                     "GET",
                     f"/containers/{container_name}/logs?lines={lines}",
@@ -455,7 +459,7 @@ class DockerExecuter:
         # Remote - use HTTP agent
         if DockerExecuter.USE_AGENT:
             try:
-                response = HealthMonitor.agent_request(
+                response = get_agent().agent_request(
                     server_ip,
                     "POST",
                     f"/images/{image}/pull",

@@ -1,6 +1,6 @@
 {
     "project": {
-        "name": "new_project2",
+        "name": "Project1",
         "docker_hub_user": "vergnetp",
         "version": "latest",
         "default_server_ip": "localhost",
@@ -43,19 +43,6 @@
                 "services": {
                     "postgres": {
                         "image": "postgres:14"
-                    }
-                }
-            },
-            "production2": {
-                "services": {
-                    "job": {
-                        "dockerfile_content": {
-                            "4": "RUN pip install --no-cache-dir -r requirements.txt",
-                            "4.1": "RUN useradd -m appuser",
-                            "4.2": "RUN chown -R appuser:appuser /app",
-                            "5.1": "USER appuser",
-                            "6": "CMD [\"gunicorn\", \"--bind\", \"0.0.0.0:8000\", \"app:app\"]"
-                        }
                     }
                 }
             }

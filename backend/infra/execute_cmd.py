@@ -19,14 +19,12 @@ maintaining security through explicit endpoint mapping.
 import subprocess
 import shlex
 import platform
+import base64
 import re
 from pathlib import Path
 from typing import Union, List, Any, Optional, Dict, Tuple
 
-try:
-    from .health_monitor import HealthMonitor
-except ImportError:
-    from health_monitor import HealthMonitor
+
 try:
     from .logger import Logger
 except ImportError:
@@ -36,6 +34,14 @@ except ImportError:
 def log(msg):
     Logger.log(msg)
 
+
+
+def get_agent():
+    try:
+        from .health_monitor import HealthMonitor
+    except ImportError:
+        from health_monitor import HealthMonitor
+    return HealthMonitor
 
 def parse_docker_error(error_text: str, cmd: Union[List[str], str]) -> str:
     """Parse Docker error messages for better user feedback"""
@@ -274,12 +280,12 @@ class CommandExecuter:
                     
                     # Make agent request
                     if route['method'] == 'GET':
-                        response = HealthMonitor.agent_request(
+                        response = get_agent().agent_request(
                             server_ip, 'GET', endpoint,
                             params=params, timeout=30
                         )
                     elif route['method'] in ['POST', 'DELETE']:
-                        response = HealthMonitor.agent_request(
+                        response = get_agent().agent_request(
                             server_ip, route['method'], endpoint,
                             json_data=params, timeout=30
                         )
@@ -599,7 +605,7 @@ class CommandExecuter:
                     target_dir = remote_cmd.split('cd ')[1].split('&&')[0].strip()
                     
                     # Use agent's tar upload endpoint
-                    response = HealthMonitor.agent_request(
+                    response = get_agent().agent_request(
                         server_ip,
                         "POST",
                         "/files/upload/tar",
@@ -731,7 +737,7 @@ class CommandExecuter:
         
         if agent_available:
             try:
-                response = HealthMonitor.agent_request(
+                response = get_agent().agent_request(
                     server_ip,
                     "POST",
                     "/files/write",
@@ -795,7 +801,7 @@ class CommandExecuter:
         
         if agent_available:
             try:
-                response = HealthMonitor.agent_request(
+                response = get_agent().agent_request(
                     server_ip,
                     "POST",
                     "/files/mkdir",

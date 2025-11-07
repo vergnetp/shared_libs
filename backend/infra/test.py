@@ -1,4 +1,4 @@
-from deployer import Deployer
+from project_deployer import ProjectDeployer
 import sys, os
 import ctypes
 from logger import Logger
@@ -46,10 +46,14 @@ def ensure_admin():
 
 def main():
     try:
-        ensure_admin()
-        deployer = Deployer('new_project')
-        deployer.build_images('uat')
-        deployer.deploy(env='uat')
+        #ensure_admin()
+        userA = 'User_A'
+        userB = 'User_B'
+        project = "Project1"
+        deployerA = ProjectDeployer(userA, project)
+        deployerB = ProjectDeployer(userB, project)
+        deployerA.deploy(env="uat")
+        deployerB.deploy(env='uat')
     except Exception as e:
         Logger.log(f"MAIN ERROR: {e}")
 

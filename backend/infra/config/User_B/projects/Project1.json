@@ -1,0 +1,30 @@
+{
+    "project": {
+        "name": "Project1",
+        "services": {
+            "api": {
+                "dockerfile_content": {
+                    "1": "FROM python:3.11-slim",
+                    "2": "WORKDIR /app",
+                    "3": "COPY TEST_PROJECT/requirements_api.txt .",
+                    "4": "RUN pip install --no-cache-dir -r requirements_api.txt",
+                    "5": "COPY shared_libs ./shared_libs",
+                    "6": "COPY TEST_PROJECT/api - Copy.py .",
+                    "7": "EXPOSE 8000",
+                    "8": "CMD [\"python\", \"api - Copy.py\"]"
+                },
+                "build_context": "C:\\Users\\vergn\\Desktop\\Projects",
+                "startup_order": 2,
+                "server_zone": "lon1",
+                "servers_count": 2,
+                "restart": true
+            },
+            "postgres": {
+                "image": "postgres:15",
+                                "server_zone": "lon1",
+                "servers_count": 1,
+                "startup_order": 1
+            }
+        }
+    }
+}
