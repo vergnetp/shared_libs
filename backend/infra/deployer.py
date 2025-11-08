@@ -1114,6 +1114,11 @@ class Deployer:
         log("Checking for nginx automation...")
         self._setup_nginx_automation(env or 'dev', services)
         
+
+        if all_success:  # Only if deployment succeeded
+            log("Configuring VPC-only SSH firewall on all servers...")
+            self._configure_vpc_firewall(env or 'dev', credentials)  
+
         Logger.end()
         
         if all_success:
@@ -4238,5 +4243,84 @@ class Deployer:
                     pass
         
         return list(servers)
+
+    def _configure_vpc_firewall(self, env: str, credentials: dict = None):
+        """Configure firewall on all active servers for this environment"""
+        log("Configuring VPC-only SSH firewall...")
+        Logger.start()
+        
+        try:
+            from .health_monitor import HealthMonitor
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            
+            # Get active servers for this environment
+            all_servers = ServerInventory.list_all_servers(credentials=credentials)
+            services = self.deployment_configurer.get_services(env)
+            
+            target_zones = {svc.get("server_zone", "lon1") for svc in services.values() if svc.get("server_zone") != "localhost"}
+            target_servers = [s['ip'] for s in all_servers if s['zone'] in target_zones and s['deployment_status'] == 'active']
+            
+            if not target_servers:
+                log("No remote servers to configure")
+                Logger.end()
+                return
+            
+            log(f"Configuring firewall on {len(target_servers)} server(s)")
+            
+            # Configure in parallel
+            results = {}
+            with ThreadPoolExecutor(max_workers=5) as executor:
+                futures = {executor.submit(self._configure_firewall_on_server, ip): ip for ip in target_servers}
+                for future in as_completed(futures):
+                    server_ip = futures[future]
+                    try:
+                        results[server_ip] = future.result()
+                        log(f"✓ Configured {server_ip}" if results[server_ip] else f"✗ Failed {server_ip}")
+                    except Exception as e:
+                        log(f"✗ Exception on {server_ip}: {e}")
+                        results[server_ip] = False
+            
+            success_count = sum(1 for v in results.values() if v)
+            Logger.end()
+            log(f"Firewall configuration: {success_count}/{len(results)} successful")
+            
+        except Exception as e:
+            log(f"Failed to configure firewall: {e}")
+            Logger.end()
+
+
+    def _configure_firewall_on_server(self, server_ip: str) -> bool:
+        """Configure firewall on single server via health agent"""
+        try:
+            from .health_monitor import HealthMonitor
+            
+            # Reset firewall
+            HealthMonitor.agent_request(server_ip, "POST", "/system/firewall/reset", json_data={'confirm': True}, timeout=30)
+            
+            # Set defaults
+            HealthMonitor.agent_request(server_ip, "POST", "/system/firewall/defaults", json_data={'incoming': 'deny', 'outgoing': 'allow'}, timeout=30)
+            
+            # Add rules
+            HealthMonitor.agent_request(
+                server_ip, "POST", "/system/firewall/rules/bulk",
+                json_data={
+                    'rules': [
+                        {'port': 22, 'protocol': 'tcp', 'sources': ['10.0.0.0/16'], 'comment': 'SSH VPC only'},
+                        {'port': 9999, 'protocol': 'tcp', 'sources': ['10.0.0.0/16'], 'comment': 'Health Agent VPC'},
+                        {'port': 443, 'protocol': 'tcp', 'sources': [], 'comment': 'HTTPS'}
+                    ]
+                },
+                timeout=30
+            )
+            
+            # Enable
+            HealthMonitor.agent_request(server_ip, "POST", "/system/firewall/enable", timeout=30)
+            
+            log(f"[{server_ip}] ✅ VPC-only SSH configured")
+            return True
+            
+        except Exception as e:
+            log(f"[{server_ip}] Failed: {e}")
+            return False
 
 

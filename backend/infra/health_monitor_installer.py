@@ -221,16 +221,7 @@ class HealthMonitorInstaller:
                 version="latest",
                 server_ip=server_ip,
                 user=user
-            )
-            
-            credentials = CredentialsManager.get_credentials()
-
-            # Push to server
-            CredentialsManager.push_credentials_to_server(
-                server_ip,
-                credentials,
-                user
-            )
+            )            
 
             if not success:
                 log(f"Warning: Failed to schedule health monitor on {server_ip}")

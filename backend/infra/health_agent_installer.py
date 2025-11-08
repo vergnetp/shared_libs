@@ -53,6 +53,11 @@ class HealthAgentInstaller:
             deps = " ".join(HealthAgentInstaller.DEPENDENCIES)
             log(f"Installing dependencies: {deps}")
             CommandExecuter.run_cmd(
+            "apt-get update && apt-get install -y python3-pip",
+            server_ip, user
+            )
+            log("✓ Installed pip3")
+            CommandExecuter.run_cmd(
                 f"pip3 install --break-system-packages {deps}",
                 server_ip, user
             )

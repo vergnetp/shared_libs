@@ -306,12 +306,12 @@ class DOManager:
         
         log("Image pre-baking complete")
 
-    @staticmethod
     def get_or_create_template(region: str = "lon1", credentials: dict = None) -> str:
         """
-        Get existing template snapshot or create a new one.
+        Create or reuse template snapshot with Docker + monitoring pre-installed.
         
-        NEW: Template now has VPC-only SSH configured!
+        CRITICAL CHANGE: Template does NOT have VPC-only SSH firewall.
+        Firewall is configured on INDIVIDUAL servers after creation.
         """
         with DOManager._template_lock:
             # Check if we already have a snapshot
@@ -345,18 +345,34 @@ class DOManager:
             # Wait for SSH
             DOManager.wait_for_ssh_ready(ip)
             
+            # Install pip3 FIRST (required for health agent)
+            log("Installing Python pip...")
+            CommandExecuter.run_cmd(
+                "apt-get update && apt-get install -y python3-pip",
+                ip, "root"
+            )
+            
             # Install Docker
             DOManager.install_docker(ip)
             
-            # Install health monitor            
-            HealthMonitorInstaller.install_on_server(ip)
+            # Install health monitor (no credentials needed in template)
+            # Health monitor will get credentials when deployed with actual project
+            try:
+                HealthMonitorInstaller.install_on_server(ip)
+            except Exception as e:
+                log(f"Warning: Health monitor installation had issues: {e}")
+                log("Continuing anyway - monitor can be fixed on deployed servers")
             
-            # Install health agent            
-            HealthAgentInstaller.install_on_server(ip)
+            # Install health agent
+            try:
+                HealthAgentInstaller.install_on_server(ip)
+            except Exception as e:
+                log(f"Warning: Health agent installation had issues: {e}")
+                log("Continuing anyway - agent can be fixed on deployed servers")
             
-            # WAIT for agent to be ready
+            # WAIT for agent to be ready (optional - not critical)
             log("Waiting for health agent to start...")
-            for i in range(30):  # Try for 30 seconds
+            for i in range(10):  # Reduced from 30 to 10 - not critical
                 try:
                     response = get_agent().agent_request(ip, "GET", "/ping", timeout=2)
                     if response.get('status') == 'alive':
@@ -366,38 +382,12 @@ class DOManager:
                     time.sleep(1)
             
             # ========================================
-            # NEW: CONFIGURE VPC-ONLY SSH FIREWALL
+            # REMOVED: VPC-ONLY SSH FIREWALL
+            # Instead, keep SSH open for now
+            # Firewall will be configured on DEPLOYED servers
             # ========================================
-            log("🔒 Configuring VPC-only SSH firewall...")
+            log("⚠️  Template SSH remains PUBLIC (will be restricted on deployed servers)")
             
-            firewall_commands = [
-                "ufw --force reset",
-                "ufw default deny incoming",
-                "ufw default allow outgoing",
-                
-                # VPC-only SSH (blocks internet SSH!)
-                "ufw allow from 10.0.0.0/16 to any port 22 comment 'SSH VPC only'",
-                
-                # Agent API (VPC only)
-                "ufw allow from 10.0.0.0/16 to any port 9999 comment 'Health Agent'",
-                
-                # HTTPS (will be restricted to Cloudflare later via agent)
-                "ufw allow 443 comment 'HTTPS - will be restricted in deployment'",
-                
-                "ufw --force enable"
-            ]
-            
-            for cmd in firewall_commands:
-                try:
-                    CommandExecuter.run_cmd(cmd, ip, "root")
-                    log(f"  ✓ {cmd[:60]}...")
-                except Exception as e:
-                    log(f"  ⚠ Firewall command failed: {e}")
-            
-            log("✅ Firewall configured - SSH restricted to VPC (10.0.0.0/16)")
-            log("   From now on, SSH only works from within VPC!")
-            # ========================================
-
             # Install basic nginx
             DOManager._install_basic_nginx(ip)
             
@@ -418,9 +408,54 @@ class DOManager:
             DOManager.destroy_droplet(template_id, credentials=credentials)
             
             log(f"✅ Template snapshot ready: {snapshot_id}")
-            log("   All servers from this template will have VPC-only SSH!")
+            log("   SSH is still public - will be restricted on deployed servers")
             return snapshot_id
-    
+
+
+    # ============================================================================
+    # NEW METHOD: Configure firewall on DEPLOYED servers
+    # ============================================================================
+
+    def configure_vpc_firewall_on_server(server_ip: str, credentials: dict = None):
+        """
+        Configure VPC-only firewall on a deployed server.
+        
+        This should be called AFTER:
+        1. Server is provisioned from snapshot
+        2. All deployment configuration is complete
+        3. We no longer need external SSH access
+        
+        IMPORTANT: After this, SSH only works from within VPC!
+        """
+        log(f"🔒 Configuring VPC-only SSH firewall on {server_ip}...")
+        
+        firewall_commands = [
+            "ufw --force reset",
+            "ufw default deny incoming",
+            "ufw default allow outgoing",
+            
+            # VPC-only SSH (blocks internet SSH!)
+            "ufw allow from 10.0.0.0/16 to any port 22 comment 'SSH VPC only'",
+            
+            # Agent API (VPC only)
+            "ufw allow from 10.0.0.0/16 to any port 9999 comment 'Health Agent'",
+            
+            # HTTPS (will be restricted to Cloudflare later via agent)
+            "ufw allow 443 comment 'HTTPS - will be restricted in deployment'",
+            
+            "ufw --force enable"
+        ]
+        
+        for cmd in firewall_commands:
+            try:
+                CommandExecuter.run_cmd(cmd, server_ip, "root")
+                log(f"  ✓ {cmd[:60]}...")
+            except Exception as e:
+                log(f"  ⚠ Firewall command failed: {e}")
+        
+        log("✅ Firewall configured - SSH restricted to VPC (10.0.0.0/16)")
+        log("   ⚠️  From now on, SSH only works from within VPC!")
+
     @staticmethod
     def delete_template(credentials: dict = None):
         """
