@@ -4249,10 +4249,7 @@ class Deployer:
         log("Configuring VPC-only SSH firewall...")
         Logger.start()
         
-        try:
-            from .health_monitor import HealthMonitor
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-            
+        try:            
             # Get active servers for this environment
             all_servers = ServerInventory.list_all_servers(credentials=credentials)
             services = self.deployment_configurer.get_services(env)

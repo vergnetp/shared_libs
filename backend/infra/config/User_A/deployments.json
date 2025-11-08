@@ -1,0 +1,48 @@
+{
+  "Project1": {
+    "uat": {
+      "postgres": {
+        "current": {
+          "servers": [
+            "178.62.50.163"
+          ],
+          "container_name": "User_A_Project1_uat_postgres",
+          "version": "latest",
+          "deployed_at": "2025-11-08T15:13:37.923739"
+        },
+        "history": [
+          {
+            "servers": [
+              "178.62.50.163"
+            ],
+            "container_name": "User_A_Project1_uat_postgres",
+            "version": "latest",
+            "deployed_at": "2025-11-08T15:13:37.923739"
+          }
+        ]
+      },
+      "api": {
+        "current": {
+          "servers": [
+            "178.62.50.163",
+            "209.97.184.172"
+          ],
+          "container_name": "User_A_Project1_uat_api",
+          "version": "latest",
+          "deployed_at": "2025-11-08T15:16:24.552019"
+        },
+        "history": [
+          {
+            "servers": [
+              "178.62.50.163",
+              "209.97.184.172"
+            ],
+            "container_name": "User_A_Project1_uat_api",
+            "version": "latest",
+            "deployed_at": "2025-11-08T15:16:24.552019"
+          }
+        ]
+      }
+    }
+  }
+}

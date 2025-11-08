@@ -625,3 +625,30 @@ class DockerExecuter:
         )
         output = str(result).strip() if result else ""
         return output and 'Up' in output
+    
+
+    @staticmethod
+    def container_exists(container_name: str, server_ip: str = 'localhost') -> bool:
+        """Check if container exists (running or stopped)"""
+        try:
+            result = CommandExecuter.run_cmd(
+                f"docker ps -a --filter 'name=^{container_name}$' --format '{{{{.Names}}}}'",
+                server_ip, "root"
+            )
+            output = str(result).strip() if result else ""
+            return bool(output and container_name in output)
+        except:
+            return False
+
+    @staticmethod
+    def volume_exists(volume_name: str, server_ip: str = 'localhost') -> bool:
+        """Check if Docker volume exists"""
+        try:
+            result = CommandExecuter.run_cmd(
+                f"docker volume ls --filter 'name=^{volume_name}$' --format '{{{{.Name}}}}'",
+                server_ip, "root"
+            )
+            output = str(result).strip() if result else ""
+            return bool(output and volume_name in output)
+        except:
+            return False

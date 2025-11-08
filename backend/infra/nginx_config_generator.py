@@ -683,7 +683,7 @@ class NginxConfigGenerator:
         
         # Case 2: Nginx exists on CORRECT network
         elif current_network == network_name:
-            if DockerExecuter.is_container_running(container_name, target_server, user):
+            if DockerExecuter.is_container_running(container_name, target_server):
                 log(f"Nginx already running on correct network ({network_name}) - skipping")
                 return True
             else:
