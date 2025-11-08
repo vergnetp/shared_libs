@@ -55,7 +55,7 @@ def main():
         if tokenB == 'Missing':
             print('Token missing')
         else:
-            credsB = {'DIGITALOCEAN_API_TOKEN', tokenB}
+            credsB = {'DIGITALOCEAN_API_TOKEN': tokenB}
             deployerA = ProjectDeployer(userA, project)
             deployerB = ProjectDeployer(userB, project)
             deployerA.deploy(env="uat")

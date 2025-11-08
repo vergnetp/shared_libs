@@ -95,6 +95,10 @@ try:
     from .credentials_manager import CredentialsManager
 except ImportError:
     from credentials_manager import CredentialsManager
+try:
+    from health_monitor import HealthMonitor
+except ImportError:
+    from .health_monitor import HealthMonitor
 
 
 def log(msg):
@@ -4289,8 +4293,8 @@ class Deployer:
     def _configure_firewall_on_server(self, server_ip: str) -> bool:
         """Configure firewall on single server via health agent"""
         try:
-            from .health_monitor import HealthMonitor
-            
+
+
             # Reset firewall
             HealthMonitor.agent_request(server_ip, "POST", "/system/firewall/reset", json_data={'confirm': True}, timeout=30)
             

@@ -641,7 +641,7 @@ class DockerExecuter:
             return False
 
     @staticmethod
-    def volume_exists(volume_name: str, server_ip: str = 'localhost') -> bool:
+    def volume_exists(volume_name: str, server_ip: str = 'localhost', user='todo') -> bool:
         """Check if Docker volume exists"""
         try:
             result = CommandExecuter.run_cmd(
