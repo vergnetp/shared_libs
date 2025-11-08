@@ -58,7 +58,7 @@ class HealthAgentInstaller:
             )
             log("✓ Installed pip3")
             CommandExecuter.run_cmd(
-                f"pip3 install --break-system-packages {deps}",
+                f"pip3 install flask requests {deps}",
                 server_ip, user
             )
             log("Dependencies installed")

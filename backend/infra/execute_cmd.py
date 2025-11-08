@@ -411,6 +411,7 @@ class CommandExecuter:
         1. Try pattern matching → agent endpoint
         2. Fall back to SSH if no match or forced
         """
+        user = 'root'  # todo: clean that
         # Normalize command to string
         if isinstance(cmd, list):
             cmd_list = CommandExecuter._normalize_command(cmd)
@@ -582,6 +583,7 @@ class CommandExecuter:
         
         MIGRATED: Uses agent for tar extraction and file writes if agent available.
         """
+        user = 'root'  # todo: clean that
         # Localhost - direct stdin
         if server_ip == 'localhost' or server_ip is None:
             result = subprocess.run(remote_cmd, shell=True, input=data, capture_output=True)
@@ -662,6 +664,8 @@ class CommandExecuter:
     @staticmethod
     def _run_ssh_cmd_with_stdin(remote_cmd: str, data: bytes, server_ip: str, user: str = "root") -> None:
         """Run a remote command via SSH and stream data to its stdin"""
+        user = 'root'  # todo: clean that
+        
         ssh_key_path = Path.home() / ".ssh" / "deployer_id_rsa"
         system = platform.system()
 

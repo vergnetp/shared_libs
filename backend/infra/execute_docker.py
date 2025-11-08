@@ -589,3 +589,39 @@ class DockerExecuter:
                     })
         
         return containers
+    
+
+
+    @staticmethod
+    def find_service_container(user, project, env, service, server_ip='localhost'):
+        """Find container for service"""
+        base_name = DeploymentNaming.get_container_name(user, project, env, service)
+        patterns = [base_name, f"{base_name}_secondary"]
+        
+        for pattern in patterns:
+            result = CommandExecuter.run_cmd(
+                f"docker ps -a --filter 'name=^{pattern}$' "
+                f"--format '{{{{.Names}}}}|{{{{.Ports}}}}|{{{{.Status}}}}'",
+                server_ip, "root"
+            )
+            output = str(result).strip() if result else ""
+            if output:
+                parts = output.split('|')
+                port = None
+                if len(parts) > 1:
+                    import re
+                    match = re.search(r':(\d+)->', parts[1])
+                    if match:
+                        port = int(match.group(1))
+                return {'name': parts[0], 'port': port, 'status': parts[2] if len(parts) > 2 else 'unknown'}
+        return None
+
+    @staticmethod
+    def is_container_running(container_name, server_ip='localhost'):
+        """Check if container is running"""
+        result = CommandExecuter.run_cmd(
+            f"docker ps --filter 'name=^{container_name}$' --format '{{{{.Status}}}}'",
+            server_ip, "root"
+        )
+        output = str(result).strip() if result else ""
+        return output and 'Up' in output
