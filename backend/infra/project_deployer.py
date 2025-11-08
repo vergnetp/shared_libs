@@ -1128,7 +1128,8 @@ class ProjectDeployer:
         zones: List[str] = None,
         service: str = None,
         build: bool = True,
-        parallel: bool = True
+        parallel: bool = True,
+        credentials: Dict[str, str] = None
     ) -> Dict[str, bool]:
         """
         Deploy services - automatically handles single-zone or multi-zone.
@@ -1139,6 +1140,7 @@ class ProjectDeployer:
             service: Deploy specific service only (None = all services)
             build: Whether to build images before deploying (default: True)
             parallel: Deploy zones in parallel (True) or sequentially (False)
+            credentials: Credentials dictionary (optional)
             
         Returns:
             Dict mapping zone -> success/failure
@@ -1160,7 +1162,7 @@ class ProjectDeployer:
             # Deploy without rebuilding
             project.deploy(env="prod", build=False)
         """
-        return self._deployer.deploy(env, zones, service, build, parallel)
+        return self._deployer.deploy(env, zones, service, build, parallel, credentials)
     
     # =========================================================================
     # MONITORING & MANAGEMENT

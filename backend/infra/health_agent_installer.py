@@ -54,7 +54,7 @@ class HealthAgentInstaller:
             log(f"Installing dependencies: {deps}")
             CommandExecuter.run_cmd(
                 f"pip3 install --break-system-packages {deps}",
-                server_ip, user, timeout=300
+                server_ip, user
             )
             log("Dependencies installed")
             

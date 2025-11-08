@@ -1,6 +1,7 @@
 from project_deployer import ProjectDeployer
 import sys, os
 import ctypes
+import env_loader
 from logger import Logger
 
 def ensure_admin():
@@ -50,10 +51,15 @@ def main():
         userA = 'User_A'
         userB = 'User_B'
         project = "Project1"
-        deployerA = ProjectDeployer(userA, project)
-        deployerB = ProjectDeployer(userB, project)
-        deployerA.deploy(env="uat")
-        deployerB.deploy(env='uat')
+        tokenB = os.environ.get("USERB_DIGITALOCEAN_API_TOKEN", "Missing")
+        if tokenB == 'Missing':
+            print('Token missing')
+        else:
+            credsB = {'DIGITALOCEAN_API_TOKEN', tokenB}
+            deployerA = ProjectDeployer(userA, project)
+            deployerB = ProjectDeployer(userB, project)
+            deployerA.deploy(env="uat")
+            deployerB.deploy(env='uat', credentials=credsB)
     except Exception as e:
         Logger.log(f"MAIN ERROR: {e}")
 

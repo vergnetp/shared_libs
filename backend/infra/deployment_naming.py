@@ -117,7 +117,7 @@ class DeploymentNaming:
         - get_image_name("bob", "u1", "proj", "staging", "web", "1.2.3") -> "bob/u1-proj-staging-web:1.2.3"
         """
         effective_service = DeploymentNaming.get_service_name(service_name)
-        return f"{docker_hub_user}/{user}-{project}-{env}-{effective_service}:{version}"
+        return f"{docker_hub_user}/{user}-{project}-{env}-{effective_service}:{version}".lower()
 
     @staticmethod
     def get_network_name() -> str:

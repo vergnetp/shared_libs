@@ -486,13 +486,21 @@ class Deployer:
             service_config = task['service_config']
             
             try:
-                # Generate or use dockerfile
-                dockerfile_path = self._get_dockerfile_path(sn, service_config)
-                
-                if not dockerfile_path:
+                if service_config.get("dockerfile_content"):
+                    dockerfile_content = self.create_temporary_dockerfile(
+                        service_config["dockerfile_content"], 
+                        sn
+                    )
+                    dockerfile_path = self.write_temporary_dockerfile(dockerfile_content, sn, env)
+                elif service_config.get("dockerfile"):
+                    dockerfile_path = self.generate_dockerfile(sn, service_config)
+                else:
+                    dockerfile_path = None
+
+                if not dockerfile_path or not os.path.exists(dockerfile_path):
                     log(f"No Dockerfile found for {sn}")
                     return False
-                
+                                
                 # Get build context
                 build_context = service_config.get("build_context", ".")
                 
