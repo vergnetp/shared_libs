@@ -27,7 +27,10 @@ try:
     from .health_agent_installer import HealthAgentInstaller
 except ImportError:
     from health_agent_installer import HealthAgentInstaller
-
+try:
+    from .deployment_constants import DIGITALOCEN_API_TOKEN_KEY
+except ImportError:
+    from deployment_constants import DIGITALOCEN_API_TOKEN_KEY
 
 
 def log(msg):
@@ -77,7 +80,7 @@ class DOManager:
         """Get API request headers with authorization"""
         token = DOManager._get_do_token(credentials)
         if not token:
-            raise ValueError("DIGITALOCEAN_API_TOKEN not found in environment")
+            raise ValueError(f"{DIGITALOCEN_API_TOKEN_KEY} not found in environment")
         
         return {
             "Authorization": f"Bearer {token}",
@@ -103,11 +106,11 @@ class DOManager:
             ValueError: If token not found
         """
         # Priority 1: Check credentials dict
-        if credentials and credentials.get('digitalocean_token'):
-            return credentials['digitalocean_token']
+        if credentials and credentials.get(DIGITALOCEN_API_TOKEN_KEY):
+            return credentials[DIGITALOCEN_API_TOKEN_KEY]
         
         # Priority 2: Check .env
-        token = os.getenv('DIGITALOCEAN_API_TOKEN')
+        token = os.getenv(DIGITALOCEN_API_TOKEN_KEY)
         if token:
             return token
         
@@ -560,8 +563,6 @@ class DOManager:
     @staticmethod
     def list_vpcs(credentials: Dict=None) -> List[Dict[str, Any]]:
         """List all VPCs in DO account"""
-        if os.getenv("DIGITALOCEAN_API_TOKEN") is None:
-            return []
         response = DOManager._api_request("GET", "/vpcs", credentials=credentials)
         return response.get("vpcs", [])
     
@@ -1020,8 +1021,6 @@ class DOManager:
     @staticmethod
     def list_droplets(tags: List[str] = None, credentials: dict = None) -> List[Dict[str, Any]]:
         """List all droplets, optionally filtered by tags"""
-        if os.getenv("DIGITALOCEAN_API_TOKEN") is None:
-            return []
         
         # Default to only listing "Infra" tagged droplets
         if tags is None:

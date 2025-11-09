@@ -5,3 +5,5 @@ DEPLOYMENT_CONFIG_FILENAME = "deployment.json"
 # Infrastructure credentials (stored alongside service secrets)
 INFRA_CREDENTIALS_SERVICE_NAME = "infra"
 INFRA_CREDENTIALS_FILENAME = "credentials.json"
+
+DIGITALOCEN_API_TOKEN_KEY = "DIGITALOCEN_API_TOKEN"

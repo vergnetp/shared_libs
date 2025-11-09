@@ -652,3 +652,21 @@ class DockerExecuter:
             return bool(output and volume_name in output)
         except:
             return False
+
+
+    @staticmethod
+    def create_volume(volume_name: str, server_ip: str = 'localhost', user: str = 'root') -> bool:
+        """Create a Docker volume if it doesn't exist"""
+        try:
+            # Check if exists first
+            if DockerExecuter.volume_exists(volume_name, server_ip, user):
+                return True
+            
+            # Create volume
+            CommandExecuter.run_cmd(
+                f"docker volume create {volume_name}",
+                server_ip, user
+            )
+            return True
+        except:
+            return False

@@ -2202,7 +2202,7 @@ class Deployer:
                 env: Environment name
             """       
             all_servers = ServerInventory.list_all_servers(credentials=credentials)
-            container_pattern = f"{self.project_name}_{env}_"
+            container_pattern = f"{self.user}_{self.project_name}_{env}_"
             
             empty_servers = []
             

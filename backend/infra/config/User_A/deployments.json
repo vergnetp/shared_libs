@@ -4,13 +4,21 @@
       "postgres": {
         "current": {
           "servers": [
-            "139.59.181.162"
+            "46.101.22.10"
           ],
           "container_name": "User_A_Project1_uat_postgres",
           "version": "latest",
-          "deployed_at": "2025-11-08T15:44:35.499285"
+          "deployed_at": "2025-11-08T20:29:13.446413"
         },
         "history": [
+          {
+            "servers": [
+              "46.101.22.10"
+            ],
+            "container_name": "User_A_Project1_uat_postgres",
+            "version": "latest",
+            "deployed_at": "2025-11-08T20:29:13.446413"
+          },
           {
             "servers": [
               "139.59.181.162"
@@ -32,14 +40,23 @@
       "api": {
         "current": {
           "servers": [
-            "139.59.181.162",
-            "178.128.174.0"
+            "46.101.22.10",
+            "104.248.170.81"
           ],
           "container_name": "User_A_Project1_uat_api",
           "version": "latest",
-          "deployed_at": "2025-11-08T15:46:15.758462"
+          "deployed_at": "2025-11-08T20:30:59.006351"
         },
         "history": [
+          {
+            "servers": [
+              "46.101.22.10",
+              "104.248.170.81"
+            ],
+            "container_name": "User_A_Project1_uat_api",
+            "version": "latest",
+            "deployed_at": "2025-11-08T20:30:59.006351"
+          },
           {
             "servers": [
               "139.59.181.162",
