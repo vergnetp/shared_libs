@@ -1084,6 +1084,62 @@ http { include /etc/nginx/conf.d/*.conf; }
         
         return droplets
     
+    @staticmethod
+    def update_droplet_tags(droplet_id: int, add_tags: List[str] = None, remove_tags: List[str] = None, credentials: dict = None):
+        """Update tags for a droplet using DigitalOcean's tag resource API"""
+        try:
+            droplet_id_str = str(droplet_id)
+            
+            # Remove old tags
+            if remove_tags:
+                for tag in remove_tags:
+                    try:
+                        resource_data = {
+                            "resources": [{
+                                "resource_id": droplet_id_str,
+                                "resource_type": "droplet"
+                            }]
+                        }
+                        
+                        url = f"{DOManager.API_BASE}/tags/{tag}/resources"
+                        headers = DOManager._get_headers(credentials)
+                        response = requests.delete(url, headers=headers, json=resource_data, timeout=30)
+                        
+                        if response.status_code in [204, 200]:
+                            log(f"Removed tag '{tag}' from droplet {droplet_id}")
+                    except Exception as e:
+                        log(f"Warning: Could not remove tag '{tag}': {e}")
+            
+            # Add new tags
+            if add_tags:
+                for tag in add_tags:
+                    try:
+                        # Ensure tag exists
+                        DOManager._api_request("POST", "/tags", {"name": tag}, credentials=credentials)
+                    except:
+                        pass  # Tag might already exist
+                    
+                    try:
+                        resource_data = {
+                            "resources": [{
+                                "resource_id": droplet_id_str,
+                                "resource_type": "droplet"
+                            }]
+                        }
+                        
+                        url = f"{DOManager.API_BASE}/tags/{tag}/resources"
+                        headers = DOManager._get_headers(credentials)
+                        response = requests.post(url, headers=headers, json=resource_data, timeout=30)
+                        
+                        if response.status_code in [201, 204]:
+                            log(f"Added tag '{tag}' to droplet {droplet_id}")
+                    except Exception as e:
+                        log(f"Warning: Could not add tag '{tag}': {e}")
+                        
+        except Exception as e:
+            log(f"Failed to update droplet tags: {e}")
+            raise
+    
     # ========================================
     # HELPER ALIAS FOR COMPATIBILITY
     # ========================================
@@ -1092,4 +1148,3 @@ http { include /etc/nginx/conf.d/*.conf; }
     def _list_snapshots(credentials: dict = None) -> List[Dict[str, Any]]:
         """Alias for list_snapshots"""
         return DOManager.list_snapshots(credentials=credentials)
-    
