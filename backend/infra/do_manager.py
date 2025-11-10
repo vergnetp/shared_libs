@@ -117,7 +117,7 @@ class DOManager:
         raise ValueError("DigitalOcean API token not found in credentials or .env")
 
     @staticmethod
-    def _api_request(method: str, endpoint: str, data: Dict = None, credentials: dict = None) -> Dict:
+    def _api_request(method: str, endpoint: str, data: dict = None, credentials: dict = None) -> dict:
         """Make API request to DigitalOcean"""
         url = f"{DOManager.API_BASE}{endpoint}"
         headers = DOManager._get_headers(credentials)
@@ -135,15 +135,16 @@ class DOManager:
                 raise ValueError(f"Unsupported HTTP method: {method}")
             
             response.raise_for_status()
+            return response.json() if response.content else {}
             
-            # Handle 204 No Content
-            if response.status_code == 204:
-                return {}
-            
-            return response.json()
-            
-        except requests.exceptions.RequestException as e:
-            log(f"API request failed: {method} {endpoint} - {e}")
+        except requests.exceptions.HTTPError as e:
+            # ADD THIS DETAILED ERROR LOGGING:
+            error_msg = f"API request failed: {method} {endpoint} - {e}"
+            if hasattr(e.response, 'text'):
+                error_msg += f"\nResponse body: {e.response.text}"
+            if data:
+                error_msg += f"\nRequest data: {data}"
+            log(error_msg)
             raise
 
     # ========================================
@@ -351,7 +352,7 @@ class DOManager:
             # Install pip3 FIRST (required for health agent)
             log("Installing Python pip...")
             CommandExecuter.run_cmd(
-                "apt-get update && apt-get install -y python3-pip",
+                "apt-get update || true && apt-get install -y python3-pip",
                 ip, "root"
             )
             
