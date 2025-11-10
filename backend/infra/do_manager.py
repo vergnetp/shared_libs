@@ -1,6 +1,8 @@
+# backend/infra/do_manager.py
 import os
 import time
 import requests
+import hashlib
 from datetime import datetime
 from typing import List, Dict, Any, Tuple, Optional
 from pathlib import Path
@@ -48,7 +50,10 @@ class DOManager:
     
     _ssh_key_lock = threading.Lock()
     _vpc_lock = threading.Lock()
-    _template_lock = threading.Lock()
+    
+    # ✓ Per-credential template locks (one template per DO account)
+    _template_locks = {}  # credential_hash -> Lock
+    _template_locks_lock = threading.Lock()
 
     # DigitalOcean API base URL
     API_BASE = "https://api.digitalocean.com/v2"
@@ -117,8 +122,8 @@ class DOManager:
         raise ValueError("DigitalOcean API token not found in credentials or .env")
 
     @staticmethod
-    def _api_request(method: str, endpoint: str, data: dict = None, credentials: dict = None) -> dict:
-        """Make API request to DigitalOcean"""
+    def _api_request(method: str, endpoint: str, data: Dict = None, credentials: dict = None) -> Dict:
+        """Make API request to DigitalOcean with better error logging"""
         url = f"{DOManager.API_BASE}{endpoint}"
         headers = DOManager._get_headers(credentials)
         
@@ -135,17 +140,44 @@ class DOManager:
                 raise ValueError(f"Unsupported HTTP method: {method}")
             
             response.raise_for_status()
-            return response.json() if response.content else {}
+            
+            # Handle 204 No Content
+            if response.status_code == 204:
+                return {}
+            
+            return response.json()
             
         except requests.exceptions.HTTPError as e:
-            # ADD THIS DETAILED ERROR LOGGING:
+            # ✓ FIXED: Add detailed error logging
             error_msg = f"API request failed: {method} {endpoint} - {e}"
             if hasattr(e.response, 'text'):
                 error_msg += f"\nResponse body: {e.response.text}"
             if data:
-                error_msg += f"\nRequest data: {data}"
+                error_msg += f"\n\nRequest data: {data}"
             log(error_msg)
             raise
+        except requests.exceptions.RequestException as e:
+            log(f"API request failed: {method} {endpoint} - {e}")
+            raise
+
+    # ========================================
+    # TEMPLATE LOCKING (PER-CREDENTIAL)
+    # ========================================
+    
+    @staticmethod
+    def _get_template_lock(credentials: dict = None) -> threading.Lock:
+        """
+        Get or create a lock for this specific credential set.
+        Each DigitalOcean account needs its own template and its own lock.
+        """
+        # Create a stable hash from the credentials
+        token = DOManager._get_do_token(credentials)
+        credential_hash = hashlib.md5(token.encode()).hexdigest() if token else "default"
+        
+        with DOManager._template_locks_lock:
+            if credential_hash not in DOManager._template_locks:
+                DOManager._template_locks[credential_hash] = threading.Lock()
+            return DOManager._template_locks[credential_hash]
 
     # ========================================
     # TEMPLATE & SNAPSHOT MANAGEMENT
@@ -160,7 +192,7 @@ class DOManager:
     @staticmethod
     def find_template_snapshot(credentials: dict = None) -> Optional[str]:
         """Find existing template snapshot by name prefix"""
-        snapshots = DOManager.list_snapshots(credentials=credentials)
+        snapshots = DOManager._list_snapshots(credentials=credentials)
         
         for snapshot in snapshots:
             if snapshot['name'].startswith(DOManager.TEMPLATE_SNAPSHOT_PREFIX):
@@ -198,7 +230,7 @@ class DOManager:
             action_id = response['action']['id']
             
             # Wait for power off
-            DOManager._wait_for_action(action_id, timeout=120)
+            DOManager._wait_for_action(action_id, timeout=120, credentials=credentials)
             
             # Create snapshot
             log(f"Creating snapshot...")
@@ -209,7 +241,7 @@ class DOManager:
             action_id = response['action']['id']
             
             # Wait for snapshot completion
-            DOManager._wait_for_action(action_id, timeout=600)
+            DOManager._wait_for_action(action_id, timeout=600, credentials=credentials)
             
             # Get snapshot ID from droplet's snapshots
             response = DOManager._api_request("GET", f"/droplets/{droplet_id}/snapshots", credentials=credentials)
@@ -310,15 +342,27 @@ class DOManager:
         
         log("Image pre-baking complete")
 
-    def get_or_create_template(region: str = "lon1", credentials: dict = None) -> str:
+    @staticmethod
+    def get_or_create_template(region: str, credentials: dict = None) -> str:
         """
-        Create or reuse template snapshot with Docker + monitoring pre-installed.
+        Get or create template snapshot for region.
         
-        CRITICAL CHANGE: Template does NOT have VPC-only SSH firewall.
-        Firewall is configured on INDIVIDUAL servers after creation.
+        Template is PER-ACCOUNT (per DO token).
+        Uses per-credential locking to prevent parallel creation within same account.
+        
+        CRITICAL: Lock is held during ENTIRE creation process to prevent race conditions.
         """
-        with DOManager._template_lock:
-            # Check if we already have a snapshot
+        # ✓ FIXED: Check BEFORE acquiring lock (more efficient!)
+        snapshot_id = DOManager.find_template_snapshot(credentials=credentials)
+        if snapshot_id:
+            log(f"Using existing template snapshot: {snapshot_id}")
+            return snapshot_id
+        
+        # Get the lock for THIS credential set
+        template_lock = DOManager._get_template_lock(credentials)
+        
+        with template_lock:
+            # ✓ Double-check after acquiring lock (another thread might have created it)
             snapshot_id = DOManager.find_template_snapshot(credentials=credentials)
             if snapshot_id:
                 log(f"Using existing template snapshot: {snapshot_id}")
@@ -349,9 +393,14 @@ class DOManager:
             # Wait for SSH
             DOManager.wait_for_ssh_ready(ip)
             
-            # Install pip3 FIRST (required for health agent)
+            # ✓ FIXED: Wait for cloud-init and apt locks, then install pip3
             log("Installing Python pip...")
             CommandExecuter.run_cmd(
+                # Wait for cloud-init to complete
+                "cloud-init status --wait && "
+                # Wait for apt locks to be released (max 5 minutes)
+                "timeout 300 bash -c 'while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do echo \"Waiting for apt lock...\"; sleep 2; done' && "
+                # Now run apt-get (|| true handles command-not-found errors)
                 "apt-get update || true && apt-get install -y python3-pip",
                 ip, "root"
             )
@@ -362,7 +411,7 @@ class DOManager:
             # Install health monitor (no credentials needed in template)
             # Health monitor will get credentials when deployed with actual project
             try:
-                HealthMonitorInstaller.install_on_server(ip)
+                HealthMonitorInstaller.install_minimal_on_server(ip)
             except Exception as e:
                 log(f"Warning: Health monitor installation had issues: {e}")
                 log("Continuing anyway - monitor can be fixed on deployed servers")
@@ -376,7 +425,7 @@ class DOManager:
             
             # WAIT for agent to be ready (optional - not critical)
             log("Waiting for health agent to start...")
-            for i in range(10):  # Reduced from 30 to 10 - not critical
+            for i in range(10):
                 try:
                     response = get_agent().agent_request(ip, "GET", "/ping", timeout=2)
                     if response.get('status') == 'alive':
@@ -385,11 +434,6 @@ class DOManager:
                 except:
                     time.sleep(1)
             
-            # ========================================
-            # REMOVED: VPC-ONLY SSH FIREWALL
-            # Instead, keep SSH open for now
-            # Firewall will be configured on DEPLOYED servers
-            # ========================================
             log("⚠️  Template SSH remains PUBLIC (will be restricted on deployed servers)")
             
             # Install basic nginx
@@ -415,11 +459,7 @@ class DOManager:
             log("   SSH is still public - will be restricted on deployed servers")
             return snapshot_id
 
-
-    # ============================================================================
-    # NEW METHOD: Configure firewall on DEPLOYED servers
-    # ============================================================================
-
+    @staticmethod
     def configure_vpc_firewall_on_server(server_ip: str, credentials: dict = None):
         """
         Configure VPC-only firewall on a deployed server.
@@ -466,7 +506,10 @@ class DOManager:
         Delete template snapshot and any template droplets.
         Use this when you want to rebuild the template from scratch.
         """
-        with DOManager._template_lock:
+        # ✓ FIXED: Use per-credential lock
+        template_lock = DOManager._get_template_lock(credentials)
+        
+        with template_lock:
             log("Deleting template resources...")
             
             # Delete template droplets
@@ -475,7 +518,7 @@ class DOManager:
                 DOManager.destroy_droplet(droplet['droplet_id'], credentials=credentials)
             
             # Delete template snapshots
-            snapshots = DOManager.list_snapshots()
+            snapshots = DOManager.list_snapshots(credentials=credentials)
             for snapshot in snapshots:
                 if snapshot['name'].startswith(DOManager.TEMPLATE_SNAPSHOT_PREFIX):
                     DOManager.delete_snapshot(str(snapshot['id']), credentials=credentials)
@@ -569,12 +612,12 @@ class DOManager:
     
     @staticmethod
     def get_or_create_vpc(region: str, ip_range: str = "10.0.0.0/16", credentials:Dict=None) -> str:
-        """Thread-safe VPC creation"""
+        """Thread-safe VPC creation - VPC is USER-SPECIFIC (per DO account)"""
         vpc_name = f"deployer-vpc-{region}"
         
         with DOManager._vpc_lock:
-            # Check existing VPCs
-            vpcs = DOManager.list_vpcs()
+            # ✓ FIXED: Check existing VPCs IN THIS USER'S ACCOUNT
+            vpcs = DOManager.list_vpcs(credentials=credentials)
             existing = [v for v in vpcs if v['name'] == vpc_name and v['region'] == region]
             
             if existing:
@@ -762,9 +805,9 @@ class DOManager:
         
         # Create basic nginx.conf with stream support
         nginx_conf = """events { worker_connections 1024; }
-    stream { include /etc/nginx/stream.d/*.conf; }
-    http { include /etc/nginx/conf.d/*.conf; }
-    """
+stream { include /etc/nginx/stream.d/*.conf; }
+http { include /etc/nginx/conf.d/*.conf; }
+"""
         
         CommandExecuter.run_cmd_with_stdin(
             "cat > /etc/nginx/nginx.conf",
@@ -1034,190 +1077,19 @@ class DOManager:
             endpoint = f"/droplets?{tag_query}"
         
         response = DOManager._api_request("GET", endpoint, credentials=credentials)
-        droplets = response.get('droplets', [])
         
-        # Double-check filtering
-        if tags:
-            filtered = []
-            for d in droplets:
-                droplet_tags = d.get('tags', [])
-                if all(tag in droplet_tags for tag in tags):
-                    filtered.append(d)
-            droplets = filtered
+        droplets = []
+        for d in response.get('droplets', []):
+            droplets.append(DOManager.get_droplet_info(str(d['id']), credentials=credentials))
         
-        return [DOManager.get_droplet_info(str(d['id'])) for d in droplets]
-
+        return droplets
+    
+    # ========================================
+    # HELPER ALIAS FOR COMPATIBILITY
+    # ========================================
+    
     @staticmethod
-    def update_droplet_tags(droplet_id: int, add_tags: List[str] = None, remove_tags: List[str] = None, credentials: dict = None):
-        """Update tags for a droplet using DigitalOcean's tag resource API"""
-        try:
-            droplet_id_str = str(droplet_id)
-            
-            # Remove old tags
-            if remove_tags:
-                for tag in remove_tags:
-                    try:
-                        resource_data = {
-                            "resources": [{
-                                "resource_id": droplet_id_str,
-                                "resource_type": "droplet"
-                            }]
-                        }
-                        
-                        url = f"{DOManager.API_BASE}/tags/{tag}/resources"
-                        headers = DOManager._get_headers()
-                        response = requests.delete(url, headers=headers, json=resource_data, timeout=30)
-                        
-                        if response.status_code in [204, 200]:
-                            log(f"Removed tag '{tag}' from droplet {droplet_id}")
-                    except Exception as e:
-                        log(f"Warning: Could not remove tag '{tag}': {e}")
-            
-            # Add new tags
-            if add_tags:
-                for tag in add_tags:
-                    try:
-                        # Ensure tag exists
-                        DOManager._api_request("POST", "/tags", {"name": tag}, credentials=credentials)
-                    except:
-                        pass  # Tag might already exist
-                    
-                    try:
-                        resource_data = {
-                            "resources": [{
-                                "resource_id": droplet_id_str,
-                                "resource_type": "droplet"
-                            }]
-                        }
-                        
-                        url = f"{DOManager.API_BASE}/tags/{tag}/resources"
-                        headers = DOManager._get_headers()
-                        response = requests.post(url, headers=headers, json=resource_data, timeout=30)
-                        
-                        if response.status_code in [201, 204]:
-                            log(f"Added tag '{tag}' to droplet {droplet_id}")
-                    except Exception as e:
-                        log(f"Warning: Could not add tag '{tag}': {e}")
-                        
-        except Exception as e:
-            log(f"Failed to update tags for droplet {droplet_id}: {e}")
-
-    # -------------------------
-    #      LOCKS  
-    #--------------------------
-
-    @staticmethod
-    def acquire_infrastructure_lock(server_ip: str, credentials: dict = None) -> bool:
-        """
-        Acquire infrastructure modification lock by tagging the leader server.
-        
-        Prevents race conditions between healing and auto-scaling operations.
-        
-        Args:
-            server_ip: IP of leader server acquiring the lock
-            credentials: Optional credentials dict
-            
-        Returns:
-            True if lock acquired successfully
-        """
-        try:
-            timestamp = int(time.time())
-            lock_tag = f"infrastructure-modify-in-progress:{timestamp}"
-            
-            # Find the leader's droplet
-            droplets = DOManager.list_droplets(tags=["Infra"], credentials=credentials)
-            leader_droplet = None
-            for d in droplets:
-                if d['ip'] == server_ip:
-                    leader_droplet = d
-                    break
-            
-            if not leader_droplet:
-                log(f"Warning: Could not find droplet for leader {server_ip}")
-                return False
-            
-            # Tag the leader droplet with lock
-            DOManager.update_droplet_tags(
-                leader_droplet['droplet_id'],
-                add_tags=[lock_tag],
-                credentials=credentials
-            )
-            
-            log(f"✓ Infrastructure lock acquired by {server_ip}")
-            return True
-            
-        except Exception as e:
-            log(f"Failed to acquire infrastructure lock: {e}")
-            return False
-
-    @staticmethod
-    def is_infrastructure_locked(credentials: dict = None) -> bool:
-        """
-        Check if any infrastructure modification is in progress.
-        
-        Returns:
-            True if infrastructure is locked, False otherwise
-        """
-        try:
-            droplets = DOManager.list_droplets(tags=["Infra"], credentials=credentials)
-            
-            for droplet in droplets:
-                for tag in droplet.get('tags', []):
-                    if tag.startswith("infrastructure-modify-in-progress:"):
-                        # Found a lock - check if it's stale (>10 minutes)
-                        try:
-                            timestamp = int(tag.split(':')[1])
-                            age_seconds = int(time.time()) - timestamp
-                            if age_seconds > 600:  # 10 minutes
-                                log(f"Warning: Found stale lock (age: {age_seconds}s) on {droplet['ip']}")
-                                # Still return True - operator should investigate
-                        except:
-                            pass
-                        return True
-            
-            return False
-            
-        except Exception as e:
-            log(f"Error checking infrastructure lock: {e}")
-            return False
-
-    @staticmethod
-    def release_infrastructure_lock(server_ip: str, credentials: dict = None):
-        """
-        Release infrastructure modification lock from leader server.
-        
-        Args:
-            server_ip: IP of leader server releasing the lock
-            credentials: Optional credentials dict
-        """
-        try:
-            # Find the leader's droplet
-            droplets = DOManager.list_droplets(tags=["Infra"], credentials=credentials)
-            leader_droplet = None
-            for d in droplets:
-                if d['ip'] == server_ip:
-                    leader_droplet = d
-                    break
-            
-            if not leader_droplet:
-                log(f"Warning: Could not find droplet for leader {server_ip}")
-                return
-            
-            # Find and remove all lock tags
-            lock_tags = [
-                tag for tag in leader_droplet.get('tags', []) 
-                if tag.startswith("infrastructure-modify-in-progress:")
-            ]
-            
-            if lock_tags:
-                DOManager.update_droplet_tags(
-                    leader_droplet['droplet_id'],
-                    remove_tags=lock_tags,
-                    credentials=credentials
-                )
-                log(f"✓ Infrastructure lock released by {server_ip}")
-            
-        except Exception as e:
-            log(f"Failed to release infrastructure lock: {e}")
-
-
+    def _list_snapshots(credentials: dict = None) -> List[Dict[str, Any]]:
+        """Alias for list_snapshots"""
+        return DOManager.list_snapshots(credentials=credentials)
+    

@@ -4,13 +4,21 @@
       "postgres": {
         "current": {
           "servers": [
-            "46.101.22.10"
+            "68.183.37.28"
           ],
           "container_name": "User_A_Project1_uat_postgres",
           "version": "latest",
-          "deployed_at": "2025-11-08T20:29:13.446413"
+          "deployed_at": "2025-11-10T09:45:03.806918"
         },
         "history": [
+          {
+            "servers": [
+              "68.183.37.28"
+            ],
+            "container_name": "User_A_Project1_uat_postgres",
+            "version": "latest",
+            "deployed_at": "2025-11-10T09:45:03.806918"
+          },
           {
             "servers": [
               "46.101.22.10"
