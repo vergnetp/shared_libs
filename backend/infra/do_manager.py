@@ -428,12 +428,14 @@ class DOManager:
                     raise Exception("Failed to retrieve API key from template server")
                 
                 # ✓ FIXED: Store it on the bastion for future use
+                bastion_api_key_path = '/etc/health-agent/api-key'
                 bastion_api_key_dir = Path('/etc/health-agent')
-                bastion_api_key_file = bastion_api_key_dir / 'api-key'
+                bastion_api_key_file = Path(bastion_api_key_path)
+
                 bastion_api_key_dir.mkdir(parents=True, exist_ok=True)
                 bastion_api_key_file.write_text(template_api_key)
                 bastion_api_key_file.chmod(0o600)
-                log(f"✓ Stored template API key on bastion: {bastion_api_key_file}")
+                log(f"✓ Stored template API key on bastion: {bastion_api_key_path}")
                 
                 # WAIT for agent to be ready WITH proper logging
                 log("Waiting for health agent to start...")
