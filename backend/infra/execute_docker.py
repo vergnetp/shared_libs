@@ -285,8 +285,8 @@ class DockerExecuter:
             try:
                 response = get_agent().agent_request(
                     server_ip,
-                    "POST",
-                    f"/containers/{container_name}/remove",
+                    "DELETE",  # ← FIXED: was POST, should be DELETE
+                    f"/containers/{container_name}",  # ← Simplified path
                     timeout=30
                 )
                 
