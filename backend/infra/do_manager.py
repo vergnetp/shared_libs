@@ -419,21 +419,47 @@ class DOManager:
             # Install health agent
             try:
                 HealthAgentInstaller.install_on_server(ip)
+                
+                # ✓ FIXED: Retrieve the API key from the template server  
+                log("Retrieving health agent API key from template...")
+                template_api_key = HealthAgentInstaller.get_api_key(ip)
+                
+                if not template_api_key:
+                    raise Exception("Failed to retrieve API key from template server")
+                
+                # ✓ FIXED: Store it on the bastion for future use
+                bastion_api_key_dir = Path('/etc/health-agent')
+                bastion_api_key_file = bastion_api_key_dir / 'api-key'
+                bastion_api_key_dir.mkdir(parents=True, exist_ok=True)
+                bastion_api_key_file.write_text(template_api_key)
+                bastion_api_key_file.chmod(0o600)
+                log(f"✓ Stored template API key on bastion: {bastion_api_key_file}")
+                
+                # WAIT for agent to be ready WITH proper logging
+                log("Waiting for health agent to start...")
+                agent_ready = False
+                for i in range(10):
+                    try:
+                        # Now this will work because bastion has the API key
+                        response = get_agent().agent_request(ip, "GET", "/ping", timeout=2)
+                        if response.get('status') == 'alive':
+                            log("✓ Health agent ready and responding")
+                            agent_ready = True
+                            break
+                    except Exception as e:
+                        if i < 9:  # Don't log on last attempt to avoid spam
+                            log(f"Attempt {i+1}/10: Agent not ready yet, waiting...")
+                        time.sleep(1)
+                
+                if not agent_ready:
+                    log("⚠️  Health agent not responding after 10 seconds")
+                    log("⚠️  This may indicate a problem, but continuing with template creation")
+                    log("⚠️  Agent will be verified again when servers boot from snapshot")
+                    
             except Exception as e:
                 log(f"Warning: Health agent installation had issues: {e}")
                 log("Continuing anyway - agent can be fixed on deployed servers")
-            
-            # WAIT for agent to be ready (optional - not critical)
-            log("Waiting for health agent to start...")
-            for i in range(10):
-                try:
-                    response = get_agent().agent_request(ip, "GET", "/ping", timeout=2)
-                    if response.get('status') == 'alive':
-                        log("✓ Health agent ready")
-                        break
-                except:
-                    time.sleep(1)
-            
+
             log("⚠️  Template SSH remains PUBLIC (will be restricted on deployed servers)")
             
             # Install basic nginx

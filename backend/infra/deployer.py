@@ -905,6 +905,10 @@ class Deployer:
         # Store target version for use in image generation
         self._override_version = target_version
         
+        if credentials:
+            log(f"Rebuilding config with credentials for user {self.user}...")
+            self.deployment_configurer.rebuild_config(credentials=credentials)
+
         # Build phase (if requested)
         if build:
             log("Building images...")
