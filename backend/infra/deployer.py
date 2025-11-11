@@ -932,7 +932,7 @@ class Deployer:
         log(f'Deploying {self.project_name}, env: {env or "all"}, service: {service_name or "all"}')
         Logger.start()
 
-        self.pre_provision_servers(env, service_name, credentials=credentials)
+        provisioned_servers = self.pre_provision_servers(env, service_name, credentials=credentials)
 
         if credentials:
             log("Pushing credentials to all servers...")
