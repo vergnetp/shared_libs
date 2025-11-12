@@ -4,13 +4,29 @@
       "postgres": {
         "current": {
           "servers": [
-            "188.166.149.140"
+            "167.99.87.55"
           ],
           "container_name": "User_A_Project1_uat_postgres",
           "version": "latest",
-          "deployed_at": "2025-11-11T20:21:39.655096"
+          "deployed_at": "2025-11-12T07:54:38.599860"
         },
         "history": [
+          {
+            "servers": [
+              "167.99.87.55"
+            ],
+            "container_name": "User_A_Project1_uat_postgres",
+            "version": "latest",
+            "deployed_at": "2025-11-12T07:54:38.599860"
+          },
+          {
+            "servers": [
+              "144.126.225.138"
+            ],
+            "container_name": "User_A_Project1_uat_postgres",
+            "version": "latest",
+            "deployed_at": "2025-11-11T21:51:30.781339"
+          },
           {
             "servers": [
               "188.166.149.140"
@@ -64,14 +80,32 @@
       "api": {
         "current": {
           "servers": [
-            "188.166.149.140",
-            "46.101.26.56"
+            "167.99.87.55",
+            "161.35.163.100"
           ],
           "container_name": "User_A_Project1_uat_api",
           "version": "latest",
-          "deployed_at": "2025-11-11T20:24:18.596101"
+          "deployed_at": "2025-11-12T07:56:23.472159"
         },
         "history": [
+          {
+            "servers": [
+              "167.99.87.55",
+              "161.35.163.100"
+            ],
+            "container_name": "User_A_Project1_uat_api",
+            "version": "latest",
+            "deployed_at": "2025-11-12T07:56:23.472159"
+          },
+          {
+            "servers": [
+              "144.126.225.138",
+              "138.68.153.202"
+            ],
+            "container_name": "User_A_Project1_uat_api",
+            "version": "latest",
+            "deployed_at": "2025-11-11T21:53:33.386772"
+          },
           {
             "servers": [
               "188.166.149.140",

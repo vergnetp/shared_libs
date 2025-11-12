@@ -101,11 +101,11 @@ class LiveDeploymentQuery:
     
     @staticmethod
     def get_servers_running_service(
+        credentials: Optional[Dict[str, str]],
         user: str,
         project: str,
         env: str,
-        service: str,
-        credentials: Dict=None
+        service: str       
     ) -> List[str]:
         """
         Find all servers that have containers running for a service.
@@ -113,16 +113,17 @@ class LiveDeploymentQuery:
         Queries docker ps on all servers to find running containers.
         
         Args:
+            credentials: optional dict of credentials
             user: user id
             project: Project name
             env: Environment name
             service: Service name
-            credentials: optional dict of credentials
+            
             
         Returns:
             List of server IPs where the service is running
         """
-        all_servers = ServerInventory.list_all_servers(credentials=credentials)
+        all_servers = ServerInventory.list_all_servers(credentials)
         servers_with_service = []
         
         # Use ResourceResolver for container naming pattern
@@ -162,10 +163,11 @@ class LiveDeploymentQuery:
     
     @staticmethod
     def get_current_deployment(
+        credentials: Optional[Dict[str, str]],
         user: str,
         project: str,
         env: str,
-        service: str
+        service: str       
     ) -> Optional[Dict[str, Any]]:
         """
         Get current deployment info by querying live infrastructure.
@@ -176,10 +178,11 @@ class LiveDeploymentQuery:
         3. Return live deployment info
         
         Args:
+            credentials: Dict=None
             user: user id
             project: Project name
             env: Environment name
-            service: Service name
+            service: Service name            
             
         Returns:
             Dict with:
@@ -189,7 +192,7 @@ class LiveDeploymentQuery:
             Or None if service not found
         """
         # Query live: which servers have this service running?
-        servers = LiveDeploymentQuery.get_servers_running_service(user, project, env, service)
+        servers = LiveDeploymentQuery.get_servers_running_service(credentials, user, project, env, service)
         
         if not servers:
             return None

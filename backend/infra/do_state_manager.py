@@ -58,12 +58,12 @@ class DOStateManager:
     
     @staticmethod
     def add_service_to_server(
+        credentials: Optional[Dict[str, str]],
         server_ip: str,
         user: str,
         project: str,
         env: str,
-        service: str,
-        credentials: Dict = None
+        service: str        
     ) -> bool:
         """
         Add service tag to droplet when service is deployed.
@@ -71,13 +71,13 @@ class DOStateManager:
         Call this after successful container deployment.
         
         Args:
+            credentials: Optional credentials dict
             server_ip: Server IP address
             user: User ID (e.g., "u1")
             project: Project name
             env: Environment name
             service: Service name
-            credentials: Optional credentials dict
-            
+           
         Returns:
             True if successful
         """
@@ -111,12 +111,12 @@ class DOStateManager:
     
     @staticmethod
     def remove_service_from_server(
+        credentials: Optional[Dict[str, str]],
         server_ip: str,
         user: str,
         project: str,
         env: str,
-        service: str,
-        credentials: Dict = None
+        service: str        
     ) -> bool:
         """
         Remove service tag from droplet when service is destroyed.
@@ -124,12 +124,12 @@ class DOStateManager:
         Call this after container removal.
         
         Args:
+            credentials: Optional credentials dict
             server_ip: Server IP address
             user: User ID
             project: Project name
             env: Environment name
-            service: Service name
-            credentials: Optional credentials dict
+            service: Service name            
             
         Returns:
             True if successful
@@ -164,8 +164,8 @@ class DOStateManager:
     
     @staticmethod
     def get_services_on_server(
-        server_ip: str,
-        credentials: Dict = None,
+        credentials: Optional[Dict[str, str]],
+        server_ip: str,        
         use_cache: bool = True
     ) -> List[Dict[str, str]]:
         """
@@ -175,8 +175,8 @@ class DOStateManager:
         Queries DigitalOcean API for droplet tags.
         
         Args:
-            server_ip: Server IP address
             credentials: Optional credentials dict
+            server_ip: Server IP address            
             use_cache: If True, use cached data (respects rate limits)
             
         Returns:
@@ -219,8 +219,8 @@ class DOStateManager:
     
     @staticmethod
     def get_users_on_server(
-        server_ip: str,
-        credentials: Dict = None,
+        credentials: Optional[Dict[str, str]],
+        server_ip: str,        
         use_cache: bool = True
     ) -> List[str]:
         """
@@ -229,8 +229,8 @@ class DOStateManager:
         CRITICAL: Works even if server is completely down!
         
         Args:
-            server_ip: Server IP address
             credentials: Optional credentials dict
+            server_ip: Server IP address            
             use_cache: If True, use cached data
             
         Returns:
@@ -242,9 +242,9 @@ class DOStateManager:
     
     @staticmethod
     def sync_server_tags(
+        credentials: Optional[Dict[str, str]],
         server_ip: str,
-        expected_services: List[Dict[str, str]],
-        credentials: Dict = None
+        expected_services: List[Dict[str, str]]
     ) -> bool:
         """
         Sync droplet tags to match expected service state.
@@ -252,9 +252,9 @@ class DOStateManager:
         Useful for fixing tag drift or recovering from missed updates.
         
         Args:
-            server_ip: Server IP address
-            expected_services: List of service dicts that SHOULD be on server
             credentials: Optional credentials dict
+            server_ip: Server IP address
+            expected_services: List of service dicts that SHOULD be on server            
             
         Returns:
             True if successful
@@ -349,13 +349,13 @@ class DOStateManager:
             return None
     
     @staticmethod
-    def _get_droplet_by_ip(server_ip: str, credentials: Dict = None) -> Optional[Dict[str, Any]]:
+    def _get_droplet_by_ip(credentials: Optional[Dict[str, str]], server_ip: str) -> Optional[Dict[str, Any]]:
         """
         Find droplet by IP address.
         
         Args:
-            server_ip: Server IP address
             credentials: Optional credentials dict
+            server_ip: Server IP address            
             
         Returns:
             Droplet info dict or None if not found
@@ -415,7 +415,7 @@ class DOStateManager:
     # ========================================
     
     @staticmethod
-    def get_all_service_tags(credentials: Dict = None) -> Dict[str, List[Dict[str, str]]]:
+    def get_all_service_tags(credentials: Optional[Dict[str, str]]) -> Dict[str, List[Dict[str, str]]]:
         """
         Get service tags for all servers in infrastructure.
         
@@ -448,9 +448,9 @@ class DOStateManager:
     
     @staticmethod
     def verify_tags_match_reality(
+        credentials: Optional[Dict[str, str]],
         server_ip: str,
-        actual_services: List[Dict[str, str]],
-        credentials: Dict = None
+        actual_services: List[Dict[str, str]]        
     ) -> Dict[str, List[str]]:
         """
         Compare DO tags with actual running services.
@@ -458,9 +458,9 @@ class DOStateManager:
         Useful for detecting tag drift.
         
         Args:
-            server_ip: Server IP
-            actual_services: List of services actually running (from docker ps)
             credentials: Optional credentials
+            server_ip: Server IP
+            actual_services: List of services actually running (from docker ps)            
             
         Returns:
             Dict with 'missing_tags' and 'extra_tags' lists
@@ -494,4 +494,3 @@ class DOStateManager:
         except Exception as e:
             log(f"Failed to verify tags: {e}")
             return {'missing_tags': [], 'extra_tags': []}
-

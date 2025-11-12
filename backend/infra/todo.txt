@@ -9,3 +9,6 @@ password rotation (schedule)
 backups (schedule)
 health checks
 maybe run docker login first
+
+
+journalctl -u health-agent -n 100 --no-pager | tail -50

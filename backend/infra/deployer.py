@@ -1051,7 +1051,8 @@ class Deployer:
                         deployment_status=ServerInventory.STATUS_ACTIVE,
                         zone=zone,
                         cpu=cpu,
-                        memory=memory
+                        memory=memory,
+                        credentials=credentials
                     )
                     
                     target_servers = [s['ip'] for s in existing_servers[:servers_count]]
@@ -1705,7 +1706,8 @@ class Deployer:
                     deployment_status=ServerInventory.STATUS_ACTIVE,
                     zone=zone,
                     cpu=cpu,
-                    memory=memory
+                    memory=memory,
+                    credentials=credentials
                 )
                 
                 target_servers = [s['ip'] for s in existing_servers[:servers_count]]
@@ -2487,7 +2489,8 @@ class Deployer:
                         deployment_status=ServerInventory.STATUS_ACTIVE,  
                         zone=zone,
                         cpu=cpu,
-                        memory=memory
+                        memory=memory,
+                        credentials=credentials
                     )
                     
                     reuse_count = min(len(existing_actives), servers_count)
@@ -3211,14 +3214,16 @@ class Deployer:
                 deployment_status=ServerInventory.STATUS_RESERVE,
                 zone=zone,
                 cpu=cpu,
-                memory=memory
+                memory=memory,
+                credentials=credentials
             )
             
             existing_greens = ServerInventory.get_servers(
                 deployment_status=ServerInventory.STATUS_ACTIVE,
                 zone=zone,
                 cpu=cpu,
-                memory=memory  
+                memory=memory,
+                credentials=credentials
             )
             
             existing_count = len(existing_reserves) + len(existing_greens)
