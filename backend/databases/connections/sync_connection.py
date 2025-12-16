@@ -1,4 +1,5 @@
-from typing import Dict, Any, Optional, Tuple, List
+import contextlib
+from typing import Dict, Any, Optional, Tuple, List, Iterator
 from abc import abstractmethod
 
 from ...errors import try_catch
@@ -107,7 +108,20 @@ class SyncConnection(Connection):
     def _get_raw_connection(self) -> Any:
         """ Return the underlying database connection (as defined by the driver) """
         return self._conn
-    
+
+    @contextlib.contextmanager
+    def transaction(self) -> Iterator["SyncConnection"]:
+        """
+        Context manager for explicit transaction control.
+        """
+        self.begin_transaction()
+        try:
+            yield self
+            self.commit_transaction()
+        except Exception:
+            self.rollback_transaction()
+            raise
+
     # region -- PRIVATE ABSTRACT METHODS ----------
 
     @try_catch

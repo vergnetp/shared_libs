@@ -1,7 +1,8 @@
 import time
 import uuid
 import asyncio
-from typing import Dict, Any, Optional, Tuple, List
+import contextlib
+from typing import Dict, Any, Optional, Tuple, List, AsyncIterator
 from abc import abstractmethod
 
 from ...errors import try_catch
@@ -136,8 +137,30 @@ class AsyncConnection(Connection):
 
     def _get_raw_connection(self) -> Any:
         """ Return the underlying database connection (as defined by the driver) """
-        return self._conn
-    
+        return self._conn    
+
+    @async_method
+    @contextlib.asynccontextmanager
+    async def transaction(self) -> AsyncIterator["AsyncConnection"]:
+        """
+        Context manager for explicit transaction control.
+        
+        Begins transaction on entry, commits on success, rolls back on exception.
+        
+        Example:
+            async with conn.transaction():
+                await conn.save_entity("orders", {"total": 99})
+                await conn.save_entity("payments", {"amount": 99})
+            # Committed here, or rolled back if exception
+        """
+        await self.begin_transaction()
+        try:
+            yield self
+            await self.commit_transaction()
+        except Exception:
+            await self.rollback_transaction()
+            raise
+
     # region -- PRIVATE ABSTRACT METHODS ----------
 
     @async_method

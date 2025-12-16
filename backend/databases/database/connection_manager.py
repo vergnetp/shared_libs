@@ -4,7 +4,7 @@ import time
 import asyncio
 import threading
 import contextlib
-from typing import Dict, Any, Iterator
+from typing import Dict, Any, Iterator, AsyncIterator
 from abc import abstractmethod
 
 from ...errors import try_catch
@@ -237,9 +237,9 @@ class ConnectionManager():
             except Exception:
                 pass
 
-    #@async_method
+    #@async_methodzz
     @contextlib.asynccontextmanager
-    async def async_connection(self) -> Iterator[AsyncConnection]:
+    async def async_connection(self) -> AsyncIterator[AsyncConnection]:
         """
         Async context manager for safe asynchronous connection usage.
         

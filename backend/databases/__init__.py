@@ -7,6 +7,7 @@ from .config import *
 from .connections import *
 from .entity import *
 from .factory import *
+from .manager import *
 
 """ from ..utils import patcher
 from typing import TYPE_CHECKING
