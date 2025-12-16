@@ -126,7 +126,7 @@ class SyncConnection(Connection):
 
     @try_catch
     @abstractmethod
-    async def _prepare_statement_sync(self, native_sql: str) -> Any:
+    def _prepare_statement_sync(self, native_sql: str) -> Any:
         """
         Prepares a statement using database-specific API
         
@@ -140,7 +140,7 @@ class SyncConnection(Connection):
 
     @try_catch
     @abstractmethod
-    async def _execute_statement_sync(self, statement: Any, params=None) -> Any:
+    def _execute_statement_sync(self, statement: Any, params=None) -> Any:
         """
         Executes a prepared statement with given parameters
         
