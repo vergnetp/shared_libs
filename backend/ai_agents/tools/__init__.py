@@ -1,6 +1,7 @@
 """Tool system for function calling."""
 
 from .base import Tool, ToolDefinition
+from .decorator import tool, FunctionTool
 from .registry import (
     register_tool,
     get_tool,
@@ -16,6 +17,9 @@ __all__ = [
     # Base
     "Tool",
     "ToolDefinition",
+    # Decorator
+    "tool",
+    "FunctionTool",
     # Registry
     "register_tool",
     "get_tool",
