@@ -172,6 +172,25 @@ class DatabaseConfig(BaseConfig):
         """
         return self._env
 
+    @property
+    def pool_creation_timeout(self) -> float:
+        """Returns pool creation timeout in seconds."""
+        return self._pool_creation_timeout
+
+    @property
+    def connection_acquisition_timeout(self) -> float:
+        """Returns connection acquisition timeout in seconds."""
+        return self._connection_acquisition_timeout
+
+    @property  
+    def query_execution_timeout(self) -> float:
+        """Returns query execution timeout in seconds."""
+        return self._query_execution_timeout
+
+    @property
+    def connection_creation_timeout(self) -> float:
+        """Returns connection creation timeout in seconds."""
+        return self._connection_creation_timeout
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert configuration to dictionary."""

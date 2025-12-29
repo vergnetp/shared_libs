@@ -10,7 +10,7 @@ from .base import UserStore, RoleStore
 from ..models import User, Role, RoleAssignment
 
 # Import from sibling module - adjust path as needed for your project structure
-from databases import DatabaseManager
+from ...databases import DatabaseManager
 
 
 class DatabaseUserStore(UserStore):
@@ -96,6 +96,7 @@ class DatabaseUserStore(UserStore):
             email=entity.get("email"),
             password_hash=entity.get("password_hash"),
             name=entity.get("name"),
+            role=entity.get("role", "user"),  # Default to 'user' for backward compat
             metadata=entity.get("metadata") or {},
             is_active=entity.get("is_active", True),
             created_at=entity.get("created_at"),

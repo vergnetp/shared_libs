@@ -6,7 +6,7 @@ import aiofiles
 import aiofiles.os
 import json
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 from urllib.parse import quote
 
 from .base import AttachmentStore, AttachmentNotFoundError
@@ -31,7 +31,7 @@ class LocalStore(AttachmentStore):
     
     def __init__(
         self,
-        base_path: str | Path,
+        base_path: Union[Path, str],
         url_base: str = None,
         store_metadata: bool = True,
         create_dirs: bool = True,

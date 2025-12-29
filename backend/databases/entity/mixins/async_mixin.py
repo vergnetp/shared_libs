@@ -93,7 +93,7 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
     @auto_transaction
     async def get_entity(self, entity_name: str, entity_id: str, 
                          include_deleted: bool = False, 
-                         deserialize: bool = False) -> Optional[Dict[str, Any]]:
+                         deserialize: bool = True) -> Optional[Dict[str, Any]]:
         """
         Fetch an entity by ID.
         
@@ -260,7 +260,7 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
                 versions = {row[0]: row[1] for row in version_results if row[1] is not None}
             
             # Prepare history entries
-            now = datetime.datetime.now(datetime.UTC).isoformat()
+            now = datetime.datetime.now(datetime.timezone.utc).isoformat()
             history_fields = list(all_fields) + ['version', 'history_timestamp', 'history_user_id', 'history_comment']
             history_sql = f"INSERT INTO [{entity_name}_history] ({', '.join(['['+f+']' for f in history_fields])}) VALUES ({', '.join(['?'] * len(history_fields))})"
             
@@ -329,7 +329,7 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
             return True
 
         # For soft deletion, use an UPDATE
-        now = datetime.datetime.now(datetime.UTC).isoformat()
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
         sql = self.sql_generator.get_soft_delete_sql(entity_name)
         result = await self.execute(sql, (now, now, user_id, entity_id))
         
@@ -370,7 +370,7 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
             return False
             
         # Update timestamps
-        now = datetime.datetime.now(datetime.UTC).isoformat()
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
         
         # Generate restore SQL
         sql = self.sql_generator.get_restore_entity_sql(entity_name)
@@ -399,7 +399,7 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
     async def find_entities(self, entity_name: str, where_clause: Optional[str] = None,
                           params: Optional[Tuple] = None, order_by: Optional[str] = None,
                           limit: Optional[int] = None, offset: Optional[int] = None,
-                          include_deleted: bool = False, deserialize: bool = False) -> List[Dict[str, Any]]:
+                          include_deleted: bool = False, deserialize: bool = True) -> List[Dict[str, Any]]:
         """
         Query entities with flexible filtering.
         
@@ -416,6 +416,13 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
         Returns:
             List of entity dictionaries
         """
+
+        # If soft-delete filtering requested, check if column exists first
+        if not include_deleted:
+            has_deleted_at = await self._check_column_exists(entity_name, "deleted_at")
+            if not has_deleted_at:
+                include_deleted = True  # Can't filter on non-existent column
+
         # Generate query SQL
         sql = self.sql_generator.get_query_builder_sql(
             entity_name, where_clause, order_by, limit, offset, include_deleted
@@ -858,7 +865,7 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
             
         # Prepare history entry
         history_entry = entity.copy()
-        now = datetime.datetime.now(datetime.UTC).isoformat()
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
         
         # Add history-specific fields
         history_entry['version'] = next_version

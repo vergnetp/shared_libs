@@ -11,7 +11,7 @@ from enum import Enum
 from typing import Optional, Dict, Any, Union, List
 import atexit
 from .. import utils
-from ..queue import QueueConfig, QueueManager, QueueRetryConfig
+from ..job_queue import QueueConfig, QueueManager, QueueRetryConfig
 from .config.logger_config import LoggerConfig, LogLevel
 
 

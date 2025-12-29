@@ -3754,6 +3754,18 @@ class EntityUtils:
         if value_type is None:
             value_type = self._infer_type(value)
         
+        # Prevent double-encoding: if value is already a string but type expects
+        # JSON serialization (dict, list, set, tuple), check if it's already valid JSON
+        if isinstance(value, str) and value_type in ('dict', 'list', 'set', 'tuple'):
+            # Already a string - likely pre-serialized, return as-is
+            try:
+                # Validate it's valid JSON
+                json.loads(value)
+                return value
+            except (json.JSONDecodeError, TypeError):
+                # Not valid JSON, serialize it as a string
+                pass
+        
         # Check for custom serializer first
         if value_type in self._custom_serializers:
             try:

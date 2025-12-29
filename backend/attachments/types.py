@@ -7,7 +7,7 @@ import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional, BinaryIO
+from typing import Any, Optional, BinaryIO, Union
 
 
 @dataclass
@@ -98,7 +98,7 @@ class Attachment:
     @classmethod
     def from_path(
         cls,
-        path: Path | str,
+        path: Union[Path, str],
         *,
         file_name: str = None,
         file_type: str = None,

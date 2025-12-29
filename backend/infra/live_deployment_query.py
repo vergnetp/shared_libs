@@ -388,8 +388,8 @@ class LiveDeploymentQuery:
     def _get_patterns_from_deployment_configs(
         server_ip: str,
         user: str,
-        project: str = None,
-        env: str = None
+        project: Optional[str] = None,
+        env: Optional[str] = None
     ) -> List[str]:
         """
         Read deployment configs from server to get expected container patterns.
@@ -645,8 +645,8 @@ class LiveDeploymentQuery:
     def _get_scheduled_patterns_from_cron(
         server_ip: str,
         user: str,
-        project: str = None,
-        env: str = None
+        project: Optional[str] = None,
+        env: Optional[str] = None
     ) -> List[str]:
         """
         Extract container patterns from crontab entries.

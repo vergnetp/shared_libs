@@ -45,11 +45,11 @@ class PoolManager(ABC):
         _shutting_down: [Dict[str, bool]: Keep track of pools shutdown status
         _metrics: Dict[str, Dict[str, int]]: keep track of some metrics for each pool (e.g. how many connection acquisitions timed out)
     """
-    _shared_pools: ClassVar[Final[Dict[str, Any]]] = {}
-    _shared_locks: ClassVar[Final[Dict[str, asyncio.Lock]]] = {}
-    _active_connections: ClassVar[Final[Dict[str, Set[AsyncConnection]]]] = {}
-    _shutting_down: ClassVar[Final[Dict[str, bool]]] = {}
-    _metrics: ClassVar[Final[Dict[str, Dict[str, int]]]] = {}
+    _shared_pools: ClassVar[Dict[str, Any]] = {}
+    _shared_locks: ClassVar[Dict[str, asyncio.Lock]] = {}
+    _active_connections: ClassVar[Dict[str, Set[AsyncConnection]]] = {}
+    _shutting_down: ClassVar[Dict[str, bool]] = {}
+    _metrics: ClassVar[Dict[str, Dict[str, int]]] = {}
     _metrics_lock: ClassVar[asyncio.Lock] = asyncio.Lock()
     
     def __init__(self, config: DatabaseConfig):

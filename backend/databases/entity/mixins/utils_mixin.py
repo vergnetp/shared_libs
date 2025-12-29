@@ -31,7 +31,7 @@ class EntityUtilsMixin:
         'date': lambda v: v.isoformat() if v is not None else None,
         'time': lambda v: v.isoformat() if v is not None else None,
         'bytes': lambda v: v.hex() if v is not None else None,
-        'bool': lambda v: str(v).lower() if v is not None else None,
+        'bool': lambda v: '1' if v else '0',  # String '0'/'1' for cross-DB TEXT column compatibility
         'int': lambda v: str(v) if v is not None else None,
         'float': lambda v: str(v) if v is not None else None,
     }
@@ -45,9 +45,14 @@ class EntityUtilsMixin:
         'date': lambda v: datetime.date.fromisoformat(v) if v else None,
         'time': lambda v: datetime.time.fromisoformat(v) if v else None,
         'bytes': lambda v: bytes.fromhex(v) if v else None,
-        'int': lambda v: int(v) if v and v.strip() else 0,
-        'float': lambda v: float(v) if v and v.strip() else 0.0,
-        'bool': lambda v: v.lower() in ('true', '1', 'yes', 'y', 't') if v else False,
+        'int': lambda v: int(v) if v is not None and str(v).strip() else 0,
+        'float': lambda v: float(v) if v is not None and str(v).strip() else 0.0,
+        # Always return Python bool - handles int (0/1), string ('0'/'1'/'true'/'false'), or bool
+        'bool': lambda v: (
+            v if isinstance(v, bool) else
+            bool(v) if isinstance(v, int) else
+            str(v).lower() in ('true', '1', 'yes', 'y', 't') if v else False
+        ),
     }
     
     def _get_instance_lock(self):
@@ -172,6 +177,18 @@ class EntityUtilsMixin:
         if value_type is None:
             value_type = self._infer_type(value)
         
+        # Prevent double-encoding: if value is already a string but type expects
+        # JSON serialization (dict, list, set, tuple), check if it's already valid JSON
+        if isinstance(value, str) and value_type in ('dict', 'list', 'set', 'tuple'):
+            # Already a string - likely pre-serialized, return as-is
+            try:
+                # Validate it's valid JSON
+                json.loads(value)
+                return value
+            except (json.JSONDecodeError, TypeError):
+                # Not valid JSON, serialize it as a string
+                pass
+        
         # Check for custom serializer first
         if value_type in self._custom_serializers:
             try:
@@ -291,7 +308,7 @@ class EntityUtilsMixin:
         Returns:
             Entity with added/updated system fields
         """
-        now = datetime.datetime.now(datetime.UTC).isoformat()
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
         result = entity.copy()
         
         # Add ID if missing

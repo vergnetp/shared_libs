@@ -2,7 +2,7 @@ import asyncio
 from datetime import datetime
 from typing import Dict, Any, Optional, List, Union, Type
 
-from ..queue import QueueConfig, QueueManager, QueueWorker, QueueRetryConfig
+from ..job_queue import QueueConfig, QueueManager, QueueWorker, QueueRetryConfig
 from .log_storage import LogStorageInterface
 from .opensearch_storage import OpenSearchLogStorage
 

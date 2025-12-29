@@ -5,7 +5,7 @@ Handles Windows/Linux path differences and local/remote distinctions.
 
 from pathlib import Path
 import os
-from typing import Dict, List, Optional, Literal, Tuple
+from typing import Dict, List, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import platform as sys_platform
 
@@ -42,7 +42,7 @@ class PathResolver:
     _os_cache: Dict[str, str] = {}
     
     @staticmethod
-    def detect_target_os(server_ip: str, user: str = "root") -> Literal["windows", "linux"]:
+    def detect_target_os(server_ip: str, user: str = "root") -> str:
         """
         Detect OS of target server (cached).
         
@@ -83,7 +83,7 @@ class PathResolver:
         project: str,
         env: str,
         service: str,
-        path_type: Literal["config", "secrets", "files", "data", "logs", "backups", "monitoring"],
+        path_type: str,
         server_ip: str
     ) -> str:
         """
@@ -96,7 +96,7 @@ class PathResolver:
             project: Project name
             env: Environment name
             service: Service name (or None for global paths)
-            path_type: Type of path (config, secrets, data, etc.)
+            path_type: Type of path ("config", "secrets", "files", "data", "logs", "backups", "monitoring")
             server_ip: Target server IP
             
         Returns:
@@ -131,7 +131,7 @@ class PathResolver:
         # Convert to string with forward slashes (Docker requirement)
         return str(path).replace("\\", "/")
     
-
+    @staticmethod
     def get_git_checkout_path(user: str, project: str, env: str, service: str) -> Path:
         """Get git checkout directory path"""
         base = Path(os.getenv('LOCAL_DIR', 'C:/local'))
@@ -141,7 +141,7 @@ class PathResolver:
     @staticmethod
     def get_volume_container_path(
         service: str,
-        path_type: Literal["config", "secrets", "files", "data", "logs", "backups", "monitoring"]
+        path_type: str
     ) -> str:
         """
         Get container path for volume mounting.
@@ -195,7 +195,7 @@ class PathResolver:
         user: str,
         project: str,
         env: str,
-        path_type: Literal["data", "logs", "backups", "monitoring"],
+        path_type: str,
         service: Optional[str] = None
     ) -> str:
         """
@@ -229,7 +229,7 @@ class PathResolver:
         project: str,
         env: str,
         service: str,
-        path_type: Literal["config", "secrets", "files", "data", "logs", "backups", "monitoring"],
+        path_type: str,
         server_ip: str,
         use_docker_volumes: bool = True,
         read_only: bool = False
@@ -308,7 +308,7 @@ class PathResolver:
                     log(f"Warning: Could not create directory {host_path}: {e}")
     
     @staticmethod
-    def ensure_docker_volumes(user: str, project: str, env: str, service: str, server_ip: str="localhost") -> Tuple[str, str]:      
+    def ensure_docker_volumes(user: str, project: str, env: str, service: str, server_ip: str="localhost") -> None:      
         docker_volume_types = ["data", "logs", "backups", "monitoring"]
         
         def create_volume_if_needed(path_type):

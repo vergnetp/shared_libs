@@ -5,7 +5,7 @@ import subprocess
 import traceback
 from datetime import datetime
 import requests
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Union
 from uuid import uuid4
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -166,7 +166,7 @@ class Deployer:
     # PUBLIC SYNC API - Manual sync operations
     # =============================================================================
 
-    def push_config(self, env: str = None, targets: List[str] = None) -> bool:
+    def push_config(self, env: Optional[str] = None, targets: Optional[Union[str, List[str]]] = None) -> bool:
         """
         Manually push config, secrets, and files to servers.
         
@@ -187,7 +187,7 @@ class Deployer:
                     success = False
             return success
 
-    def pull_data(self, env: str = None, targets: List[str] = None) -> bool:
+    def pull_data(self, env: Optional[str] = None, targets: Optional[Union[str, List[str]]] = None) -> bool:
         """
         Manually pull data, logs, backups, and monitoring data from containers/servers.
         
@@ -208,7 +208,7 @@ class Deployer:
                     success = False
             return success
 
-    def full_sync(self, env: str = None, targets: List[str] = None) -> bool:
+    def full_sync(self, env: Optional[str] = None, targets: Optional[Union[str, List[str]]] = None) -> bool:
         """
         Manually perform full bidirectional sync - push config and pull data.
         
@@ -238,7 +238,7 @@ class Deployer:
         schedule = service_config.get("schedule")
         return schedule is not None and CronManager.validate_cron_schedule(schedule)
 
-    def _has_remote_servers(self, env: str = None) -> bool:
+    def _has_remote_servers(self, env: Optional[str] = None) -> bool:
         """
         Check if any services target remote servers (non-localhost).
         
@@ -389,15 +389,15 @@ class Deployer:
 
         # Return as string if exists
         dockerfile_path = Path(dockerfile_path)
-        return str(dockerfile_path) if dockerfile_path.exists() else None
+        return str(dockerfile_path) if dockerfile_path.exists() else ''
 
 
 
     def build_images(self, 
-                    environment: str = None,
+                    environment: Optional[str] = None,
                     push_to_registry: bool = False,
-                    service_name: str = None,
-                    credentials: dict = None):
+                    service_name: Optional[str] = None,
+                    credentials: Optional[Dict[str, str]] = None):
         """
         Build Docker images for all enabled services in parallel.
         
@@ -876,7 +876,7 @@ class Deployer:
 
 
 
-    def deploy(self, env: str = None, service_name: str = None, build: bool = True, target_version: str = None, credentials: dict = None) -> bool:
+    def deploy(self, env: Optional[str] = None, service_name: Optional[str] = None, build: bool = True, target_version: Optional[str] = None, credentials: Optional[Dict[str, str]] = None) -> bool:
         """
         Deploy services with immutable infrastructure and parallel execution.
         
@@ -1680,7 +1680,7 @@ class Deployer:
         env: str,
         svc_name: str,
         config: Dict[str, Any],
-        credentials: dict = None
+        credentials: Optional[Dict[str, str]] = None
     ) -> Dict[str, Any]:
         """
         Deploy a single service (called in parallel with other services of same startup_order).
@@ -2193,7 +2193,7 @@ class Deployer:
         
         log(f"[{server_ip}] ═══════════════════════════════════════════════")
 
-    def _cleanup_empty_servers(self, env: str, credentials: dict = None):
+    def _cleanup_empty_servers(self, env: str, credentials: Optional[Dict[str, str]]= None):
             """
             Find servers with no services deployed and destroy/release them.
             
@@ -2280,7 +2280,7 @@ class Deployer:
             else:
                 log("No empty servers found")
 
-    def _get_servers_running_service(self, env: str, service_name: str, credentials: Dict=None) -> List[str]:
+    def _get_servers_running_service(self, env: str, service_name: str, credentials: Optional[Dict[str, str]] = None) -> List[str]:
         """
         Get list of server IPs that have containers for this service.
         
@@ -2394,7 +2394,7 @@ class Deployer:
                 env: str,
                 service_name: str,
                 service_config: Dict[str, Any],
-                credentials: dict = None
+                credentials: Optional[Dict[str, str]] = None
             ) -> bool:
                 """
                 Deploy with immutable infrastructure - MATCHES YOUR PLAN 100%.
@@ -2667,7 +2667,7 @@ class Deployer:
                 log(f"Immutable deployment successful")
                 return True
 
-    def get_services_by_startup_order(self, env: str = None) -> Dict[str, Dict[str, Any]]:
+    def get_services_by_startup_order(self, env: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
         """
         Get services sorted by startup_order.
         
@@ -2960,7 +2960,7 @@ class Deployer:
             except Exception as e:
                 log(f"Failed to update nginx on {server_ip}: {e}")
 
-    def list_deployments(self, env: str = None, include_costs: bool = True) -> Dict[str, Any]:
+    def list_deployments(self, env: Optional[str] = None, include_costs: bool = True) -> Dict[str, Any]:
         """
         Get current deployment status.
         
@@ -3013,7 +3013,7 @@ class Deployer:
         
         return deployments
 
-    def print_deployments(self, env: str = None, include_costs: bool = True):
+    def print_deployments(self, env: Optional[str] = None, include_costs: bool = True):
         """Pretty-print deployment status to console"""
         deployments = self.list_deployments(env, include_costs)
         
@@ -3130,7 +3130,7 @@ class Deployer:
             # New is secondary, old is base
             return base_name
         
-    def pre_provision_servers(self, env: str, service_name: str = None, credentials: Dict=None) -> Dict[str, List[str]]:
+    def pre_provision_servers(self, env: Optional[str], service_name: Optional[str] = None, credentials: Optional[Dict[str, str]] = None) -> Dict[str, List[str]]:
         """
         Pre-provision all servers needed for deployment based on service requirements.
         
@@ -4066,7 +4066,7 @@ class Deployer:
             log(traceback.format_exc())
             return False
 
-    def _get_credential(self, credentials: dict, key: str, env_key: str = None, required: bool = False) -> str:
+    def _get_credential(self, credentials: Optional[Dict[str, str]], key: str, env_key: Optional[str] = None, required: bool = False) -> Union[str, None]:
         """
         Get credential with fallback to .env defaults.
         
@@ -4102,7 +4102,7 @@ class Deployer:
         
         return None
 
-    def _get_registry_credentials(self, credentials: dict = None) -> tuple:
+    def _get_registry_credentials(self, credentials: Optional[Dict[str, str]] = None) -> tuple:
         """
         Get Docker registry credentials with fallback to .env defaults.
         
@@ -4128,7 +4128,7 @@ class Deployer:
         log("⚠️  No registry credentials - assuming public images or manual docker login")
         return (None, None, None)
 
-    def _get_git_token(self, service_config: dict, credentials: dict = None) -> str:
+    def _get_git_token(self, service_config: dict, credentials: Optional[Dict[str, str]] = None) -> Optional[str]:
         """
         Get git token with fallback chain.
         
@@ -4257,7 +4257,7 @@ class Deployer:
         
         return list(servers)
 
-    def _configure_vpc_firewall(self, env: str, credentials: dict = None):
+    def _configure_vpc_firewall(self, env: str, credentials: Optional[Dict[str, str]] = None):
         """Configure firewall on all active servers for this environment"""
         log("Configuring VPC-only SSH firewall...")
         Logger.start()

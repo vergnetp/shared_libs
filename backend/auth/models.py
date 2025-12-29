@@ -2,7 +2,8 @@
 Auth models - User, Role, RoleAssignment, Session
 """
 from dataclasses import dataclass, field, asdict
-from datetime import datetime, UTC
+from datetime import datetime, timezone
+UTC = timezone.utc
 from typing import Optional
 import uuid
 
@@ -21,11 +22,17 @@ class User:
     email: str = ""
     password_hash: Optional[str] = None
     name: Optional[str] = None
+    role: str = "user"  # 'admin' | 'user' - global role
     metadata: dict = field(default_factory=dict)
     is_active: bool = True
     created_at: datetime = field(default_factory=_utcnow)
     updated_at: datetime = field(default_factory=_utcnow)
     deleted_at: Optional[datetime] = None
+    
+    @property
+    def is_admin(self) -> bool:
+        """Check if user has admin role."""
+        return self.role == "admin"
     
     def to_dict(self) -> dict:
         return asdict(self)

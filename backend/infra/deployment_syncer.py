@@ -1,4 +1,4 @@
-from typing import Union, List, Dict, Any
+from typing import Union, List, Dict, Any, Optional
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import platform
@@ -218,7 +218,7 @@ class DeploymentSyncer:
     # =============================================================================
 
     @staticmethod
-    def push(user: str, project: str, env: str, targets: Union[str, List[str]] = None) -> bool:
+    def push(user: str, project: str, env: str, targets: Optional[Union[str, List[str]]] = None) -> bool:
         """
         Push local content (config, secrets, files) to remote servers - OPTIMIZED & PARALLEL.
         Single archive, parallel transfer to all servers.
@@ -345,7 +345,7 @@ class DeploymentSyncer:
         return success
 
     @staticmethod  
-    def pull(user: str, project: str, env: str, targets: Union[str, List[str]] = None) -> bool:
+    def pull(user: str, project: str, env: str, targets: Optional[Union[str, List[str]]] = None) -> bool:
         """
         Pull generated content (data, logs, backups, monitoring) from remote servers/containers - PARALLEL.
         
@@ -390,7 +390,7 @@ class DeploymentSyncer:
         return success
 
     @staticmethod
-    def sync(user: str, project: str, env: str, targets: Union[str, List[str]] = None) -> bool:
+    def sync(user: str, project: str, env: str, targets: Optional[Union[str, List[str]]] = None) -> bool:
         """
         Full bidirectional sync - push local content and pull generated content.
         
