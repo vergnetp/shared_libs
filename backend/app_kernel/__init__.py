@@ -63,9 +63,11 @@ from .settings import (
     ObservabilitySettings,
     ReliabilitySettings,
     FeatureSettings,
+    CorsSettings,
+    SecuritySettings,
 )
 
-from .app import init_app_kernel
+from .app import init_app_kernel, get_kernel, KernelRuntime
 
 # Re-export commonly used items
 from .auth import (
@@ -86,6 +88,8 @@ from .jobs import (
     get_job_client,
     start_workers,
     stop_workers,
+    run_worker,
+    create_jobs_router,
 )
 
 from .streaming import (
@@ -107,12 +111,32 @@ from .reliability import (
 
 from .health import create_health_router
 
+from .db import (
+    init_kernel_schema,
+    cleanup_expired_idempotency_keys,
+    cleanup_old_rate_limits,
+)
+
+# Bootstrap - simplified service creation
+from .bootstrap import (
+    create_service,
+    quick_service,
+    ServiceConfig,
+)
+
 __all__ = [
     # Version
     "__version__",
     
     # Main init
     "init_app_kernel",
+    "get_kernel",
+    "KernelRuntime",
+    
+    # Bootstrap (simplified)
+    "create_service",
+    "quick_service",
+    "ServiceConfig",
     
     # Settings
     "KernelSettings",
@@ -123,6 +147,8 @@ __all__ = [
     "ObservabilitySettings",
     "ReliabilitySettings",
     "FeatureSettings",
+    "CorsSettings",
+    "SecuritySettings",
     
     # Auth
     "UserIdentity",
@@ -141,6 +167,8 @@ __all__ = [
     "get_job_client",
     "start_workers",
     "stop_workers",
+    "run_worker",
+    "create_jobs_router",
     
     # Streaming
     "stream_lease",
@@ -158,4 +186,9 @@ __all__ = [
     
     # Health
     "create_health_router",
+    
+    # Schema
+    "init_kernel_schema",
+    "cleanup_expired_idempotency_keys",
+    "cleanup_old_rate_limits",
 ]

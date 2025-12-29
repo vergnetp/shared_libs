@@ -28,13 +28,16 @@ Usage:
     
     init_app_kernel(app, settings, registry)
     
+    # Access kernel components via app.state.kernel
+    # logger = app.state.kernel.logger
+    # metrics = app.state.kernel.metrics
+    
     # Workers run separately - see jobs/worker.py for worker process example
 """
-from typing import Optional, Callable
-import uuid
+from dataclasses import dataclass
+from typing import Optional, Callable, Any
 
 from fastapi import FastAPI, Request
-from starlette.middleware.base import BaseHTTPMiddleware
 
 from .settings import KernelSettings
 from .jobs import JobRegistry
@@ -48,6 +51,41 @@ except ImportError:
     QueueRedisConfig = None
 
 
+@dataclass
+class KernelRuntime:
+    """
+    Runtime state for an initialized kernel.
+    
+    Stored on app.state.kernel after init_app_kernel() completes.
+    Access via app.state.kernel.logger, app.state.kernel.metrics, etc.
+    """
+    logger: Any  # KernelLogger or logging.Logger
+    metrics: Any  # MetricsCollector
+    audit: Any  # AuditLogger
+    settings: KernelSettings
+    
+    # Optional components (may be None if not configured)
+    redis_config: Any = None  # QueueRedisConfig if Redis available
+    job_registry: Optional[JobRegistry] = None
+
+
+def get_kernel(app: FastAPI) -> KernelRuntime:
+    """
+    Get the kernel runtime from a FastAPI app.
+    
+    Usage:
+        kernel = get_kernel(app)
+        kernel.logger.info("Hello")
+        kernel.metrics.increment("requests")
+    
+    Raises:
+        RuntimeError: If kernel not initialized
+    """
+    if not hasattr(app.state, "kernel"):
+        raise RuntimeError("Kernel not initialized. Call init_app_kernel() first.")
+    return app.state.kernel
+
+
 def init_app_kernel(
     app: FastAPI,
     settings: KernelSettings,
@@ -55,22 +93,26 @@ def init_app_kernel(
     user_loader: Optional[Callable] = None,
     user_store = None,  # For auth router (UserStore protocol)
     is_admin: Optional[Callable] = None,  # For metrics protection
-    setup_request_context: bool = True,
     setup_reliability_middleware: bool = True,
     mount_routers: bool = True,  # Auto-mount kernel routers
-):
+) -> None:
     """
-    Initialize the app kernel.
+    Initialize the app kernel. SIDE-EFFECTFUL.
     
-    This function:
-    - Wires middleware (for API process)
-    - Sets up observability
-    - Initializes job client (for enqueueing)
-    - Prepares worker dispatch configuration
-    - Auto-mounts common routers (health, metrics, auth)
+    This function fully initializes the app with all kernel infrastructure:
+    - CORS middleware (if enabled)
+    - Security middleware (request ID, headers, logging, error handling)
+    - Observability (logging, metrics, audit)
+    - Job client (for enqueueing)
+    - Rate limiting and idempotency (if Redis available)
+    - Auto-mounted routers (health, metrics, auth)
+    
+    After calling this, access components via app.state.kernel:
+        app.state.kernel.logger
+        app.state.kernel.metrics
+        app.state.kernel.audit
     
     NOTE: This does NOT start workers. Workers run as separate processes.
-    The kernel provides worker code; your deployment decides how to run them.
     
     Args:
         app: FastAPI application
@@ -79,9 +121,11 @@ def init_app_kernel(
         user_loader: Optional async function to load user by ID (for auth deps)
         user_store: Optional UserStore for auth router (login/register)
         is_admin: Optional function(user) -> bool for admin checks
-        setup_request_context: Whether to add request context middleware
         setup_reliability_middleware: Whether to add rate limiting/idempotency
         mount_routers: Whether to auto-mount kernel routers based on settings.features
+    
+    Returns:
+        None - access components via app.state.kernel
     """
     # =========================================================================
     # 1. Initialize observability first (so other components can log)
@@ -112,7 +156,27 @@ def init_app_kernel(
     logger.info(f"Initializing app_kernel for {settings.observability.service_name}")
     
     # =========================================================================
-    # 2. Initialize Redis-based components (if job_queue available)
+    # 2. Setup CORS middleware (must be early)
+    # =========================================================================
+    from .middleware import setup_cors, setup_security_middleware
+    
+    setup_cors(app, settings.cors)
+    if settings.cors.enabled:
+        logger.info(f"CORS: enabled, origins={settings.cors.allow_origins}")
+    
+    # =========================================================================
+    # 3. Setup security middleware (request ID, headers, logging, errors)
+    # =========================================================================
+    setup_security_middleware(app, settings.security)
+    logger.info(
+        f"Security middleware: request_id={settings.security.enable_request_id}, "
+        f"headers={settings.security.enable_security_headers}, "
+        f"logging={settings.security.enable_request_logging}, "
+        f"debug={settings.security.debug}"
+    )
+    
+    # =========================================================================
+    # 4. Initialize Redis-based components (if job_queue available)
     # =========================================================================
     redis_config = None
     
@@ -128,7 +192,7 @@ def init_app_kernel(
         logger.warning("Redis URL configured but job_queue not installed - using in-memory fallbacks")
     
     # =========================================================================
-    # 3. Initialize streaming lifecycle
+    # 5. Initialize streaming lifecycle
     # =========================================================================
     from .streaming.leases import init_lease_limiter, StreamLeaseConfig
     
@@ -141,7 +205,7 @@ def init_app_kernel(
     logger.info(f"Streaming: max {settings.streaming.max_concurrent_per_user} concurrent per user")
     
     # =========================================================================
-    # 4. Initialize job queue (if job_queue available)
+    # 6. Initialize job queue (if job_queue available)
     # =========================================================================
     if job_registry is not None and JOB_QUEUE_AVAILABLE and redis_config is not None:
         try:
@@ -194,7 +258,7 @@ def init_app_kernel(
         logger.warning("Job registry provided but job_queue not available - jobs will not be processed")
     
     # =========================================================================
-    # 5. Initialize auth
+    # 7. Initialize auth
     # =========================================================================
     if settings.auth.enabled:
         from .auth.deps import init_auth_deps
@@ -203,38 +267,13 @@ def init_app_kernel(
         logger.info("Auth: enabled")
     
     # =========================================================================
-    # 6. Initialize database session factory
+    # 8. Initialize database session factory
     # =========================================================================
     if settings.database_url:
         logger.info(f"Database: URL configured (call init_db_session with connection manager)")
     
     # =========================================================================
-    # 7. Setup request context middleware
-    # =========================================================================
-    if setup_request_context:
-        @app.middleware("http")
-        async def request_context_middleware(request: Request, call_next):
-            """Add request context for logging and tracing."""
-            # Generate or extract request ID
-            request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
-            
-            # Store in request state
-            request.state.request_id = request_id
-            
-            # Add to logging context
-            from .observability.logging import log_context
-            
-            with log_context(
-                request_id=request_id,
-                method=request.method,
-                path=request.url.path
-            ):
-                response = await call_next(request)
-                response.headers["x-request-id"] = request_id
-                return response
-    
-    # =========================================================================
-    # 8. Setup reliability middleware (if Redis available)
+    # 9. Setup reliability middleware (if Redis available)
     # =========================================================================
     if setup_reliability_middleware and settings.reliability.rate_limit_enabled and redis_config is not None:
         from .reliability.ratelimit import init_rate_limiter, RateLimitConfig
@@ -258,7 +297,7 @@ def init_app_kernel(
         logger.info(f"Idempotency: TTL {settings.reliability.idempotency_ttl_seconds}s")
     
     # =========================================================================
-    # 9. Auto-mount kernel routers based on feature settings
+    # 10. Auto-mount kernel routers based on feature settings
     # =========================================================================
     if mount_routers:
         _mount_kernel_routers(
@@ -270,18 +309,22 @@ def init_app_kernel(
         )
     
     # =========================================================================
-    # 10. Store settings in app state for access
+    # 11. Store kernel runtime on app.state
     # =========================================================================
-    app.state.kernel_settings = settings
+    kernel_runtime = KernelRuntime(
+        logger=logger,
+        metrics=metrics,
+        audit=audit,
+        settings=settings,
+        redis_config=redis_config,
+        job_registry=job_registry,
+    )
+    
+    app.state.kernel = kernel_runtime
+    app.state.kernel_settings = settings  # Legacy compat
     app.state.kernel_initialized = True
     
     logger.info(f"app_kernel initialized for {settings.observability.service_name}")
-    
-    return {
-        "logger": logger,
-        "metrics": metrics,
-        "audit": audit,
-    }
 
 
 def _mount_kernel_routers(
@@ -356,3 +399,15 @@ def _mount_kernel_routers(
     if features.enable_audit_routes:
         # TODO: Create audit router
         logger.info(f"Audit routes: enabled at {features.audit_path} (not yet implemented)")
+    
+    # -------------------------------------------------------------------------
+    # Job routes (status, list, cancel)
+    # -------------------------------------------------------------------------
+    if features.enable_job_routes:
+        from .jobs.router import create_jobs_router
+        
+        # get_db dependency needs to be provided by the app
+        # For now, log that it's enabled but app must mount manually if they need DB queries
+        logger.info(f"Job routes: enabled at {features.job_routes_prefix} (mount with create_jobs_router)")
+        # NOTE: Apps should call create_jobs_router(get_db=their_get_db) and mount it
+        # because kernel doesn't know the app's database dependency

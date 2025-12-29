@@ -182,3 +182,221 @@ async def stop_workers():
     """
     manager = get_worker_manager()
     await manager.stop()
+
+
+async def run_worker(
+    tasks: Dict[str, Any],
+    redis_url: str = None,
+    worker_count: int = None,
+    init_app = None,
+    shutdown_app = None,
+    log_level: str = None,
+):
+    """
+    Run a worker process with the given tasks.
+    
+    This is the main entrypoint for worker processes. Handles all boilerplate:
+    - Signal handling (graceful shutdown)
+    - Logging setup
+    - Queue configuration
+    - Worker lifecycle
+    
+    Usage:
+        # worker.py
+        from backend.app_kernel.jobs import run_worker
+        from .workers.documents import ingest_document
+        from .workers.chat import process_chat
+        
+        async def init():
+            await init_dependencies(get_settings())
+        
+        async def shutdown():
+            await shutdown_dependencies()
+        
+        if __name__ == "__main__":
+            import asyncio
+            asyncio.run(run_worker(
+                tasks={
+                    "document_ingest": ingest_document,
+                    "chat_response": process_chat,
+                },
+                init_app=init,
+                shutdown_app=shutdown,
+            ))
+    
+    Args:
+        tasks: Dict mapping task names to processor functions
+        redis_url: Redis URL (default: REDIS_URL env var)
+        worker_count: Number of worker threads (default: WORKER_COUNT env var or 3)
+        init_app: Optional async function to initialize app dependencies
+        shutdown_app: Optional async function to cleanup app dependencies
+        log_level: Logging level (default: LOG_LEVEL env var or INFO)
+    """
+    import os
+    import sys
+    import signal
+    
+    # Config from env or args
+    redis_url = redis_url or os.getenv("REDIS_URL")
+    worker_count = worker_count or int(os.getenv("WORKER_COUNT", "3"))
+    log_level = log_level or os.getenv("LOG_LEVEL", "INFO")
+    
+    # Use backend.log module
+    try:
+        from backend.log import info, error, warning, debug, critical, init_logger
+        
+        # Initialize the logger
+        init_logger(service_name="worker", min_level=log_level, quiet_init=True)
+        
+        # Create wrapper object for job_queue (expects logger.info(), etc.)
+        class LoggerWrapper:
+            """Wraps module-level log functions as object methods."""
+            @staticmethod
+            def info(msg, **kwargs):
+                info(msg, **kwargs)
+            
+            @staticmethod
+            def error(msg, **kwargs):
+                error(msg, **kwargs)
+            
+            @staticmethod
+            def warning(msg, **kwargs):
+                warning(msg, **kwargs)
+            
+            @staticmethod
+            def debug(msg, **kwargs):
+                debug(msg, **kwargs)
+            
+            @staticmethod
+            def critical(msg, **kwargs):
+                critical(msg, **kwargs)
+        
+        logger = LoggerWrapper()
+    except ImportError:
+        # Fallback to stdlib if log module not available
+        import logging
+        logging.basicConfig(
+            level=getattr(logging, log_level),
+            format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
+        )
+        _stdlib_logger = logging.getLogger("worker")
+        
+        # Wrap stdlib logger to handle kwargs
+        class StdlibLoggerWrapper:
+            def __init__(self, logger):
+                self._logger = logger
+            
+            def _format(self, msg, **kwargs):
+                if kwargs:
+                    extra = " ".join(f"{k}={v}" for k, v in kwargs.items())
+                    return f"{msg} [{extra}]"
+                return msg
+            
+            def info(self, msg, **kwargs):
+                self._logger.info(self._format(msg, **kwargs))
+            
+            def error(self, msg, **kwargs):
+                self._logger.error(self._format(msg, **kwargs))
+            
+            def warning(self, msg, **kwargs):
+                self._logger.warning(self._format(msg, **kwargs))
+            
+            def debug(self, msg, **kwargs):
+                self._logger.debug(self._format(msg, **kwargs))
+            
+            def critical(self, msg, **kwargs):
+                self._logger.critical(self._format(msg, **kwargs))
+        
+        logger = StdlibLoggerWrapper(_stdlib_logger)
+    
+    if not redis_url:
+        logger.error("REDIS_URL environment variable required")
+        sys.exit(1)
+    
+    logger.info(f"Starting worker with {worker_count} threads")
+    logger.info(f"Redis: {redis_url}")
+    logger.info(f"Tasks: {list(tasks.keys())}")
+    
+    # Initialize app dependencies
+    if init_app:
+        await init_app()
+    
+    # Import job_queue components
+    try:
+        from backend.job_queue import QueueWorker, QueueConfig
+        from backend.job_queue.config import (
+            QueueRedisConfig,
+            QueueWorkerConfig,
+            QueueRetryConfig,
+            QueueLoggingConfig,
+        )
+    except ImportError:
+        try:
+            from job_queue import QueueWorker, QueueConfig
+            from job_queue.config import (
+                QueueRedisConfig,
+                QueueWorkerConfig,
+                QueueRetryConfig,
+                QueueLoggingConfig,
+            )
+        except ImportError:
+            logger.error("job_queue module not available")
+            sys.exit(1)
+    
+    # Create queue configuration
+    config = QueueConfig(
+        redis=QueueRedisConfig(url=redis_url),
+        worker=QueueWorkerConfig(
+            worker_count=worker_count,
+            work_timeout=300,  # 5 minutes per task
+        ),
+        retry=QueueRetryConfig.exponential(
+            max_attempts=3,
+            min_delay=5.0,
+            max_delay=300.0,
+        ),
+        logging=QueueLoggingConfig(logger=logger),
+    )
+    
+    # Register processors
+    for task_name, processor in tasks.items():
+        config.callables.register(processor, name=task_name)
+    
+    # Create worker
+    worker = QueueWorker(config=config)
+    
+    # Handle shutdown gracefully
+    shutdown_event = asyncio.Event()
+    
+    def handle_signal(sig):
+        logger.info(f"Received signal {sig}, shutting down...")
+        shutdown_event.set()
+    
+    # Signal handlers
+    loop = asyncio.get_event_loop()
+    if sys.platform != "win32":
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, lambda s=sig: handle_signal(s))
+    else:
+        def windows_handler(signum, frame):
+            handle_signal(signum)
+        signal.signal(signal.SIGINT, windows_handler)
+        signal.signal(signal.SIGTERM, windows_handler)
+    
+    try:
+        logger.info("Worker starting...")
+        await worker.start()
+        logger.info("Worker started, processing jobs...")
+        
+        # Wait for shutdown signal
+        await shutdown_event.wait()
+        
+    except Exception as e:
+        logger.error(f"Worker error: {e}", exc_info=True)
+        raise
+    finally:
+        logger.info("Worker stopping...")
+        await worker.stop()
+        if shutdown_app:
+            await shutdown_app()
+        logger.info("Worker stopped")

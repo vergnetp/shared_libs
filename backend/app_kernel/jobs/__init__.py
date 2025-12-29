@@ -5,6 +5,7 @@ This module provides:
 - JobRegistry: Interface for registering task processors
 - JobClient: Enqueue wrapper for apps
 - Worker management: Start/stop workers
+- Job routes: Status/list/cancel endpoints
 
 The kernel provides mechanisms; apps provide task implementations.
 
@@ -43,7 +44,9 @@ from .worker import (
     get_worker_manager,
     start_workers,
     stop_workers,
+    run_worker,
 )
+from .router import create_jobs_router
 
 __all__ = [
     # Registry
@@ -64,4 +67,8 @@ __all__ = [
     "get_worker_manager",
     "start_workers",
     "stop_workers",
+    "run_worker",
+    
+    # Router
+    "create_jobs_router",
 ]

@@ -71,7 +71,7 @@ class ObservabilitySettings:
     add_caller_info: bool = True
 
 
-@dataclass(frozen=True) 
+@dataclass(frozen=True)
 class ReliabilitySettings:
     """Rate limiting and idempotency settings."""
     # Rate limiting
@@ -82,6 +82,45 @@ class ReliabilitySettings:
     # Idempotency
     idempotency_enabled: bool = True
     idempotency_ttl_seconds: int = 86400  # 24 hours
+
+
+@dataclass(frozen=True)
+class CorsSettings:
+    """CORS middleware configuration."""
+    enabled: bool = True
+    allow_origins: Tuple[str, ...] = ("*",)
+    allow_credentials: bool = True
+    allow_methods: Tuple[str, ...] = ("*",)
+    allow_headers: Tuple[str, ...] = ("*",)
+    
+    @classmethod
+    def from_env(cls) -> "CorsSettings":
+        """Create from environment variables."""
+        origins = os.environ.get("CORS_ORIGINS", "*")
+        origins_tuple = tuple(origins.split(",")) if origins else ("*",)
+        return cls(
+            enabled=os.environ.get("CORS_ENABLED", "true").lower() in ("true", "1", "yes"),
+            allow_origins=origins_tuple,
+        )
+
+
+@dataclass(frozen=True)
+class SecuritySettings:
+    """Security middleware configuration."""
+    # Request ID middleware
+    enable_request_id: bool = True
+    
+    # Security headers middleware
+    enable_security_headers: bool = True
+    
+    # Request logging middleware
+    enable_request_logging: bool = True
+    
+    # Error handling middleware (catches unhandled exceptions)
+    enable_error_handling: bool = True
+    
+    # Debug mode (shows full errors instead of generic 500)
+    debug: bool = False
 
 
 @dataclass(frozen=True)
@@ -110,6 +149,10 @@ class FeatureSettings:
     allow_self_signup: bool = False
     auth_prefix: str = "/auth"
     
+    # Job routes (status, list, cancel)
+    enable_job_routes: bool = True
+    job_routes_prefix: str = "/jobs"
+    
     # Audit log query endpoint (admin only)
     enable_audit_routes: bool = False
     audit_path: str = "/audit"
@@ -129,6 +172,7 @@ class FeatureSettings:
             KERNEL_ENABLE_AUTH=true
             KERNEL_AUTH_MODE=local
             KERNEL_ALLOW_SIGNUP=false
+            KERNEL_ENABLE_JOBS=true
             KERNEL_ENABLE_AUDIT=false
         """
         def env_bool(key: str, default: bool) -> bool:
@@ -146,6 +190,7 @@ class FeatureSettings:
             enable_auth_routes=env_bool("KERNEL_ENABLE_AUTH", True),
             auth_mode=os.environ.get("KERNEL_AUTH_MODE", "local"),  # type: ignore
             allow_self_signup=env_bool("KERNEL_ALLOW_SIGNUP", False),
+            enable_job_routes=env_bool("KERNEL_ENABLE_JOBS", True),
             enable_audit_routes=env_bool("KERNEL_ENABLE_AUDIT", False),
         )
 
@@ -177,6 +222,8 @@ class KernelSettings:
     observability: ObservabilitySettings = field(default_factory=ObservabilitySettings)
     reliability: ReliabilitySettings = field(default_factory=ReliabilitySettings)
     features: FeatureSettings = field(default_factory=FeatureSettings)
+    cors: CorsSettings = field(default_factory=CorsSettings)
+    security: SecuritySettings = field(default_factory=SecuritySettings)
     
     # Database URL for auth stores (if using database-backed auth)
     database_url: Optional[str] = None

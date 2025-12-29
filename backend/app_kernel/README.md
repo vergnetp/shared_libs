@@ -21,7 +21,105 @@ A stable, reusable application kernel for backend services.
 from app_kernel import init_app_kernel, KernelSettings
 ```
 
-## Quick Start
+## 🚀 Quick Start (Easiest Way)
+
+Create a complete service in **~30 lines** using `create_service`:
+
+```python
+from fastapi import APIRouter, Depends
+from app_kernel import create_service, ServiceConfig, get_current_user
+
+# Your business logic
+router = APIRouter(prefix="/widgets", tags=["widgets"])
+
+@router.post("")
+async def create_widget(data: dict, user=Depends(get_current_user)):
+    return {"id": "123", "owner": user.id, **data}
+
+@router.get("")
+async def list_widgets(user=Depends(get_current_user)):
+    return []
+
+# Create the app - that's it!
+app = create_service(
+    name="widget_service",
+    routers=[router],
+    config=ServiceConfig.from_env(),  # Uses JWT_SECRET, REDIS_URL env vars
+)
+```
+
+**What you get for free:**
+- ✅ JWT authentication (`/api/v1/auth/login`, `/api/v1/auth/register`)
+- ✅ CORS (configured or `*`)
+- ✅ Security headers
+- ✅ Request ID tracking
+- ✅ Structured logging
+- ✅ Metrics endpoint (`/metrics`)
+- ✅ Health endpoints (`/healthz`, `/readyz`)
+- ✅ Rate limiting (if `REDIS_URL` set)
+- ✅ Background jobs (if `REDIS_URL` set)
+- ✅ Error handling
+
+### With Background Jobs
+
+```python
+from app_kernel import create_service, ServiceConfig, get_job_client
+
+# Task handler
+async def process_order(payload, ctx):
+    order_id = payload["order_id"]
+    # Do work...
+    return {"status": "done"}
+
+# Route that enqueues work
+router = APIRouter(prefix="/orders")
+
+@router.post("")
+async def create_order(data: dict, user=Depends(get_current_user)):
+    client = get_job_client()
+    result = await client.enqueue("process_order", {"order_id": "123"}, user_id=user.id)
+    return {"job_id": result.job_id}
+
+# Create app with tasks
+app = create_service(
+    name="order_service",
+    routers=[router],
+    tasks={"process_order": process_order},  # Register task handlers
+    config=ServiceConfig.from_env(),
+)
+```
+
+### ServiceConfig Options
+
+```python
+config = ServiceConfig(
+    # Auth
+    jwt_secret="your-secret",      # Required for production
+    jwt_expiry_hours=24,
+    auth_enabled=True,
+    allow_self_signup=False,
+    
+    # Redis (enables jobs, rate limiting)
+    redis_url="redis://localhost:6379",
+    
+    # CORS
+    cors_origins=["http://localhost:3000"],
+    
+    # Rate limiting
+    rate_limit_requests=100,
+    rate_limit_window=60,
+    
+    # Debug
+    debug=False,
+)
+
+# Or load from environment variables
+config = ServiceConfig.from_env()  # Reads JWT_SECRET, REDIS_URL, DEBUG, etc.
+```
+
+## Advanced: Manual Initialization
+
+For more control, use `init_app_kernel` directly:
 
 ```python
 from fastapi import FastAPI
