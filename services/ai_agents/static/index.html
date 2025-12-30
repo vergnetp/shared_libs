@@ -1,0 +1,3308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agent Service Test UI</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #f5f7fa;
+            color: #333;
+            min-height: 100vh;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 20px 0;
+            border-bottom: 1px solid #e0e4e8;
+            margin-bottom: 20px;
+        }
+        
+        h1 { font-size: 1.5rem; color: #5b4ed9; }
+        h2 { color: #333; margin-bottom: 16px; }
+        h3 { color: #555; margin-bottom: 12px; }
+        
+        .status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.875rem;
+        }
+        
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #aaa;
+        }
+        
+        .status-dot.connected { background: #4caf50; }
+        .status-dot.error { background: #f44336; }
+        
+        .spinner {
+            border: 3px solid #e0e4e8;
+            border-top: 3px solid #5b4ed9;
+            border-radius: 50%;
+            width: 24px;
+            height: 24px;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .upload-progress {
+            display: none;
+            padding: 16px;
+            text-align: center;
+        }
+        
+        .upload-progress.active {
+            display: block;
+        }
+        
+        .upload-form.uploading {
+            opacity: 0.5;
+            pointer-events: none;
+        }
+        
+        .tabs {
+            display: flex;
+            gap: 4px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+        
+        .tab {
+            padding: 10px 20px;
+            background: #e8eaef;
+            border: none;
+            color: #555;
+            cursor: pointer;
+            border-radius: 8px 8px 0 0;
+            transition: all 0.2s;
+            font-weight: 500;
+        }
+        
+        .tab:hover { color: #333; background: #dde0e6; }
+        .tab.active { color: #fff; background: #5b4ed9; }
+        
+        .panel { display: none; }
+        .panel.active { display: block; }
+        
+        .grid {
+            display: grid;
+            grid-template-columns: 300px 1fr;
+            gap: 20px;
+        }
+        
+        .grid-3 {
+            display: grid;
+            grid-template-columns: 280px 1fr 320px;
+            gap: 20px;
+        }
+        
+        .sidebar {
+            background: #fff;
+            border-radius: 12px;
+            padding: 16px;
+            max-height: calc(100vh - 200px);
+            overflow-y: auto;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+        }
+        
+        .sidebar h3 {
+            font-size: 0.875rem;
+            color: #666;
+            margin-bottom: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        
+        .list-item {
+            padding: 12px;
+            background: #f5f7fa;
+            border-radius: 8px;
+            margin-bottom: 8px;
+            cursor: pointer;
+            transition: all 0.2s;
+            border: 1px solid transparent;
+        }
+        
+        .list-item:hover { background: #e8eaef; }
+        .list-item.selected { background: #ebe9fc; border-color: #5b4ed9; }
+        
+        .list-item-title {
+            font-weight: 500;
+            margin-bottom: 4px;
+            color: #333;
+        }
+        
+        .list-item-meta {
+            font-size: 0.75rem;
+            color: #777;
+        }
+        
+        .main-content {
+            background: #fff;
+            border-radius: 12px;
+            display: flex;
+            flex-direction: column;
+            max-height: calc(100vh - 200px);
+            box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+        }
+        
+        .chat-header {
+            padding: 12px 16px;
+            border-bottom: 1px solid #e0e4e8;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .chat-messages {
+            flex: 1;
+            padding: 20px;
+            overflow-y: auto;
+            overflow-x: hidden;
+        }
+        
+        .message {
+            margin-bottom: 16px;
+            max-width: 80%;
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+        }
+        
+        .message.user {
+            margin-left: auto;
+            text-align: right;
+        }
+        
+        .message-content {
+            display: inline-block;
+            padding: 12px 16px;
+            border-radius: 12px;
+            background: #f5f7fa;
+            color: #333;
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+            max-width: 100%;
+            text-align: left;
+        }
+        
+        .message.user .message-content {
+            background: #5b4ed9;
+            color: #fff;
+        }
+        
+        .message.assistant .message-content {
+            background: #e8eaef;
+            color: #333;
+        }
+        
+        .message-meta {
+            font-size: 0.75rem;
+            color: #888;
+            margin-top: 4px;
+        }
+        
+        .chat-input {
+            display: flex;
+            gap: 12px;
+            padding: 16px;
+            border-top: 1px solid #e0e4e8;
+        }
+        
+        input, textarea, select {
+            padding: 10px 14px;
+            border: 1px solid #dde0e6;
+            border-radius: 8px;
+            background: #fff;
+            color: #333;
+            font-size: 0.9rem;
+        }
+        
+        input:focus, textarea:focus, select:focus {
+            outline: none;
+            border-color: #5b4ed9;
+        }
+        
+        input[type="text"], textarea {
+            flex: 1;
+        }
+        
+        button {
+            padding: 10px 20px;
+            background: #5b4ed9;
+            color: #fff;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 500;
+            transition: all 0.2s;
+        }
+        
+        button:hover { background: #4a3fc7; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+        
+        .btn-secondary {
+            background: #e8eaef;
+            color: #333;
+        }
+        
+        .btn-secondary:hover { background: #dde0e6; }
+        
+        .btn-small {
+            padding: 6px 12px;
+            font-size: 0.8rem;
+        }
+        
+        .btn-danger {
+            background: #e74c3c;
+        }
+        
+        .btn-danger:hover { background: #c0392b; }
+        
+        .form-group {
+            margin-bottom: 16px;
+        }
+        
+        .form-group label {
+            display: block;
+            font-size: 0.85rem;
+            color: #555;
+            margin-bottom: 6px;
+            font-weight: 500;
+        }
+        
+        .form-group select,
+        .form-group input,
+        .form-group textarea {
+            width: 100%;
+        }
+        
+        .form-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+        }
+        
+        .modal {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0,0,0,0.5);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 100;
+        }
+        
+        .modal.active { display: flex; }
+        
+        .modal-content {
+            background: #fff;
+            border-radius: 12px;
+            padding: 24px;
+            width: 600px;
+            max-width: 90%;
+            max-height: 90vh;
+            overflow-y: auto;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.15);
+        }
+        
+        .modal h2 {
+            margin-bottom: 20px;
+            color: #333;
+        }
+        
+        .modal-actions {
+            display: flex;
+            gap: 12px;
+            justify-content: flex-end;
+            margin-top: 24px;
+        }
+        
+        .card {
+            background: #fff;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+            margin-bottom: 16px;
+        }
+        
+        .card-title {
+            font-weight: 600;
+            margin-bottom: 12px;
+            color: #333;
+        }
+        
+        .metrics {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+        
+        .metric-card {
+            background: #fff;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+        }
+        
+        .metric-value {
+            font-size: 2rem;
+            font-weight: 700;
+            color: #5b4ed9;
+        }
+        
+        .metric-label {
+            font-size: 0.875rem;
+            color: #888;
+            margin-top: 4px;
+        }
+        
+        .settings-panel {
+            background: #fff;
+            border-radius: 12px;
+            padding: 16px;
+            max-height: calc(100vh - 200px);
+            overflow-y: auto;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+        }
+        
+        .settings-section {
+            margin-bottom: 20px;
+            padding-bottom: 16px;
+            border-bottom: 1px solid #eee;
+        }
+        
+        .settings-section:last-child {
+            border-bottom: none;
+            margin-bottom: 0;
+        }
+        
+        .settings-section h4 {
+            font-size: 0.8rem;
+            color: #666;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 12px;
+        }
+        
+        .toggle-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 0;
+        }
+        
+        .toggle-label {
+            font-size: 0.9rem;
+            color: #333;
+        }
+        
+        .toggle {
+            position: relative;
+            width: 44px;
+            height: 24px;
+        }
+        
+        .toggle input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        
+        .toggle-slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #ccc;
+            transition: .3s;
+            border-radius: 24px;
+        }
+        
+        .toggle-slider:before {
+            position: absolute;
+            content: "";
+            height: 18px;
+            width: 18px;
+            left: 3px;
+            bottom: 3px;
+            background-color: white;
+            transition: .3s;
+            border-radius: 50%;
+        }
+        
+        .toggle input:checked + .toggle-slider {
+            background-color: #5b4ed9;
+        }
+        
+        .toggle input:checked + .toggle-slider:before {
+            transform: translateX(20px);
+        }
+        
+        .system-prompt-display {
+            background: #f8f9fa;
+            border: 1px solid #e0e4e8;
+            border-radius: 8px;
+            padding: 12px;
+            font-family: monospace;
+            font-size: 0.85rem;
+            white-space: pre-wrap;
+            max-height: 150px;
+            overflow-y: auto;
+            color: #555;
+        }
+        
+        .user-info-display {
+            background: #fff9e6;
+            border: 1px solid #ffe066;
+            border-radius: 8px;
+            padding: 12px;
+            font-size: 0.85rem;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        
+        .security-log {
+            font-family: monospace;
+            font-size: 0.8rem;
+        }
+        
+        .log-entry {
+            padding: 8px 12px;
+            border-bottom: 1px solid #eee;
+            display: flex;
+            gap: 12px;
+        }
+        
+        .log-entry:hover {
+            background: #f5f7fa;
+        }
+        
+        .log-time {
+            color: #888;
+            white-space: nowrap;
+        }
+        
+        .log-type {
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 500;
+        }
+        
+        .log-type.info { background: #e3f2fd; color: #1976d2; }
+        .log-type.warn { background: #fff3e0; color: #f57c00; }
+        .log-type.error { background: #ffebee; color: #d32f2f; }
+        .log-type.security { background: #fce4ec; color: #c2185b; }
+        
+        .log-message {
+            flex: 1;
+            color: #333;
+        }
+        
+        .error-toast {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background: #d32f2f;
+            color: white;
+            padding: 16px 24px;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+            z-index: 1000;
+            max-width: 400px;
+            animation: slideIn 0.3s ease;
+        }
+        
+        @keyframes slideIn {
+            from { transform: translateX(100%); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+        }
+        
+        .error-toast-close {
+            position: absolute;
+            top: 8px;
+            right: 8px;
+            background: none;
+            border: none;
+            color: white;
+            cursor: pointer;
+            padding: 4px;
+        }
+        
+        .badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 0.75rem;
+            font-weight: 500;
+        }
+        
+        .badge-success { background: #e8f5e9; color: #2e7d32; }
+        .badge-warning { background: #fff3e0; color: #f57c00; }
+        .badge-info { background: #e3f2fd; color: #1976d2; }
+        
+        .typing-indicator {
+            display: inline-flex;
+            gap: 4px;
+            padding: 12px 16px;
+            background: #e8eaef;
+            border-radius: 12px;
+        }
+        
+        .typing-indicator span {
+            width: 8px;
+            height: 8px;
+            background: #5b4ed9;
+            border-radius: 50%;
+            animation: bounce 1.4s infinite ease-in-out;
+        }
+        
+        .typing-indicator span:nth-child(1) { animation-delay: -0.32s; }
+        .typing-indicator span:nth-child(2) { animation-delay: -0.16s; }
+        
+        @keyframes bounce {
+            0%, 80%, 100% { transform: scale(0); }
+            40% { transform: scale(1); }
+        }
+        
+        pre {
+            background: #f0f2f5;
+            padding: 12px;
+            border-radius: 8px;
+            overflow-x: auto;
+            font-size: 0.85rem;
+            color: #333;
+        }
+        
+        code {
+            font-family: 'Fira Code', 'Consolas', monospace;
+        }
+        
+        .empty-state {
+            text-align: center;
+            padding: 40px;
+            color: #888;
+        }
+        
+        .inline-edit {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+        
+        .inline-edit input {
+            flex: 1;
+        }
+        
+        /* Document Sidebar in Chat */
+        .chat-with-docs {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 0;
+            transition: all 0.3s ease;
+            flex: 1;
+            min-height: 0;
+            overflow: hidden;
+        }
+        
+        .chat-with-docs.docs-open {
+            grid-template-columns: 1fr 280px;
+        }
+        
+        .docs-sidebar {
+            display: none;
+            background: #fff;
+            border-left: 1px solid #e0e4e8;
+            padding: 16px;
+            overflow-y: auto;
+            max-height: calc(100vh - 200px);
+        }
+        
+        .docs-sidebar.open {
+            display: block;
+        }
+        
+        .docs-sidebar h4 {
+            font-size: 0.85rem;
+            color: #666;
+            margin-bottom: 12px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .doc-drop-zone {
+            border: 2px dashed #dde0e6;
+            border-radius: 8px;
+            padding: 20px;
+            text-align: center;
+            margin-bottom: 16px;
+            transition: all 0.2s;
+            cursor: pointer;
+        }
+        
+        .doc-drop-zone:hover,
+        .doc-drop-zone.dragover {
+            border-color: #5b4ed9;
+            background: #f8f7ff;
+        }
+        
+        .doc-drop-zone input {
+            display: none;
+        }
+        
+        .doc-item {
+            padding: 10px 12px;
+            background: #f5f7fa;
+            border-radius: 8px;
+            margin-bottom: 8px;
+            font-size: 0.85rem;
+        }
+        
+        .doc-item-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 8px;
+        }
+        
+        .doc-item-name {
+            font-weight: 500;
+            color: #333;
+            word-break: break-word;
+            flex: 1;
+        }
+        
+        .doc-item-meta {
+            font-size: 0.75rem;
+            color: #888;
+            margin-top: 4px;
+        }
+        
+        .doc-item-delete {
+            background: none;
+            border: none;
+            color: #999;
+            cursor: pointer;
+            padding: 2px 6px;
+            font-size: 0.8rem;
+        }
+        
+        .doc-item-delete:hover {
+            color: #e74c3c;
+        }
+        
+        .doc-item.uploading {
+            opacity: 0.7;
+        }
+        
+        .doc-progress {
+            height: 4px;
+            background: #e0e4e8;
+            border-radius: 2px;
+            margin-top: 8px;
+            overflow: hidden;
+        }
+        
+        .doc-progress-bar {
+            height: 100%;
+            background: #5b4ed9;
+            transition: width 0.3s;
+        }
+        
+        /* Source Box */
+        .source-box {
+            background: #f8f9fa;
+            border: 1px solid #e0e4e8;
+            border-radius: 8px;
+            padding: 12px;
+            margin-top: 8px;
+            font-size: 0.85rem;
+            max-width: 100%;
+            overflow: hidden;
+        }
+        
+        .source-box-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+            font-weight: 500;
+            color: #555;
+        }
+        
+        .source-box-content {
+            color: #666;
+            font-style: italic;
+            line-height: 1.4;
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+            word-break: break-word;
+            max-height: 100px;
+            overflow-y: auto;
+        }
+        
+        .source-box-link {
+            color: #5b4ed9;
+            text-decoration: none;
+            font-size: 0.8rem;
+        }
+        
+        .source-box-link:hover {
+            text-decoration: underline;
+        }
+        
+        /* Chat input with upload button */
+        .chat-input-wrapper {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+        
+        .upload-btn {
+            background: #e8eaef;
+            border: none;
+            border-radius: 8px;
+            padding: 10px 12px;
+            cursor: pointer;
+            font-size: 1.1rem;
+            transition: all 0.2s;
+        }
+        
+        .upload-btn:hover {
+            background: #dde0e6;
+        }
+        
+        .docs-toggle-btn {
+            background: #e8eaef;
+            border: none;
+            border-radius: 6px;
+            padding: 4px 10px;
+            cursor: pointer;
+            font-size: 0.8rem;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+        
+        .docs-toggle-btn:hover {
+            background: #dde0e6;
+        }
+        
+        .docs-toggle-btn.active {
+            background: #5b4ed9;
+            color: white;
+        }
+        
+        .doc-count-badge {
+            background: #5b4ed9;
+            color: white;
+            font-size: 0.7rem;
+            padding: 1px 6px;
+            border-radius: 10px;
+            margin-left: 4px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🤖 Agent Service</h1>
+            <div class="status">
+                <span class="status-dot" id="statusDot"></span>
+                <span id="statusText">Connecting...</span>
+            </div>
+        </header>
+        
+        <div class="tabs">
+            <button class="tab active" data-tab="chat">💬 Chat</button>
+            <button class="tab" data-tab="agents">🤖 Agents</button>
+            <button class="tab" data-tab="documents">📄 Documents</button>
+            <button class="tab" data-tab="security">🔒 Security</button>
+            <button class="tab" data-tab="monitoring">📊 Monitoring</button>
+        </div>
+        
+        <!-- Chat Panel -->
+        <div class="panel active" id="chat">
+            <div class="grid-3">
+                <!-- Threads Sidebar -->
+                <div class="sidebar">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                        <h3>Chats <span id="threadCount" style="font-size: 0.8rem; color: #888;"></span></h3>
+                        <button class="btn-secondary btn-small" onclick="showNewThreadModal()">+ New</button>
+                    </div>
+                    <div id="threadList">
+                        <div class="empty-state">No threads yet</div>
+                    </div>
+                </div>
+                
+                <!-- Main Chat Area with Documents Sidebar -->
+                <div class="main-content">
+                    <div class="chat-header" id="chatHeader" style="display: none;">
+                        <div>
+                            <strong id="currentThreadTitle">Chat</strong>
+                            <span class="badge badge-info" id="currentAgentBadge"></span>
+                            <span class="badge" id="currentModelBadge" style="background: #6c757d; color: white; font-size: 0.65rem;"></span>
+                        </div>
+                        <div style="display: flex; gap: 8px; align-items: center;">
+                            <button class="docs-toggle-btn" id="docsToggleBtn" onclick="toggleDocsSidebar()" title="Toggle Documents">
+                                📄 <span id="agentDocCount">0</span>
+                            </button>
+                            <button class="btn-secondary btn-small" onclick="showSystemPrompt()">View System Prompt</button>
+                        </div>
+                    </div>
+                    
+                    <div class="chat-with-docs" id="chatWithDocs">
+                        <div style="display: flex; flex-direction: column; flex: 1; min-height: 0; height: 100%;">
+                            <div class="chat-messages" id="chatMessages">
+                                <div class="empty-state">Select or create a chat to start chatting</div>
+                            </div>
+                            
+                            <div class="chat-input">
+                                <div class="chat-input-wrapper" style="flex: 1; display: flex; gap: 8px;">
+                                    <button class="upload-btn" onclick="triggerDocUpload()" title="Upload document" id="chatUploadBtn" style="display: none;">📎</button>
+                                    <input type="text" id="messageInput" placeholder="Type a message..." disabled onkeypress="if(event.key==='Enter')sendMessage()" style="flex: 1;">
+                                </div>
+                                <button id="sendBtn" onclick="sendMessage()" disabled>Send</button>
+                            </div>
+                        </div>
+                        
+                        <!-- Documents Sidebar -->
+                        <div class="docs-sidebar" id="docsSidebar">
+                            <h4>
+                                📁 Documents
+                                <button class="doc-item-delete" onclick="toggleDocsSidebar()" title="Close">✕</button>
+                            </h4>
+                            
+                            <div class="doc-drop-zone" id="docDropZone" onclick="document.getElementById('docFileInput').click()">
+                                <div>📄 Drop files here</div>
+                                <div style="font-size: 0.8rem; color: #888; margin-top: 4px;">or click to browse</div>
+                                <input type="file" id="docFileInput" multiple accept=".pdf,.txt,.md,.doc,.docx" onchange="handleDocUpload(event)">
+                            </div>
+                            
+                            <div id="agentDocsList">
+                                <div class="empty-state" style="padding: 20px; font-size: 0.85rem;">No documents yet</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Settings Panel -->
+                <div class="settings-panel">
+                    <h3>⚙️ Live Settings</h3>
+                    
+                    <div class="settings-section">
+                        <h4>🧠 Memory Strategy</h4>
+                        <div class="form-group">
+                            <select id="memoryStrategy" onchange="toggleMemoryN(); updateAgentSettings()">
+                                <option value="last_n">Last N Messages</option>
+                                <option value="summarize">Summarize History</option>
+                                <option value="sliding_window">Sliding Window</option>
+                                <option value="none">No Memory</option>
+                            </select>
+                        </div>
+                        <div class="form-group" id="memoryNGroup">
+                            <label>Exchanges to Keep</label>
+                            <input type="number" id="memoryN" value="20" min="1" max="100" onchange="updateAgentSettings()">
+                        </div>
+                    </div>
+                    
+                    <div class="settings-section">
+                        <h4>🛡️ Safety Controls <span style="font-weight:normal;font-size:0.7rem;color:#888;">(per message)</span></h4>
+                        
+                        <div class="toggle-row">
+                            <span class="toggle-label" title="Disables assumptions and educated guesses.">
+                                1️⃣ Stick to documented facts
+                                <span style="cursor:help;color:#888;">ⓘ</span>
+                            </span>
+                            <label class="toggle">
+                                <input type="checkbox" id="stickToFacts" onchange="updateAgentSettings()">
+                                <span class="toggle-slider"></span>
+                            </label>
+                        </div>
+                        
+                        <div class="toggle-row">
+                            <span class="toggle-label" title="Avoids taking sides and presents both pros and cons based on evidence or consensus.">
+                                2️⃣ Objective, balanced responses
+                                <span style="cursor:help;color:#888;">ⓘ</span>
+                            </span>
+                            <label class="toggle">
+                                <input type="checkbox" id="objectiveResponses" onchange="updateAgentSettings()">
+                                <span class="toggle-slider"></span>
+                            </label>
+                        </div>
+                        
+                        <div class="toggle-row">
+                            <span class="toggle-label" title="Prevents users from overriding or injecting hidden instructions.">
+                                3️⃣ Block prompt manipulation
+                                <span style="cursor:help;color:#888;">ⓘ</span>
+                            </span>
+                            <label class="toggle">
+                                <input type="checkbox" id="injectionDefense" onchange="updateAgentSettings()">
+                                <span class="toggle-slider"></span>
+                            </label>
+                        </div>
+                    </div>
+                    
+                    <div class="settings-section">
+                        <h4>🎯 Model Settings</h4>
+                        <div class="form-group">
+                            <label>Temperature</label>
+                            <input type="range" id="temperature" min="0" max="1" step="0.1" value="0.7" 
+                                   oninput="document.getElementById('tempValue').textContent=this.value" onchange="updateAgentSettings()">
+                            <span id="tempValue">0.7</span>
+                        </div>
+                        <div class="form-group">
+                            <label>Max Tokens (output)</label>
+                            <input type="number" id="maxTokens" value="4096" min="100" max="4096" onchange="updateAgentSettings()">
+                        </div>
+                    </div>
+                    
+                    <div class="settings-section">
+                        <h4 style="display: flex; justify-content: space-between; align-items: center;">
+                            📝 User Context
+                            <button class="btn-danger btn-small" onclick="clearAllContext()" style="font-size: 0.65rem; padding: 2px 6px;">Clear All</button>
+                        </h4>
+                        <div class="user-info-display" id="userInfoDisplay">
+                            <em>No user info collected yet</em>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Agents Panel -->
+        <div class="panel" id="agents">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                <h2>Agents</h2>
+                <button onclick="showNewAgentModal()">+ Create Agent</button>
+            </div>
+            <div id="agentList" class="metrics"></div>
+        </div>
+        
+        <!-- Documents Panel -->
+        <div class="panel" id="documents">
+            <!-- Model Loading Banner -->
+            <div id="modelLoadingBanner" style="display: none; background: #fff3cd; border: 1px solid #ffc107; border-radius: 8px; padding: 12px 16px; margin-bottom: 20px;">
+                <div style="display: flex; align-items: center; gap: 12px;">
+                    <div class="spinner" style="width: 20px; height: 20px;"></div>
+                    <div>
+                        <strong>Loading AI models...</strong>
+                        <div id="modelLoadingDetail" style="font-size: 0.85rem; color: #666;"></div>
+                    </div>
+                </div>
+            </div>
+            
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                <h2>Documents</h2>
+                <div style="display: flex; gap: 12px; align-items: center;">
+                    <select id="tagFilter" onchange="filterByTag()" style="width: auto;">
+                        <option value="">All Tags</option>
+                    </select>
+                    <button id="uploadBtn" onclick="showUploadModal()" disabled>+ Upload</button>
+                </div>
+            </div>
+            
+            <div class="card">
+                <div class="card-title">🔍 Ask Documents</div>
+                <div style="display: flex; gap: 12px; margin-bottom: 12px;">
+                    <input type="text" id="searchQuery" placeholder="Ask a question about your documents..." style="flex:1;" onkeypress="if(event.key==='Enter') askDocuments()">
+                    <select id="searchEntityFilter" style="width: auto;">
+                        <option value="">All entities</option>
+                    </select>
+                    <button id="askBtn" onclick="askDocuments()" disabled>Ask</button>
+                </div>
+                <div style="display: flex; gap: 12px; align-items: center; font-size: 0.85rem; color: #666;">
+                    <label>Answer with:</label>
+                    <select id="askProvider" style="width: auto;">
+                        <option value="tinyroberta">Loading models...</option>
+                    </select>
+                    <span id="ollamaStatus" style="font-size: 0.75rem;"></span>
+                </div>
+                <div id="searchResults" style="margin-top: 16px;"></div>
+            </div>
+            
+            <div class="card">
+                <div class="card-title">📁 Uploaded Documents</div>
+                <div id="documentList"></div>
+            </div>
+        </div>
+        
+        <!-- Security Panel -->
+        <div class="panel" id="security">
+            <h2 style="margin-bottom: 20px;">🔒 Security Log</h2>
+            
+            <div class="card">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+                    <div class="card-title">Recent Events</div>
+                    <div>
+                        <select id="securityFilter" onchange="filterSecurityLog()">
+                            <option value="all">All Events</option>
+                            <option value="security">Security Only</option>
+                            <option value="error">Errors Only</option>
+                            <option value="blocked">Blocked Only</option>
+                        </select>
+                        <button class="btn-secondary btn-small" onclick="refreshSecurityLog()">Refresh</button>
+                        <button class="btn-danger btn-small" onclick="clearSecurityLog()">Clear</button>
+                    </div>
+                </div>
+                <div class="security-log" id="securityLog">
+                    <div class="empty-state">No security events recorded</div>
+                </div>
+            </div>
+            
+            <div class="metrics" style="margin-top: 20px;">
+                <div class="metric-card">
+                    <div class="metric-value" id="blockedCount">0</div>
+                    <div class="metric-label">Blocked Requests</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-value" id="injectionAttempts">0</div>
+                    <div class="metric-label">Injection Attempts</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-value" id="totalRequests">0</div>
+                    <div class="metric-label">Total Requests</div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Monitoring Panel -->
+        <div class="panel" id="monitoring">
+            <h2 style="margin-bottom: 20px;">📊 Metrics</h2>
+            <div class="metrics" id="metricsGrid"></div>
+            
+            <h3 style="margin: 24px 0 16px;">Usage Breakdown</h3>
+            <div id="usageBreakdown"></div>
+            
+            <div style="display: flex; justify-content: space-between; align-items: center; margin: 24px 0 16px;">
+                <h3>🔍 LLM Calls Audit</h3>
+                <div>
+                    <select id="llmCallTypeFilter" onchange="loadLLMCalls()" style="margin-right: 8px;">
+                        <option value="">All Types</option>
+                        <option value="chat">Chat (sync)</option>
+                        <option value="chat_stream">Chat (SSE stream)</option>
+                        <option value="chat_ws">Chat (WebSocket)</option>
+                    </select>
+                    <button class="btn-secondary btn-small" onclick="loadLLMCalls()">Refresh</button>
+                </div>
+            </div>
+            <div id="llmCallsSummary" style="margin-bottom: 16px;"></div>
+            <div style="overflow-x: auto;">
+                <table id="llmCallsTable" style="width: 100%; border-collapse: collapse; font-size: 0.85rem;">
+                    <thead>
+                        <tr style="background: #f5f5f5;">
+                            <th style="padding: 8px; text-align: left; border-bottom: 2px solid #ddd;">Time</th>
+                            <th style="padding: 8px; text-align: left; border-bottom: 2px solid #ddd;">Agent</th>
+                            <th style="padding: 8px; text-align: left; border-bottom: 2px solid #ddd;">Type</th>
+                            <th style="padding: 8px; text-align: left; border-bottom: 2px solid #ddd;">Provider</th>
+                            <th style="padding: 8px; text-align: left; border-bottom: 2px solid #ddd;">Model</th>
+                            <th style="padding: 8px; text-align: left; border-bottom: 2px solid #ddd;">Message</th>
+                            <th style="padding: 8px; text-align: right; border-bottom: 2px solid #ddd;">In Tokens</th>
+                            <th style="padding: 8px; text-align: right; border-bottom: 2px solid #ddd;">Out Tokens</th>
+                            <th style="padding: 8px; text-align: left; border-bottom: 2px solid #ddd;">Tools</th>
+                            <th style="padding: 8px; text-align: right; border-bottom: 2px solid #ddd;">Cost</th>
+                            <th style="padding: 8px; text-align: right; border-bottom: 2px solid #ddd;">Duration</th>
+                        </tr>
+                    </thead>
+                    <tbody id="llmCallsBody">
+                        <tr><td colspan="11" style="padding: 16px; text-align: center; color: #888;">Loading...</td></tr>
+                    </tbody>
+                    <tfoot id="llmCallsFoot" style="font-weight: bold; background: #f0f0f0;">
+                    </tfoot>
+                </table>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Error Toast Container -->
+    <div id="errorToastContainer"></div>
+    
+    <!-- New Chat Modal -->
+    <div class="modal" id="newThreadModal">
+        <div class="modal-content">
+            <h2>New Chat</h2>
+            <div class="form-group">
+                <label>Agent</label>
+                <select id="threadAgentSelect"></select>
+            </div>
+            <div class="form-group">
+                <label>Title (optional)</label>
+                <input type="text" id="threadTitle" placeholder="Chat title...">
+            </div>
+            <div class="modal-actions">
+                <button class="btn-secondary" onclick="closeModal('newThreadModal')">Cancel</button>
+                <button onclick="createThread()">Create</button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- New Agent Modal -->
+    <div class="modal" id="newAgentModal">
+        <div class="modal-content" style="max-height: 90vh; overflow-y: auto;">
+            <h2 id="agentModalTitle">Create Agent</h2>
+            <input type="hidden" id="editAgentId" value="">
+            
+            <!-- Basic Info -->
+            <div class="form-group">
+                <label>Name</label>
+                <input type="text" id="agentName" placeholder="My Agent" oninput="copyNameToRole()">
+            </div>
+            <div class="form-group">
+                <label>Role <span style="font-size: 0.75rem; color: #888;">(auto-filled from name)</span></label>
+                <input type="text" id="agentRole" placeholder="A helpful assistant">
+            </div>
+            <div class="form-row">
+                <div class="form-group" style="flex: 2;">
+                    <label>Model</label>
+                    <select id="agentModel">
+                        <!-- Will be populated dynamically from models catalog -->
+                        <option value="groq:llama-3.3-70b-versatile">llama-3.3-70b-versatile (Groq - Free)</option>
+                    </select>
+                </div>
+            </div>
+            <div class="form-group">
+                <label>System Prompt</label>
+                <textarea id="agentSystemPrompt" rows="4" placeholder="You are a helpful assistant..."></textarea>
+            </div>
+            
+            <!-- Model Settings -->
+            <div style="border-top: 1px solid #eee; margin: 16px 0; padding-top: 16px;">
+                <h4 style="margin: 0 0 12px 0; font-size: 0.9rem; color: #666;">🎯 Model Settings</h4>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Temperature</label>
+                        <input type="number" id="agentTemp" value="0.7" min="0" max="2" step="0.1">
+                    </div>
+                    <div class="form-group">
+                        <label>Max Tokens (output)</label>
+                        <input type="number" id="agentMaxTokens" value="4096" min="100" max="32768">
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Premium Escalation -->
+            <div style="border-top: 1px solid #eee; margin: 16px 0; padding-top: 16px;">
+                <h4 style="margin: 0 0 12px 0; font-size: 0.9rem; color: #666;">🚀 Premium Escalation (optional)</h4>
+                <p style="font-size: 0.8rem; color: #888; margin-bottom: 12px;">
+                    For complex queries, agent will automatically escalate to premium model.
+                </p>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Premium Model</label>
+                        <select id="agentPremiumModel">
+                            <option value="">None (no escalation)</option>
+                            <!-- Will be populated dynamically from models catalog -->
+                        </select>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Memory Settings -->
+            <div style="border-top: 1px solid #eee; margin: 16px 0; padding-top: 16px;">
+                <h4 style="margin: 0 0 12px 0; font-size: 0.9rem; color: #666;">🧠 Memory Settings</h4>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Memory Strategy</label>
+                        <select id="agentMemoryStrategy" onchange="toggleAgentMemoryN()">
+                            <option value="last_n">Last N messages</option>
+                            <option value="sliding_window">Sliding window</option>
+                            <option value="none">No memory</option>
+                        </select>
+                    </div>
+                    <div class="form-group" id="agentMemoryNGroup">
+                        <label>Messages to keep</label>
+                        <input type="number" id="agentMemoryN" value="20" min="1" max="100">
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Safety Controls -->
+            <div style="border-top: 1px solid #eee; margin: 16px 0; padding-top: 16px;">
+                <h4 style="margin: 0 0 12px 0; font-size: 0.9rem; color: #666;">🛡️ Safety Controls (defaults)</h4>
+                <div class="toggle-row" style="margin-bottom: 8px;">
+                    <span class="toggle-label" title="Disables assumptions and educated guesses.">
+                        Stick to documented facts <span style="cursor:help;color:#888;">ⓘ</span>
+                    </span>
+                    <label class="toggle">
+                        <input type="checkbox" id="agentStickToFacts" checked>
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+                <div class="toggle-row" style="margin-bottom: 8px;">
+                    <span class="toggle-label" title="Avoids taking sides and presents both pros and cons.">
+                        Objective, balanced responses <span style="cursor:help;color:#888;">ⓘ</span>
+                    </span>
+                    <label class="toggle">
+                        <input type="checkbox" id="agentObjectiveResponses" checked>
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+                <div class="toggle-row">
+                    <span class="toggle-label" title="Prevents users from overriding or injecting hidden instructions.">
+                        Block prompt manipulation <span style="cursor:help;color:#888;">ⓘ</span>
+                    </span>
+                    <label class="toggle">
+                        <input type="checkbox" id="agentInjectionDefense" checked>
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+            </div>
+            
+            <!-- Tools -->
+            <div style="border-top: 1px solid #eee; margin: 16px 0; padding-top: 16px;">
+                <h4 style="margin: 0 0 12px 0; font-size: 0.9rem; color: #666;">🔧 Tools</h4>
+                <div class="toggle-row" style="margin-bottom: 8px;">
+                    <span class="toggle-label" title="Allow agent to search uploaded documents for answers.">
+                        Search Documents (RAG) <span style="cursor:help;color:#888;">ⓘ</span>
+                    </span>
+                    <label class="toggle">
+                        <input type="checkbox" id="agentSearchDocuments" checked>
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+            </div>
+            
+            <!-- User Context -->
+            <div style="border-top: 1px solid #eee; margin: 16px 0; padding-top: 16px;">
+                <h4 style="margin: 0 0 12px 0; font-size: 0.9rem; color: #666;">📝 User Context</h4>
+                <div class="toggle-row" style="margin-bottom: 8px;">
+                    <span class="toggle-label">Save User Data (Context)</span>
+                    <label class="toggle">
+                        <input type="checkbox" id="agentSaveUserData" checked onchange="toggleContextSchema()">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+                <div class="form-group" id="contextSchemaGroup">
+                    <label>Context Schema (JSON - optional)</label>
+                    <textarea id="agentContextSchema" rows="3" placeholder='{"name": "User name", "preferences": "User preferences"}'></textarea>
+                    <small style="color: #666;">Define what the agent remembers. Leave empty for auto mode.</small>
+                </div>
+            </div>
+            
+            <div class="modal-actions">
+                <button class="btn-secondary" onclick="closeModal('newAgentModal')">Cancel</button>
+                <button id="agentSubmitBtn" onclick="saveAgent()">Create</button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Upload Modal -->
+    <div class="modal" id="uploadModal">
+        <div class="modal-content">
+            <h2>Upload Document</h2>
+            
+            <!-- Upload Form -->
+            <div id="uploadForm">
+                <div class="form-group">
+                    <label>File</label>
+                    <input type="file" id="uploadFile" accept=".pdf,.txt,.md,.json,.csv,.png,.jpg,.jpeg">
+                </div>
+                <div class="form-group">
+                    <label>Entity ID</label>
+                    <input type="text" id="uploadEntityId" placeholder="e.g., project-123">
+                </div>
+                <div class="form-group">
+                    <label>Title (optional)</label>
+                    <input type="text" id="uploadTitle" placeholder="Document title">
+                </div>
+                <div class="form-group">
+                    <label>Tags (comma-separated)</label>
+                    <input type="text" id="uploadTags" placeholder="tag1, tag2">
+                </div>
+                <div class="modal-actions">
+                    <button class="btn-secondary" onclick="closeModal('uploadModal')">Cancel</button>
+                    <button id="uploadSubmitBtn" onclick="uploadDocument()">Upload</button>
+                </div>
+            </div>
+            
+            <!-- Upload Progress -->
+            <div id="uploadProgress" class="upload-progress">
+                <div class="spinner" style="margin: 0 auto 16px;"></div>
+                <div id="uploadStatus">Uploading and processing document...</div>
+                <div id="uploadDetail" style="font-size: 0.85rem; color: #666; margin-top: 8px;">
+                    This may take a moment for large files or PDFs
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- System Prompt Modal -->
+    <div class="modal" id="systemPromptModal">
+        <div class="modal-content" style="width: 800px;">
+            <h2>System Prompt</h2>
+            <div class="form-group">
+                <label>Base Prompt (user-defined)</label>
+                <div class="system-prompt-display" id="basePromptContent" style="max-height: 120px;">
+                    Loading...
+                </div>
+            </div>
+            <div class="form-group">
+                <label>Full Prompt (what the agent sees)</label>
+                <div class="system-prompt-display" id="systemPromptContent" style="max-height: 300px;">
+                    Loading...
+                </div>
+            </div>
+            <div class="form-group" id="userContextSection" style="display: none;">
+                <label>Current User Context</label>
+                <div class="user-info-display" id="promptUserContext">
+                    No context yet
+                </div>
+            </div>
+            <div class="modal-actions">
+                <button onclick="closeModal('systemPromptModal')">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // State
+        let currentThread = null;
+        let currentAgent = null;
+        let agents = [];
+        let threads = [];
+        let ws = null;
+        let securityLogs = [];
+        let lastAgentName = '';  // Track name for auto-copy to role
+        
+        const API = '/api/v1';
+        
+        // Copy agent name to role field (only if role is empty or matches previous name)
+        function copyNameToRole() {
+            const nameEl = document.getElementById('agentName');
+            const roleEl = document.getElementById('agentRole');
+            const newName = nameEl.value;
+            
+            // Only auto-fill if role is empty or equals previous name
+            if (roleEl.value === '' || roleEl.value === lastAgentName) {
+                roleEl.value = newName;
+            }
+            lastAgentName = newName;
+        }
+        
+        // ===================
+        // Error Handling
+        // ===================
+        
+        function showError(message, details = null) {
+            const container = document.getElementById('errorToastContainer');
+            const toast = document.createElement('div');
+            toast.className = 'error-toast';
+            toast.innerHTML = `
+                <button class="error-toast-close" onclick="this.parentElement.remove()">×</button>
+                <strong>Error:</strong> ${escapeHtml(message)}
+                ${details ? `<br><small>${escapeHtml(details)}</small>` : ''}
+            `;
+            container.appendChild(toast);
+            
+            // Auto-remove after 8 seconds
+            setTimeout(() => toast.remove(), 8000);
+            
+            // Also log to security log
+            addSecurityLog('error', message);
+        }
+        
+        async function apiCall(url, options = {}) {
+            try {
+                const response = await fetch(url, {
+                    headers: { 'Content-Type': 'application/json', ...options.headers },
+                    ...options
+                });
+                
+                if (!response.ok) {
+                    const errorData = await response.json().catch(() => ({}));
+                    const errorMsg = errorData.detail || errorData.message || `HTTP ${response.status}`;
+                    showError(errorMsg, `${options.method || 'GET'} ${url}`);
+                    return null;
+                }
+                
+                // Handle 204 No Content (e.g., DELETE responses)
+                if (response.status === 204) {
+                    return true;
+                }
+                
+                return await response.json();
+            } catch (err) {
+                showError(err.message, `${options.method || 'GET'} ${url}`);
+                return null;
+            }
+        }
+        
+        // ===================
+        // Security Log
+        // ===================
+        
+        function addSecurityLog(type, message) {
+            const now = new Date();
+            securityLogs.unshift({
+                time: now.toLocaleTimeString(),
+                date: now.toLocaleDateString(),
+                type: type,
+                message: message
+            });
+            
+            // Keep last 100
+            if (securityLogs.length > 100) securityLogs.pop();
+            
+            renderSecurityLog();
+            updateSecurityMetrics();
+        }
+        
+        function renderSecurityLog() {
+            const container = document.getElementById('securityLog');
+            const filter = document.getElementById('securityFilter').value;
+            
+            const filtered = filter === 'all' 
+                ? securityLogs 
+                : securityLogs.filter(l => l.type === filter);
+            
+            if (filtered.length === 0) {
+                container.innerHTML = '<div class="empty-state">No events match filter</div>';
+                return;
+            }
+            
+            container.innerHTML = filtered.slice(0, 50).map(log => `
+                <div class="log-entry">
+                    <span class="log-time">${log.time}</span>
+                    <span class="log-type ${log.type}">${log.type.toUpperCase()}</span>
+                    <span class="log-message">${escapeHtml(log.message)}</span>
+                </div>
+            `).join('');
+        }
+        
+        function filterSecurityLog() {
+            renderSecurityLog();
+        }
+        
+        async function refreshSecurityLog() {
+            const data = await apiCall(`${API}/analytics/security/events?limit=100`);
+            if (data && data.events) {
+                securityLogs = data.events.map(e => ({
+                    time: new Date(e.timestamp).toLocaleTimeString(),
+                    date: new Date(e.timestamp).toLocaleDateString(),
+                    type: e.blocked ? 'blocked' : (e.threat_type || 'info'),
+                    message: e.content_preview || e.threat_type || 'Unknown event'
+                }));
+                renderSecurityLog();
+                updateSecurityMetrics();
+            }
+            
+            // Also fetch summary
+            const summary = await apiCall(`${API}/analytics/security/summary`);
+            if (summary) {
+                document.getElementById('blockedCount').textContent = summary.total_blocked || 0;
+                document.getElementById('totalRequests').textContent = summary.total_events || 0;
+            }
+        }
+        
+        function clearSecurityLog() {
+            if (confirm('Clear all security logs?')) {
+                securityLogs = [];
+                renderSecurityLog();
+                updateSecurityMetrics();
+            }
+        }
+        
+        function updateSecurityMetrics() {
+            document.getElementById('blockedCount').textContent = 
+                securityLogs.filter(l => l.type === 'blocked').length;
+            document.getElementById('injectionAttempts').textContent = 
+                securityLogs.filter(l => l.message.toLowerCase().includes('injection')).length;
+            document.getElementById('totalRequests').textContent = securityLogs.length;
+        }
+        
+        // ===================
+        // Tabs
+        // ===================
+        
+        document.querySelectorAll('.tab').forEach(tab => {
+            tab.addEventListener('click', async () => {
+                document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+                document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+                tab.classList.add('active');
+                document.getElementById(tab.dataset.tab).classList.add('active');
+                
+                // Refresh data when switching to monitoring tab
+                if (tab.dataset.tab === 'monitoring') {
+                    await loadMetrics();
+                    await loadLLMCalls();
+                }
+            });
+        });
+        
+        // ===================
+        // Modals
+        // ===================
+        
+        function showModal(id) {
+            document.getElementById(id).classList.add('active');
+        }
+        
+        function closeModal(id) {
+            document.getElementById(id).classList.remove('active');
+        }
+        
+        function showNewThreadModal() {
+            populateAgentSelect();
+            showModal('newThreadModal');
+        }
+        
+        function showUploadModal() {
+            showModal('uploadModal');
+        }
+        
+        async function showSystemPrompt() {
+            if (!currentAgent) return;
+            
+            // Show base prompt immediately
+            document.getElementById('basePromptContent').textContent = 
+                currentAgent.system_prompt || 'No system prompt defined';
+            document.getElementById('systemPromptContent').textContent = 'Loading...';
+            document.getElementById('userContextSection').style.display = 'none';
+            
+            showModal('systemPromptModal');
+            
+            // Fetch full prompt from API
+            const userId = currentThread?.user_id || 'default';
+            const data = await apiCall(`${API}/agents/${currentAgent.id}/full-prompt?user_id=${userId}`);
+            
+            if (data) {
+                document.getElementById('systemPromptContent').textContent = data.full_prompt || 'No prompt';
+                
+                if (data.user_context && Object.keys(data.user_context).length > 0) {
+                    document.getElementById('userContextSection').style.display = 'block';
+                    document.getElementById('promptUserContext').textContent = 
+                        JSON.stringify(data.user_context, null, 2);
+                }
+            } else {
+                document.getElementById('systemPromptContent').textContent = 
+                    currentAgent.system_prompt || 'No system prompt defined';
+            }
+        }
+        
+        // ===================
+        // Agents
+        // ===================
+        
+        async function loadAgents() {
+            const data = await apiCall(`${API}/agents`);
+            if (!data) return;
+            
+            agents = data;
+            renderAgents();
+        }
+        
+        function renderAgents() {
+            const container = document.getElementById('agentList');
+            if (agents.length === 0) {
+                container.innerHTML = '<div class="empty-state">No agents yet. Create one!</div>';
+                return;
+            }
+            
+            container.innerHTML = agents.map(agent => `
+                <div class="metric-card">
+                    <div style="display: flex; justify-content: space-between; align-items: start;">
+                        <div>
+                            <div class="metric-value" style="font-size: 1.2rem;">${escapeHtml(agent.name)}</div>
+                            <div class="metric-label">${escapeHtml(agent.provider)} / ${escapeHtml(agent.model || 'default')}</div>
+                        </div>
+                        <div style="display: flex; gap: 8px;">
+                            <button class="btn-secondary btn-small" onclick="editAgent('${agent.id}')">Edit</button>
+                            <button class="btn-danger btn-small" onclick="deleteAgent('${agent.id}')">Delete</button>
+                        </div>
+                    </div>
+                    <div style="margin-top: 12px; font-size: 0.85rem; color: #666;">
+                        ${escapeHtml((agent.system_prompt || '').substring(0, 100))}${(agent.system_prompt || '').length > 100 ? '...' : ''}
+                    </div>
+                    <div style="margin-top: 8px;">
+                        <span class="badge ${agent.context_schema !== null && agent.context_schema !== undefined ? 'badge-success' : 'badge-info'}">
+                            ${agent.context_schema !== null && agent.context_schema !== undefined ? '✓ Saves user data' : 'No user data'}
+                        </span>
+                    </div>
+                </div>
+            `).join('');
+        }
+        
+        function populateAgentSelect() {
+            const select = document.getElementById('threadAgentSelect');
+            select.innerHTML = agents.map(a => 
+                `<option value="${a.id}">${escapeHtml(a.name)}</option>`
+            ).join('');
+        }
+        
+        function updatePremiumModelOptions() {
+            if (!modelsCatalog) return;
+            
+            const select = document.getElementById('agentPremiumModel');
+            if (!select) return;
+            
+            // Build grouped options like the main model dropdown
+            let html = '<option value="">None (no escalation)</option>';
+            
+            // Paid APIs only for premium (Anthropic, OpenAI)
+            html += '<optgroup label="Anthropic">';
+            const anthropicModels = modelsCatalog.models.anthropic || [];
+            anthropicModels.forEach(m => {
+                html += `<option value="anthropic:${m}">${m}</option>`;
+            });
+            html += '</optgroup>';
+            
+            html += '<optgroup label="OpenAI">';
+            const openaiModels = modelsCatalog.models.openai || [];
+            openaiModels.forEach(m => {
+                html += `<option value="openai:${m}">${m}</option>`;
+            });
+            html += '</optgroup>';
+            
+            // Groq as free fast option
+            const groqModels = modelsCatalog.models.groq || [];
+            if (groqModels.length > 0) {
+                html += '<optgroup label="Groq (Free)">';
+                groqModels.forEach(m => {
+                    html += `<option value="groq:${m}">${m}</option>`;
+                });
+                html += '</optgroup>';
+            }
+            
+            select.innerHTML = html;
+        }
+        
+        function toggleContextSchema() {
+            const saveUserData = document.getElementById('agentSaveUserData').checked;
+            const schemaGroup = document.getElementById('contextSchemaGroup');
+            schemaGroup.style.display = saveUserData ? 'block' : 'none';
+        }
+        
+        function toggleAgentMemoryN() {
+            const strategy = document.getElementById('agentMemoryStrategy').value;
+            const nGroup = document.getElementById('agentMemoryNGroup');
+            nGroup.style.display = ['last_n', 'sliding_window'].includes(strategy) ? 'block' : 'none';
+        }
+        
+        function toggleMemoryN() {
+            const strategy = document.getElementById('memoryStrategy').value;
+            const nGroup = document.getElementById('memoryNGroup');
+            nGroup.style.display = ['last_n', 'sliding_window'].includes(strategy) ? 'block' : 'none';
+        }
+        
+        function showNewAgentModal() {
+            // Reset form for create mode
+            document.getElementById('agentModalTitle').textContent = 'Create Agent';
+            document.getElementById('agentSubmitBtn').textContent = 'Create';
+            document.getElementById('editAgentId').value = '';
+            document.getElementById('agentName').value = '';
+            document.getElementById('agentRole').value = '';
+            lastAgentName = '';  // Reset tracking
+            // Set default model (groq:llama-3.3-70b-versatile)
+            updateModelOptions();
+            document.getElementById('agentModel').value = 'groq:llama-3.3-70b-versatile';
+            document.getElementById('agentSystemPrompt').value = '';
+            document.getElementById('agentTemp').value = '0.7';
+            document.getElementById('agentMaxTokens').value = '4096';
+            // Premium escalation (none by default)
+            updatePremiumModelOptions();
+            document.getElementById('agentPremiumModel').value = '';
+            // Memory settings
+            document.getElementById('agentMemoryStrategy').value = 'last_n';
+            document.getElementById('agentMemoryN').value = '20';
+            toggleAgentMemoryN();
+            // Safety settings (default ON)
+            document.getElementById('agentStickToFacts').checked = true;
+            document.getElementById('agentObjectiveResponses').checked = true;
+            document.getElementById('agentInjectionDefense').checked = true;
+            // Tools (default ON)
+            document.getElementById('agentSearchDocuments').checked = true;
+            // Context settings
+            document.getElementById('agentSaveUserData').checked = true;
+            document.getElementById('agentContextSchema').value = '';
+            toggleContextSchema();
+            showModal('newAgentModal');
+        }
+        
+        async function editAgent(agentId) {
+            const agent = agents.find(a => a.id === agentId);
+            if (!agent) return;
+            
+            const metadata = agent.metadata || {};
+            
+            // Set form to edit mode
+            document.getElementById('agentModalTitle').textContent = 'Edit Agent';
+            document.getElementById('agentSubmitBtn').textContent = 'Save';
+            document.getElementById('editAgentId').value = agentId;
+            document.getElementById('agentName').value = agent.name || '';
+            document.getElementById('agentRole').value = '';  // Role is embedded in system_prompt
+            updateModelOptions();
+            // Set model as provider:model format
+            const modelSelect = document.getElementById('agentModel');
+            const provider = agent.provider || 'groq';
+            const model = agent.model || 'llama-3.3-70b-versatile';
+            const modelValue = `${provider}:${model}`;
+            // If this combo isn't in the list, add it
+            if (![...modelSelect.options].some(o => o.value === modelValue)) {
+                const opt = document.createElement('option');
+                opt.value = modelValue;
+                opt.textContent = `${model} (${provider})`;
+                modelSelect.appendChild(opt);
+            }
+            modelSelect.value = modelValue;
+            document.getElementById('agentSystemPrompt').value = agent.system_prompt || '';
+            document.getElementById('agentTemp').value = agent.temperature || 0.7;
+            document.getElementById('agentMaxTokens').value = agent.max_tokens || 4096;
+            
+            // Memory settings
+            document.getElementById('agentMemoryStrategy').value = agent.memory_strategy || metadata.memory_strategy || 'last_n';
+            let memoryParams = agent.memory_params || metadata.memory_params || {};
+            // Parse if it's a JSON string
+            if (typeof memoryParams === 'string') {
+                try { memoryParams = JSON.parse(memoryParams); } catch(e) { memoryParams = {}; }
+            }
+            document.getElementById('agentMemoryN').value = memoryParams.n || 20;
+            toggleAgentMemoryN();
+            
+            // Premium escalation
+            updatePremiumModelOptions();
+            if (agent.premium_provider && agent.premium_model) {
+                const premiumValue = `${agent.premium_provider}:${agent.premium_model}`;
+                const premiumSelect = document.getElementById('agentPremiumModel');
+                // If this combo isn't in the list, add it
+                if (![...premiumSelect.options].some(o => o.value === premiumValue)) {
+                    const opt = document.createElement('option');
+                    opt.value = premiumValue;
+                    opt.textContent = `${agent.premium_model} (${agent.premium_provider})`;
+                    premiumSelect.appendChild(opt);
+                }
+                premiumSelect.value = premiumValue;
+            } else {
+                document.getElementById('agentPremiumModel').value = '';
+            }
+            
+            // Safety settings (default ON if not set)
+            document.getElementById('agentStickToFacts').checked = metadata.stick_to_facts !== false;
+            document.getElementById('agentObjectiveResponses').checked = metadata.objective_responses !== false;
+            document.getElementById('agentInjectionDefense').checked = metadata.injection_defense !== false;
+            
+            // Tools
+            const tools = agent.tools || [];
+            document.getElementById('agentSearchDocuments').checked = tools.includes('search_documents');
+            
+            // Handle context_schema
+            const hasContextSchema = agent.context_schema !== null && agent.context_schema !== undefined;
+            document.getElementById('agentSaveUserData').checked = hasContextSchema;
+            
+            if (hasContextSchema && typeof agent.context_schema === 'object' && Object.keys(agent.context_schema).length > 0) {
+                document.getElementById('agentContextSchema').value = JSON.stringify(agent.context_schema, null, 2);
+            } else {
+                document.getElementById('agentContextSchema').value = '';
+            }
+            
+            toggleContextSchema();
+            showModal('newAgentModal');
+        }
+        
+        async function deleteAgent(agentId) {
+            if (!confirm('Delete this agent? This cannot be undone.')) return;
+            
+            const result = await apiCall(`${API}/agents/${agentId}`, { method: 'DELETE' });
+            if (result !== null) {
+                loadAgents();
+                addSecurityLog('info', `Agent deleted: ${agentId}`);
+            }
+        }
+        
+        async function saveAgent() {
+            const editId = document.getElementById('editAgentId').value;
+            const saveUserData = document.getElementById('agentSaveUserData').checked;
+            
+            let context_schema = null;
+            if (saveUserData) {
+                const contextSchemaStr = document.getElementById('agentContextSchema').value.trim();
+                if (contextSchemaStr) {
+                    try {
+                        context_schema = JSON.parse(contextSchemaStr);
+                    } catch (e) {
+                        showError('Invalid JSON in Context Schema');
+                        return;
+                    }
+                } else {
+                    context_schema = {};  // Auto mode - empty object
+                }
+            }
+            // If saveUserData is false, context_schema stays null (disabled)
+            
+            // Parse provider:model format
+            const modelValue = document.getElementById('agentModel').value;
+            const [provider, model] = modelValue.includes(':') ? modelValue.split(':') : ['groq', modelValue];
+            
+            // Parse premium model format
+            const premiumModelValue = document.getElementById('agentPremiumModel').value;
+            let premiumProvider = null;
+            let premiumModel = null;
+            if (premiumModelValue && premiumModelValue.includes(':')) {
+                [premiumProvider, premiumModel] = premiumModelValue.split(':');
+            }
+            
+            // Build tools array
+            const tools = [];
+            if (document.getElementById('agentSearchDocuments').checked) {
+                tools.push('search_documents');
+            }
+            
+            const data = {
+                name: document.getElementById('agentName').value,
+                provider: provider,
+                model: model,
+                system_prompt: document.getElementById('agentSystemPrompt').value,
+                temperature: parseFloat(document.getElementById('agentTemp').value),
+                max_tokens: parseInt(document.getElementById('agentMaxTokens').value),
+                context_schema: context_schema,
+                tools: tools,
+                memory_strategy: document.getElementById('agentMemoryStrategy').value,
+                memory_params: {
+                    n: parseInt(document.getElementById('agentMemoryN').value)
+                },
+                premium_provider: premiumProvider,
+                premium_model: premiumModel,
+                metadata: {
+                    stick_to_facts: document.getElementById('agentStickToFacts').checked,
+                    objective_responses: document.getElementById('agentObjectiveResponses').checked,
+                    injection_defense: document.getElementById('agentInjectionDefense').checked,
+                    memory_strategy: document.getElementById('agentMemoryStrategy').value,
+                    memory_params: {
+                        n: parseInt(document.getElementById('agentMemoryN').value)
+                    },
+                },
+            };
+            
+            // Add role only for create
+            if (!editId) {
+                data.role = document.getElementById('agentRole').value;
+            }
+            
+            let result;
+            if (editId) {
+                // Update existing
+                result = await apiCall(`${API}/agents/${editId}`, {
+                    method: 'PATCH',
+                    body: JSON.stringify(data)
+                });
+            } else {
+                // Create new
+                result = await apiCall(`${API}/agents`, {
+                    method: 'POST',
+                    body: JSON.stringify(data)
+                });
+            }
+            
+            if (result) {
+                closeModal('newAgentModal');
+                await loadAgents();  // Wait for fresh data
+                addSecurityLog('info', editId ? `Agent updated: ${data.name}` : `Agent created: ${data.name}`);
+                
+                // If editing, refresh the chat tab if this agent is selected
+                if (editId && currentThread && currentThread.agent_id === editId) {
+                    const agent = agents.find(a => a.id === editId);
+                    if (agent) {
+                        loadAgentSettings(agent);
+                    }
+                }
+            }
+        }
+        
+        // ===================
+        // Threads
+        // ===================
+        
+        async function loadThreads() {
+            const data = await apiCall(`${API}/threads`);
+            console.log('loadThreads response:', data);  // DEBUG
+            if (!data) return;
+            
+            threads = data;
+            renderThreads();
+        }
+        
+        function renderThreads() {
+            const container = document.getElementById('threadList');
+            const countEl = document.getElementById('threadCount');
+            
+            if (threads.length === 0) {
+                container.innerHTML = '<div class="empty-state">No chats yet</div>';
+                countEl.textContent = '';
+                return;
+            }
+            
+            // Update total count
+            countEl.textContent = `(${threads.length})`;
+            
+            // Group threads by agent
+            const grouped = {};
+            for (const thread of threads) {
+                const agentId = thread.agent_id || 'unknown';
+                if (!grouped[agentId]) {
+                    grouped[agentId] = [];
+                }
+                grouped[agentId].push(thread);
+            }
+            
+            // Build HTML with collapsible agent groups
+            let html = '';
+            for (const [agentId, agentThreads] of Object.entries(grouped)) {
+                // Find agent name
+                const agent = agents.find(a => a.id === agentId);
+                const agentName = agent ? agent.name : 'Unknown Agent';
+                const isCollapsed = collapsedAgents[agentId] || false;
+                
+                html += `
+                    <div class="thread-group">
+                        <div class="thread-group-header" 
+                             onclick="toggleAgentCollapse('${agentId}')"
+                             style="font-size: 0.8rem; color: #666; padding: 8px 12px; background: #f0f0f0; border-radius: 4px; margin-bottom: 4px; cursor: pointer; display: flex; justify-content: space-between; align-items: center;">
+                            <span>🤖 ${escapeHtml(agentName)} <span style="color:#999;">(${agentThreads.length})</span></span>
+                            <span style="font-size: 0.7rem;">${isCollapsed ? '▶' : '▼'}</span>
+                        </div>
+                        <div class="thread-group-items" style="display: ${isCollapsed ? 'none' : 'block'};">
+                            ${agentThreads.map(thread => `
+                                <div class="list-item ${currentThread?.id === thread.id ? 'selected' : ''}" 
+                                     style="margin-left: 8px; display: flex; justify-content: space-between; align-items: center;">
+                                    <div onclick="selectThread('${thread.id}')" style="flex: 1; cursor: pointer;">
+                                        <div class="list-item-title">${escapeHtml(thread.title || 'Untitled')}</div>
+                                        <div class="list-item-meta">${thread.message_count || 0} messages</div>
+                                    </div>
+                                    <button class="btn-danger btn-small" onclick="event.stopPropagation(); deleteThread('${thread.id}')" 
+                                            style="padding: 2px 6px; font-size: 0.7rem;">✕</button>
+                                </div>
+                            `).join('')}
+                        </div>
+                    </div>
+                `;
+            }
+            
+            container.innerHTML = html;
+        }
+        
+        // Track collapsed state for agent groups
+        let collapsedAgents = {};
+        
+        function toggleAgentCollapse(agentId) {
+            collapsedAgents[agentId] = !collapsedAgents[agentId];
+            renderThreads();
+        }
+        
+        async function createThread() {
+            const data = {
+                agent_id: document.getElementById('threadAgentSelect').value,
+                title: document.getElementById('threadTitle').value || 'New Chat'
+            };
+            
+            const result = await apiCall(`${API}/threads`, {
+                method: 'POST',
+                body: JSON.stringify(data)
+            });
+            
+            if (result) {
+                closeModal('newThreadModal');
+                await loadThreads();  // Wait for threads to load
+                selectThread(result.id);  // Now the thread exists in the array
+            }
+        }
+        
+        async function deleteThread(threadId) {
+            if (!confirm('Delete this chat? All messages will be lost.')) return;
+            
+            const result = await apiCall(`${API}/threads/${threadId}`, {
+                method: 'DELETE'
+            });
+            
+            // DELETE returns true (204), null on error
+            if (result) {
+                // Remove from local array immediately
+                threads = threads.filter(t => t.id !== threadId);
+                
+                // Clear current if deleted
+                if (currentThread?.id === threadId) {
+                    currentThread = null;
+                    document.getElementById('chatHeader').style.display = 'none';
+                    document.getElementById('messages').innerHTML = '<div class="empty-state">Select a chat to start chatting</div>';
+                    document.getElementById('messageInput').disabled = true;
+                    document.getElementById('sendBtn').disabled = true;
+                }
+                
+                // Re-render immediately
+                renderThreads();
+                
+                // Also reload from server to be sure
+                await loadThreads();
+            }
+        }
+        
+        async function selectThread(threadId) {
+            const thread = threads.find(t => t.id === threadId);
+            if (!thread) return;
+            
+            currentThread = thread;
+            
+            // Load agent for this thread
+            const agent = await apiCall(`${API}/agents/${thread.agent_id}`);
+            if (agent) {
+                currentAgent = agent;
+                document.getElementById('currentAgentBadge').textContent = agent.name;
+                // Show provider/model
+                const modelBadge = document.getElementById('currentModelBadge');
+                const provider = agent.provider || 'openai';
+                const model = agent.model || 'gpt-4o-mini';
+                modelBadge.textContent = `${provider}/${model}`;
+                loadAgentSettings(agent);
+                
+                // Load agent documents and update UI
+                await loadAgentDocs();
+                updateDocUploadButton();
+                setupDocDropZone();
+            }
+            
+            document.getElementById('chatHeader').style.display = 'flex';
+            document.getElementById('currentThreadTitle').textContent = thread.title || 'Untitled';
+            document.getElementById('messageInput').disabled = false;
+            document.getElementById('sendBtn').disabled = false;
+            
+            renderThreads();
+            loadMessages();
+            connectWebSocket();
+            
+            // Load user context for this thread
+            await refreshUserInfo();
+        }
+        
+        function loadAgentSettings(agent) {
+            // Populate settings panel with agent config
+            document.getElementById('temperature').value = agent.temperature || 0.7;
+            document.getElementById('tempValue').textContent = agent.temperature || 0.7;
+            document.getElementById('maxTokens').value = agent.max_tokens || 4096;
+            
+            // Memory strategy
+            const memoryParams = agent.memory_params || {};
+            document.getElementById('memoryStrategy').value = agent.memory_strategy || 'last_n';
+            document.getElementById('memoryN').value = memoryParams.n || 20;
+            
+            // Safety controls from metadata (default to ON if not set)
+            const metadata = agent.metadata || {};
+            document.getElementById('stickToFacts').checked = metadata.stick_to_facts !== false;  // Default ON
+            document.getElementById('objectiveResponses').checked = metadata.objective_responses !== false;  // Default ON
+            document.getElementById('injectionDefense').checked = metadata.injection_defense !== false;  // Default ON
+            
+            // Show/hide N field based on strategy
+            toggleMemoryN();
+        }
+        
+        async function updateAgentSettings() {
+            if (!currentAgent) return;
+            
+            const settings = {
+                temperature: parseFloat(document.getElementById('temperature').value),
+                max_tokens: parseInt(document.getElementById('maxTokens').value),
+                memory_strategy: document.getElementById('memoryStrategy').value,
+                memory_params: {
+                    n: parseInt(document.getElementById('memoryN').value)
+                },
+                metadata: {
+                    ...currentAgent.metadata,
+                    stick_to_facts: document.getElementById('stickToFacts').checked,
+                    objective_responses: document.getElementById('objectiveResponses').checked,
+                    injection_defense: document.getElementById('injectionDefense').checked,
+                }
+            };
+            
+            // Update agent
+            const result = await apiCall(`${API}/agents/${currentAgent.id}`, {
+                method: 'PATCH',
+                body: JSON.stringify(settings)
+            });
+            
+            if (result) {
+                currentAgent = result;
+                addSecurityLog('info', `Agent settings updated`);
+            }
+        }
+        
+        async function refreshUserInfo() {
+            console.log('[DEBUG refreshUserInfo] Called, currentThread=', currentThread);
+            if (!currentThread) {
+                console.log('[DEBUG refreshUserInfo] No currentThread, returning');
+                return;
+            }
+            
+            const display = document.getElementById('userInfoDisplay');
+            
+            try {
+                const url = `${API}/threads/${currentThread.id}/user-context`;
+                console.log('[DEBUG refreshUserInfo] Fetching:', url);
+                const data = await apiCall(url);
+                console.log('[DEBUG refreshUserInfo] Response:', data);
+                
+                if (!data) {
+                    console.log('[DEBUG refreshUserInfo] No data returned');
+                    display.innerHTML = '<em style="color: #888;">Could not load context</em>';
+                    return;
+                }
+                
+                if (!data.enabled) {
+                    console.log('[DEBUG refreshUserInfo] Not enabled');
+                    display.innerHTML = '<em style="color: #888;">Context not enabled. Set context_schema on agent.</em>';
+                    return;
+                }
+                
+                if (!data.context || Object.keys(data.context).length === 0) {
+                    console.log('[DEBUG refreshUserInfo] Empty context');
+                    display.innerHTML = '<em>Context enabled - no data yet</em>';
+                    return;
+                }
+                
+                console.log('[DEBUG refreshUserInfo] Rendering context:', data.context);
+                display.innerHTML = renderContext(data.context);
+            } catch (e) {
+                console.error('[DEBUG refreshUserInfo] Error:', e);
+                display.innerHTML = '<em style="color: #888;">Error loading context</em>';
+            }
+        }
+        
+        function renderContext(context, indent = 0, parentKey = null) {
+            if (!context || typeof context !== 'object') {
+                return `<span>${escapeHtml(String(context))}</span>`;
+            }
+            
+            const prefix = '&nbsp;'.repeat(indent * 4);
+            
+            if (Array.isArray(context)) {
+                return context.map((item, i) => `
+                    <div style="margin-left: ${indent * 12}px; padding: 2px 0;">
+                        ${typeof item === 'object' ? renderContext(item, indent + 1) : `• ${escapeHtml(String(item))}`}
+                    </div>
+                `).join('');
+            }
+            
+            return Object.entries(context).map(([key, value]) => `
+                <div style="margin-bottom: 6px; padding: 6px; background: #fff; border-radius: 4px; margin-left: ${indent * 12}px; display: flex; justify-content: space-between; align-items: flex-start;">
+                    <div style="flex: 1;">
+                        <strong>${escapeHtml(key)}:</strong> 
+                        ${typeof value === 'object' ? '<br>' + renderContext(value, indent + 1, key) : escapeHtml(String(value))}
+                    </div>
+                    ${indent === 0 ? `<button class="btn-danger btn-small" onclick="deleteContextField('${escapeHtml(key)}')" style="font-size: 0.6rem; padding: 1px 4px; margin-left: 4px;">✕</button>` : ''}
+                </div>
+            `).join('');
+        }
+        
+        function updateUserContextDisplay(context) {
+            const display = document.getElementById('userInfoDisplay');
+            if (!context || Object.keys(context).length === 0) {
+                display.innerHTML = '<em>No user info collected yet</em>';
+                return;
+            }
+            display.innerHTML = renderContext(context);
+        }
+        
+        async function deleteContextField(fieldName) {
+            if (!currentThread) return;
+            if (!confirm(`Delete "${fieldName}" from user context?`)) return;
+            
+            const result = await apiCall(`${API}/threads/${currentThread.id}/user-context/${fieldName}`, {
+                method: 'DELETE'
+            });
+            
+            if (result) {
+                await refreshUserInfo();
+                addSecurityLog('info', `Deleted context field: ${fieldName}`);
+            }
+        }
+        
+        async function clearAllContext() {
+            if (!currentThread) return;
+            if (!confirm('Clear ALL user context? This cannot be undone.')) return;
+            
+            const result = await apiCall(`${API}/threads/${currentThread.id}/user-context`, {
+                method: 'DELETE'
+            });
+            
+            if (result) {
+                await refreshUserInfo();
+                addSecurityLog('info', 'Cleared all user context');
+            }
+        }
+        
+        // ===================
+        // Messages
+        // ===================
+        
+        async function loadMessages() {
+            if (!currentThread) return;
+            
+            const data = await apiCall(`${API}/threads/${currentThread.id}/messages`);
+            if (!data) return;
+            
+            renderMessages(data);
+        }
+        
+        function renderMessages(messages) {
+            const container = document.getElementById('chatMessages');
+            
+            if (!messages || messages.length === 0) {
+                container.innerHTML = '<div class="empty-state">No messages yet. Start the conversation!</div>';
+                return;
+            }
+            
+            container.innerHTML = messages.map(msg => `
+                <div class="message ${msg.role}">
+                    <div class="message-content">${formatMessage(msg.content)}</div>
+                    <div class="message-meta">${msg.role} • ${formatTime(msg.created_at)}</div>
+                </div>
+            `).join('');
+            
+            container.scrollTop = container.scrollHeight;
+        }
+        
+        async function sendMessage() {
+            const input = document.getElementById('messageInput');
+            const message = input.value.trim();
+            if (!message || !currentThread) return;
+            
+            input.value = '';
+            
+            // Add user message immediately
+            appendMessage({ role: 'user', content: message });
+            
+            // Show typing indicator
+            showTypingIndicator();
+            
+            // Get per-chat overrides from settings panel
+            const requestBody = { 
+                message,
+                stick_to_facts: document.getElementById('stickToFacts').checked,
+                objective_responses: document.getElementById('objectiveResponses').checked,
+                temperature: parseFloat(document.getElementById('temperature').value),
+                memory_strategy: document.getElementById('memoryStrategy').value,
+                memory_n: parseInt(document.getElementById('memoryN').value),
+            };
+            
+            // Send via REST (WebSocket streaming is alternative)
+            const data = await apiCall(`${API}/chat/${currentThread.id}`, {
+                method: 'POST',
+                body: JSON.stringify(requestBody)
+            });
+            
+            hideTypingIndicator();
+            
+            if (data && data.message) {
+                // Append message with sources if available
+                appendMessage({ 
+                    role: 'assistant', 
+                    content: data.message.content,
+                    sources: data.sources || []
+                });
+                
+                // Refresh thread to update message count
+                if (currentThread) {
+                    const refreshed = await apiCall(`${API}/threads/${currentThread.id}`);
+                    if (refreshed) {
+                        currentThread = refreshed;
+                        // Update thread in list
+                        const idx = threads.findIndex(t => t.id === currentThread.id);
+                        if (idx >= 0) threads[idx] = refreshed;
+                        renderThreads();
+                        // Update header with new title if changed
+                        document.getElementById('currentThreadTitle').textContent = refreshed.title || 'Untitled';
+                    }
+                }
+                
+                // Always fetch fresh user context from API after each message
+                console.log('[DEBUG sendMessage] About to call refreshUserInfo');
+                await refreshUserInfo();
+                console.log('[DEBUG sendMessage] refreshUserInfo completed');
+            }
+        }
+        
+        function appendMessage(msg) {
+            const container = document.getElementById('chatMessages');
+            
+            // Remove empty state if present
+            const empty = container.querySelector('.empty-state');
+            if (empty) empty.remove();
+            
+            const div = document.createElement('div');
+            div.className = `message ${msg.role}`;
+            
+            // Build sources HTML if present
+            let sourcesHtml = '';
+            if (msg.sources && msg.sources.length > 0) {
+                sourcesHtml = msg.sources.map(source => renderSourceBox(source)).join('');
+            }
+            
+            div.innerHTML = `
+                <div class="message-content">${formatMessage(msg.content)}</div>
+                ${sourcesHtml}
+                <div class="message-meta">${msg.role} • now</div>
+            `;
+            container.appendChild(div);
+            container.scrollTop = container.scrollHeight;
+        }
+        
+        function showTypingIndicator() {
+            const container = document.getElementById('chatMessages');
+            const div = document.createElement('div');
+            div.className = 'message assistant';
+            div.id = 'typingIndicator';
+            div.innerHTML = `
+                <div class="typing-indicator">
+                    <span></span><span></span><span></span>
+                </div>
+            `;
+            container.appendChild(div);
+            container.scrollTop = container.scrollHeight;
+        }
+        
+        function hideTypingIndicator() {
+            const indicator = document.getElementById('typingIndicator');
+            if (indicator) indicator.remove();
+        }
+        
+        // ===================
+        // WebSocket
+        // ===================
+        
+        function connectWebSocket() {
+            if (!currentThread) return;
+            
+            if (ws) ws.close();
+            
+            const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            ws = new WebSocket(`${protocol}//${location.host}${API}/chat/${currentThread.id}/ws`);
+            
+            ws.onopen = () => {
+                document.getElementById('statusDot').className = 'status-dot connected';
+                document.getElementById('statusText').textContent = 'Connected';
+            };
+            
+            ws.onclose = () => {
+                document.getElementById('statusDot').className = 'status-dot';
+                document.getElementById('statusText').textContent = 'Disconnected';
+            };
+            
+            ws.onerror = (err) => {
+                showError('WebSocket error', err.message);
+            };
+            
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                if (data.type === 'chunk') {
+                    // Handle streaming chunk
+                } else if (data.type === 'done') {
+                    hideTypingIndicator();
+                    appendMessage({ role: 'assistant', content: data.content });
+                } else if (data.type === 'error') {
+                    hideTypingIndicator();
+                    showError(data.error);
+                }
+            };
+        }
+        
+        // ===================
+        // Documents
+        // ===================
+        
+        let allTags = [];
+        let allEntities = [];
+        let modelsReady = false;
+        let modelsCatalog = null;  // Loaded from API
+        
+        async function loadModelsCatalog() {
+            const data = await apiCall(`${API}/agents/models/catalog`);
+            if (data) {
+                modelsCatalog = data;
+                updateModelOptions();
+                updateAskModelOptions();
+            }
+        }
+        
+        function updateModelOptions() {
+            if (!modelsCatalog) return;
+            
+            const select = document.getElementById('agentModel');
+            if (!select) return;
+            
+            // Build grouped options like the Documents tab
+            let html = '';
+            
+            // Free & Fast (Groq) - first since it's the default
+            const groqModels = modelsCatalog.models.groq || [];
+            if (groqModels.length > 0) {
+                html += '<optgroup label="Free & Fast (Groq)">';
+                groqModels.forEach(m => {
+                    const selected = m === 'llama-3.3-70b-versatile' ? ' selected' : '';
+                    html += `<option value="groq:${m}"${selected}>${m}</option>`;
+                });
+                html += '</optgroup>';
+            }
+            
+            // Local (Ollama)
+            const ollamaModels = modelsCatalog.models.ollama || [];
+            if (ollamaModels.length > 0) {
+                html += '<optgroup label="Local (Ollama)">';
+                ollamaModels.forEach(m => {
+                    const details = modelsCatalog.details[m] || {};
+                    const size = details.size_gb ? ` (${details.size_gb}GB)` : '';
+                    const rec = details.recommended ? ' ⭐' : '';
+                    html += `<option value="ollama:${m}">${m}${size}${rec}</option>`;
+                });
+                html += '</optgroup>';
+            }
+            
+            // Paid APIs
+            html += '<optgroup label="Paid APIs">';
+            const anthropicModels = modelsCatalog.models.anthropic || [];
+            anthropicModels.forEach(m => {
+                html += `<option value="anthropic:${m}">${m}</option>`;
+            });
+            const openaiModels = modelsCatalog.models.openai || [];
+            openaiModels.forEach(m => {
+                html += `<option value="openai:${m}">${m}</option>`;
+            });
+            html += '</optgroup>';
+            
+            select.innerHTML = html;
+        }
+        
+        function updateAskModelOptions() {
+            if (!modelsCatalog) return;
+            
+            const select = document.getElementById('askProvider');
+            if (!select) return;
+            
+            // Build grouped options
+            let html = '<option value="tinyroberta">TinyRoberta (extractive, fast)</option>';
+            
+            // Free & Fast (Groq)
+            const groqModels = modelsCatalog.models.groq || [];
+            if (groqModels.length > 0) {
+                html += '<optgroup label="Free & Fast (Groq)">';
+                groqModels.forEach(m => {
+                    html += `<option value="groq:${m}">${m}</option>`;
+                });
+                html += '</optgroup>';
+            }
+            
+            // Local (Ollama)
+            const ollamaModels = modelsCatalog.models.ollama || [];
+            if (ollamaModels.length > 0) {
+                html += '<optgroup label="Local (Ollama)">';
+                ollamaModels.forEach(m => {
+                    const details = modelsCatalog.details[m] || {};
+                    const size = details.size_gb ? ` (${details.size_gb}GB)` : '';
+                    const rec = details.recommended ? ' ⭐' : '';
+                    html += `<option value="ollama:${m}" id="${m === 'qwen2.5:3b' ? 'ollamaOption' : ''}">${m}${size}${rec}</option>`;
+                });
+                html += '</optgroup>';
+            }
+            
+            // Paid APIs
+            html += '<optgroup label="Paid APIs">';
+            const anthropicModels = modelsCatalog.models.anthropic || [];
+            anthropicModels.forEach(m => {
+                html += `<option value="anthropic:${m}">${m}</option>`;
+            });
+            const openaiModels = modelsCatalog.models.openai || [];
+            openaiModels.slice(0, 3).forEach(m => {  // Just top 3
+                html += `<option value="openai:${m}">${m}</option>`;
+            });
+            html += '</optgroup>';
+            
+            select.innerHTML = html;
+        }
+        
+        async function checkModelStatus() {
+            const status = await apiCall(`${API}/documents/status`);
+            if (!status) return;
+            
+            modelsReady = status.ready;
+            
+            const banner = document.getElementById('modelLoadingBanner');
+            const uploadBtn = document.getElementById('uploadBtn');
+            const askBtn = document.getElementById('askBtn');
+            
+            if (status.ready) {
+                banner.style.display = 'none';
+                uploadBtn.disabled = false;
+                askBtn.disabled = false;
+                
+                // Check Ollama status after models ready
+                checkOllamaStatus();
+            } else {
+                banner.style.display = 'block';
+                uploadBtn.disabled = true;
+                askBtn.disabled = true;
+                
+                // Show detailed status
+                const details = [];
+                if (status.embeddings?.loading) {
+                    details.push(`Embeddings: loading...`);
+                } else if (status.embeddings?.ready) {
+                    details.push(`Embeddings: ✓ ${status.embeddings.model || ''}`);
+                } else if (status.embeddings?.error) {
+                    details.push(`Embeddings: ✗`);
+                }
+                
+                if (status.reranker?.loading) {
+                    details.push('Reranker: loading...');
+                } else if (status.reranker?.ready) {
+                    details.push(`Reranker: ✓`);
+                } else if (status.reranker?.error) {
+                    details.push(`Reranker: ✗`);
+                }
+                
+                if (status.qa?.loading) {
+                    details.push('QA: loading...');
+                } else if (status.qa?.ready) {
+                    details.push('QA: ✓');
+                }
+                
+                document.getElementById('modelLoadingDetail').textContent = details.join(' | ');
+                
+                // Poll again in 2 seconds
+                setTimeout(checkModelStatus, 2000);
+            }
+        }
+        
+        async function checkOllamaStatus() {
+            const statusEl = document.getElementById('ollamaStatus');
+            const ollamaOption = document.getElementById('ollamaOption');
+            
+            if (!statusEl) return;
+            
+            const status = await apiCall(`${API}/documents/ollama/status`);
+            
+            if (!status || !status.available) {
+                statusEl.innerHTML = '<span style="color: #888;">Ollama not running</span>';
+                if (ollamaOption) ollamaOption.disabled = true;
+                return;
+            }
+            
+            // Check if qwen2.5:3b is installed
+            const hasModel = status.models.some(m => m.includes('qwen2.5'));
+            
+            if (hasModel) {
+                statusEl.innerHTML = '<span style="color: #22c55e;">✓</span>';
+                if (ollamaOption) ollamaOption.disabled = false;
+            } else {
+                statusEl.innerHTML = `<button class="btn-small" onclick="installOllamaModel()" style="padding: 2px 8px; font-size: 0.7rem;">Install Qwen 2.5</button>`;
+                if (ollamaOption) ollamaOption.disabled = true;
+            }
+        }
+        
+        async function installOllamaModel() {
+            const statusEl = document.getElementById('ollamaStatus');
+            statusEl.innerHTML = '<span style="color: #f59e0b;">Downloading... (1.9GB)</span>';
+            
+            const result = await apiCall(`${API}/documents/ollama/pull?model=qwen2.5:3b`, { method: 'POST' });
+            
+            if (result?.success) {
+                statusEl.innerHTML = '<span style="color: #22c55e;">✓ Installed</span>';
+                const ollamaOption = document.getElementById('ollamaOption');
+                if (ollamaOption) ollamaOption.disabled = false;
+            } else {
+                statusEl.innerHTML = '<span style="color: #ef4444;">Failed</span>';
+            }
+        }
+        
+        async function loadDocuments() {
+            const tagFilter = document.getElementById('tagFilter')?.value || '';
+            const url = tagFilter ? `${API}/documents?tags=${tagFilter}` : `${API}/documents`;
+            
+            const data = await apiCall(url);
+            if (!data) return;
+            
+            // Extract unique tags and entities
+            allTags = [...new Set(data.flatMap(d => d.tags || []))].sort();
+            allEntities = [...new Set(data.map(d => d.entity_id).filter(Boolean))].sort();
+            
+            // Update tag filter dropdown
+            const tagSelect = document.getElementById('tagFilter');
+            const currentTag = tagSelect.value;
+            tagSelect.innerHTML = '<option value="">All Tags</option>' + 
+                allTags.map(t => `<option value="${t}" ${t === currentTag ? 'selected' : ''}>${t}</option>`).join('');
+            
+            // Update entity filter dropdown
+            const entitySelect = document.getElementById('searchEntityFilter');
+            entitySelect.innerHTML = '<option value="">All entities</option>' + 
+                allEntities.map(e => `<option value="${e}">${e}</option>`).join('');
+            
+            renderDocuments(data);
+        }
+        
+        function filterByTag() {
+            loadDocuments();
+        }
+        
+        function renderDocuments(docs) {
+            const container = document.getElementById('documentList');
+            
+            if (!docs || docs.length === 0) {
+                container.innerHTML = '<div class="empty-state">No documents uploaded yet</div>';
+                return;
+            }
+            
+            container.innerHTML = docs.map(doc => `
+                <div class="list-item" style="display: flex; justify-content: space-between; align-items: center;">
+                    <div style="flex: 1;">
+                        <div class="list-item-title">${escapeHtml(doc.filename)}</div>
+                        <div class="list-item-meta">
+                            ${doc.chunk_count} chunks • ${formatBytes(doc.size_bytes)} • ${doc.entity_id || 'no entity'}
+                        </div>
+                        ${doc.tags && doc.tags.length > 0 ? `
+                            <div style="margin-top: 4px;">
+                                ${doc.tags.map(t => `<span class="badge badge-info" style="font-size: 0.7rem; margin-right: 4px;">${escapeHtml(t)}</span>`).join('')}
+                            </div>
+                        ` : ''}
+                    </div>
+                    <div style="display: flex; gap: 8px;">
+                        <button class="btn-secondary btn-small" onclick="editDocTags('${doc.id}', '${(doc.tags || []).join(',')}')">Tags</button>
+                        <button class="btn-danger btn-small" onclick="deleteDocument('${doc.id}')">Delete</button>
+                    </div>
+                </div>
+            `).join('');
+        }
+        
+        async function editDocTags(docId, currentTags) {
+            const newTags = prompt('Edit tags (comma-separated):', currentTags);
+            if (newTags === null) return;
+            
+            const tagList = newTags.split(',').map(t => t.trim()).filter(Boolean);
+            
+            await apiCall(`${API}/documents/${docId}/tags`, {
+                method: 'POST',
+                body: JSON.stringify(tagList)
+            });
+            
+            loadDocuments();
+        }
+        
+        async function uploadDocument() {
+            const file = document.getElementById('uploadFile').files[0];
+            const entityId = document.getElementById('uploadEntityId').value;
+            
+            if (!file || !entityId) {
+                showError('File and Entity ID are required');
+                return;
+            }
+            
+            // Show progress
+            document.getElementById('uploadForm').style.display = 'none';
+            document.getElementById('uploadProgress').style.display = 'block';
+            document.getElementById('uploadStatus').textContent = 'Uploading and processing document...';
+            
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('entity_id', entityId);
+            formData.append('title', document.getElementById('uploadTitle').value);
+            formData.append('tags', document.getElementById('uploadTags').value);
+            
+            try {
+                const response = await fetch(`${API}/documents/upload`, {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (!response.ok) {
+                    const err = await response.json().catch(() => ({}));
+                    
+                    // Check if models still loading
+                    if (response.status === 503) {
+                        showError('AI models are still loading. Please wait and try again.');
+                        checkModelStatus();
+                    } else {
+                        showError(err.detail || 'Upload failed');
+                    }
+                    
+                    // Reset form
+                    document.getElementById('uploadForm').style.display = 'block';
+                    document.getElementById('uploadProgress').style.display = 'none';
+                    return;
+                }
+                
+                closeModal('uploadModal');
+                // Reset form for next time
+                document.getElementById('uploadForm').style.display = 'block';
+                document.getElementById('uploadProgress').style.display = 'none';
+                document.getElementById('uploadFile').value = '';
+                document.getElementById('uploadEntityId').value = '';
+                document.getElementById('uploadTitle').value = '';
+                document.getElementById('uploadTags').value = '';
+                
+                loadDocuments();
+                addSecurityLog('info', `Document uploaded: ${file.name}`);
+            } catch (err) {
+                showError(err.message);
+                document.getElementById('uploadForm').style.display = 'block';
+                document.getElementById('uploadProgress').style.display = 'none';
+            }
+        }
+        
+        async function deleteDocument(docId) {
+            if (!confirm('Delete this document?')) return;
+            
+            const result = await apiCall(`${API}/documents/${docId}`, { method: 'DELETE' });
+            if (result !== null) {
+                loadDocuments();
+                addSecurityLog('info', `Document deleted: ${docId}`);
+            }
+        }
+        
+        async function askDocuments() {
+            const query = document.getElementById('searchQuery').value;
+            if (!query) {
+                showError('Enter a question');
+                return;
+            }
+            
+            if (!modelsReady) {
+                showError('AI models are still loading. Please wait.');
+                return;
+            }
+            
+            const entityId = document.getElementById('searchEntityFilter').value;
+            const tagFilter = document.getElementById('tagFilter').value;
+            const providerValue = document.getElementById('askProvider').value;
+            
+            // Parse provider:model format
+            let provider = providerValue;
+            let model = '';
+            if (providerValue.includes(':') && providerValue !== 'tinyroberta') {
+                const parts = providerValue.split(':');
+                provider = parts[0];
+                model = parts.slice(1).join(':');  // Handle models like qwen2.5:3b
+            }
+            
+            let url = `${API}/documents/ask?query=${encodeURIComponent(query)}&provider=${provider}`;
+            if (model) url += `&model=${encodeURIComponent(model)}`;
+            if (entityId) url += `&entity_id=${entityId}`;
+            if (tagFilter) url += `&tags=${tagFilter}`;
+            
+            const container = document.getElementById('searchResults');
+            container.innerHTML = '<div style="display: flex; align-items: center; gap: 12px; color: #888;"><div class="spinner" style="width: 20px; height: 20px;"></div>Searching and generating answer...</div>';
+            
+            const data = await apiCall(url, { method: 'POST' });
+            
+            console.log('Ask response:', data);  // Debug
+            
+            if (!data) {
+                container.innerHTML = '<div class="empty-state">Failed to get answer - check console for errors</div>';
+                return;
+            }
+            
+            const isExtractive = provider === 'tinyroberta';
+            const methodBadge = isExtractive 
+                ? '<span class="badge" style="background: #4CAF50; color: white;">Extractive QA</span>'
+                : `<span class="badge" style="background: #9C27B0; color: white;">${data.provider}/${data.model}</span>`;
+            
+            const confidenceColor = data.confidence > 0.5 ? '#4CAF50' : data.confidence > 0.2 ? '#FF9800' : '#f44336';
+            
+            // Build answer display
+            let html = `
+                <div style="margin-bottom: 16px;">
+                    ${methodBadge}
+                    ${isExtractive && data.confidence ? `<span class="badge" style="background: ${confidenceColor}; color: white;">Confidence: ${((data.confidence || 0) * 100).toFixed(0)}%</span>` : ''}
+                </div>
+            `;
+            
+            // Answer box
+            if (data.answer && !data.answer.includes("couldn't find")) {
+                html += `
+                    <div class="card" style="background: #f0f4ff; border-left: 4px solid #5b4ed9; margin-bottom: 16px;">
+                        <div style="font-weight: 500; margin-bottom: 8px; color: #5b4ed9;">Answer:</div>
+                        <div style="font-size: 1rem; line-height: 1.6;">${escapeHtml(data.answer)}</div>
+                    </div>
+                `;
+            } else {
+                html += `
+                    <div class="card" style="background: #fff3cd; border-left: 4px solid #ffc107; margin-bottom: 16px;">
+                        <div style="color: #856404;">${escapeHtml(data.answer || 'No answer generated')}</div>
+                    </div>
+                `;
+            }
+            
+            // Always show sources section
+            html += `<h4 style="margin: 16px 0 8px;">Sources (${data.sources?.length || 0} chunks found)</h4>`;
+            
+            if (data.sources && data.sources.length > 0) {
+                html += data.sources.map(s => `
+                    <div class="list-item" style="font-size: 0.85rem;">
+                        <div style="display: flex; justify-content: space-between; align-items: center;">
+                            <span class="badge badge-info">Score: ${((s.score || 0) * 100).toFixed(0)}%</span>
+                            <span style="font-size: 0.7rem; color: #888;">${s.document_id || ''}</span>
+                        </div>
+                        <div style="margin-top: 8px; color: #555; white-space: pre-wrap;">${escapeHtml(s.content)}</div>
+                    </div>
+                `).join('');
+            } else {
+                html += `
+                    <div class="empty-state" style="padding: 16px; background: #f8f9fa; border-radius: 8px;">
+                        <div style="color: #666;">No matching chunks found in the vector store.</div>
+                        <div style="font-size: 0.8rem; margin-top: 8px; color: #888;">
+                            This can happen if:
+                            <ul style="text-align: left; margin: 8px 0;">
+                                <li>The server was restarted (in-memory vector store)</li>
+                                <li>The document wasn't processed correctly</li>
+                                <li>The entity filter doesn't match</li>
+                            </ul>
+                            Try re-uploading the document.
+                        </div>
+                    </div>
+                `;
+            }
+            
+            container.innerHTML = html;
+        }
+        
+        // Embedding model is now auto-detected based on RAM
+        async function loadEmbeddingModel() {
+            // No longer needed - auto-detected
+        }
+        
+        // ===================
+        // Monitoring
+        // ===================
+        
+        async function loadMetrics() {
+            const data = await apiCall(`${API}/analytics/metrics`);
+            
+            const metrics = data || {
+                agents: agents.length,
+                threads: threads.length,
+                messages: 0,
+                documents: 0,
+                total_cost: 0,
+                total_tokens: 0,
+            };
+            
+            document.getElementById('metricsGrid').innerHTML = `
+                <div class="metric-card">
+                    <div class="metric-value">${metrics.agents}</div>
+                    <div class="metric-label">Agents</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-value">${metrics.threads}</div>
+                    <div class="metric-label">Threads</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-value">${metrics.messages}</div>
+                    <div class="metric-label">Messages</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-value">${metrics.documents}</div>
+                    <div class="metric-label">Documents</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-value">$${(metrics.total_cost || 0).toFixed(4)}</div>
+                    <div class="metric-label">Total Cost</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-value">${(metrics.total_tokens || 0).toLocaleString()}</div>
+                    <div class="metric-label">Total Tokens</div>
+                </div>
+            `;
+        }
+        
+        async function loadLLMCalls() {
+            const callType = document.getElementById('llmCallTypeFilter').value;
+            const url = callType 
+                ? `${API}/analytics/llm-calls?limit=100&call_type=${callType}`
+                : `${API}/analytics/llm-calls?limit=100`;
+            
+            const data = await apiCall(url);
+            if (!data) return;
+            
+            const { calls, summary } = data;
+            
+            // Update summary
+            document.getElementById('llmCallsSummary').innerHTML = `
+                <div style="display: flex; gap: 16px; flex-wrap: wrap; font-size: 0.85rem; color: #666;">
+                    <span><strong>Total Calls:</strong> ${summary.total_calls}</span>
+                    <span><strong>Total Cost:</strong> $${summary.total_cost.toFixed(6)}</span>
+                    <span><strong>Input Tokens:</strong> ${summary.total_input_tokens.toLocaleString()}</span>
+                    <span><strong>Output Tokens:</strong> ${summary.total_output_tokens.toLocaleString()}</span>
+                </div>
+            `;
+            
+            // Update table body
+            const tbody = document.getElementById('llmCallsBody');
+            if (calls.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="11" style="padding: 16px; text-align: center; color: #888;">No LLM calls recorded yet</td></tr>';
+            } else {
+                tbody.innerHTML = calls.map(call => {
+                    const time = new Date(call.timestamp).toLocaleString();
+                    const typeColor = {
+                        'chat': '#4CAF50',
+                        'chat_stream': '#8BC34A',
+                        'chat_ws': '#CDDC39',
+                        'guard': '#FF9800',
+                        'tool_continuation': '#2196F3',
+                        'summary': '#9C27B0',
+                    }[call.call_type] || '#666';
+                    
+                    return `
+                        <tr style="border-bottom: 1px solid #eee;">
+                            <td style="padding: 6px 8px; font-size: 0.75rem; white-space: nowrap;">${time}</td>
+                            <td style="padding: 6px 8px; font-size: 0.75rem;">${escapeHtml(call.agent_name || '-')}</td>
+                            <td style="padding: 6px 8px;"><span style="background: ${typeColor}; color: white; padding: 2px 6px; border-radius: 3px; font-size: 0.7rem;">${call.call_type}</span></td>
+                            <td style="padding: 6px 8px;">${call.provider}</td>
+                            <td style="padding: 6px 8px; font-size: 0.75rem;">${call.model}</td>
+                            <td style="padding: 6px 8px; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${escapeHtml(call.message_preview)}">${escapeHtml(call.message_preview)}</td>
+                            <td style="padding: 6px 8px; text-align: right;">${call.input_tokens.toLocaleString()}</td>
+                            <td style="padding: 6px 8px; text-align: right;">${call.output_tokens.toLocaleString()}</td>
+                            <td style="padding: 6px 8px; font-size: 0.75rem;">${call.tools_used.length > 0 ? call.tools_used.join(', ') : '-'}</td>
+                            <td style="padding: 6px 8px; text-align: right;">$${call.cost.toFixed(6)}</td>
+                            <td style="padding: 6px 8px; text-align: right;">${call.duration_ms.toFixed(0)}ms</td>
+                        </tr>
+                    `;
+                }).join('');
+            }
+            
+            // Update footer with totals
+            const tfoot = document.getElementById('llmCallsFoot');
+            if (calls.length > 0) {
+                const totalIn = calls.reduce((sum, c) => sum + c.input_tokens, 0);
+                const totalOut = calls.reduce((sum, c) => sum + c.output_tokens, 0);
+                const totalCost = calls.reduce((sum, c) => sum + c.cost, 0);
+                const avgDuration = calls.reduce((sum, c) => sum + c.duration_ms, 0) / calls.length;
+                
+                tfoot.innerHTML = `
+                    <tr>
+                        <td colspan="6" style="padding: 8px; text-align: right;">Totals (${calls.length} calls):</td>
+                        <td style="padding: 8px; text-align: right;">${totalIn.toLocaleString()}</td>
+                        <td style="padding: 8px; text-align: right;">${totalOut.toLocaleString()}</td>
+                        <td style="padding: 8px;"></td>
+                        <td style="padding: 8px; text-align: right;">$${totalCost.toFixed(6)}</td>
+                        <td style="padding: 8px; text-align: right;">avg ${avgDuration.toFixed(0)}ms</td>
+                    </tr>
+                `;
+            } else {
+                tfoot.innerHTML = '';
+            }
+        }
+        
+        // ===================
+        // Chat Document Management
+        // ===================
+        
+        let docsSidebarOpen = false;
+        let agentDocs = [];
+        
+        function toggleDocsSidebar() {
+            docsSidebarOpen = !docsSidebarOpen;
+            const sidebar = document.getElementById('docsSidebar');
+            const container = document.getElementById('chatWithDocs');
+            const toggleBtn = document.getElementById('docsToggleBtn');
+            
+            if (docsSidebarOpen) {
+                sidebar.classList.add('open');
+                container.classList.add('docs-open');
+                toggleBtn.classList.add('active');
+                loadAgentDocs();
+            } else {
+                sidebar.classList.remove('open');
+                container.classList.remove('docs-open');
+                toggleBtn.classList.remove('active');
+            }
+        }
+        
+        async function loadAgentDocs() {
+            if (!currentAgent) return;
+            
+            const data = await apiCall(`${API}/documents/agent/${currentAgent.id}`);
+            agentDocs = data || [];
+            renderAgentDocs();
+            updateDocCount();
+        }
+        
+        function updateDocCount() {
+            const countEl = document.getElementById('agentDocCount');
+            if (countEl) {
+                countEl.textContent = agentDocs.length;
+            }
+        }
+        
+        function renderAgentDocs() {
+            const container = document.getElementById('agentDocsList');
+            
+            if (!agentDocs || agentDocs.length === 0) {
+                container.innerHTML = '<div class="empty-state" style="padding: 20px; font-size: 0.85rem;">No documents yet</div>';
+                return;
+            }
+            
+            container.innerHTML = agentDocs.map(doc => `
+                <div class="doc-item" id="doc-${doc.id}">
+                    <div class="doc-item-header">
+                        <div class="doc-item-name">📄 ${escapeHtml(doc.filename)}</div>
+                        <button class="doc-item-delete" onclick="deleteAgentDoc('${doc.id}')" title="Delete">🗑</button>
+                    </div>
+                    <div class="doc-item-meta">
+                        ${formatBytes(doc.size_bytes)} • ${doc.chunk_count} chunks
+                    </div>
+                </div>
+            `).join('');
+        }
+        
+        function triggerDocUpload() {
+            document.getElementById('docFileInput').click();
+        }
+        
+        async function handleDocUpload(event) {
+            const files = event.target.files;
+            if (!files.length || !currentAgent) return;
+            
+            for (const file of files) {
+                await uploadAgentDoc(file);
+            }
+            
+            // Clear input for next upload
+            event.target.value = '';
+        }
+        
+        async function uploadAgentDoc(file) {
+            if (!currentAgent) return;
+            
+            // Auto-open sidebar when uploading (but don't refresh docs)
+            if (!docsSidebarOpen) {
+                docsSidebarOpen = true;
+                const sidebar = document.getElementById('docsSidebar');
+                const container = document.getElementById('chatWithDocs');
+                const toggleBtn = document.getElementById('docsToggleBtn');
+                sidebar.classList.add('open');
+                container.classList.add('docs-open');
+                toggleBtn.classList.add('active');
+                // Don't call loadAgentDocs() here - we'll render after upload
+            }
+            
+            // Add uploading indicator
+            const container = document.getElementById('agentDocsList');
+            const tempId = 'temp-' + Date.now();
+            const uploadingHtml = `
+                <div class="doc-item uploading" id="${tempId}">
+                    <div class="doc-item-header">
+                        <div class="doc-item-name">📄 ${escapeHtml(file.name)}</div>
+                    </div>
+                    <div class="doc-progress">
+                        <div class="doc-progress-bar" style="width: 30%;"></div>
+                    </div>
+                </div>
+            `;
+            
+            // Remove empty state if present
+            const emptyState = container.querySelector('.empty-state');
+            if (emptyState) emptyState.remove();
+            
+            container.insertAdjacentHTML('afterbegin', uploadingHtml);
+            
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('title', file.name);
+            
+            try {
+                const response = await fetch(`${API}/documents/agent/${currentAgent.id}/upload`, {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (!response.ok) {
+                    throw new Error('Upload failed');
+                }
+                
+                const doc = await response.json();
+                
+                // Remove temp, add real doc
+                document.getElementById(tempId)?.remove();
+                agentDocs.unshift(doc);
+                renderAgentDocs();
+                updateDocCount();
+                
+                addSecurityLog('info', `Document uploaded: ${file.name}`);
+            } catch (err) {
+                document.getElementById(tempId)?.remove();
+                showError(`Failed to upload ${file.name}: ${err.message}`);
+            }
+        }
+        
+        async function deleteAgentDoc(docId) {
+            if (!currentAgent) return;
+            if (!confirm('Delete this document?')) return;
+            
+            const result = await apiCall(`${API}/documents/agent/${currentAgent.id}/${docId}`, {
+                method: 'DELETE'
+            });
+            
+            if (result) {
+                agentDocs = agentDocs.filter(d => d.id !== docId);
+                renderAgentDocs();
+                updateDocCount();
+                addSecurityLog('info', `Document deleted: ${docId}`);
+            }
+        }
+        
+        // Drag and drop support
+        function setupDocDropZone() {
+            const dropZone = document.getElementById('docDropZone');
+            if (!dropZone) return;
+            
+            ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+                dropZone.addEventListener(eventName, (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                });
+            });
+            
+            ['dragenter', 'dragover'].forEach(eventName => {
+                dropZone.addEventListener(eventName, () => {
+                    dropZone.classList.add('dragover');
+                });
+            });
+            
+            ['dragleave', 'drop'].forEach(eventName => {
+                dropZone.addEventListener(eventName, () => {
+                    dropZone.classList.remove('dragover');
+                });
+            });
+            
+            dropZone.addEventListener('drop', async (e) => {
+                const files = e.dataTransfer.files;
+                for (const file of files) {
+                    await uploadAgentDoc(file);
+                }
+            });
+        }
+        
+        // Render source box for a message
+        function renderSourceBox(source) {
+            if (!source) return '';
+            
+            const page = source.page ? `, page ${source.page}` : '';
+            const preview = source.chunk_preview || '';
+            
+            return `
+                <div class="source-box">
+                    <div class="source-box-header">
+                        <span>📄 ${escapeHtml(source.filename)}${page}</span>
+                        <a href="${API}/documents/agent/${currentAgent?.id}/${source.document_id}/download" 
+                           class="source-box-link" target="_blank">View →</a>
+                    </div>
+                    <div class="source-box-content">"${escapeHtml(preview)}"</div>
+                </div>
+            `;
+        }
+        
+        // Check if agent has search_documents tool and show/hide upload button
+        function updateDocUploadButton() {
+            const uploadBtn = document.getElementById('chatUploadBtn');
+            if (!uploadBtn || !currentAgent) return;
+            
+            const tools = currentAgent.tools || [];
+            if (tools.includes('search_documents')) {
+                uploadBtn.style.display = 'block';
+            } else {
+                uploadBtn.style.display = 'none';
+            }
+        }
+        
+        // ===================
+        // Utilities
+        // ===================
+        
+        function escapeHtml(str) {
+            if (str === null || str === undefined) return '';
+            if (typeof str !== 'string') str = String(str);
+            return str.replace(/[&<>"']/g, m => ({
+                '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+            })[m]);
+        }
+        
+        function formatMessage(content) {
+            if (!content) return '';
+            // Basic markdown-like formatting
+            return escapeHtml(content)
+                .replace(/`([^`]+)`/g, '<code>$1</code>')
+                .replace(/\n/g, '<br>');
+        }
+        
+        function formatTime(timestamp) {
+            if (!timestamp) return 'now';
+            return new Date(timestamp).toLocaleTimeString();
+        }
+        
+        function formatBytes(bytes) {
+            if (!bytes) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+        }
+        
+        // ===================
+        // Health Check
+        // ===================
+        
+        async function checkHealth() {
+            try {
+                const response = await fetch('/health');
+                if (response.ok) {
+                    document.getElementById('statusDot').className = 'status-dot connected';
+                    document.getElementById('statusText').textContent = 'Connected';
+                } else {
+                    throw new Error('Health check failed');
+                }
+            } catch (err) {
+                document.getElementById('statusDot').className = 'status-dot error';
+                document.getElementById('statusText').textContent = 'Error';
+            }
+        }
+        
+        // ===================
+        // Init
+        // ===================
+        
+        async function init() {
+            await checkHealth();
+            await loadModelsCatalog();  // Load models for dropdowns
+            await loadAgents();
+            await loadThreads();
+            await loadDocuments();
+            await checkModelStatus();  // Check AI model loading status
+            await loadMetrics();
+            await refreshSecurityLog();
+            
+            // Periodic health check
+            setInterval(checkHealth, 30000);
+        }
+        
+        init();
+    </script>
+</body>
+</html>

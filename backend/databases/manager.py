@@ -48,10 +48,10 @@ class DatabaseManager:
         app = FastAPI(lifespan=lifespan)
     """
     
-    DEFAULT_PORTS: Dict[str, int] = {
+    DEFAULT_PORTS: Dict[str, Optional[int]] = {
         "postgres": 5432,
         "mysql": 3306,
-        "sqlite": 0,
+        "sqlite": None,
     }
     
     def __init__(

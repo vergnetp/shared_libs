@@ -55,18 +55,23 @@ def init_db_session(
     
     from backend.databases.manager import DatabaseManager
     
-    # Use default ports if not specified
-    if port is None:
-        port = {"sqlite": 0, "postgres": 5432, "mysql": 3306}.get(database_type, 5432)
-    
-    _db_manager = DatabaseManager(
-        db_type=database_type,
-        database=database_name,
-        host=host,
-        port=port,
-        user=user,
-        password=password,
-    )
+    # Build kwargs based on database type
+    if database_type == "sqlite":
+        # SQLite only needs database path
+        _db_manager = DatabaseManager(
+            db_type="sqlite",
+            database=database_name,
+        )
+    else:
+        # Postgres/MySQL need connection params
+        _db_manager = DatabaseManager(
+            db_type=database_type,
+            database=database_name,
+            host=host,
+            port=port or {"postgres": 5432, "mysql": 3306}.get(database_type, 5432),
+            user=user,
+            password=password,
+        )
     
     return _db_manager
 

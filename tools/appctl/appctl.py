@@ -1,841 +1,773 @@
 #!/usr/bin/env python3
 """
-appctl - Application scaffold generator for app_kernel services.
+appctl - App Kernel CLI Tool
 
-Usage:
-    appctl new myapp                     # Interactive mode
-    appctl new myapp --from-manifest app.manifest.yaml
-    appctl new myapp --db postgres --redis --tasks process_order,send_email
-    appctl manifest myapp                # Generate manifest only
-    
-Output:
-    myapp/
-    ├── __init__.py
-    ├── main.py
-    ├── config.py
-    ├── db_schema.py
-    ├── schemas.py
-    ├── tasks.py           (if tasks defined)
-    ├── routes/
-    │   ├── __init__.py
-    │   └── {entity}.py    (for each entity)
-    ├── app.manifest.yaml
-    ├── Dockerfile
-    ├── docker-compose.yml
-    ├── requirements.txt
-    └── .env.example
+Commands:
+  new <name> --from-manifest <file>   Create new project from manifest
+  generate                            Regenerate _gen/ from manifest
+  add entity <name>                   Add new entity (updates manifest)
 """
 
-import argparse
 import os
 import sys
+import yaml
+import argparse
 from pathlib import Path
-from typing import List, Optional
-
-from manifest_schema import (
-    AppManifest,
-    DatabaseConfig,
-    RedisConfig,
-    AuthConfig,
-    CorsConfig,
-    EntityConfig,
-    EntityField,
-)
-import templates
+from typing import Any
+from dataclasses import dataclass
 
 
 # =============================================================================
-# Helpers
+# Type Mappings
 # =============================================================================
 
-def to_pascal(name: str) -> str:
-    """Convert snake_case to PascalCase."""
-    return "".join(word.capitalize() for word in name.split("_"))
+PYTHON_TYPES = {
+    "string": "str",
+    "text": "str",
+    "int": "int",
+    "float": "float",
+    "bool": "bool",
+    "datetime": "datetime",
+    "json": "dict",
+}
 
+SQLITE_TYPES = {
+    "string": "TEXT",
+    "text": "TEXT",
+    "int": "INTEGER",
+    "float": "REAL",
+    "bool": "INTEGER",
+    "datetime": "TEXT",
+    "json": "TEXT",
+}
 
-def to_plural(name: str) -> str:
-    """Simple pluralization."""
-    if name.endswith("y"):
-        return name[:-1] + "ies"
-    elif name.endswith("s"):
-        return name + "es"
-    return name + "s"
-
-
-def field_to_sql_type(field_type: str, db_type: str = "sqlite") -> str:
-    """Convert field type to SQL type."""
-    mapping = {
-        "string": "TEXT",
-        "text": "TEXT",
-        "int": "INTEGER",
-        "float": "REAL",
-        "bool": "INTEGER",  # SQLite uses INTEGER for bool
-        "datetime": "TEXT",  # ISO format
-        "json": "TEXT",      # JSON string
-    }
-    return mapping.get(field_type, "TEXT")
-
-
-def field_to_python_type(field_type: str) -> str:
-    """Convert field type to Python type hint."""
-    mapping = {
-        "string": "str",
-        "text": "str",
-        "int": "int",
-        "float": "float",
-        "bool": "bool",
-        "datetime": "datetime",
-        "json": "Any",
-    }
-    return mapping.get(field_type, "str")
+PYDANTIC_TYPES = {
+    "string": "str",
+    "text": "str",
+    "int": "int",
+    "float": "float",
+    "bool": "bool",
+    "datetime": "datetime",
+    "json": "Dict[str, Any]",
+}
 
 
 # =============================================================================
-# Generators
+# Manifest Loading
 # =============================================================================
 
-class ScaffoldGenerator:
-    """Generates app scaffold from manifest."""
+@dataclass
+class Field:
+    name: str
+    type: str
+    required: bool = False
+    default: Any = None
+
+
+@dataclass
+class Entity:
+    name: str
+    fields: list[Field]
+    workspace_scoped: bool = False
+    soft_delete: bool = False
     
-    def __init__(self, manifest: AppManifest, output_dir: Path):
-        self.manifest = manifest
-        self.output_dir = output_dir
-        self.name = manifest.name
-        self.name_upper = manifest.name.upper().replace("-", "_")
+    @property
+    def table_name(self) -> str:
+        """Pluralize for table name."""
+        if self.name.endswith('y'):
+            return self.name[:-1] + 'ies'
+        elif self.name.endswith('s'):
+            return self.name + 'es'
+        return self.name + 's'
     
-    def generate(self):
-        """Generate all scaffold files."""
-        # Create directories
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        (self.output_dir / "routes").mkdir(exist_ok=True)
-        
-        # Generate files
-        self._generate_init()
-        self._generate_config()
-        self._generate_main()
-        self._generate_db_schema()
-        self._generate_schemas()
-        self._generate_routes()
-        
-        if self.manifest.tasks:
-            self._generate_tasks()
-        
-        self._generate_dockerfile()
-        self._generate_docker_compose()
-        self._generate_requirements()
-        self._generate_env_example()
-        self._generate_manifest()
-        
-        print(f"\n✅ Generated {self.name}/ scaffold")
-        print(f"   {len(list(self.output_dir.rglob('*')))} files created")
-        print(f"\nNext steps:")
-        print(f"   cd {self.name}")
-        print(f"   cp .env.example .env")
-        print(f"   # Edit .env with your secrets")
-        print(f"   uvicorn {self.name}.main:app --reload")
+    @property
+    def class_name(self) -> str:
+        """PascalCase for class name."""
+        return ''.join(word.capitalize() for word in self.name.split('_'))
+
+
+def load_manifest(path: Path) -> dict:
+    """Load and parse manifest YAML."""
+    with open(path) as f:
+        return yaml.safe_load(f)
+
+
+def parse_entities(manifest: dict) -> list[Entity]:
+    """Parse entities from manifest."""
+    entities = []
+    for e in manifest.get("entities", []):
+        fields = []
+        for f in e.get("fields", []):
+            fields.append(Field(
+                name=f["name"],
+                type=f.get("type", "string"),
+                required=f.get("required", False),
+                default=f.get("default"),
+            ))
+        entities.append(Entity(
+            name=e["name"],
+            fields=fields,
+            workspace_scoped=e.get("workspace_scoped", False),
+            soft_delete=e.get("soft_delete", False),
+        ))
+    return entities
+
+
+# =============================================================================
+# Code Generators
+# =============================================================================
+
+def generate_db_schema(entities: list[Entity], manifest: dict) -> str:
+    """Generate _gen/db_schema.py."""
+    lines = [
+        '"""',
+        'Database schema - AUTO-GENERATED from manifest.yaml',
+        'DO NOT EDIT - changes will be overwritten on regenerate',
+        '"""',
+        '',
+        'from typing import Any',
+        '',
+        '',
+        'async def init_schema(db: Any) -> None:',
+        '    """Initialize database schema. Called by kernel after DB connection."""',
+        '',
+    ]
     
-    def _write(self, filename: str, content: str):
-        """Write file to output directory."""
-        path = self.output_dir / filename
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content)
-        print(f"   Created {filename}")
-    
-    def _generate_init(self):
-        """Generate __init__.py."""
-        content = templates.INIT_PY.format(
-            name=self.name,
-            description=self.manifest.description or f"{self.name} service",
-            version=self.manifest.version,
-        )
-        self._write("__init__.py", content)
-    
-    def _generate_config(self):
-        """Generate config.py."""
-        m = self.manifest
+    for entity in entities:
+        table = entity.table_name
+        lines.append(f'    # {entity.class_name}')
+        lines.append(f'    await db.execute("""')
+        lines.append(f'        CREATE TABLE IF NOT EXISTS {table} (')
+        lines.append(f'            id TEXT PRIMARY KEY,')
         
-        db_port = m.database.port
-        if db_port is None:
-            db_port = {"sqlite": 0, "postgres": 5432, "mysql": 3306}.get(m.database.type, 5432)
+        # Workspace scope
+        if entity.workspace_scoped:
+            lines.append(f'            workspace_id TEXT,')
         
-        content = templates.CONFIG_PY.format(
-            name=self.name,
-            name_upper=self.name_upper,
-            version=m.version,
-            host=m.host,
-            port=m.port,
-            debug_env=m.debug_env,
-            db_type=m.database.type,
-            db_name=m.database.name,
-            db_host=m.database.host,
-            db_port=db_port if db_port else "None",
-            db_user=f'"{m.database.user}"' if m.database.user else "None",
-            db_password_env=m.database.password_env or "DATABASE_PASSWORD",
-            redis_url_env=m.redis.url_env,
-            auth_enabled=str(m.auth.enabled),
-            allow_signup=str(m.auth.allow_signup),
-            jwt_secret_env=m.auth.jwt_secret_env,
-            jwt_expiry=m.auth.jwt_expiry_hours,
-            cors_origins_default=",".join(m.cors.origins),
-        )
-        self._write("config.py", content)
-    
-    def _generate_main(self):
-        """Generate main.py."""
-        m = self.manifest
-        
-        # Tasks import
-        tasks_import = ""
-        tasks_dict = ""
-        tasks_arg = "tasks=None,"
-        if m.tasks:
-            tasks_import = "from .tasks import TASKS"
-            tasks_dict = "tasks = TASKS"
-            tasks_arg = "tasks=tasks,"
-        
-        # Routes import
-        route_imports = []
-        routers_list = []
-        for entity in m.entities:
-            if entity.generate_routes:
-                plural = to_plural(entity.name)
-                route_imports.append(f"from .routes.{plural} import router as {plural}_router")
-                routers_list.append(f"            {plural}_router,")
-        
-        routes_import = "\n".join(route_imports) if route_imports else ""
-        routers_list_str = "\n".join(routers_list) if routers_list else "            # Add your routers here"
-        
-        # Redis health check
-        redis_health_check = ""
-        redis_health_arg = ""
-        if m.redis.enabled:
-            redis_health_check = '''
-async def check_redis() -> Tuple[bool, str]:
-    """Health check for Redis connection."""
-    try:
-        from backend.app_kernel import get_kernel
-        # Redis check via kernel
-        return True, "redis connected"
-    except Exception as e:
-        return False, f"redis error: {e}"
-'''
-            redis_health_arg = ", check_redis"
-        
-        # Redis prefix
-        redis_prefix = m.redis.key_prefix or f"{self.name.replace('-', '_')}:"
-        
-        content = templates.MAIN_PY.format(
-            name=self.name,
-            description=m.description or f"{self.name} service",
-            tasks_import=tasks_import,
-            routes_import=routes_import,
-            redis_health_check=redis_health_check,
-            redis_prefix=redis_prefix,
-            cors_credentials=str(m.cors.credentials),
-            tasks_dict=tasks_dict,
-            routers_list=routers_list_str,
-            tasks_arg=tasks_arg,
-            redis_health_arg=redis_health_arg,
-        )
-        self._write("main.py", content)
-    
-    def _generate_db_schema(self):
-        """Generate db_schema.py."""
-        m = self.manifest
-        
-        # Build table list for docstring
-        table_list = []
-        for entity in m.entities:
-            table_list.append(f"- {to_plural(entity.name)}")
-        table_list_str = "\n".join(table_list) if table_list else "- (no entities defined)"
-        
-        # Build schema statements
-        statements = []
-        for entity in m.entities:
-            stmt = self._generate_entity_schema(entity)
-            statements.append(stmt)
-        
-        if not statements:
-            statements.append("    # No entities defined - add your tables here")
-            statements.append("    pass")
-        
-        schema_statements = "\n\n".join(statements)
-        
-        content = templates.DB_SCHEMA_PY.format(
-            name=self.name,
-            table_list=table_list_str,
-            schema_statements=schema_statements,
-        )
-        self._write("db_schema.py", content)
-    
-    def _generate_entity_schema(self, entity: EntityConfig) -> str:
-        """Generate schema SQL for an entity."""
-        table_name = to_plural(entity.name)
-        
-        # Build columns
-        columns = ["        id TEXT PRIMARY KEY"]
-        
+        # Entity fields
         for field in entity.fields:
-            sql_type = field_to_sql_type(field.type)
-            nullable = "" if field.required else ""  # SQLite doesn't enforce NOT NULL well
+            sql_type = SQLITE_TYPES.get(field.type, "TEXT")
             default = ""
+            # Only emit DEFAULT for non-standard values
+            # SQLite defaults: INTEGER->NULL, TEXT->NULL, REAL->NULL
             if field.default is not None:
-                if field.type in ("string", "text", "json"):
+                if isinstance(field.default, str):
                     default = f" DEFAULT '{field.default}'"
+                elif isinstance(field.default, bool):
+                    default = f" DEFAULT {1 if field.default else 0}"
                 else:
                     default = f" DEFAULT {field.default}"
-            columns.append(f"        {field.name} {sql_type}{nullable}{default}")
+            not_null = " NOT NULL" if field.required else ""
+            lines.append(f'            {field.name} {sql_type}{not_null}{default},')
         
-        if entity.workspace_scoped:
-            columns.append("        workspace_id TEXT")
-        
-        columns.extend([
-            "        created_at TEXT",
-            "        updated_at TEXT",
-        ])
-        
+        # Timestamps
+        lines.append(f'            created_at TEXT,')
+        lines.append(f'            updated_at TEXT,')
         if entity.soft_delete:
-            columns.append("        deleted_at TEXT")
+            lines.append(f'            deleted_at TEXT,')
         
-        columns_str = ",\n".join(columns)
+        # Remove trailing comma from last field
+        lines[-1] = lines[-1].rstrip(',')
+        lines.append(f'        )')
+        lines.append(f'    """)')
         
-        # Build indexes
-        indexes = []
+        # Indexes
         if entity.workspace_scoped:
-            indexes.append(f'    await db.execute("CREATE INDEX IF NOT EXISTS idx_{table_name}_workspace ON {table_name}(workspace_id)")')
+            lines.append(f'    await db.execute("CREATE INDEX IF NOT EXISTS idx_{table}_workspace ON {table}(workspace_id)")')
         
-        indexes_str = "\n".join(indexes) if indexes else ""
-        
-        return f'''    # {to_pascal(entity.name)}
-    await db.execute("""
-        CREATE TABLE IF NOT EXISTS {table_name} (
-{columns_str}
-        )
-    """)
-{indexes_str}'''
+        lines.append('')
     
-    def _generate_schemas(self):
-        """Generate schemas.py with Pydantic models."""
-        m = self.manifest
-        
-        entity_schemas = []
-        for entity in m.entities:
-            schema = self._generate_entity_pydantic(entity)
-            entity_schemas.append(schema)
-        
-        if not entity_schemas:
-            entity_schemas.append("# Add your Pydantic schemas here")
-        
-        content = templates.SCHEMAS_PY.format(
-            name=self.name,
-            entity_schemas="\n\n".join(entity_schemas),
-        )
-        self._write("schemas.py", content)
-    
-    def _generate_entity_pydantic(self, entity: EntityConfig) -> str:
-        """Generate Pydantic schemas for an entity."""
-        pascal = to_pascal(entity.name)
-        
-        # Create fields
-        create_fields = []
-        for field in entity.fields:
-            py_type = field_to_python_type(field.type)
-            if not field.required:
-                py_type = f"Optional[{py_type}]"
-                default = f" = {repr(field.default)}" if field.default is not None else " = None"
-            else:
-                default = ""
-            create_fields.append(f"    {field.name}: {py_type}{default}")
-        
-        create_fields_str = "\n".join(create_fields) if create_fields else "    pass"
-        
-        # Update fields (all optional)
-        update_fields = []
-        for field in entity.fields:
-            py_type = field_to_python_type(field.type)
-            update_fields.append(f"    {field.name}: Optional[{py_type}] = None")
-        
-        update_fields_str = "\n".join(update_fields) if update_fields else "    pass"
-        
-        # Response fields
-        response_fields = ["    id: str"]
-        for field in entity.fields:
-            py_type = field_to_python_type(field.type)
-            if not field.required:
-                py_type = f"Optional[{py_type}]"
-            response_fields.append(f"    {field.name}: {py_type}")
-        
-        if entity.workspace_scoped:
-            response_fields.append("    workspace_id: Optional[str] = None")
-        
-        response_fields.extend([
-            "    created_at: Optional[str] = None",
-            "    updated_at: Optional[str] = None",
-        ])
-        
-        response_fields_str = "\n".join(response_fields)
-        
-        return f'''# {pascal} schemas
-class {pascal}Create(BaseModel):
-{create_fields_str}
+    return '\n'.join(lines)
 
 
-class {pascal}Update(BaseModel):
-{update_fields_str}
-
-
-class {pascal}Response(BaseModel):
-{response_fields_str}
+def generate_schemas(entities: list[Entity]) -> str:
+    """Generate _gen/schemas.py."""
+    lines = [
+        '"""',
+        'Pydantic schemas - AUTO-GENERATED from manifest.yaml',
+        'DO NOT EDIT - changes will be overwritten on regenerate',
+        '"""',
+        '',
+        'from datetime import datetime',
+        'from typing import Any, Dict, Optional',
+        'from pydantic import BaseModel',
+        '',
+        '',
+    ]
     
-    class Config:
-        from_attributes = True'''
-    
-    def _generate_routes(self):
-        """Generate route files."""
-        m = self.manifest
+    for entity in entities:
+        cls = entity.class_name
         
-        route_imports = []
-        route_exports = []
-        
-        for entity in m.entities:
-            if entity.generate_routes:
-                self._generate_entity_route(entity)
-                plural = to_plural(entity.name)
-                route_imports.append(f"from .{plural} import router as {plural}_router")
-                route_exports.append(f'    "{plural}_router",')
-        
-        # Generate routes/__init__.py
-        content = templates.ROUTES_INIT_PY.format(
-            name=self.name,
-            route_imports="\n".join(route_imports) if route_imports else "# No routes generated",
-            route_exports="\n".join(route_exports) if route_exports else '    # No routes',
-        )
-        self._write("routes/__init__.py", content)
-    
-    def _generate_entity_route(self, entity: EntityConfig):
-        """Generate route file for an entity."""
-        pascal = to_pascal(entity.name)
-        plural = to_plural(entity.name)
-        
-        # Workspace handling
-        if entity.workspace_scoped:
-            workspace_import = "from backend.app_kernel.access import require_workspace_member"
-            workspace_param = "    workspace_id: str,"
-            workspace_field = '        "workspace_id": workspace_id,'
-            workspace_filter = '"workspace_id": workspace_id, '
-            workspace_check = f'''    if entity.get("workspace_id") != workspace_id:
-        raise HTTPException(status_code=403, detail="Access denied")'''
+        # Base (shared fields)
+        lines.append(f'class {cls}Base(BaseModel):')
+        if not entity.fields:
+            lines.append('    pass')
         else:
-            workspace_import = ""
-            workspace_param = ""
-            workspace_field = ""
-            workspace_filter = ""
-            workspace_check = ""
+            for field in entity.fields:
+                py_type = PYDANTIC_TYPES.get(field.type, "str")
+                if field.required:
+                    lines.append(f'    {field.name}: {py_type}')
+                elif field.default is not None:
+                    # Only emit explicit defaults
+                    default_val = repr(field.default)
+                    lines.append(f'    {field.name}: Optional[{py_type}] = {default_val}')
+                else:
+                    lines.append(f'    {field.name}: Optional[{py_type}] = None')
+        lines.append('')
         
-        # Soft delete filter
-        deleted_filter = '"deleted_at": None' if entity.soft_delete else ""
+        # Create
+        lines.append(f'class {cls}Create({cls}Base):')
+        if entity.workspace_scoped:
+            lines.append('    workspace_id: Optional[str] = None')
+        else:
+            lines.append('    pass')
+        lines.append('')
         
-        # Delete implementation
+        # Update (all optional)
+        lines.append(f'class {cls}Update(BaseModel):')
+        if not entity.fields:
+            lines.append('    pass')
+        else:
+            for field in entity.fields:
+                py_type = PYDANTIC_TYPES.get(field.type, "str")
+                lines.append(f'    {field.name}: Optional[{py_type}] = None')
+        lines.append('')
+        
+        # Response
+        lines.append(f'class {cls}Response({cls}Base):')
+        lines.append('    id: str')
+        if entity.workspace_scoped:
+            lines.append('    workspace_id: Optional[str] = None')
+        lines.append('    created_at: Optional[datetime] = None')
+        lines.append('    updated_at: Optional[datetime] = None')
         if entity.soft_delete:
-            delete_impl = f'''    from datetime import datetime, timezone
+            lines.append('    deleted_at: Optional[datetime] = None')
+        lines.append('')
+        lines.append(f'    class Config:')
+        lines.append(f'        from_attributes = True')
+        lines.append('')
+        lines.append('')
     
-    entity = await db.get_entity("{plural}", id)
+    return '\n'.join(lines)
+
+
+def generate_crud(entities: list[Entity]) -> str:
+    """Generate _gen/crud.py with generic CRUD operations."""
+    return '''"""
+Generic CRUD operations - AUTO-GENERATED from manifest.yaml
+DO NOT EDIT - changes will be overwritten on regenerate
+"""
+
+from typing import Any, Optional, TypeVar
+from datetime import datetime, timezone
+import uuid
+
+T = TypeVar("T")
+
+
+class EntityCRUD:
+    """Generic CRUD for any entity."""
+    
+    def __init__(self, table: str, soft_delete: bool = False):
+        self.table = table
+        self.soft_delete = soft_delete
+    
+    async def list(
+        self, 
+        db: Any, 
+        skip: int = 0, 
+        limit: int = 100,
+        workspace_id: Optional[str] = None,
+        include_deleted: bool = False,
+    ) -> list[dict]:
+        """List entities with pagination."""
+        conditions = []
+        params = []
+        
+        if workspace_id:
+            conditions.append("[workspace_id] = ?")
+            params.append(workspace_id)
+        
+        where_clause = " AND ".join(conditions) if conditions else None
+        
+        return await db.find_entities(
+            self.table,
+            where_clause=where_clause,
+            params=tuple(params) if params else None,
+            limit=limit,
+            offset=skip,
+            include_deleted=include_deleted if self.soft_delete else True,
+        )
+    
+    async def get(self, db: Any, id: str, include_deleted: bool = False) -> Optional[dict]:
+        """Get entity by ID."""
+        return await db.get_entity(self.table, id, include_deleted=include_deleted if self.soft_delete else True)
+    
+    async def create(self, db: Any, data: Any) -> dict:
+        """Create new entity."""
+        now = datetime.now(timezone.utc).isoformat()
+        entity_id = str(uuid.uuid4())
+        
+        values = data.model_dump(exclude_unset=True)
+        values["id"] = entity_id
+        values["created_at"] = now
+        values["updated_at"] = now
+        
+        result = await db.save_entity(self.table, values)
+        return result
+    
+    async def update(self, db: Any, id: str, data: Any) -> Optional[dict]:
+        """Update entity."""
+        # Get existing entity
+        existing = await self.get(db, id)
+        if not existing:
+            return None
+        
+        values = data.model_dump(exclude_unset=True)
+        if not values:
+            return existing
+        
+        # Merge with existing
+        updated = {**existing, **values}
+        updated["updated_at"] = datetime.now(timezone.utc).isoformat()
+        
+        result = await db.save_entity(self.table, updated)
+        return result
+    
+    async def delete(self, db: Any, id: str) -> bool:
+        """Delete entity (soft delete if configured)."""
+        permanent = not self.soft_delete
+        return await db.delete_entity(self.table, id, permanent=permanent)
+'''
+
+
+def generate_entity_router(entity: Entity) -> str:
+    """Generate _gen/routes/{entity}.py."""
+    cls = entity.class_name
+    table = entity.table_name
+    
+    return f'''"""
+{cls} CRUD routes - AUTO-GENERATED from manifest.yaml
+DO NOT EDIT - changes will be overwritten on regenerate
+
+For custom logic, create src/routes/{entity.name}.py
+"""
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from typing import Optional
+
+from ..schemas import {cls}Create, {cls}Update, {cls}Response
+from ..crud import EntityCRUD
+
+# Import db dependency from src (allows customization)
+from ...src.deps import get_db
+
+router = APIRouter(prefix="/{table}", tags=["{table}"])
+crud = EntityCRUD("{table}", soft_delete={entity.soft_delete})
+
+
+@router.get("", response_model=list[{cls}Response])
+async def list_{table}(
+    db=Depends(get_db),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=1000),
+    {"workspace_id: Optional[str] = None," if entity.workspace_scoped else ""}
+):
+    """List {table}."""
+    return await crud.list(db, skip=skip, limit=limit{", workspace_id=workspace_id" if entity.workspace_scoped else ""})
+
+
+@router.post("", response_model={cls}Response, status_code=201)
+async def create_{entity.name}(data: {cls}Create, db=Depends(get_db)):
+    """Create {entity.name}."""
+    return await crud.create(db, data)
+
+
+@router.get("/{{id}}", response_model={cls}Response)
+async def get_{entity.name}(id: str, db=Depends(get_db)):
+    """Get {entity.name} by ID."""
+    entity = await crud.get(db, id)
     if not entity:
-        raise HTTPException(status_code=404, detail="{pascal} not found")
-{workspace_check}
-    
-    entity["deleted_at"] = datetime.now(timezone.utc).isoformat()
-    await db.save_entity("{plural}", entity)'''
-        else:
-            delete_impl = f'''    entity = await db.get_entity("{plural}", id)
+        raise HTTPException(404, "{cls} not found")
+    return entity
+
+
+@router.patch("/{{id}}", response_model={cls}Response)
+async def update_{entity.name}(id: str, data: {cls}Update, db=Depends(get_db)):
+    """Update {entity.name}."""
+    entity = await crud.update(db, id, data)
     if not entity:
-        raise HTTPException(status_code=404, detail="{pascal} not found")
-{workspace_check}
+        raise HTTPException(404, "{cls} not found")
+    return entity
+
+
+@router.delete("/{{id}}", status_code=204)
+async def delete_{entity.name}(id: str, db=Depends(get_db)):
+    """Delete {entity.name}."""
+    await crud.delete(db, id)
+'''
+
+
+def generate_routes_init(entities: list[Entity]) -> str:
+    """Generate _gen/routes/__init__.py."""
+    lines = [
+        '"""',
+        'Generated routes - AUTO-GENERATED from manifest.yaml',
+        'DO NOT EDIT - changes will be overwritten on regenerate',
+        '"""',
+        '',
+        'from fastapi import APIRouter',
+        '',
+    ]
     
-    await db.delete_entity("{plural}", id)'''
-        
-        schema_classes = f"{pascal}Create, {pascal}Update, {pascal}Response"
-        
-        content = templates.ENTITY_ROUTE_PY.format(
-            entity_name=entity.name,
-            entity_name_plural=plural,
-            entity_name_pascal=pascal,
-            workspace_import=workspace_import,
-            workspace_param=workspace_param,
-            workspace_field=workspace_field,
-            workspace_filter=workspace_filter,
-            workspace_check=workspace_check,
-            deleted_filter=deleted_filter,
-            delete_impl=delete_impl,
-            schema_classes=schema_classes,
-        )
-        self._write(f"routes/{plural}.py", content)
+    # Import all entity routers
+    for entity in entities:
+        lines.append(f'from .{entity.name} import router as {entity.name}_router')
     
-    def _generate_tasks(self):
-        """Generate tasks.py."""
-        m = self.manifest
-        
-        # Generate handler stubs
-        handlers = []
-        registry_entries = []
-        
-        for task in m.tasks:
-            handler = f'''async def {task}(payload: Dict[str, Any], ctx: JobContext) -> Dict[str, Any]:
-    """
-    Handler for {task} task.
+    lines.append('')
+    lines.append('# Combined router for all generated CRUD endpoints')
+    lines.append('router = APIRouter()')
+    lines.append('')
     
-    Args:
-        payload: Task payload
-        ctx: Job context (job_id, attempt, user_id, etc.)
+    for entity in entities:
+        lines.append(f'router.include_router({entity.name}_router)')
     
-    Returns:
-        Result dict
-    """
-    logger.info(f"Processing {task}", extra={{"job_id": ctx.job_id}})
+    return '\n'.join(lines)
+
+
+def generate_gen_init() -> str:
+    """Generate _gen/__init__.py."""
+    return '''"""
+Generated code - AUTO-GENERATED from manifest.yaml
+DO NOT EDIT - changes will be overwritten on regenerate
+
+For custom logic, put code in src/
+"""
+
+from .db_schema import init_schema
+from .schemas import *
+from .crud import EntityCRUD
+from .routes import router as gen_router
+
+__all__ = ["init_schema", "EntityCRUD", "gen_router"]
+'''
+
+
+def generate_src_deps() -> str:
+    """Generate src/deps.py stub."""
+    return '''"""
+Application dependencies.
+
+This file is YOUR code - never overwritten by generator.
+Add custom dependencies here.
+"""
+
+from typing import AsyncGenerator
+from backend.app_kernel.db import db_session_dependency, get_db_session
+
+# Re-export kernel's db dependency
+get_db = db_session_dependency
+
+# For workers - use context manager
+get_db_context = get_db_session
+
+
+# =============================================================================
+# Add your custom dependencies below
+# =============================================================================
+
+# Example:
+# _my_service: Optional[MyService] = None
+#
+# def get_my_service() -> MyService:
+#     if _my_service is None:
+#         raise RuntimeError("Service not initialized")
+#     return _my_service
+'''
+
+
+def generate_src_routes_init() -> str:
+    """Generate src/routes/__init__.py stub."""
+    return '''"""
+Custom routes.
+
+This file is YOUR code - never overwritten by generator.
+Import and combine your custom routers here.
+"""
+
+from fastapi import APIRouter
+
+router = APIRouter()
+
+# Import and include your custom routes:
+# from .chat import router as chat_router
+# router.include_router(chat_router)
+'''
+
+
+def generate_main(manifest: dict) -> str:
+    """Generate main.py (only if not exists)."""
+    name = manifest.get("name", "myapp")
     
-    async with get_db_session() as db:
-        # TODO: Implement {task} logic
-        pass
+    return f'''"""
+Application entry point.
+
+This file is generated ONCE - safe to customize after creation.
+"""
+
+from backend.app_kernel import create_service, ServiceConfig
+from ._gen import init_schema, gen_router
+from .src.routes import router as custom_router
+from .config import settings
+
+
+def _build_config() -> ServiceConfig:
+    """Build kernel configuration from settings."""
+    # Ensure data directory exists
+    settings.ensure_data_dir()
     
-    metrics.increment("{task}_completed")
-    return {{"status": "done"}}'''
-            handlers.append(handler)
-            registry_entries.append(f'    "{task}": {task},')
+    return ServiceConfig(
+        # Auth
+        jwt_secret=settings.jwt_secret,
         
-        content = templates.TASKS_PY.format(
-            name=self.name,
-            task_handlers="\n\n\n".join(handlers),
-            task_registry="\n".join(registry_entries),
-        )
-        self._write("tasks.py", content)
+        # Database
+        database_name=settings.database_path,
+        database_type=settings.database_type,
+        
+        # Redis
+        redis_url=settings.redis_url,
+    )
+
+
+app = create_service(
+    name="{name}",
+    config=_build_config(),
+    schema_init=init_schema,
+    routers=[gen_router, custom_router],
+)
+'''
+
+
+def generate_config(manifest: dict) -> str:
+    """Generate config.py (only if not exists)."""
+    name = manifest.get("name", "myapp")
+    db = manifest.get("database", {})
+    redis = manifest.get("redis", {})
+    auth = manifest.get("auth", {})
     
-    def _generate_dockerfile(self):
-        """Generate Dockerfile."""
-        content = templates.DOCKERFILE.format(
-            name=self.name,
-            port=self.manifest.port,
-        )
-        self._write("Dockerfile", content)
-    
-    def _generate_docker_compose(self):
-        """Generate docker-compose.yml."""
-        m = self.manifest
-        
-        # Redis service
-        redis_env = ""
-        redis_service = ""
-        depends_on = ""
-        if m.redis.enabled:
-            redis_env = f"      - {m.redis.url_env}=redis://redis:6379"
-            redis_service = '''
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data'''
-            depends_on = '''    depends_on:
-      - redis'''
-        
-        # Database service
-        db_env = ""
-        db_service = ""
-        db_name_compose = m.database.name
-        
-        if m.database.type == "postgres":
-            db_env = """      - DATABASE_HOST=postgres
-      - DATABASE_PORT=5432
-      - DATABASE_USER=postgres
-      - DATABASE_PASSWORD=postgres"""
-            db_service = '''
-  postgres:
-    image: postgres:15-alpine
-    environment:
-      - POSTGRES_DB=app
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=postgres
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data'''
-            db_name_compose = "app"
-            if depends_on:
-                depends_on = depends_on.replace("redis", "redis\n      - postgres")
+    def parse_env_var(value: str, required_name: str) -> tuple[str, bool]:
+        """Parse ${VAR} or ${VAR:-default} syntax. Returns (code, is_path)."""
+        if not value:
+            return f'os.environ["{required_name}"]', False
+        if value.startswith("${"):
+            var_part = value[2:-1]  # Remove ${ and }
+            if ":-" in var_part:
+                var_name, default = var_part.split(":-", 1)
+                if default.startswith("./"):
+                    return f'os.getenv("{var_name}") or str(SERVICE_DIR / "{default[2:]}")', True
+                return f'os.getenv("{var_name}", "{default}")', False
             else:
-                depends_on = '''    depends_on:
-      - postgres'''
-        
-        content = templates.DOCKER_COMPOSE.format(
-            name=self.name,
-            port=m.port,
-            jwt_secret_env=m.auth.jwt_secret_env,
-            db_type=m.database.type,
-            db_name_compose=db_name_compose,
-            redis_env=redis_env,
-            db_env=db_env,
-            depends_on=depends_on,
-            redis_service=redis_service,
-            db_service=db_service,
-        )
-        
-        # Add volumes if needed
-        if m.redis.enabled or m.database.type == "postgres":
-            content += "\nvolumes:"
-            if m.redis.enabled:
-                content += "\n  redis_data:"
-            if m.database.type == "postgres":
-                content += "\n  postgres_data:"
-        
-        self._write("docker-compose.yml", content)
+                return f'os.environ["{var_part}"]', False
+        elif value.startswith("./"):
+            return f'str(SERVICE_DIR / "{value[2:]}")', True
+        return f'"{value}"', False
     
-    def _generate_requirements(self):
-        """Generate requirements.txt."""
-        m = self.manifest
-        
-        # Database requirements
-        db_reqs = {
-            "sqlite": "# SQLite is built-in",
-            "postgres": "asyncpg>=0.29.0\npsycopg2-binary>=2.9.9",
-            "mysql": "aiomysql>=0.2.0\nmysqlclient>=2.2.0",
-        }
-        db_requirements = db_reqs.get(m.database.type, "")
-        
-        # Redis requirements
-        redis_requirements = "redis>=5.0.0" if m.redis.enabled else "# Redis not enabled"
-        
-        content = templates.REQUIREMENTS_TXT.format(
-            name=self.name,
-            db_requirements=db_requirements,
-            redis_requirements=redis_requirements,
-        )
-        self._write("requirements.txt", content)
+    db_path = db.get("path", f"./data/{name}.db")
+    db_path_code, _ = parse_env_var(db_path, "DATABASE_PATH")
     
-    def _generate_env_example(self):
-        """Generate .env.example."""
-        m = self.manifest
-        
-        # Database env vars
-        db_env = []
-        if m.database.type != "sqlite":
-            db_env.append(f"{self.name_upper}_DATABASE_HOST={m.database.host}")
-            port = m.database.port or {"postgres": 5432, "mysql": 3306}.get(m.database.type)
-            db_env.append(f"{self.name_upper}_DATABASE_PORT={port}")
-            db_env.append(f"{self.name_upper}_DATABASE_USER={m.database.user or 'user'}")
-            db_env.append(f"{self.name_upper}_{m.database.password_env or 'DATABASE_PASSWORD'}=secret")
-        db_env_vars = "\n".join(db_env)
-        
-        # Redis env vars
-        redis_env = f"{self.name_upper}_{m.redis.url_env}=redis://localhost:6379" if m.redis.enabled else f"# {self.name_upper}_{m.redis.url_env}="
-        
-        content = templates.ENV_EXAMPLE.format(
-            name=self.name,
-            name_upper=self.name_upper,
-            host=m.host,
-            port=m.port,
-            db_type=m.database.type,
-            db_name=m.database.name,
-            db_env_vars=db_env_vars,
-            jwt_secret_env=m.auth.jwt_secret_env,
-            auth_enabled=str(m.auth.enabled).lower(),
-            allow_signup=str(m.auth.allow_signup).lower(),
-            redis_env_vars=redis_env,
-            cors_origins=",".join(m.cors.origins),
-        )
-        self._write(".env.example", content)
+    redis_url = redis.get("url", "")
+    redis_url_code, _ = parse_env_var(redis_url, "REDIS_URL")
     
-    def _generate_manifest(self):
-        """Generate app.manifest.yaml."""
-        m = self.manifest
-        
-        # CORS origins as YAML list
-        cors_yaml = "\n".join(f"    - {origin}" for origin in m.cors.origins)
-        
-        # Tasks as YAML list
-        tasks_yaml = "\n".join(f"  - {task}" for task in m.tasks) if m.tasks else "  # No tasks defined"
-        
-        # Entities as YAML
-        entities_yaml_parts = []
-        for entity in m.entities:
-            fields_yaml = "\n".join(f"      - name: {f.name}\n        type: {f.type}" for f in entity.fields)
-            entities_yaml_parts.append(f"""  - name: {entity.name}
-    fields:
-{fields_yaml}
-    workspace_scoped: {str(entity.workspace_scoped).lower()}
-    generate_routes: {str(entity.generate_routes).lower()}""")
-        
-        entities_yaml = "\n".join(entities_yaml_parts) if entities_yaml_parts else "  # No entities defined"
-        
-        content = templates.MANIFEST_YAML.format(
-            name=self.name,
-            version=m.version,
-            description=m.description or "",
-            db_type=m.database.type,
-            db_name=m.database.name,
-            redis_enabled=str(m.redis.enabled).lower(),
-            auth_enabled=str(m.auth.enabled).lower(),
-            allow_signup=str(m.auth.allow_signup).lower(),
-            cors_origins_yaml=cors_yaml,
-            tasks_yaml=tasks_yaml,
-            entities_yaml=entities_yaml,
+    jwt_secret = auth.get("jwt_secret", "")
+    jwt_secret_code, _ = parse_env_var(jwt_secret, "JWT_SECRET")
+    
+    return f'''"""
+Application configuration.
+
+This file is generated ONCE - safe to customize after creation.
+"""
+
+import os
+from pathlib import Path
+from dataclasses import dataclass
+
+# Service directory (where this file lives)
+SERVICE_DIR = Path(__file__).parent
+
+
+@dataclass(frozen=True)
+class Settings:
+    """Application settings from environment."""
+    
+    # Database
+    database_path: str = {db_path_code}
+    database_type: str = "{db.get('type', 'sqlite')}"
+    
+    # Redis
+    redis_url: str = {redis_url_code}
+    
+    # Auth
+    jwt_secret: str = {jwt_secret_code}
+    
+    @property
+    def database_name(self) -> str:
+        """Extract database name from path."""
+        return Path(self.database_path).stem
+    
+    def ensure_data_dir(self):
+        """Create data directory if needed."""
+        Path(self.database_path).parent.mkdir(parents=True, exist_ok=True)
+
+
+settings = Settings()
+'''
+
+
+# =============================================================================
+# File Writing
+# =============================================================================
+
+def write_file(path: Path, content: str, overwrite: bool = True) -> bool:
+    """Write file, optionally skipping if exists."""
+    if path.exists() and not overwrite:
+        print(f"  ⊘ {path} (exists - skipped)")
+        return False
+    
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
+    
+    action = "updated" if path.exists() else "created"
+    print(f"  ✓ {path} ({action})")
+    return True
+
+
+# =============================================================================
+# Commands
+# =============================================================================
+
+def cmd_new(args):
+    """Create new project from manifest."""
+    manifest_path = Path(args.from_manifest)
+    if not manifest_path.exists():
+        print(f"Error: Manifest not found: {manifest_path}")
+        sys.exit(1)
+    
+    # Determine output location
+    if args.output:
+        project_dir = Path(args.output)
+    else:
+        project_dir = Path(args.name)
+    
+    if project_dir.exists():
+        print(f"Error: Directory already exists: {project_dir}")
+        sys.exit(1)
+    
+    manifest = load_manifest(manifest_path)
+    entities = parse_entities(manifest)
+    
+    print(f"Creating {project_dir} from {manifest_path}...")
+    
+    # Create directory structure
+    project_dir.mkdir()
+    (project_dir / "_gen" / "routes").mkdir(parents=True)
+    (project_dir / "src" / "routes").mkdir(parents=True)
+    (project_dir / "src" / "workers").mkdir(parents=True)
+    
+    # Copy manifest
+    write_file(project_dir / "manifest.yaml", manifest_path.read_text())
+    
+    # Generate _gen/ (always overwrite)
+    write_file(project_dir / "_gen" / "__init__.py", generate_gen_init())
+    write_file(project_dir / "_gen" / "db_schema.py", generate_db_schema(entities, manifest))
+    write_file(project_dir / "_gen" / "schemas.py", generate_schemas(entities))
+    write_file(project_dir / "_gen" / "crud.py", generate_crud(entities))
+    write_file(project_dir / "_gen" / "routes" / "__init__.py", generate_routes_init(entities))
+    for entity in entities:
+        write_file(
+            project_dir / "_gen" / "routes" / f"{entity.name}.py",
+            generate_entity_router(entity)
         )
-        self._write("app.manifest.yaml", content)
+    
+    # Generate src/ stubs (only if not exists)
+    write_file(project_dir / "src" / "__init__.py", "", overwrite=False)
+    write_file(project_dir / "src" / "deps.py", generate_src_deps(), overwrite=False)
+    write_file(project_dir / "src" / "routes" / "__init__.py", generate_src_routes_init(), overwrite=False)
+    write_file(project_dir / "src" / "workers" / "__init__.py", "", overwrite=False)
+    
+    # Generate root files (only if not exists)
+    write_file(project_dir / "main.py", generate_main(manifest), overwrite=False)
+    write_file(project_dir / "config.py", generate_config(manifest), overwrite=False)
+    
+    print(f"\n✓ Created {project_dir}/")
+    print(f"\nNext steps:")
+    print(f"  cd {project_dir}")
+    print(f"  # Add custom routes to src/routes/")
+    print(f"  # Add workers to src/workers/")
+    print(f"  # Edit manifest.yaml and run: appctl generate")
+
+
+def cmd_generate(args):
+    """Regenerate _gen/ from manifest."""
+    manifest_path = Path("manifest.yaml")
+    if not manifest_path.exists():
+        print("Error: manifest.yaml not found in current directory")
+        sys.exit(1)
+    
+    manifest = load_manifest(manifest_path)
+    entities = parse_entities(manifest)
+    
+    print("Regenerating from manifest.yaml...")
+    
+    gen_dir = Path("_gen")
+    
+    # Always regenerate _gen/
+    write_file(gen_dir / "__init__.py", generate_gen_init())
+    write_file(gen_dir / "db_schema.py", generate_db_schema(entities, manifest))
+    write_file(gen_dir / "schemas.py", generate_schemas(entities))
+    write_file(gen_dir / "crud.py", generate_crud(entities))
+    write_file(gen_dir / "routes" / "__init__.py", generate_routes_init(entities))
+    for entity in entities:
+        write_file(gen_dir / "routes" / f"{entity.name}.py", generate_entity_router(entity))
+    
+    # Skip src/
+    print("  ⊘ src/* (your code - preserved)")
+    
+    # Optionally force regenerate root files
+    if args.force:
+        write_file(Path("main.py"), generate_main(manifest))
+        write_file(Path("config.py"), generate_config(manifest))
+    else:
+        print("  ⊘ main.py (exists - skipped, use --force to regenerate)")
+        print("  ⊘ config.py (exists - skipped, use --force to regenerate)")
+    
+    print("\n✓ Done!")
 
 
 # =============================================================================
 # CLI
 # =============================================================================
 
-def cmd_new(args):
-    """Handle 'new' command."""
-    name = args.name
-    
-    # Load from manifest or build from args
-    if args.from_manifest:
-        manifest = AppManifest.from_yaml(args.from_manifest)
-        # Override name if provided and different
-        if name != manifest.name:
-            # Recreate with new name but keep all other config objects
-            manifest = AppManifest(
-                name=name,
-                version=manifest.version,
-                description=manifest.description,
-                database=manifest.database,
-                redis=manifest.redis,
-                auth=manifest.auth,
-                cors=manifest.cors,
-                tasks=manifest.tasks,
-                entities=manifest.entities,
-                api_prefix=manifest.api_prefix,
-                host=manifest.host,
-                port=manifest.port,
-                debug_env=manifest.debug_env,
-            )
-    else:
-        # Build manifest from CLI args
-        db_config = DatabaseConfig(
-            type=args.db or "sqlite",
-            name=args.db_name or f"./data/{name}.db",
-        )
-        
-        redis_config = RedisConfig(enabled=args.redis)
-        
-        auth_config = AuthConfig(
-            enabled=not args.no_auth,
-            allow_signup=args.allow_signup,
-        )
-        
-        # Parse tasks
-        tasks = []
-        if args.tasks:
-            tasks = [t.strip() for t in args.tasks.split(",")]
-        
-        # Parse entities
-        entities = []
-        if args.entities:
-            for entity_def in args.entities.split(","):
-                entity_def = entity_def.strip()
-                # Format: "entity_name" or "entity_name:field1,field2"
-                if ":" in entity_def:
-                    entity_name, fields_str = entity_def.split(":", 1)
-                    fields = [EntityField(name=f.strip()) for f in fields_str.split(";")]
-                else:
-                    entity_name = entity_def
-                    fields = []
-                entities.append(EntityConfig(name=entity_name, fields=fields))
-        
-        manifest = AppManifest(
-            name=name,
-            version=args.version or "1.0.0",
-            description=args.description or "",
-            database=db_config,
-            redis=redis_config,
-            auth=auth_config,
-            tasks=tasks,
-            entities=entities,
-        )
-    
-    # Determine output directory
-    if args.output:
-        output_dir = Path(args.output)
-    else:
-        # Default: current working directory / app name
-        output_dir = Path.cwd() / name
-    
-    # Generate scaffold
-    generator = ScaffoldGenerator(manifest, output_dir)
-    generator.generate()
-
-
-def cmd_manifest(args):
-    """Handle 'manifest' command - generate manifest only."""
-    name = args.name
-    
-    manifest = AppManifest(
-        name=name,
-        version=args.version or "1.0.0",
-        description=args.description or f"{name} service",
-    )
-    
-    output_path = args.output or f"{name}.manifest.yaml"
-    manifest.to_yaml(output_path)
-    print(f"✅ Generated {output_path}")
-    print(f"\nEdit the manifest then run:")
-    print(f"   appctl new {name} --from-manifest {output_path}")
-
-
 def main():
-    """Main entry point."""
-    parser = argparse.ArgumentParser(
-        description="Application scaffold generator for app_kernel services",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  appctl new myapp                          # Creates ./myapp/
-  appctl new myapp --db postgres --redis    # With Postgres and Redis
-  appctl new myapp --tasks job1,job2        # With background tasks
-  appctl new myapp --entities widget:name;color  # With entity and fields
-  appctl new myapp --from-manifest app.yaml # From manifest file
-  appctl new myapp --output /other/path     # Custom output location
-  appctl manifest myapp                     # Generate manifest only
-
-Windows (from services/ folder):
-  Drag myapp.manifest.yaml onto new_app.bat
-        """,
-    )
+    parser = argparse.ArgumentParser(description="App Kernel CLI")
+    subparsers = parser.add_subparsers(dest="command", required=True)
     
-    subparsers = parser.add_subparsers(dest="command", help="Commands")
+    # new
+    new_parser = subparsers.add_parser("new", help="Create new project")
+    new_parser.add_argument("name", help="Project name")
+    new_parser.add_argument("--from-manifest", required=True, help="Manifest file")
+    new_parser.add_argument("--output", "-o", help="Output directory (default: current dir)")
     
-    # 'new' command
-    new_parser = subparsers.add_parser("new", help="Create new app scaffold")
-    new_parser.add_argument("name", help="App name")
-    new_parser.add_argument("--from-manifest", "-m", help="Load from manifest file")
-    new_parser.add_argument("--output", "-o", help="Output directory (default: services/<name>)")
-    new_parser.add_argument("--version", "-v", default="1.0.0", help="App version")
-    new_parser.add_argument("--description", "-d", help="App description")
-    new_parser.add_argument("--db", choices=["sqlite", "postgres", "mysql"], default="sqlite", help="Database type")
-    new_parser.add_argument("--db-name", help="Database name/path")
-    new_parser.add_argument("--redis", action="store_true", help="Enable Redis")
-    new_parser.add_argument("--no-auth", action="store_true", help="Disable authentication")
-    new_parser.add_argument("--allow-signup", action="store_true", help="Allow self-signup")
-    new_parser.add_argument("--tasks", help="Comma-separated task names")
-    new_parser.add_argument("--entities", help="Entity definitions (name:field1;field2,name2:...)")
-    new_parser.set_defaults(func=cmd_new)
-    
-    # 'manifest' command
-    manifest_parser = subparsers.add_parser("manifest", help="Generate manifest file only")
-    manifest_parser.add_argument("name", help="App name")
-    manifest_parser.add_argument("--output", "-o", help="Output file path")
-    manifest_parser.add_argument("--version", "-v", default="1.0.0", help="App version")
-    manifest_parser.add_argument("--description", "-d", help="App description")
-    manifest_parser.set_defaults(func=cmd_manifest)
+    # generate
+    gen_parser = subparsers.add_parser("generate", help="Regenerate from manifest")
+    gen_parser.add_argument("--force", action="store_true", help="Force regenerate all files")
+    gen_parser.add_argument("--dry-run", action="store_true", help="Show what would be done")
     
     args = parser.parse_args()
     
-    if not args.command:
-        parser.print_help()
-        sys.exit(1)
-    
-    args.func(args)
+    if args.command == "new":
+        cmd_new(args)
+    elif args.command == "generate":
+        cmd_generate(args)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,174 @@
+# AI Agents Service Manifest
+name: ai_agents
+version: "1.0.0"
+
+database:
+  type: sqlite
+  path: "./data/ai_agents.db"
+
+entities:
+  - name: workspace
+    table: workspaces
+    soft_delete: true
+    fields:
+      - name: name
+        type: str
+        required: true
+      - name: description
+        type: str
+      - name: settings
+        type: json
+      - name: owner_user_id
+        type: str
+
+  - name: workspace_member
+    table: workspace_members
+    fields:
+      - name: workspace_id
+        type: str
+        required: true
+      - name: user_id
+        type: str
+        required: true
+      - name: role
+        type: str
+        default: "member"
+
+  - name: agent
+    table: agents
+    soft_delete: true
+    fields:
+      - name: name
+        type: str
+        required: true
+      - name: description
+        type: str
+      - name: system_prompt
+        type: str
+      - name: model
+        type: str
+      - name: provider
+        type: str
+      - name: workspace_id
+        type: str
+      - name: owner_user_id
+        type: str
+      - name: settings
+        type: json
+      - name: context_schema
+        type: json
+
+  - name: thread
+    table: threads
+    soft_delete: true
+    fields:
+      - name: agent_id
+        type: str
+        required: true
+      - name: title
+        type: str
+      - name: workspace_id
+        type: str
+      - name: owner_user_id
+        type: str
+      - name: metadata
+        type: json
+
+  - name: message
+    table: messages
+    fields:
+      - name: thread_id
+        type: str
+        required: true
+      - name: role
+        type: str
+        required: true
+      - name: content
+        type: str
+      - name: tool_calls
+        type: json
+      - name: tool_results
+        type: json
+      - name: tokens_in
+        type: int
+      - name: tokens_out
+        type: int
+      - name: cost
+        type: float
+
+  - name: document
+    table: documents
+    soft_delete: true
+    fields:
+      - name: agent_id
+        type: str
+        required: true
+      - name: filename
+        type: str
+        required: true
+      - name: content_type
+        type: str
+      - name: size
+        type: int
+      - name: status
+        type: str
+        default: "pending"
+      - name: workspace_id
+        type: str
+      - name: metadata
+        type: json
+
+  - name: document_chunk
+    table: document_chunks
+    fields:
+      - name: document_id
+        type: str
+        required: true
+      - name: content
+        type: str
+      - name: embedding
+        type: json
+      - name: chunk_index
+        type: int
+      - name: metadata
+        type: json
+
+  - name: user_context
+    table: user_contexts
+    fields:
+      - name: agent_id
+        type: str
+        required: true
+      - name: user_id
+        type: str
+        required: true
+      - name: context_data
+        type: json
+      - name: workspace_id
+        type: str
+
+  - name: analytics_daily
+    table: analytics_daily
+    fields:
+      - name: date
+        type: str
+        required: true
+      - name: workspace_id
+        type: str
+      - name: agent_id
+        type: str
+      - name: messages_count
+        type: int
+        default: 0
+      - name: tokens_in
+        type: int
+        default: 0
+      - name: tokens_out
+        type: int
+        default: 0
+      - name: total_cost
+        type: float
+        default: 0.0
+
+routes:
+  prefix: /api/v1

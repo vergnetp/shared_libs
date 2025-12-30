@@ -35,7 +35,7 @@ Usage:
         config=ServiceConfig(
             jwt_secret=os.environ["JWT_SECRET"],
             redis_url=os.environ.get("REDIS_URL"),
-            database_url=os.environ.get("DATABASE_URL"),
+            database_name=os.environ.get("database_name"),
             cors_origins=["http://localhost:3000"],
         ),
         
@@ -161,7 +161,7 @@ class ServiceConfig:
         Environment variables:
             {prefix}JWT_SECRET: Required for production
             {prefix}REDIS_URL: Enables jobs, rate limiting
-            {prefix}DATABASE_URL: For health checks
+            {prefix}database_name: For health checks
             {prefix}CORS_ORIGINS: Comma-separated origins
             {prefix}DEBUG: Enable debug mode
         """
@@ -188,7 +188,7 @@ class ServiceConfig:
             allow_self_signup=env_bool("ALLOW_SELF_SIGNUP", False),
             redis_url=env("REDIS_URL"),
             redis_key_prefix=env("REDIS_KEY_PREFIX", "app:"),
-            database_url=env("DATABASE_URL"),
+            database_name=env("database_name"),
             cors_origins=env_list("CORS_ORIGINS", ["*"]),
             cors_credentials=env_bool("CORS_CREDENTIALS", True),
             rate_limit_enabled=env_bool("RATE_LIMIT_ENABLED", True),
@@ -279,7 +279,7 @@ def create_service(
             name="widget_service",
             routers=[widgets_router],
             config=ServiceConfig(
-                database_url="./data/widgets.db",
+                database_name="./data/widgets.db",
                 database_type="sqlite",
             ),
             schema_init=init_tables,
@@ -313,15 +313,19 @@ def create_service(
             if cfg.database_type == "sqlite":
                 from pathlib import Path
                 Path(cfg.database_name).parent.mkdir(parents=True, exist_ok=True)
-            
-            init_db_session(
-                database_name=cfg.database_name,
-                database_type=cfg.database_type,
-                host=cfg.database_host,
-                port=cfg.database_port,
-                user=cfg.database_user,
-                password=cfg.database_password,
-            )
+                init_db_session(
+                    database_name=cfg.database_name,
+                    database_type="sqlite",
+                )
+            else:
+                init_db_session(
+                    database_name=cfg.database_name,
+                    database_type=cfg.database_type,
+                    host=cfg.database_host,
+                    port=cfg.database_port or 5432,
+                    user=cfg.database_user,
+                    password=cfg.database_password,
+                )
             logger.info(f"Database initialized", extra={
                 "type": cfg.database_type,
                 "database": cfg.database_name,
@@ -340,7 +344,7 @@ def create_service(
             "version": version,
             "debug": cfg.debug,
             "redis": bool(cfg.redis_url),
-            "database": bool(cfg.database_url),
+            "database": bool(cfg.database_name),
         })
         metrics.set_gauge("service_started", 1)
         
@@ -497,9 +501,7 @@ def _build_kernel_settings(
             enable_audit_routes=False,
         ),
         
-        health_checks=tuple(health_checks),
-        
-        database_url=cfg.database_url,
+        health_checks=tuple(health_checks)
     )
 
 

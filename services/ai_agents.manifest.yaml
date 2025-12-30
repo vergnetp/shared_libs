@@ -1,0 +1,218 @@
+# AI Agents Service
+name: ai_agents
+description: AI Agents as a Service - Multi-provider LLM agents with RAG
+
+database:
+  type: sqlite
+  path: ./data/ai_agents.db
+
+redis:
+  url: ${REDIS_URL:-redis://localhost:6379/0}
+
+auth:
+  jwt_secret: ${JWT_SECRET}
+
+cors:
+  origins: ["*"]
+  credentials: true
+
+tasks:
+  - ingest_document
+  - reindex_document
+  - process_memory
+  - generate_summary
+
+entities:
+  - name: workspace
+    workspace_scoped: false
+    soft_delete: true
+    fields:
+      - name: name
+        type: string
+        required: true
+      - name: description
+        type: text
+      - name: metadata
+        type: json
+
+  - name: workspace_member
+    workspace_scoped: true
+    fields:
+      - name: user_id
+        type: string
+        required: true
+      - name: role
+        type: string
+        default: "member"
+
+  - name: agent
+    workspace_scoped: true
+    soft_delete: true
+    fields:
+      - name: name
+        type: string
+        required: true
+      - name: system_prompt
+        type: text
+      - name: model
+        type: string
+        default: "llama-3.3-70b-versatile"
+      - name: premium_model
+        type: string
+      - name: temperature
+        type: float
+        default: 0.5
+      - name: max_tokens
+        type: int
+        default: 4096
+      - name: tools
+        type: json
+      - name: guardrails
+        type: json
+      - name: memory_strategy
+        type: string
+        default: "last_n"
+      - name: memory_params
+        type: json
+      - name: context_schema
+        type: json
+      - name: capabilities
+        type: json
+      - name: owner_user_id
+        type: string
+      - name: metadata
+        type: json
+      - name: created_by
+        type: string
+      - name: updated_by
+        type: string
+
+  - name: thread
+    workspace_scoped: true
+    soft_delete: true
+    fields:
+      - name: agent_id
+        type: string
+        required: true
+      - name: title
+        type: string
+      - name: summary
+        type: text
+      - name: turn_count
+        type: int
+      - name: token_count
+        type: int
+      - name: owner_user_id
+        type: string
+      - name: metadata
+        type: json
+
+  - name: message
+    workspace_scoped: false
+    fields:
+      - name: thread_id
+        type: string
+        required: true
+      - name: role
+        type: string
+        required: true
+      - name: content
+        type: text
+      - name: tool_calls
+        type: json
+      - name: tool_results
+        type: json
+      - name: model
+        type: string
+      - name: input_tokens
+        type: int
+      - name: output_tokens
+        type: int
+      - name: cost
+        type: float
+      - name: latency_ms
+        type: int
+      - name: metadata
+        type: json
+
+  - name: document
+    workspace_scoped: true
+    soft_delete: true
+    fields:
+      - name: agent_id
+        type: string
+      - name: filename
+        type: string
+        required: true
+      - name: content_type
+        type: string
+      - name: size
+        type: int
+      - name: chunk_count
+        type: int
+      - name: status
+        type: string
+        default: "pending"
+      - name: error
+        type: text
+      - name: metadata
+        type: json
+      - name: processed_at
+        type: datetime
+
+  - name: document_chunk
+    workspace_scoped: false
+    fields:
+      - name: document_id
+        type: string
+        required: true
+      - name: chunk_index
+        type: int
+        required: true
+      - name: content
+        type: text
+        required: true
+      - name: embedding
+        type: text
+      - name: metadata
+        type: json
+
+  - name: user_context
+    workspace_scoped: true
+    fields:
+      - name: user_id
+        type: string
+        required: true
+      - name: context_type
+        type: string
+        required: true
+      - name: content
+        type: text
+        required: true
+      - name: metadata
+        type: json
+      - name: expires_at
+        type: datetime
+
+  - name: analytics_daily
+    workspace_scoped: true
+    fields:
+      - name: date
+        type: string
+        required: true
+      - name: agent_id
+        type: string
+      - name: user_id
+        type: string
+      - name: message_count
+        type: int
+      - name: thread_count
+        type: int
+      - name: token_count
+        type: int
+      - name: cost
+        type: float
+      - name: avg_latency_ms
+        type: int
+      - name: error_count
+        type: int

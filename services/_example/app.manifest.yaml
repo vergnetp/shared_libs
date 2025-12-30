@@ -1,0 +1,39 @@
+# App Manifest for _example
+# This file defines your application structure
+# Run: appctl new --from-manifest app.manifest.yaml
+
+name: _example
+version: 1.0.0
+description: "My example service"
+
+database:
+  type: sqlite
+  name: ./data/app.db
+
+redis:
+  enabled: false
+
+auth:
+  enabled: true
+  allow_signup: false
+
+cors:
+  origins:
+    - *
+
+tasks:
+  # No tasks defined
+
+entities:
+  - name: item
+    fields:
+      - name: title
+        type: string
+      - name: description
+        type: text
+      - name: price
+        type: float
+      - name: active
+        type: bool
+    workspace_scoped: true
+    generate_routes: true
