@@ -1,0 +1,1039 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Deploy Dashboard</title>
+    <style>
+        :root {
+            --bg: #f8fafc;
+            --bg-card: #ffffff;
+            --bg-input: #f1f5f9;
+            --border: #e2e8f0;
+            --text: #1e293b;
+            --text-muted: #64748b;
+            --primary: #3b82f6;
+            --primary-hover: #2563eb;
+            --success: #22c55e;
+            --warning: #f59e0b;
+            --danger: #ef4444;
+        }
+        
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+        }
+        
+        /* Layout */
+        .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 16px 24px;
+            background: var(--bg-card);
+            border-bottom: 1px solid var(--border);
+            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+        }
+        .header h1 { font-size: 1.25rem; font-weight: 600; }
+        .header-actions { display: flex; gap: 12px; align-items: center; }
+        
+        /* Cards */
+        .card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 16px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+        }
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+        }
+        .card-title { font-size: 1rem; font-weight: 600; }
+        
+        /* Grid */
+        .grid { display: grid; gap: 16px; }
+        .grid-2 { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+        .grid-3 { grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); }
+        
+        /* Forms */
+        .form-group { margin-bottom: 16px; }
+        .form-group label {
+            display: block;
+            font-size: 0.875rem;
+            color: var(--text-muted);
+            margin-bottom: 6px;
+        }
+        input, select, textarea {
+            width: 100%;
+            padding: 10px 12px;
+            background: var(--bg-input);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            color: var(--text);
+            font-size: 0.875rem;
+        }
+        input:focus, select:focus, textarea:focus {
+            outline: none;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
+        }
+        input::placeholder { color: var(--text-muted); }
+        
+        /* Buttons */
+        .btn {
+            padding: 10px 16px;
+            border: none;
+            border-radius: 6px;
+            font-size: 0.875rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .btn-primary { background: var(--primary); color: white; }
+        .btn-primary:hover { background: var(--primary-hover); }
+        .btn-success { background: var(--success); color: white; }
+        .btn-danger { background: var(--danger); color: white; }
+        .btn-ghost {
+            background: transparent;
+            color: var(--text-muted);
+            border: 1px solid var(--border);
+        }
+        .btn-ghost:hover { background: var(--bg-input); }
+        .btn-sm { padding: 6px 12px; font-size: 0.75rem; }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        
+        /* Lists */
+        .list-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 12px;
+            background: var(--bg-input);
+            border-radius: 6px;
+            margin-bottom: 8px;
+        }
+        .list-item:last-child { margin-bottom: 0; }
+        .list-item-info { flex: 1; }
+        .list-item-title { font-weight: 500; margin-bottom: 2px; }
+        .list-item-meta { font-size: 0.75rem; color: var(--text-muted); }
+        .list-item-actions { display: flex; gap: 8px; }
+        
+        /* Status badges */
+        .badge {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 500;
+        }
+        .badge-success { background: rgba(34, 197, 94, 0.15); color: #16a34a; }
+        .badge-warning { background: rgba(245, 158, 11, 0.15); color: #d97706; }
+        .badge-danger { background: rgba(239, 68, 68, 0.15); color: #dc2626; }
+        .badge-info { background: rgba(59, 130, 246, 0.15); color: #2563eb; }
+        
+        /* Tabs */
+        .tabs {
+            display: flex;
+            gap: 4px;
+            margin-bottom: 20px;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 4px;
+        }
+        .tab {
+            padding: 8px 16px;
+            background: transparent;
+            border: none;
+            color: var(--text-muted);
+            cursor: pointer;
+            border-radius: 6px 6px 0 0;
+            font-size: 0.875rem;
+        }
+        .tab.active { background: var(--bg-input); color: var(--text); }
+        .tab:hover { color: var(--text); }
+        
+        /* Modal */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.4);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+        }
+        .modal {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            width: 90%;
+            max-width: 500px;
+            max-height: 90vh;
+            overflow-y: auto;
+            box-shadow: 0 20px 50px rgba(0,0,0,0.15);
+        }
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 16px 20px;
+            border-bottom: 1px solid var(--border);
+        }
+        .modal-body { padding: 20px; }
+        .modal-footer {
+            padding: 16px 20px;
+            border-top: 1px solid var(--border);
+            display: flex;
+            justify-content: flex-end;
+            gap: 8px;
+        }
+        
+        /* Logs */
+        .log-container {
+            background: #1e293b;
+            border-radius: 6px;
+            padding: 12px;
+            font-family: 'Monaco', 'Menlo', monospace;
+            font-size: 0.75rem;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .log-line { margin-bottom: 4px; color: #cbd5e1; }
+        .log-line.info { color: #60a5fa; }
+        .log-line.success { color: #4ade80; }
+        .log-line.error { color: #f87171; }
+        
+        /* Progress */
+        .progress-bar {
+            height: 8px;
+            background: var(--bg-input);
+            border-radius: 4px;
+            overflow: hidden;
+            margin: 12px 0;
+        }
+        .progress-fill {
+            height: 100%;
+            background: var(--primary);
+            transition: width 0.3s;
+        }
+        
+        /* Auth screen */
+        .auth-container {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .auth-card {
+            width: 100%;
+            max-width: 400px;
+        }
+        .auth-title {
+            text-align: center;
+            margin-bottom: 24px;
+        }
+        .auth-title h1 { font-size: 1.5rem; margin-bottom: 8px; }
+        .auth-title p { color: var(--text-muted); font-size: 0.875rem; }
+        
+        /* Empty state */
+        .empty-state {
+            text-align: center;
+            padding: 40px 20px;
+            color: var(--text-muted);
+        }
+        .empty-state p { margin-bottom: 16px; }
+        
+        /* Utility */
+        .hidden { display: none !important; }
+        .text-muted { color: var(--text-muted); }
+        .text-sm { font-size: 0.875rem; }
+        .mt-2 { margin-top: 8px; }
+        .mt-4 { margin-top: 16px; }
+        .mb-2 { margin-bottom: 8px; }
+        .flex { display: flex; }
+        .gap-2 { gap: 8px; }
+        .items-center { align-items: center; }
+    </style>
+</head>
+<body>
+    <!-- Auth Screen -->
+    <div id="auth-screen" class="auth-container">
+        <div class="auth-card">
+            <div class="auth-title">
+                <h1>🚀 Deploy Dashboard</h1>
+                <p>Sign in to manage your deployments</p>
+            </div>
+            <div class="card">
+                <div class="tabs">
+                    <button class="tab active" onclick="showAuthTab('login')">Login</button>
+                    <button class="tab" onclick="showAuthTab('signup')">Sign Up</button>
+                </div>
+                
+                <form id="login-form" onsubmit="handleLogin(event)">
+                    <div class="form-group">
+                        <label>Email</label>
+                        <input type="email" id="login-email" placeholder="you@example.com" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Password</label>
+                        <input type="password" id="login-password" placeholder="••••••••" required>
+                    </div>
+                    <button type="submit" class="btn btn-primary" style="width: 100%;">Sign In</button>
+                </form>
+                
+                <form id="signup-form" class="hidden" onsubmit="handleSignup(event)">
+                    <div class="form-group">
+                        <label>Email</label>
+                        <input type="email" id="signup-email" placeholder="you@example.com" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Password</label>
+                        <input type="password" id="signup-password" placeholder="••••••••" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Confirm Password</label>
+                        <input type="password" id="signup-confirm" placeholder="••••••••" required>
+                    </div>
+                    <button type="submit" class="btn btn-primary" style="width: 100%;">Create Account</button>
+                </form>
+                
+                <p id="auth-error" class="text-sm mt-4 hidden" style="color: var(--danger);"></p>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Main App -->
+    <div id="app-screen" class="hidden">
+        <header class="header">
+            <h1>🚀 Deploy Dashboard</h1>
+            <div class="header-actions">
+                <select id="workspace-select" onchange="switchWorkspace()">
+                    <option value="">Select Workspace</option>
+                </select>
+                <button class="btn btn-ghost btn-sm" onclick="showNewWorkspaceModal()">+ Workspace</button>
+                <span id="user-email" class="text-muted text-sm"></span>
+                <button class="btn btn-ghost btn-sm" onclick="logout()">Logout</button>
+            </div>
+        </header>
+        
+        <div class="container">
+            <!-- No workspace selected -->
+            <div id="no-workspace" class="card">
+                <div class="empty-state">
+                    <p>Select a workspace or create a new one to get started</p>
+                    <button class="btn btn-primary" onclick="showNewWorkspaceModal()">Create Workspace</button>
+                </div>
+            </div>
+            
+            <!-- Workspace content -->
+            <div id="workspace-content" class="hidden">
+                <div class="tabs">
+                    <button class="tab active" onclick="showTab('projects')">Projects</button>
+                    <button class="tab" onclick="showTab('deployments')">Deployments</button>
+                </div>
+                
+                <!-- Projects Tab -->
+                <div id="tab-projects">
+                    <div class="card">
+                        <div class="card-header">
+                            <span class="card-title">Projects</span>
+                            <button class="btn btn-primary btn-sm" onclick="showNewProjectModal()">+ New Project</button>
+                        </div>
+                        <div id="projects-list">
+                            <div class="empty-state">
+                                <p>No projects yet</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Deployments Tab -->
+                <div id="tab-deployments" class="hidden">
+                    <div class="card">
+                        <div class="card-header">
+                            <span class="card-title">Recent Deployments</span>
+                        </div>
+                        <div id="deployments-list">
+                            <div class="empty-state">
+                                <p>No deployments yet</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Modals Container -->
+    <div id="modals"></div>
+    
+    <script>
+        // =============================================================================
+        // State
+        // =============================================================================
+        
+        let state = {
+            token: localStorage.getItem('token'),
+            user: null,
+            workspaces: [],
+            currentWorkspace: null,
+            projects: [],
+            deployments: [],
+        };
+        
+        const API_BASE = window.location.origin + '/api/v1';
+        
+        // =============================================================================
+        // API Helpers
+        // =============================================================================
+        
+        async function api(method, path, data = null) {
+            const headers = { 'Content-Type': 'application/json' };
+            if (state.token) {
+                headers['Authorization'] = `Bearer ${state.token}`;
+            }
+            
+            const opts = { method, headers };
+            if (data) opts.body = JSON.stringify(data);
+            
+            const res = await fetch(API_BASE + path, opts);
+            
+            if (res.status === 401) {
+                logout();
+                throw new Error('Session expired');
+            }
+            
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({ detail: 'Request failed' }));
+                throw new Error(err.detail || 'Request failed');
+            }
+            
+            if (res.status === 204) return null;
+            return res.json();
+        }
+        
+        // =============================================================================
+        // Auth
+        // =============================================================================
+        
+        function showAuthTab(tab) {
+            document.querySelectorAll('.auth-card .tab').forEach(t => t.classList.remove('active'));
+            document.querySelector(`.auth-card .tab:nth-child(${tab === 'login' ? 1 : 2})`).classList.add('active');
+            document.getElementById('login-form').classList.toggle('hidden', tab !== 'login');
+            document.getElementById('signup-form').classList.toggle('hidden', tab !== 'signup');
+            document.getElementById('auth-error').classList.add('hidden');
+        }
+        
+        async function handleLogin(e) {
+            e.preventDefault();
+            const email = document.getElementById('login-email').value;
+            const password = document.getElementById('login-password').value;
+            
+            try {
+                const res = await api('POST', '/auth/login', { username: email, password });
+                state.token = res.access_token;
+                localStorage.setItem('token', state.token);
+                await initApp();
+            } catch (err) {
+                showAuthError(err.message);
+            }
+        }
+        
+        async function handleSignup(e) {
+            e.preventDefault();
+            const email = document.getElementById('signup-email').value;
+            const password = document.getElementById('signup-password').value;
+            const confirm = document.getElementById('signup-confirm').value;
+            
+            if (password !== confirm) {
+                showAuthError('Passwords do not match');
+                return;
+            }
+            
+            try {
+                await api('POST', '/auth/register', { username: email, email, password });
+                // Auto login after signup
+                const res = await api('POST', '/auth/login', { username: email, password });
+                state.token = res.access_token;
+                localStorage.setItem('token', state.token);
+                await initApp();
+            } catch (err) {
+                showAuthError(err.message);
+            }
+        }
+        
+        function showAuthError(msg) {
+            const el = document.getElementById('auth-error');
+            el.textContent = msg;
+            el.classList.remove('hidden');
+        }
+        
+        function logout() {
+            state.token = null;
+            state.user = null;
+            localStorage.removeItem('token');
+            document.getElementById('auth-screen').classList.remove('hidden');
+            document.getElementById('app-screen').classList.add('hidden');
+        }
+        
+        // =============================================================================
+        // App Init
+        // =============================================================================
+        
+        async function initApp() {
+            if (!state.token) {
+                document.getElementById('auth-screen').classList.remove('hidden');
+                document.getElementById('app-screen').classList.add('hidden');
+                return;
+            }
+            
+            try {
+                // Get user info
+                state.user = await api('GET', '/auth/me');
+                document.getElementById('user-email').textContent = state.user.email;
+                
+                // Get workspaces
+                state.workspaces = await api('GET', '/workspaces');
+                renderWorkspaceSelect();
+                
+                // Show app
+                document.getElementById('auth-screen').classList.add('hidden');
+                document.getElementById('app-screen').classList.remove('hidden');
+                
+                // Load first workspace if any
+                if (state.workspaces.length > 0) {
+                    const lastWs = localStorage.getItem('lastWorkspace');
+                    const ws = state.workspaces.find(w => w.id === lastWs) || state.workspaces[0];
+                    document.getElementById('workspace-select').value = ws.id;
+                    await switchWorkspace();
+                }
+            } catch (err) {
+                console.error('Init failed:', err);
+                logout();
+            }
+        }
+        
+        // =============================================================================
+        // Workspaces
+        // =============================================================================
+        
+        function renderWorkspaceSelect() {
+            const select = document.getElementById('workspace-select');
+            select.innerHTML = '<option value="">Select Workspace</option>' +
+                state.workspaces.map(w => `<option value="${w.id}">${w.name}</option>`).join('');
+        }
+        
+        async function switchWorkspace() {
+            const wsId = document.getElementById('workspace-select').value;
+            
+            if (!wsId) {
+                state.currentWorkspace = null;
+                document.getElementById('no-workspace').classList.remove('hidden');
+                document.getElementById('workspace-content').classList.add('hidden');
+                return;
+            }
+            
+            state.currentWorkspace = state.workspaces.find(w => w.id === wsId);
+            localStorage.setItem('lastWorkspace', wsId);
+            
+            document.getElementById('no-workspace').classList.add('hidden');
+            document.getElementById('workspace-content').classList.remove('hidden');
+            
+            await loadProjects();
+            await loadDeployments();
+        }
+        
+        function showNewWorkspaceModal() {
+            showModal('New Workspace', `
+                <form onsubmit="createWorkspace(event)">
+                    <div class="form-group">
+                        <label>Workspace Name</label>
+                        <input type="text" id="new-ws-name" placeholder="my-org" pattern="^[a-z][a-z0-9_-]*$" required>
+                        <small class="text-muted">Lowercase letters, numbers, hyphens</small>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+                        <button type="submit" class="btn btn-primary">Create</button>
+                    </div>
+                </form>
+            `);
+        }
+        
+        async function createWorkspace(e) {
+            e.preventDefault();
+            const name = document.getElementById('new-ws-name').value;
+            
+            try {
+                const ws = await api('POST', '/workspaces', { name });
+                state.workspaces.push(ws);
+                renderWorkspaceSelect();
+                document.getElementById('workspace-select').value = ws.id;
+                await switchWorkspace();
+                closeModal();
+            } catch (err) {
+                alert(err.message);
+            }
+        }
+        
+        // =============================================================================
+        // Projects
+        // =============================================================================
+        
+        async function loadProjects() {
+            if (!state.currentWorkspace) return;
+            
+            try {
+                state.projects = await api('GET', `/workspaces/${state.currentWorkspace.id}/projects`);
+                renderProjects();
+            } catch (err) {
+                console.error('Load projects failed:', err);
+            }
+        }
+        
+        function renderProjects() {
+            const container = document.getElementById('projects-list');
+            
+            if (state.projects.length === 0) {
+                container.innerHTML = '<div class="empty-state"><p>No projects yet</p></div>';
+                return;
+            }
+            
+            container.innerHTML = state.projects.map(p => `
+                <div class="list-item">
+                    <div class="list-item-info">
+                        <div class="list-item-title">${p.name}</div>
+                        <div class="list-item-meta">
+                            ${Object.keys(p.services || {}).length} services · 
+                            Docker Hub: ${p.docker_hub_user}
+                        </div>
+                    </div>
+                    <div class="list-item-actions">
+                        <button class="btn btn-ghost btn-sm" onclick="showProjectDetails('${p.name}')">Manage</button>
+                        <button class="btn btn-primary btn-sm" onclick="showDeployModal('${p.name}')">Deploy</button>
+                    </div>
+                </div>
+            `).join('');
+        }
+        
+        function showNewProjectModal() {
+            showModal('New Project', `
+                <form onsubmit="createProject(event)">
+                    <div class="form-group">
+                        <label>Project Name</label>
+                        <input type="text" id="new-proj-name" placeholder="my-app" pattern="^[a-z][a-z0-9_-]*$" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Docker Hub Username</label>
+                        <input type="text" id="new-proj-docker" placeholder="myusername" required>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+                        <button type="submit" class="btn btn-primary">Create</button>
+                    </div>
+                </form>
+            `);
+        }
+        
+        async function createProject(e) {
+            e.preventDefault();
+            const name = document.getElementById('new-proj-name').value;
+            const docker_hub_user = document.getElementById('new-proj-docker').value;
+            
+            try {
+                await api('POST', `/workspaces/${state.currentWorkspace.id}/projects`, { name, docker_hub_user });
+                await loadProjects();
+                closeModal();
+            } catch (err) {
+                alert(err.message);
+            }
+        }
+        
+        async function showProjectDetails(projectName) {
+            const project = state.projects.find(p => p.name === projectName);
+            if (!project) return;
+            
+            const services = Object.entries(project.services || {});
+            
+            showModal(`Project: ${projectName}`, `
+                <div class="tabs mb-2">
+                    <button class="tab active" onclick="showProjectTab('services', '${projectName}')">Services</button>
+                    <button class="tab" onclick="showProjectTab('credentials', '${projectName}')">Credentials</button>
+                </div>
+                
+                <div id="project-tab-services">
+                    <div class="card-header">
+                        <span class="card-title">Services</span>
+                        <button class="btn btn-primary btn-sm" onclick="showAddServiceModal('${projectName}')">+ Add</button>
+                    </div>
+                    ${services.length === 0 
+                        ? '<p class="text-muted text-sm">No services configured</p>'
+                        : services.map(([name, cfg]) => `
+                            <div class="list-item">
+                                <div class="list-item-info">
+                                    <div class="list-item-title">${name}</div>
+                                    <div class="list-item-meta">
+                                        ${cfg.image || cfg.git_repo || 'Standard service'}
+                                    </div>
+                                </div>
+                                <button class="btn btn-danger btn-sm" onclick="removeService('${projectName}', '${name}')">Remove</button>
+                            </div>
+                        `).join('')
+                    }
+                </div>
+                
+                <div id="project-tab-credentials" class="hidden">
+                    <p class="text-muted text-sm mb-2">Set credentials for each environment</p>
+                    ${['prod', 'uat', 'dev'].map(env => `
+                        <div class="list-item">
+                            <div class="list-item-info">
+                                <div class="list-item-title">${env}</div>
+                            </div>
+                            <button class="btn btn-ghost btn-sm" onclick="showCredentialsModal('${projectName}', '${env}')">Configure</button>
+                        </div>
+                    `).join('')}
+                </div>
+            `);
+        }
+        
+        function showProjectTab(tab, projectName) {
+            document.querySelectorAll('.modal .tab').forEach(t => t.classList.remove('active'));
+            event.target.classList.add('active');
+            document.getElementById('project-tab-services').classList.toggle('hidden', tab !== 'services');
+            document.getElementById('project-tab-credentials').classList.toggle('hidden', tab !== 'credentials');
+        }
+        
+        function showAddServiceModal(projectName) {
+            closeModal();
+            setTimeout(() => {
+                showModal('Add Service', `
+                    <form onsubmit="addService(event, '${projectName}')">
+                        <div class="form-group">
+                            <label>Service Name</label>
+                            <input type="text" id="svc-name" placeholder="api, postgres, redis..." required>
+                            <small class="text-muted">Use postgres, redis for auto-config</small>
+                        </div>
+                        <div class="form-group">
+                            <label>Image (optional)</label>
+                            <input type="text" id="svc-image" placeholder="nginx:alpine">
+                        </div>
+                        <div class="form-group">
+                            <label>Git Repo (optional)</label>
+                            <input type="text" id="svc-git" placeholder="github.com/user/repo@main">
+                        </div>
+                        <div class="form-group">
+                            <label>Ports (comma-separated)</label>
+                            <input type="text" id="svc-ports" placeholder="8000, 8080">
+                        </div>
+                        <div class="form-group">
+                            <label>Server Zone</label>
+                            <select id="svc-zone">
+                                <option value="lon1">London (lon1)</option>
+                                <option value="nyc1">New York (nyc1)</option>
+                                <option value="sfo1">San Francisco (sfo1)</option>
+                                <option value="ams3">Amsterdam (ams3)</option>
+                            </select>
+                        </div>
+                        <div class="modal-footer">
+                            <button type="button" class="btn btn-ghost" onclick="closeModal(); showProjectDetails('${projectName}')">Cancel</button>
+                            <button type="submit" class="btn btn-primary">Add Service</button>
+                        </div>
+                    </form>
+                `);
+            }, 100);
+        }
+        
+        async function addService(e, projectName) {
+            e.preventDefault();
+            
+            const data = {
+                name: document.getElementById('svc-name').value,
+                server_zone: document.getElementById('svc-zone').value,
+            };
+            
+            const image = document.getElementById('svc-image').value;
+            const git = document.getElementById('svc-git').value;
+            const ports = document.getElementById('svc-ports').value;
+            
+            if (image) data.image = image;
+            if (git) data.git_repo = git;
+            if (ports) data.ports = ports.split(',').map(p => p.trim());
+            
+            try {
+                await api('POST', `/workspaces/${state.currentWorkspace.id}/projects/${projectName}/services`, data);
+                await loadProjects();
+                closeModal();
+                showProjectDetails(projectName);
+            } catch (err) {
+                alert(err.message);
+            }
+        }
+        
+        async function removeService(projectName, serviceName) {
+            if (!confirm(`Remove service ${serviceName}?`)) return;
+            
+            try {
+                await api('DELETE', `/workspaces/${state.currentWorkspace.id}/projects/${projectName}/services/${serviceName}`);
+                await loadProjects();
+                showProjectDetails(projectName);
+            } catch (err) {
+                alert(err.message);
+            }
+        }
+        
+        function showCredentialsModal(projectName, env) {
+            closeModal();
+            setTimeout(() => {
+                showModal(`Credentials: ${projectName} / ${env}`, `
+                    <form onsubmit="saveCredentials(event, '${projectName}', '${env}')">
+                        <div class="form-group">
+                            <label>DigitalOcean Token *</label>
+                            <input type="password" id="cred-do" placeholder="dop_v1_..." required>
+                        </div>
+                        <div class="form-group">
+                            <label>Docker Hub Username</label>
+                            <input type="text" id="cred-docker-user" placeholder="username">
+                        </div>
+                        <div class="form-group">
+                            <label>Docker Hub Password</label>
+                            <input type="password" id="cred-docker-pass" placeholder="password or token">
+                        </div>
+                        <div class="modal-footer">
+                            <button type="button" class="btn btn-ghost" onclick="closeModal(); showProjectDetails('${projectName}')">Cancel</button>
+                            <button type="submit" class="btn btn-primary">Save</button>
+                        </div>
+                    </form>
+                `);
+            }, 100);
+        }
+        
+        async function saveCredentials(e, projectName, env) {
+            e.preventDefault();
+            
+            const data = {
+                digitalocean_token: document.getElementById('cred-do').value,
+            };
+            
+            const dockerUser = document.getElementById('cred-docker-user').value;
+            const dockerPass = document.getElementById('cred-docker-pass').value;
+            
+            if (dockerUser) data.docker_hub_user = dockerUser;
+            if (dockerPass) data.docker_hub_password = dockerPass;
+            
+            try {
+                await api('PUT', `/workspaces/${state.currentWorkspace.id}/projects/${projectName}/credentials/${env}`, data);
+                closeModal();
+                showProjectDetails(projectName);
+                alert('Credentials saved!');
+            } catch (err) {
+                alert(err.message);
+            }
+        }
+        
+        // =============================================================================
+        // Deployments
+        // =============================================================================
+        
+        async function loadDeployments() {
+            if (!state.currentWorkspace || state.projects.length === 0) {
+                state.deployments = [];
+                renderDeployments();
+                return;
+            }
+            
+            try {
+                // Load deployments for all projects
+                const allDeploys = [];
+                for (const p of state.projects) {
+                    const deploys = await api('GET', `/workspaces/${state.currentWorkspace.id}/projects/${p.name}/deployments?limit=10`);
+                    allDeploys.push(...(deploys.deployments || []));
+                }
+                state.deployments = allDeploys.sort((a, b) => 
+                    new Date(b.triggered_at) - new Date(a.triggered_at)
+                ).slice(0, 20);
+                renderDeployments();
+            } catch (err) {
+                console.error('Load deployments failed:', err);
+            }
+        }
+        
+        function renderDeployments() {
+            const container = document.getElementById('deployments-list');
+            
+            if (state.deployments.length === 0) {
+                container.innerHTML = '<div class="empty-state"><p>No deployments yet</p></div>';
+                return;
+            }
+            
+            container.innerHTML = state.deployments.map(d => {
+                const statusClass = {
+                    'queued': 'badge-info',
+                    'running': 'badge-warning',
+                    'succeeded': 'badge-success',
+                    'failed': 'badge-danger',
+                }[d.status] || 'badge-info';
+                
+                return `
+                    <div class="list-item">
+                        <div class="list-item-info">
+                            <div class="list-item-title">${d.project_name} → ${d.env}</div>
+                            <div class="list-item-meta">
+                                ${new Date(d.triggered_at).toLocaleString()} · ${d.triggered_by}
+                            </div>
+                        </div>
+                        <div class="list-item-actions">
+                            <span class="badge ${statusClass}">${d.status}</span>
+                            <button class="btn btn-ghost btn-sm" onclick="showDeploymentStatus('${d.project_name}', '${d.job_id}')">Details</button>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+        
+        function showDeployModal(projectName) {
+            showModal('Deploy', `
+                <form onsubmit="triggerDeploy(event, '${projectName}')">
+                    <div class="form-group">
+                        <label>Environment</label>
+                        <select id="deploy-env">
+                            <option value="prod">Production</option>
+                            <option value="uat">UAT</option>
+                            <option value="dev">Development</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>
+                            <input type="checkbox" id="deploy-force"> Force rebuild
+                        </label>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+                        <button type="submit" class="btn btn-success">Deploy</button>
+                    </div>
+                </form>
+            `);
+        }
+        
+        async function triggerDeploy(e, projectName) {
+            e.preventDefault();
+            
+            const env = document.getElementById('deploy-env').value;
+            const force = document.getElementById('deploy-force').checked;
+            
+            try {
+                const result = await api('POST', `/workspaces/${state.currentWorkspace.id}/projects/${projectName}/deploy`, { env, force });
+                closeModal();
+                showDeploymentStatus(projectName, result.job_id);
+            } catch (err) {
+                alert(err.message);
+            }
+        }
+        
+        async function showDeploymentStatus(projectName, jobId) {
+            showModal('Deployment Status', `
+                <div id="deploy-status-content">
+                    <p class="text-muted">Loading...</p>
+                </div>
+            `);
+            
+            await pollDeploymentStatus(projectName, jobId);
+        }
+        
+        async function pollDeploymentStatus(projectName, jobId) {
+            try {
+                const status = await api('GET', `/workspaces/${state.currentWorkspace.id}/projects/${projectName}/deploy/${jobId}`);
+                
+                const statusClass = {
+                    'queued': 'badge-info',
+                    'running': 'badge-warning',
+                    'succeeded': 'badge-success',
+                    'failed': 'badge-danger',
+                }[status.status] || 'badge-info';
+                
+                const content = document.getElementById('deploy-status-content');
+                if (!content) return; // Modal closed
+                
+                content.innerHTML = `
+                    <div class="flex items-center gap-2 mb-2">
+                        <span class="badge ${statusClass}">${status.status}</span>
+                        ${status.step ? `<span class="text-muted text-sm">${status.step}</span>` : ''}
+                    </div>
+                    ${status.progress != null ? `
+                        <div class="progress-bar">
+                            <div class="progress-fill" style="width: ${status.progress}%"></div>
+                        </div>
+                    ` : ''}
+                    ${status.error ? `<p style="color: var(--danger);" class="text-sm">${status.error}</p>` : ''}
+                    ${status.logs && status.logs.length > 0 ? `
+                        <div class="log-container">
+                            ${status.logs.map(l => `<div class="log-line">${l}</div>`).join('')}
+                        </div>
+                    ` : ''}
+                `;
+                
+                // Keep polling if not done
+                if (status.status === 'queued' || status.status === 'running') {
+                    setTimeout(() => pollDeploymentStatus(projectName, jobId), 2000);
+                } else {
+                    // Refresh deployments list
+                    await loadDeployments();
+                }
+            } catch (err) {
+                console.error('Poll failed:', err);
+            }
+        }
+        
+        // =============================================================================
+        // Tabs
+        // =============================================================================
+        
+        function showTab(tab) {
+            document.querySelectorAll('#workspace-content > .tabs .tab').forEach(t => t.classList.remove('active'));
+            document.querySelector(`#workspace-content > .tabs .tab:nth-child(${tab === 'projects' ? 1 : 2})`).classList.add('active');
+            document.getElementById('tab-projects').classList.toggle('hidden', tab !== 'projects');
+            document.getElementById('tab-deployments').classList.toggle('hidden', tab !== 'deployments');
+        }
+        
+        // =============================================================================
+        // Modal
+        // =============================================================================
+        
+        function showModal(title, content) {
+            document.getElementById('modals').innerHTML = `
+                <div class="modal-overlay" onclick="if(event.target === this) closeModal()">
+                    <div class="modal">
+                        <div class="modal-header">
+                            <span class="card-title">${title}</span>
+                            <button class="btn btn-ghost btn-sm" onclick="closeModal()">✕</button>
+                        </div>
+                        <div class="modal-body">
+                            ${content}
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+        
+        function closeModal() {
+            document.getElementById('modals').innerHTML = '';
+        }
+        
+        // =============================================================================
+        // Init
+        // =============================================================================
+        
+        document.addEventListener('DOMContentLoaded', () => initApp());
+    </script>
+</body>
+</html>

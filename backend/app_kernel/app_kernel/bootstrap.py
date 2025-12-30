@@ -121,8 +121,13 @@ class ServiceConfig:
     redis_url: Optional[str] = None
     redis_key_prefix: str = "app:"
     
-    # Database (optional - for health checks)
-    database_url: Optional[str] = None
+    # Database (kernel manages connection pool, app provides schema)
+    database_name: Optional[str] = None  # DB name or file path for sqlite
+    database_type: str = "sqlite"        # sqlite, postgres, mysql
+    database_host: str = "localhost"
+    database_port: Optional[int] = None  # None = use default for type
+    database_user: Optional[str] = None
+    database_password: Optional[str] = None
     
     # CORS
     cors_origins: List[str] = field(default_factory=lambda: ["*"])
@@ -219,6 +224,9 @@ def create_service(
     # Config
     config: Optional[ServiceConfig] = None,
     
+    # Database schema init (async function that takes db connection)
+    schema_init: Optional[Callable] = None,
+    
     # Metadata
     version: str = "1.0.0",
     description: str = "",
@@ -248,10 +256,11 @@ def create_service(
             - (prefix, APIRouter, tags) tuple
         tasks: Dict of task_name -> handler for background jobs
         config: ServiceConfig (or uses defaults/env vars)
+        schema_init: Async function(db) to initialize app database tables
         version: Service version
         description: API description
-        on_startup: Async function called on startup
-        on_shutdown: Async function called on shutdown
+        on_startup: Async function called on startup (after db init)
+        on_shutdown: Async function called on shutdown (before db close)
         health_checks: List of (name, check_fn) for /readyz
         auth_service: Factory function for auth service (enables login/register)
         is_admin: Function(user) -> bool for admin checks
@@ -263,11 +272,17 @@ def create_service(
         Configured FastAPI application
     
     Example:
+        async def init_tables(db):
+            await db.execute("CREATE TABLE IF NOT EXISTS widgets ...")
+        
         app = create_service(
             name="widget_service",
-            routers=[widgets_router, orders_router],
-            tasks={"process_widget": process_widget},
-            config=ServiceConfig.from_env("WIDGET_"),
+            routers=[widgets_router],
+            config=ServiceConfig(
+                database_url="./data/widgets.db",
+                database_type="sqlite",
+            ),
+            schema_init=init_tables,
         )
     """
     # Use provided config or load from env
@@ -290,7 +305,34 @@ def create_service(
         logger = get_logger()
         metrics = get_metrics()
         
-        # Run startup hook
+        # Initialize database if configured
+        if cfg.database_name:
+            from .db import init_db_session, init_schema
+            
+            # Ensure data directory exists for SQLite
+            if cfg.database_type == "sqlite":
+                from pathlib import Path
+                Path(cfg.database_name).parent.mkdir(parents=True, exist_ok=True)
+            
+            init_db_session(
+                database_name=cfg.database_name,
+                database_type=cfg.database_type,
+                host=cfg.database_host,
+                port=cfg.database_port,
+                user=cfg.database_user,
+                password=cfg.database_password,
+            )
+            logger.info(f"Database initialized", extra={
+                "type": cfg.database_type,
+                "database": cfg.database_name,
+            })
+            
+            # Initialize app schema if provided
+            if schema_init:
+                await init_schema(schema_init)
+                logger.info("Database schema initialized")
+        
+        # Run app startup hook
         if on_startup:
             await on_startup()
         
@@ -298,14 +340,21 @@ def create_service(
             "version": version,
             "debug": cfg.debug,
             "redis": bool(cfg.redis_url),
+            "database": bool(cfg.database_url),
         })
         metrics.set_gauge("service_started", 1)
         
         yield
         
-        # Run shutdown hook
+        # Run app shutdown hook
         if on_shutdown:
             await on_shutdown()
+        
+        # Close database
+        if cfg.database_name:
+            from .db import close_db_session
+            await close_db_session()
+            logger.info("Database closed")
         
         logger.info(f"{name} shutting down")
     
@@ -449,6 +498,8 @@ def _build_kernel_settings(
         ),
         
         health_checks=tuple(health_checks),
+        
+        database_url=cfg.database_url,
     )
 
 

@@ -115,6 +115,11 @@ from .db import (
     init_kernel_schema,
     cleanup_expired_idempotency_keys,
     cleanup_old_rate_limits,
+    get_db_session,
+    db_session_dependency,
+    init_db_session,
+    get_db_manager,
+    init_schema,
 )
 
 # Bootstrap - simplified service creation
@@ -186,6 +191,13 @@ __all__ = [
     
     # Health
     "create_health_router",
+    
+    # Database
+    "init_db_session",
+    "get_db_session",
+    "get_db_manager",
+    "db_session_dependency",
+    "init_schema",
     
     # Schema
     "init_kernel_schema",

@@ -1,0 +1,1 @@
+"""App scaffold generator."""
