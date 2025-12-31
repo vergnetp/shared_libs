@@ -1,5 +1,5 @@
 """
-Database session management.
+Database connection management.
 
 Kernel manages the connection pool via DatabaseManager.
 Apps provide config (in ServiceConfig) and schema (via schema_init).
@@ -11,17 +11,17 @@ Usage:
         database_type="sqlite",
     )
     
-    # In routes
-    from backend.app_kernel.db import db_session_dependency
+    # In routes (FastAPI dependency)
+    from backend.app_kernel.db import db_connection
     
     @app.get("/users")
-    async def get_users(db = Depends(db_session_dependency)):
+    async def get_users(db=Depends(db_connection)):
         return await db.find_entities("users")
     
-    # In workers/scripts
-    from backend.app_kernel.db import get_db_session
+    # In workers/scripts (context manager)
+    from backend.app_kernel.db import get_db_connection
     
-    async with get_db_session() as db:
+    async with get_db_connection() as db:
         await db.save_entity("jobs", {"id": "123", "status": "done"})
 """
 from typing import Optional, Callable, Awaitable
@@ -84,12 +84,14 @@ def get_db_manager():
 
 
 @asynccontextmanager
-async def get_db_session():
+async def get_db_connection():
     """
-    Get a database session (connection with entity methods).
+    Get a database connection from the pool.
+    
+    Connection is automatically released when context exits.
     
     Usage:
-        async with get_db_session() as db:
+        async with get_db_connection() as db:
             user = await db.get_entity("users", user_id)
             await db.save_entity("users", user)
     """
@@ -100,17 +102,20 @@ async def get_db_session():
         yield conn
 
 
-async def db_session_dependency():
+async def db_connection():
     """
-    FastAPI dependency for database sessions.
+    FastAPI dependency for database connections.
+    
+    Connection is acquired from pool at request start,
+    released back to pool when request completes.
     
     Usage:
         @app.get("/")
-        async def handler(db = Depends(db_session_dependency)):
+        async def handler(db=Depends(db_connection)):
             ...
     """
-    async with get_db_session() as session:
-        yield session
+    async with get_db_connection() as conn:
+        yield conn
 
 
 async def init_schema(init_fn: Callable[[any], Awaitable[None]]):
@@ -126,11 +131,11 @@ async def init_schema(init_fn: Callable[[any], Awaitable[None]]):
         
         await init_schema(my_schema)
     """
-    async with get_db_session() as db:
+    async with get_db_connection() as db:
         await init_fn(db)
 
 
-async def close_db_session():
+async def close_db():
     """Close database connections on shutdown."""
     global _db_manager
     if _db_manager is not None:

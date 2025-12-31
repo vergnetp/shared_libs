@@ -12,7 +12,7 @@ from ..schemas import WorkspaceMemberCreate, WorkspaceMemberUpdate, WorkspaceMem
 from ..crud import EntityCRUD
 
 # Import db dependency from src (allows customization)
-from ...src.deps import get_db
+from ...src.deps import db_connection
 
 router = APIRouter(prefix="/workspace_members", tags=["workspace_members"])
 crud = EntityCRUD("workspace_members", soft_delete=False)
@@ -20,7 +20,7 @@ crud = EntityCRUD("workspace_members", soft_delete=False)
 
 @router.get("", response_model=list[WorkspaceMemberResponse])
 async def list_workspace_members(
-    db=Depends(get_db),
+    db=Depends(db_connection),
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=1000),
     workspace_id: Optional[str] = None,
@@ -30,13 +30,13 @@ async def list_workspace_members(
 
 
 @router.post("", response_model=WorkspaceMemberResponse, status_code=201)
-async def create_workspace_member(data: WorkspaceMemberCreate, db=Depends(get_db)):
+async def create_workspace_member(data: WorkspaceMemberCreate, db=Depends(db_connection)):
     """Create workspace_member."""
     return await crud.create(db, data)
 
 
 @router.get("/{id}", response_model=WorkspaceMemberResponse)
-async def get_workspace_member(id: str, db=Depends(get_db)):
+async def get_workspace_member(id: str, db=Depends(db_connection)):
     """Get workspace_member by ID."""
     entity = await crud.get(db, id)
     if not entity:
@@ -45,7 +45,7 @@ async def get_workspace_member(id: str, db=Depends(get_db)):
 
 
 @router.patch("/{id}", response_model=WorkspaceMemberResponse)
-async def update_workspace_member(id: str, data: WorkspaceMemberUpdate, db=Depends(get_db)):
+async def update_workspace_member(id: str, data: WorkspaceMemberUpdate, db=Depends(db_connection)):
     """Update workspace_member."""
     entity = await crud.update(db, id, data)
     if not entity:
@@ -54,6 +54,6 @@ async def update_workspace_member(id: str, data: WorkspaceMemberUpdate, db=Depen
 
 
 @router.delete("/{id}", status_code=204)
-async def delete_workspace_member(id: str, db=Depends(get_db)):
+async def delete_workspace_member(id: str, db=Depends(db_connection)):
     """Delete workspace_member."""
     await crud.delete(db, id)

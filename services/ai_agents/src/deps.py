@@ -7,8 +7,8 @@ This module centralizes:
 3. App-specific dependencies (NOT database - kernel handles that)
 
 IMPORTANT: Database is managed by app_kernel. Use:
-    - from backend.app_kernel.db import db_session_dependency  (for routes)
-    - from backend.app_kernel.db import get_db_session          (for workers)
+    - from backend.app_kernel.db import db_connection  (for routes)
+    - from backend.app_kernel.db import get_db_connection      (for workers)
     - from backend.app_kernel.db import get_db_manager          (for health checks)
 """
 
@@ -20,15 +20,17 @@ from contextlib import asynccontextmanager
 # Database - USE KERNEL'S (don't create our own!)
 # =============================================================================
 from backend.app_kernel.db import (
-    db_session_dependency,  # FastAPI dependency
-    get_db_session,         # Async context manager for workers
+    db_connection,          # FastAPI dependency
+    get_db_connection,      # Async context manager for workers
+    
+    
     get_db_manager,         # For health checks
-    AsyncConnection,        # Type hint (re-exported from kernel)
 )
+from backend.databases.connections import AsyncConnection
 
 # Backward-compatible aliases
-get_db = db_session_dependency      # FastAPI dependency: Depends(get_db)
-get_db_context = get_db_session     # Worker context: async with get_db_context() as db:
+get_db = db_connection      # FastAPI dependency: Depends(get_db)
+get_db_context = get_db_connection     # Worker context: async with get_db_context() as db:
 
 # =============================================================================
 # AI Agents

@@ -356,8 +356,8 @@ def create_service(
         
         # Close database
         if cfg.database_name:
-            from .db import close_db_session
-            await close_db_session()
+            from .db import close_db
+            await close_db()
             logger.info("Database closed")
         
         logger.info(f"{name} shutting down")

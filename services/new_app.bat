@@ -33,7 +33,7 @@ echo   Generating %APPNAME% from %MANIFEST%...
 echo.
 
 REM Run appctl from shared_libs/tools/appctl
-python "%~dp0..\shared_libs\tools\appctl\appctl.py" new "%APPNAME%" --from-manifest "%MANIFEST%" --output "%~dp0%APPNAME%"
+python "%~dp0..\tools\appctl\appctl.py" new "%APPNAME%" --from-manifest "%MANIFEST%" --output "%~dp0%APPNAME%"
 
 if errorlevel 1 (
     echo.

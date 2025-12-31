@@ -115,11 +115,12 @@ from .db import (
     init_kernel_schema,
     cleanup_expired_idempotency_keys,
     cleanup_old_rate_limits,
-    get_db_session,
-    db_session_dependency,
+    db_connection,
+    get_db_connection,
     init_db_session,
     get_db_manager,
     init_schema,
+    close_db,
 )
 
 # Bootstrap - simplified service creation
@@ -194,10 +195,11 @@ __all__ = [
     
     # Database
     "init_db_session",
-    "get_db_session",
+    "db_connection",
+    "get_db_connection",
     "get_db_manager",
-    "db_session_dependency",
     "init_schema",
+    "close_db",
     
     # Schema
     "init_kernel_schema",

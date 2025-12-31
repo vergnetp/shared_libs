@@ -1,0 +1,61 @@
+# Example App Manifest
+# Copy this file, rename to yourapp.manifest.yaml, edit, then run:
+#   new_app.bat yourapp.manifest.yaml
+
+name: example_app
+version: 1.0.0
+description: "My example service"
+
+# Database: sqlite, postgres, or mysql
+database:
+  type: sqlite
+  name: ./data/app.db
+  # For postgres/mysql:
+  # host: localhost
+  # port: 5432
+  # user: postgres
+  # password_env: DATABASE_PASSWORD
+
+# Redis: enable for background jobs, rate limiting
+redis:
+  enabled: false
+  # url_env: REDIS_URL
+  # key_prefix: "myapp:"
+
+# Authentication
+auth:
+  enabled: true
+  allow_signup: false
+  jwt_secret_env: JWT_SECRET
+  jwt_expiry_hours: 24
+
+# CORS origins
+cors:
+  origins:
+    - "*"
+  credentials: true
+
+# Background tasks (handlers generated in tasks.py)
+tasks:
+  # - send_email
+  # - process_order
+
+# Entities (generates schema + CRUD routes)
+entities:
+  - name: item
+    fields:
+      - name: title
+        type: string
+      - name: description
+        type: text
+        required: false
+      - name: price
+        type: float
+      - name: active
+        type: bool
+        default: true
+    workspace_scoped: true
+    generate_routes: true
+    soft_delete: true
+
+# Field types: string, text, int, float, bool, datetime, json

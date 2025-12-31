@@ -1,22 +1,11 @@
 """
-Agent Service - AI Agents as a Service
-
-Features:
-- Multi-provider support (OpenAI, Anthropic, Ollama)
-- Conversation management (threads, messages)
-- Cost tracking and budgets
-- RAG document processing
-- Background job processing
-- Rate limiting and idempotency
+AI Agents Service
 
 Database is managed by app_kernel - no duplicate initialization needed.
 """
 
 from pathlib import Path
 from typing import Tuple
-
-# Import deps FIRST to set up sys.path
-from .src import deps
 
 from fastapi import Depends
 from fastapi.staticfiles import StaticFiles
@@ -27,12 +16,12 @@ from backend.app_kernel import (
     get_audit,
     get_logger,
 )
-from backend.app_kernel.db import get_db_manager, get_db_session
+from backend.app_kernel.db import get_db_manager, db_connection
 from backend.app_kernel.jobs import create_jobs_router, get_job_client
 
 from .config import get_settings
 from .src.deps import init_app_dependencies, shutdown_app_dependencies
-from .src.db_schema import init_agent_schema  # NEW: separated schema
+from .src.db_schema import init_agent_schema
 from .src.jobs import registry
 from .src.routes import (
     agents_router,
@@ -138,11 +127,7 @@ def is_admin_user(user) -> bool:
 # =============================================================================
 
 def _build_config() -> ServiceConfig:
-    """
-    Build ServiceConfig from app settings.
-    
-    IMPORTANT: Include database fields so kernel manages DB lifecycle.
-    """
+    """Build ServiceConfig from app settings."""
     settings = get_settings()
     return ServiceConfig(
         # Auth
@@ -155,7 +140,7 @@ def _build_config() -> ServiceConfig:
         redis_url=settings.redis_url,
         redis_key_prefix="agent:",
         
-        # DATABASE - kernel manages this now
+        # Database
         database_name=settings.database_name,
         database_type=settings.database_type,
         database_host=settings.database_host,
@@ -199,7 +184,7 @@ def create_app():
     
     # Create app using bootstrap
     app = create_service(
-        name="agent-service",
+        name="ai-agents",
         version=settings.service_version,
         description=__doc__,
         
@@ -232,16 +217,10 @@ def create_app():
         is_admin=is_admin_user,
     )
     
-    # =========================================================================
-    # App-specific additions (not handled by create_service)
-    # =========================================================================
-    
-    # Jobs router with kernel's get_db dependency
+    # Jobs router
     if settings.redis_url:
-        from backend.app_kernel.db import db_session_dependency
-        
         jobs_router = create_jobs_router(
-            get_db=db_session_dependency,  # Use kernel's dependency
+            get_db=db_connection,
             get_job_client=get_job_client,
             prefix="/jobs",
             tags=["jobs"],
@@ -267,7 +246,7 @@ def create_app():
             limit=limit,
         )
     
-    # Static files (test UI) - must be last
+    # Static files - must be last
     static_path = Path(__file__).parent / "static"
     if static_path.exists():
         app.mount("/", StaticFiles(directory=str(static_path), html=True), name="static")

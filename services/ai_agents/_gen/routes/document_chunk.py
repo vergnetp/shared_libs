@@ -12,7 +12,7 @@ from ..schemas import DocumentChunkCreate, DocumentChunkUpdate, DocumentChunkRes
 from ..crud import EntityCRUD
 
 # Import db dependency from src (allows customization)
-from ...src.deps import get_db
+from ...src.deps import db_connection
 
 router = APIRouter(prefix="/document_chunks", tags=["document_chunks"])
 crud = EntityCRUD("document_chunks", soft_delete=False)
@@ -20,7 +20,7 @@ crud = EntityCRUD("document_chunks", soft_delete=False)
 
 @router.get("", response_model=list[DocumentChunkResponse])
 async def list_document_chunks(
-    db=Depends(get_db),
+    db=Depends(db_connection),
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=1000),
     
@@ -30,13 +30,13 @@ async def list_document_chunks(
 
 
 @router.post("", response_model=DocumentChunkResponse, status_code=201)
-async def create_document_chunk(data: DocumentChunkCreate, db=Depends(get_db)):
+async def create_document_chunk(data: DocumentChunkCreate, db=Depends(db_connection)):
     """Create document_chunk."""
     return await crud.create(db, data)
 
 
 @router.get("/{id}", response_model=DocumentChunkResponse)
-async def get_document_chunk(id: str, db=Depends(get_db)):
+async def get_document_chunk(id: str, db=Depends(db_connection)):
     """Get document_chunk by ID."""
     entity = await crud.get(db, id)
     if not entity:
@@ -45,7 +45,7 @@ async def get_document_chunk(id: str, db=Depends(get_db)):
 
 
 @router.patch("/{id}", response_model=DocumentChunkResponse)
-async def update_document_chunk(id: str, data: DocumentChunkUpdate, db=Depends(get_db)):
+async def update_document_chunk(id: str, data: DocumentChunkUpdate, db=Depends(db_connection)):
     """Update document_chunk."""
     entity = await crud.update(db, id, data)
     if not entity:
@@ -54,6 +54,6 @@ async def update_document_chunk(id: str, data: DocumentChunkUpdate, db=Depends(g
 
 
 @router.delete("/{id}", status_code=204)
-async def delete_document_chunk(id: str, db=Depends(get_db)):
+async def delete_document_chunk(id: str, db=Depends(db_connection)):
     """Delete document_chunk."""
     await crud.delete(db, id)

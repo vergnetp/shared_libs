@@ -2,12 +2,20 @@
 """
 Worker entrypoint for background job processing.
 
-Run with: python -m services.ai_agents.worker
+Usage:
+    python -m services.ai_agents.worker
+
+Environment variables:
+    REDIS_URL: Redis connection URL (required)
+    WORKER_COUNT: Number of worker threads (default: 3)
+    LOG_LEVEL: Logging level (default: INFO)
 """
 import asyncio
 
 from .config import get_settings
 from .src.deps import init_app_dependencies, shutdown_app_dependencies
+
+# Task processors
 from .src.workers.documents import ingest_document, reindex_document
 from .src.workers.memory import summarize_thread, compact_memory
 from .src.workers.chat import process_chat

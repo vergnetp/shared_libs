@@ -1,5 +1,5 @@
 """
-app_kernel.db - Database session management and schema.
+app_kernel.db - Database connection management.
 
 Kernel manages the connection pool via DatabaseManager.
 Apps provide config (in ServiceConfig) and schema (via init_schema callback).
@@ -7,17 +7,17 @@ Apps provide config (in ServiceConfig) and schema (via init_schema callback).
 Usage:
     # Config in create_service
     ServiceConfig(
-        database_url="./data/app.db",
+        database_name="./data/app.db",
         database_type="sqlite",
     )
     
-    # In routes
+    # In routes (FastAPI dependency)
     @app.get("/users")
-    async def get_users(db = Depends(db_session_dependency)):
+    async def get_users(db=Depends(db_connection)):
         return await db.find_entities("users")
     
-    # In workers/scripts
-    async with get_db_session() as db:
+    # In workers/scripts (context manager)
+    async with get_db_connection() as db:
         await db.save_entity("users", user)
     
     # Initialize app schema (in on_startup)
@@ -27,10 +27,10 @@ Usage:
 from .session import (
     init_db_session,
     get_db_manager,
-    get_db_session,
-    db_session_dependency,
+    get_db_connection,
+    db_connection,
     init_schema,
-    close_db_session,
+    close_db,
 )
 
 from .schema import (
@@ -43,13 +43,13 @@ from .schema import (
 from backend.databases.connections import AsyncConnection, SyncConnection
 
 __all__ = [
-    # Session management
+    # Connection management
     "init_db_session",
     "get_db_manager",
-    "get_db_session",
-    "db_session_dependency",
+    "get_db_connection",
+    "db_connection",
     "init_schema",
-    "close_db_session",
+    "close_db",
     
     # Kernel schema
     "init_kernel_schema",

@@ -360,7 +360,7 @@ from ..schemas import {cls}Create, {cls}Update, {cls}Response
 from ..crud import EntityCRUD
 
 # Import db dependency from src (allows customization)
-from ...src.deps import get_db
+from ...src.deps import db_connection
 
 router = APIRouter(prefix="/{table}", tags=["{table}"])
 crud = EntityCRUD("{table}", soft_delete={entity.soft_delete})
@@ -368,7 +368,7 @@ crud = EntityCRUD("{table}", soft_delete={entity.soft_delete})
 
 @router.get("", response_model=list[{cls}Response])
 async def list_{table}(
-    db=Depends(get_db),
+    db=Depends(db_connection),
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=1000),
     {"workspace_id: Optional[str] = None," if entity.workspace_scoped else ""}
@@ -378,13 +378,13 @@ async def list_{table}(
 
 
 @router.post("", response_model={cls}Response, status_code=201)
-async def create_{entity.name}(data: {cls}Create, db=Depends(get_db)):
+async def create_{entity.name}(data: {cls}Create, db=Depends(db_connection)):
     """Create {entity.name}."""
     return await crud.create(db, data)
 
 
 @router.get("/{{id}}", response_model={cls}Response)
-async def get_{entity.name}(id: str, db=Depends(get_db)):
+async def get_{entity.name}(id: str, db=Depends(db_connection)):
     """Get {entity.name} by ID."""
     entity = await crud.get(db, id)
     if not entity:
@@ -393,7 +393,7 @@ async def get_{entity.name}(id: str, db=Depends(get_db)):
 
 
 @router.patch("/{{id}}", response_model={cls}Response)
-async def update_{entity.name}(id: str, data: {cls}Update, db=Depends(get_db)):
+async def update_{entity.name}(id: str, data: {cls}Update, db=Depends(db_connection)):
     """Update {entity.name}."""
     entity = await crud.update(db, id, data)
     if not entity:
@@ -402,7 +402,7 @@ async def update_{entity.name}(id: str, data: {cls}Update, db=Depends(get_db)):
 
 
 @router.delete("/{{id}}", status_code=204)
-async def delete_{entity.name}(id: str, db=Depends(get_db)):
+async def delete_{entity.name}(id: str, db=Depends(db_connection)):
     """Delete {entity.name}."""
     await crud.delete(db, id)
 '''
@@ -462,27 +462,14 @@ This file is YOUR code - never overwritten by generator.
 Add custom dependencies here.
 """
 
-from typing import AsyncGenerator
-from backend.app_kernel.db import db_session_dependency, get_db_session
+from backend.app_kernel.db import db_connection, get_db_connection
 
-# Re-export kernel's db dependency
-get_db = db_session_dependency
-
-# For workers - use context manager
-get_db_context = get_db_session
+__all__ = ["db_connection", "get_db_connection"]
 
 
 # =============================================================================
 # Add your custom dependencies below
 # =============================================================================
-
-# Example:
-# _my_service: Optional[MyService] = None
-#
-# def get_my_service() -> MyService:
-#     if _my_service is None:
-#         raise RuntimeError("Service not initialized")
-#     return _my_service
 '''
 
 
@@ -496,12 +483,152 @@ Import and combine your custom routers here.
 """
 
 from fastapi import APIRouter
+from .custom import router as custom_router
 
 router = APIRouter()
+router.include_router(custom_router)
+'''
 
-# Import and include your custom routes:
-# from .chat import router as chat_router
-# router.include_router(chat_router)
+
+def generate_src_routes_custom() -> str:
+    """Generate src/routes/custom.py example."""
+    return '''"""
+Custom routes - example file.
+
+Add your business logic routes here.
+"""
+
+from fastapi import APIRouter, Depends, HTTPException
+from ..deps import db_connection
+
+router = APIRouter(prefix="/custom", tags=["custom"])
+
+
+@router.get("/hello")
+async def hello():
+    """Example endpoint."""
+    return {"message": "Hello from custom route!"}
+
+
+@router.get("/items/{item_id}")
+async def get_item(item_id: str, db=Depends(db_connection)):
+    """Example: fetch from database."""
+    item = await db.get_entity("items", item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Item not found")
+    return item
+
+
+@router.post("/items")
+async def create_item(name: str, db=Depends(db_connection)):
+    """Example: save to database."""
+    item = await db.save_entity("items", {"name": name})
+    return item
+'''
+
+
+def generate_src_workers_init() -> str:
+    """Generate src/workers/__init__.py stub."""
+    return '''"""
+Custom background tasks.
+
+This file is YOUR code - never overwritten by generator.
+Register your task functions here.
+"""
+
+from .tasks import process_item
+
+# Task registry - imported by worker.py
+tasks = {
+    "process_item": process_item,
+}
+'''
+
+
+def generate_src_workers_tasks() -> str:
+    """Generate src/workers/tasks.py example."""
+    return '''"""
+Background tasks - example file.
+
+Tasks are async functions that run in the worker process.
+They receive a job context and any arguments passed when enqueued.
+"""
+
+from ..deps import get_db_connection
+from backend.app_kernel import get_logger
+
+logger = get_logger()
+
+
+async def process_item(ctx, item_id: str):
+    """
+    Example background task.
+    
+    Args:
+        ctx: Job context with metadata (job_id, attempt, etc.)
+        item_id: The item to process
+    
+    Usage (from a route):
+        from backend.app_kernel.jobs import get_job_client
+        client = get_job_client()
+        await client.enqueue("process_item", item_id="123")
+    """
+    logger.info(f"Processing item {item_id}", extra={"job_id": ctx.job_id})
+    
+    async with get_db_connection() as db:
+        # Fetch item
+        item = await db.get_entity("items", item_id)
+        if not item:
+            logger.error(f"Item not found: {item_id}")
+            return {"status": "error", "message": "Item not found"}
+        
+        # Do some processing...
+        item["processed"] = True
+        await db.save_entity("items", item)
+        
+        logger.info(f"Item {item_id} processed successfully")
+        return {"status": "ok", "item_id": item_id}
+'''
+
+
+def generate_worker(manifest: dict) -> str:
+    """Generate worker.py."""
+    name = manifest.get("name", "myapp")
+    
+    return f'''#!/usr/bin/env python3
+"""
+Background worker for {name}.
+
+Run with: python -m services.{name}.worker
+"""
+
+import asyncio
+from .config import settings
+from .src.workers import tasks
+
+
+async def init():
+    """Initialize app dependencies."""
+    settings.ensure_data_dir()
+
+
+async def shutdown():
+    """Cleanup."""
+    pass
+
+
+if __name__ == "__main__":
+    from backend.app_kernel.jobs import run_worker
+    
+    if not tasks:
+        print("No tasks registered in src/workers/__init__.py")
+        print("Add tasks like: tasks['my_task'] = my_function")
+    else:
+        asyncio.run(run_worker(
+            tasks=tasks,
+            init_app=init,
+            shutdown_app=shutdown,
+        ))
 '''
 
 
@@ -647,22 +774,24 @@ def write_file(path: Path, content: str, overwrite: bool = True) -> bool:
 
 def cmd_new(args):
     """Create new project from manifest."""
-    manifest_path = Path(args.from_manifest)
+    manifest_path = Path(args.manifest)
     if not manifest_path.exists():
         print(f"Error: Manifest not found: {manifest_path}")
         sys.exit(1)
+    
+    manifest = load_manifest(manifest_path)
+    name = manifest.get("name", manifest_path.stem)
     
     # Determine output location
     if args.output:
         project_dir = Path(args.output)
     else:
-        project_dir = Path(args.name)
+        project_dir = Path("services") / name
     
     if project_dir.exists():
         print(f"Error: Directory already exists: {project_dir}")
         sys.exit(1)
     
-    manifest = load_manifest(manifest_path)
     entities = parse_entities(manifest)
     
     print(f"Creating {project_dir} from {manifest_path}...")
@@ -692,11 +821,14 @@ def cmd_new(args):
     write_file(project_dir / "src" / "__init__.py", "", overwrite=False)
     write_file(project_dir / "src" / "deps.py", generate_src_deps(), overwrite=False)
     write_file(project_dir / "src" / "routes" / "__init__.py", generate_src_routes_init(), overwrite=False)
-    write_file(project_dir / "src" / "workers" / "__init__.py", "", overwrite=False)
+    write_file(project_dir / "src" / "routes" / "custom.py", generate_src_routes_custom(), overwrite=False)
+    write_file(project_dir / "src" / "workers" / "__init__.py", generate_src_workers_init(), overwrite=False)
+    write_file(project_dir / "src" / "workers" / "tasks.py", generate_src_workers_tasks(), overwrite=False)
     
     # Generate root files (only if not exists)
     write_file(project_dir / "main.py", generate_main(manifest), overwrite=False)
     write_file(project_dir / "config.py", generate_config(manifest), overwrite=False)
+    write_file(project_dir / "worker.py", generate_worker(manifest), overwrite=False)
     
     print(f"\n✓ Created {project_dir}/")
     print(f"\nNext steps:")
@@ -708,9 +840,9 @@ def cmd_new(args):
 
 def cmd_generate(args):
     """Regenerate _gen/ from manifest."""
-    manifest_path = Path("manifest.yaml")
+    manifest_path = Path(args.manifest) if args.manifest else Path("manifest.yaml")
     if not manifest_path.exists():
-        print("Error: manifest.yaml not found in current directory")
+        print(f"Error: Manifest not found: {manifest_path}")
         sys.exit(1)
     
     manifest = load_manifest(manifest_path)
@@ -752,15 +884,13 @@ def main():
     subparsers = parser.add_subparsers(dest="command", required=True)
     
     # new
-    new_parser = subparsers.add_parser("new", help="Create new project")
-    new_parser.add_argument("name", help="Project name")
-    new_parser.add_argument("--from-manifest", required=True, help="Manifest file")
-    new_parser.add_argument("--output", "-o", help="Output directory (default: current dir)")
+    new_parser = subparsers.add_parser("new", help="Create new project from manifest")
+    new_parser.add_argument("manifest", help="Manifest file path")
+    new_parser.add_argument("--output", "-o", help="Output directory (default: services/{name})")
     
     # generate
-    gen_parser = subparsers.add_parser("generate", help="Regenerate from manifest")
-    gen_parser.add_argument("--force", action="store_true", help="Force regenerate all files")
-    gen_parser.add_argument("--dry-run", action="store_true", help="Show what would be done")
+    gen_parser = subparsers.add_parser("generate", help="Regenerate _gen/ from manifest.yaml in current dir")
+    gen_parser.add_argument("manifest", nargs="?", help="Manifest file (default: manifest.yaml)")
     
     args = parser.parse_args()
     
