@@ -238,6 +238,7 @@ def create_service(
     # Health & Auth
     health_checks: Sequence[HealthCheck] = (),
     auth_service: Optional[Callable] = None,
+    user_store: Optional[Any] = None,  # Direct UserStore implementation
     is_admin: Optional[Callable] = None,
     
     # Advanced
@@ -307,7 +308,7 @@ def create_service(
         
         # Initialize database if configured
         if cfg.database_name:
-            from .db import init_db_session, init_schema
+            from .db import init_db_session, init_schema, get_db_connection
             
             # Ensure data directory exists for SQLite
             if cfg.database_type == "sqlite":
@@ -330,6 +331,12 @@ def create_service(
                 "type": cfg.database_type,
                 "database": cfg.database_name,
             })
+            
+            # Initialize AUTH schema if auth enabled (before app schema)
+            if cfg.auth_enabled:
+                from .auth.schema import init_auth_schema
+                await init_schema(init_auth_schema)
+                logger.info("Auth schema initialized")
             
             # Initialize app schema if provided
             if schema_init:
@@ -372,18 +379,24 @@ def create_service(
         redoc_url=redoc_url,
     )
     
-    # Get user store adapter if auth_service provided
-    user_store = None
-    if auth_service is not None:
+    # Get user store - either direct, from auth_service adapter, or auto-create
+    _user_store = user_store  # Direct user_store takes precedence
+    if _user_store is None and auth_service is not None:
         from .auth import AuthServiceAdapter
-        user_store = AuthServiceAdapter(auth_service())
+        _user_store = AuthServiceAdapter(auth_service())
+    
+    # Auto-create user store if DB + auth enabled and no store provided
+    if _user_store is None and cfg.database_name and cfg.auth_enabled:
+        from .db import get_db_connection
+        from .auth.stores import create_kernel_user_store
+        _user_store = create_kernel_user_store(get_db_connection)
     
     # Initialize kernel
     init_app_kernel(
         app,
         kernel_settings,
         job_registry=registry,
-        user_store=user_store,
+        user_store=_user_store,
         is_admin=is_admin or _default_is_admin,
         setup_reliability_middleware=bool(cfg.redis_url),
         mount_routers=True,

@@ -69,28 +69,50 @@ def verify_password(password: str, password_hash: str) -> bool:
 # =============================================================================
 
 def create_access_token(
-    user: UserIdentity,
-    secret: str,
-    expires_delta: timedelta = timedelta(minutes=15)
+    user_id: str = None,
+    role: str = "user",
+    secret: str = "",
+    expires_minutes: int = 15,
+    *,
+    user: "UserIdentity" = None,
+    expires_delta: timedelta = None,
 ) -> str:
     """
-    Create an access token for the user.
+    Create an access token.
+    
+    Can be called two ways:
+    1. create_access_token(user_id="123", role="user", secret="...", expires_minutes=15)
+    2. create_access_token(user=user_identity, secret="...", expires_delta=timedelta(...))
     
     Args:
-        user: User identity to encode in token
+        user_id: User ID to encode
+        role: User role
         secret: Secret key for signing
-        expires_delta: Token expiration time
+        expires_minutes: Token expiration in minutes
+        user: UserIdentity object (alternative to user_id/role)
+        expires_delta: Token expiration as timedelta (alternative to expires_minutes)
     
     Returns:
         Encoded JWT token string
     """
     now = datetime.now(UTC)
-    expires = now + expires_delta
+    
+    # Handle both calling conventions
+    if user is not None:
+        _user_id = user.id
+        _role = user.role
+    else:
+        _user_id = user_id
+        _role = role
+    
+    if expires_delta is not None:
+        expires = now + expires_delta
+    else:
+        expires = now + timedelta(minutes=expires_minutes)
     
     payload = {
-        "sub": user.id,
-        "email": user.email,
-        "role": user.role,
+        "sub": _user_id,
+        "role": _role,
         "type": "access",
         "iat": now,
         "exp": expires
@@ -100,28 +122,45 @@ def create_access_token(
 
 
 def create_refresh_token(
-    user: UserIdentity,
-    secret: str,
-    expires_delta: timedelta = timedelta(days=30)
+    user_id: str = None,
+    secret: str = "",
+    expires_days: int = 30,
+    *,
+    user: "UserIdentity" = None,
+    expires_delta: timedelta = None,
 ) -> str:
     """
-    Create a refresh token for the user.
+    Create a refresh token.
+    
+    Can be called two ways:
+    1. create_refresh_token(user_id="123", secret="...", expires_days=30)
+    2. create_refresh_token(user=user_identity, secret="...", expires_delta=timedelta(...))
     
     Args:
-        user: User identity to encode in token
+        user_id: User ID to encode
         secret: Secret key for signing
-        expires_delta: Token expiration time
+        expires_days: Token expiration in days
+        user: UserIdentity object (alternative to user_id)
+        expires_delta: Token expiration as timedelta (alternative to expires_days)
     
     Returns:
         Encoded JWT token string
     """
     now = datetime.now(UTC)
-    expires = now + expires_delta
+    
+    # Handle both calling conventions
+    if user is not None:
+        _user_id = user.id
+    else:
+        _user_id = user_id
+    
+    if expires_delta is not None:
+        expires = now + expires_delta
+    else:
+        expires = now + timedelta(days=expires_days)
     
     payload = {
-        "sub": user.id,
-        "email": user.email,
-        "role": user.role,
+        "sub": _user_id,
         "type": "refresh",
         "iat": now,
         "exp": expires

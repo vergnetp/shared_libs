@@ -23,7 +23,7 @@ from .utils import (
     verify_password,
     create_access_token,
     create_refresh_token,
-    verify_token,
+    decode_token,
     AuthError,
 )
 
@@ -303,7 +303,7 @@ def create_auth_router(
         Refresh access token using refresh token.
         """
         try:
-            payload = verify_token(request.refresh_token, token_secret)
+            payload = decode_token(request.refresh_token, token_secret)
         except AuthError as e:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -362,7 +362,7 @@ def create_auth_router(
         token = auth_header[7:]  # Remove "Bearer "
         
         try:
-            payload = verify_token(token, token_secret)
+            payload = decode_token(token, token_secret)
         except AuthError as e:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -406,7 +406,7 @@ def create_auth_router(
         token = auth_header[7:]
         
         try:
-            payload = verify_token(token, token_secret)
+            payload = decode_token(token, token_secret)
         except AuthError as e:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -460,7 +460,7 @@ def create_auth_router(
         if auth_header.startswith("Bearer "):
             token = auth_header[7:]
             try:
-                verify_token(token, token_secret)
+                decode_token(token, token_secret)
             except AuthError:
                 pass  # Token invalid, but we don't care for logout
         

@@ -1,0 +1,141 @@
+name: deploy_api
+version: "0.1.0"
+description: |
+  Deployment Management Service - API wrapper for infra deployment system.
+  Provides REST endpoints for workspace, project, service, and deployment management.
+
+# Database configuration
+database:
+  type: sqlite
+  path: ${DATABASE_PATH:-./data/deploy.db}
+
+# Redis (optional - for job queue)
+redis:
+  url: ${REDIS_URL:-redis://localhost:6379}
+
+# Auth configuration
+auth:
+  jwt_secret: ${JWT_SECRET}
+  jwt_expiry_hours: 24
+  allow_self_signup: true  # For initial setup
+
+# Entities (generates _gen/db_schema.py, _gen/schemas.py, _gen/crud.py)
+entities:
+  # Workspaces (tenants)
+  - name: workspace
+    workspace_scoped: false
+    soft_delete: false
+    fields:
+      - name: name
+        type: string
+        required: true
+      - name: owner_id
+        type: string
+        required: true
+      - name: plan
+        type: string
+        default: "free"
+
+  # Workspace members (user <-> workspace relationship)
+  - name: workspace_member
+    workspace_scoped: true
+    soft_delete: false
+    fields:
+      - name: user_id
+        type: string
+        required: true
+      - name: role
+        type: string
+        default: "member"
+      - name: joined_at
+        type: datetime
+
+  # Projects
+  - name: project
+    workspace_scoped: true
+    soft_delete: false
+    fields:
+      - name: name
+        type: string
+        required: true
+      - name: docker_hub_user
+        type: string
+        required: true
+      - name: version
+        type: string
+        default: "latest"
+      - name: config_json
+        type: json
+      - name: created_by
+        type: string
+
+  # Credentials (encrypted)
+  - name: credential
+    workspace_scoped: true
+    soft_delete: false
+    fields:
+      - name: project_name
+        type: string
+        required: true
+      - name: env
+        type: string
+        required: true
+      - name: encrypted_blob
+        type: text
+
+  # Deployment runs (history)
+  - name: deployment_run
+    workspace_scoped: true
+    soft_delete: false
+    fields:
+      - name: job_id
+        type: string
+        required: true
+      - name: project_name
+        type: string
+        required: true
+      - name: env
+        type: string
+        required: true
+      - name: services
+        type: json
+      - name: status
+        type: string
+        default: "queued"
+      - name: triggered_by
+        type: string
+        required: true
+      - name: triggered_at
+        type: datetime
+      - name: started_at
+        type: datetime
+      - name: completed_at
+        type: datetime
+      - name: result_json
+        type: json
+      - name: error
+        type: text
+
+  # Deployment state (current state per project/env)
+  - name: deployment_state
+    workspace_scoped: true
+    soft_delete: false
+    fields:
+      - name: project_name
+        type: string
+        required: true
+      - name: env
+        type: string
+        required: true
+      - name: state_json
+        type: json
+      - name: last_deployed_at
+        type: datetime
+      - name: last_deployed_by
+        type: string
+
+# Custom routes (not auto-generated, live in src/routes/)
+custom_routes:
+  - deployments  # Trigger deploy, status, rollback
+  - projects     # Extended project routes with services/credentials
+  - workspaces   # Workspace membership management

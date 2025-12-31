@@ -8,6 +8,7 @@ This module provides:
 - Password hashing
 - Generic auth router (login/register/me/change-password/logout)
 - AuthServiceAdapter for backend.auth integration
+- Built-in KernelUserStore for auto auth when DB is configured
 
 Usage:
     from app_kernel.auth import get_current_user, require_admin, UserIdentity
@@ -36,6 +37,8 @@ from .utils import (
     verify_token,
 )
 from .router import create_auth_router, UserStore, AuthServiceAdapter
+from .schema import init_auth_schema
+from .stores import KernelUserStore, create_kernel_user_store
 
 __all__ = [
     # Models
@@ -64,4 +67,9 @@ __all__ = [
     "create_auth_router",
     "UserStore",
     "AuthServiceAdapter",
+    
+    # Schema & Stores
+    "init_auth_schema",
+    "KernelUserStore",
+    "create_kernel_user_store",
 ]

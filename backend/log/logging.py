@@ -8,11 +8,14 @@ import pathlib
 import time
 from datetime import datetime
 from enum import Enum
-from typing import Optional, Dict, Any, Union, List
+from typing import Optional, Dict, Any, Union, List, TYPE_CHECKING
 import atexit
 from .. import utils
-from ..job_queue import QueueConfig, QueueManager, QueueRetryConfig
 from .config.logger_config import LoggerConfig, LogLevel
+
+# Lazy import to avoid circular dependency: job_queue → resilience → log → job_queue
+if TYPE_CHECKING:
+    from ..job_queue import QueueConfig, QueueManager, QueueRetryConfig
 
 
 class Logger:
@@ -40,6 +43,9 @@ class Logger:
         # Initialize QueueConfig if Redis is enabled and defined
         if self.config.use_redis and self.config.redis_url:
             try:
+                # Lazy import to avoid circular dependency
+                from ..job_queue import QueueConfig, QueueManager
+                
                 self.queue_config = QueueConfig(
                     redis_url=self.config.redis_url,
                     queue_prefix="log:",
@@ -346,6 +352,8 @@ class Logger:
                     log_record[key] = value
             
             # Use queue manager with a timeout for the operation
+            # Lazy import to avoid circular dependency
+            from ..job_queue import QueueRetryConfig
             retry_config = QueueRetryConfig(max_attempts=3, delays=[1, 5, 15], timeout=30)        
             
             self.queue_manager.enqueue(

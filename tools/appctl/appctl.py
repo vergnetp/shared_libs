@@ -891,6 +891,7 @@ def main():
     # generate
     gen_parser = subparsers.add_parser("generate", help="Regenerate _gen/ from manifest.yaml in current dir")
     gen_parser.add_argument("manifest", nargs="?", help="Manifest file (default: manifest.yaml)")
+    gen_parser.add_argument("--force", "-f", action="store_true", help="Force regenerate main.py and config.py")
     
     args = parser.parse_args()
     

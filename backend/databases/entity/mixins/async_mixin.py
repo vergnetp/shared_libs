@@ -106,6 +106,12 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
         Returns:
             Entity dictionary or None if not found
         """
+        # If soft-delete filtering requested, check if column exists first
+        if not include_deleted:
+            has_deleted_at = await self._check_column_exists(entity_name, "deleted_at")
+            if not has_deleted_at:
+                include_deleted = True  # Can't filter on non-existent column
+        
         # Generate the SQL
         sql = self.sql_generator.get_entity_by_id_sql(entity_name, include_deleted)
         
@@ -472,6 +478,12 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
         Returns:
             Count of matching entities
         """
+        # If soft-delete filtering requested, check if column exists first
+        if not include_deleted:
+            has_deleted_at = await self._check_column_exists(entity_name, "deleted_at")
+            if not has_deleted_at:
+                include_deleted = True  # Can't filter on non-existent column
+        
         # Generate count SQL
         sql = self.sql_generator.get_count_entities_sql(
             entity_name, where_clause, include_deleted
