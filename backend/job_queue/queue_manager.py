@@ -617,6 +617,78 @@ class QueueManager:
         result = {**status, **metadata}
         return result
     
+    def get_job_status(self, job_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get status of a specific job from Redis.
+        
+        Args:
+            job_id: Job/operation ID
+            
+        Returns:
+            Dict with status info or None if not found
+        """
+        try:
+            redis_client = self.config.redis.get_client()
+            job_key = self.config.redis.get_job_key(job_id)
+            
+            data = redis_client.hgetall(job_key)
+            if not data:
+                return None
+            
+            # Decode bytes to strings
+            result = {}
+            for k, v in data.items():
+                key = k.decode() if isinstance(k, bytes) else k
+                val = v.decode() if isinstance(v, bytes) else v
+                
+                # Parse numeric fields
+                if key in ("progress", "started_at", "completed_at", "updated_at"):
+                    try:
+                        val = float(val)
+                        if key == "progress":
+                            val = int(val)
+                    except (ValueError, TypeError):
+                        pass
+                
+                # Parse result JSON
+                if key == "result" and val:
+                    try:
+                        val = json.loads(val)
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                
+                result[key] = val
+            
+            return result
+            
+        except Exception as e:
+            self.config.logger.warning(f"Failed to get job status: {e}")
+            return None
+    
+    def update_job_progress(self, job_id: str, step: str = None, progress: int = None):
+        """
+        Update job progress in Redis.
+        
+        Args:
+            job_id: Job/operation ID
+            step: Current step name
+            progress: Progress percentage (0-100)
+        """
+        try:
+            redis_client = self.config.redis.get_client()
+            job_key = self.config.redis.get_job_key(job_id)
+            
+            data = {"updated_at": time.time()}
+            if step is not None:
+                data["step"] = step
+            if progress is not None:
+                data["progress"] = progress
+            
+            redis_client.hset(job_key, mapping=data)
+            
+        except Exception as e:
+            self.config.logger.warning(f"Failed to update job progress: {e}")
+    
     @circuit_breaker(name="queue_purge", failure_threshold=5, recovery_timeout=30.0)
     @try_catch
     def purge_queue(self, queue_name: str, priority: str = "normal") -> int:

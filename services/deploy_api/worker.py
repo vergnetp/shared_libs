@@ -60,6 +60,7 @@ async def main():
     logger.info(f"Tasks: {list(TASKS.keys())}")
     
     # Run worker with init/shutdown hooks
+    # key_prefix defaults to "app:" matching kernel
     await run_worker(
         tasks=TASKS,
         redis_url=settings.redis_url,

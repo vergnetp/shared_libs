@@ -90,6 +90,16 @@ class QueueRetryConfig:
     def retry_on(self) -> tuple:
         return self._retry_on
     
+    @property
+    def delays(self) -> list:
+        """Pre-calculated delays for each retry attempt."""
+        return [self.calculate_delay(i + 1) for i in range(self._max_attempts)]
+    
+    @property
+    def timeout(self) -> float:
+        """Default timeout for operations (uses max_delay as default)."""
+        return self._max_delay
+    
     def _validate_config(self):
         """Validate configuration."""
         if self._max_attempts < 0:

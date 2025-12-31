@@ -187,6 +187,7 @@ async def stop_workers():
 async def run_worker(
     tasks: Dict[str, Any],
     redis_url: str = None,
+    key_prefix: str = None,
     worker_count: int = None,
     init_app = None,
     shutdown_app = None,
@@ -227,6 +228,7 @@ async def run_worker(
     Args:
         tasks: Dict mapping task names to processor functions
         redis_url: Redis URL (default: REDIS_URL env var)
+        key_prefix: Redis key prefix (default: REDIS_KEY_PREFIX env var or "app:")
         worker_count: Number of worker threads (default: WORKER_COUNT env var or 3)
         init_app: Optional async function to initialize app dependencies
         shutdown_app: Optional async function to cleanup app dependencies
@@ -238,6 +240,7 @@ async def run_worker(
     
     # Config from env or args
     redis_url = redis_url or os.getenv("REDIS_URL")
+    key_prefix = key_prefix or os.getenv("REDIS_KEY_PREFIX", "queue:")
     worker_count = worker_count or int(os.getenv("WORKER_COUNT", "3"))
     log_level = log_level or os.getenv("LOG_LEVEL", "INFO")
     
@@ -315,6 +318,7 @@ async def run_worker(
     
     logger.info(f"Starting worker with {worker_count} threads")
     logger.info(f"Redis: {redis_url}")
+    logger.info(f"Key prefix: {key_prefix}")
     logger.info(f"Tasks: {list(tasks.keys())}")
     
     # Initialize app dependencies
@@ -345,7 +349,7 @@ async def run_worker(
     
     # Create queue configuration
     config = QueueConfig(
-        redis=QueueRedisConfig(url=redis_url),
+        redis=QueueRedisConfig(url=redis_url, key_prefix=key_prefix),
         worker=QueueWorkerConfig(
             worker_count=worker_count,
             work_timeout=300,  # 5 minutes per task
@@ -357,6 +361,8 @@ async def run_worker(
         ),
         logging=QueueLoggingConfig(logger=logger),
     )
+    
+    logger.info(f"Queue config initialized: redis={redis_url}, key_prefix={key_prefix}, workers={worker_count}")
     
     # Register processors
     for task_name, processor in tasks.items():

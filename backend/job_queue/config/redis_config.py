@@ -13,7 +13,7 @@ class QueueRedisConfig:
     def __init__(
         self,
         url: str = "redis://localhost:6379/0",
-        key_prefix: str = "queue:",
+        key_prefix: str = "app:",
         max_connections: int = 10,
         socket_timeout: float = 5.0,
         socket_connect_timeout: float = 5.0,
@@ -123,6 +123,10 @@ class QueueRedisConfig:
         """Get the Redis key for scheduled items."""
         return f"{self._key_prefix}scheduled"
     
+    def get_job_key(self, job_id: str) -> str:
+        """Get the Redis key for a specific job's status."""
+        return f"{self._key_prefix}job:{job_id}"
+    
     def to_dict(self) -> Dict[str, Any]:
         """Convert configuration to dictionary."""
         return {
@@ -152,7 +156,7 @@ class QueueRedisConfig:
         """Create instance from dictionary."""
         return cls(
             url=data.get('url', 'redis://localhost:6379/0'),
-            key_prefix=data.get('key_prefix', 'queue:'),
+            key_prefix=data.get('key_prefix', 'app:'),
             max_connections=data.get('max_connections', 10),
             socket_timeout=data.get('socket_timeout', 5.0),
             socket_connect_timeout=data.get('socket_connect_timeout', 5.0),

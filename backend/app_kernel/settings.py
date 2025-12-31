@@ -16,7 +16,7 @@ from typing import Optional, Dict, Any, Tuple, Literal, List, Callable, Awaitabl
 class RedisSettings:
     """Redis connection settings for jobs and streaming."""
     url: str = "redis://localhost:6379"
-    key_prefix: str = "app:"
+    key_prefix: str = "queue:"  # Match job_queue default
     
     # Connection pool settings
     max_connections: int = 10

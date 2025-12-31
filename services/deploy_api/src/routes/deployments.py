@@ -83,7 +83,7 @@ async def trigger_deployment(
         )
     
     # Enqueue deployment job
-    job_id = await job_client.enqueue(
+    result = await job_client.enqueue(
         "deploy",
         {
             "workspace_id": workspace_id,
@@ -94,6 +94,7 @@ async def trigger_deployment(
             "triggered_by": current_user.id,
         },
     )
+    job_id = result.job_id if hasattr(result, 'job_id') else str(result)
     
     # Record deployment run
     run = await deployment_store.create_run(
@@ -133,7 +134,7 @@ async def get_deployment_status(
     deployment_store=Depends(get_deployment_store),
 ):
     """Get deployment status and logs."""
-    # Get deployment run
+    # Get deployment run from DB (for metadata)
     run = await deployment_store.get_run(job_id)
     if not run:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deployment not found")
@@ -142,35 +143,38 @@ async def get_deployment_status(
     if run["workspace_id"] != workspace_id or run["project_name"] != project_name:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deployment not found")
     
-    # Get job status from kernel
+    # Get real-time job status from Redis (primary source)
+    job_status = None
     try:
         job_client = get_job_client()
-        job_status = await job_client.get_status(job_id)
-    except RuntimeError:
-        job_status = None
+        job_status = await job_client.get_job_status(job_id)
+    except (RuntimeError, AttributeError):
+        pass
     
-    # Merge job status with run record
-    status_val = run["status"]
-    step = None
-    progress = None
-    logs = []
-    
+    # Use Redis status if available, fall back to DB
     if job_status:
-        status_val = job_status.get("status", status_val)
+        status_val = job_status.get("status", run["status"])
         step = job_status.get("step")
         progress = job_status.get("progress")
-        logs = job_status.get("logs", [])
+        error = job_status.get("error") or run.get("error")
+        result = job_status.get("result") or run.get("result")
+    else:
+        status_val = run["status"]
+        step = None
+        progress = None
+        error = run.get("error")
+        result = run.get("result")
     
     return DeploymentStatusResponse(
         job_id=job_id,
         status=status_val,
         step=step,
         progress=progress,
-        logs=logs,
+        logs=[],  # Could add log streaming later
         started_at=run.get("started_at"),
         completed_at=run.get("completed_at"),
-        result=run.get("result"),
-        error=run.get("error"),
+        result=result,
+        error=error,
     )
 
 
@@ -344,7 +348,7 @@ async def trigger_rollback(
         )
     
     # Enqueue rollback job
-    job_id = await job_client.enqueue(
+    result = await job_client.enqueue(
         "rollback",
         {
             "workspace_id": workspace_id,
@@ -353,6 +357,7 @@ async def trigger_rollback(
             "triggered_by": current_user.id,
         },
     )
+    job_id = result.job_id if hasattr(result, 'job_id') else str(result)
     
     # Record
     run = await deployment_store.create_run(

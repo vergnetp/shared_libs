@@ -136,6 +136,32 @@ class QueueMetricsConfig:
             self._gauges.clear()
             self._histograms.clear()
     
+    def update_metric(self, name: str, value: Any = 1, force_log: bool = False):
+        """
+        Update a metric by name - facade for increment/gauge/histogram.
+        
+        Automatically routes to the right method based on metric name conventions:
+        - Names ending in '_time' or 'avg_' -> histogram
+        - Names ending in '_timestamp' -> gauge  
+        - Everything else -> counter (increment)
+        
+        Args:
+            name: Metric name
+            value: Value to record (default 1 for counters)
+            force_log: Whether to force logging (currently unused)
+        """
+        if not self._enabled:
+            return
+        
+        # Route to appropriate method based on naming convention
+        if 'timestamp' in name or name.startswith('last_'):
+            self.gauge(name, float(value))
+        elif 'time' in name or name.startswith('avg_'):
+            self.histogram(name, float(value))
+        else:
+            # Default to counter increment
+            self.increment(name, int(value) if isinstance(value, (int, float)) else 1)
+    
     def to_dict(self) -> Dict[str, Any]:
         """Convert configuration to dictionary."""
         return {

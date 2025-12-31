@@ -119,7 +119,7 @@ class ServiceConfig:
     
     # Redis (optional - enables jobs, rate limiting, idempotency)
     redis_url: Optional[str] = None
-    redis_key_prefix: str = "app:"
+    redis_key_prefix: str = "queue:"  # Match job_queue default
     
     # Database (kernel manages connection pool, app provides schema)
     database_name: Optional[str] = None  # DB name or file path for sqlite
@@ -187,7 +187,7 @@ class ServiceConfig:
             auth_enabled=env_bool("AUTH_ENABLED", True),
             allow_self_signup=env_bool("ALLOW_SELF_SIGNUP", False),
             redis_url=env("REDIS_URL"),
-            redis_key_prefix=env("REDIS_KEY_PREFIX", "app:"),
+            redis_key_prefix=env("REDIS_KEY_PREFIX", "queue:"),
             database_name=env("database_name"),
             cors_origins=env_list("CORS_ORIGINS", ["*"]),
             cors_credentials=env_bool("CORS_CREDENTIALS", True),

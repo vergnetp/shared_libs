@@ -54,6 +54,123 @@ class QueueWorker:
         # Thread pool metrics
         self._thread_pool_size = config.worker.thread_pool_size
         self._thread_metrics_lock = threading.Lock()
+    
+    # =========================================================================
+    # Job Status Tracking (Redis-based)
+    # =========================================================================
+    
+    def _set_job_status(
+        self, 
+        job_id: str, 
+        status: str, 
+        step: str = None,
+        progress: int = None,
+        result: Any = None,
+        error: str = None,
+    ):
+        """
+        Update job status in Redis.
+        
+        Args:
+            job_id: Job/operation ID
+            status: Status string (queued, running, completed, failed)
+            step: Optional current step name
+            progress: Optional progress percentage (0-100)
+            result: Optional result data (on completion)
+            error: Optional error message (on failure)
+        """
+        try:
+            redis_client = self.config.redis.get_client()
+            job_key = self.config.redis.get_job_key(job_id)
+            
+            data = {
+                "status": status,
+                "updated_at": time.time(),
+            }
+            
+            if status == "running":
+                data["started_at"] = time.time()
+            elif status in ("completed", "failed"):
+                data["completed_at"] = time.time()
+            
+            if step is not None:
+                data["step"] = step
+            if progress is not None:
+                data["progress"] = progress
+            if result is not None:
+                data["result"] = json.dumps(result) if not isinstance(result, str) else result
+            if error is not None:
+                data["error"] = error
+            
+            # Use HSET for hash storage
+            redis_client.hset(job_key, mapping=data)
+            
+            # Set TTL (24 hours) - completed jobs auto-expire
+            redis_client.expire(job_key, 86400)
+            
+            self.config.logger.debug(f"Job status updated: {job_id} -> {status}")
+            
+        except Exception as e:
+            self.config.logger.warning(f"Failed to update job status: {e}")
+    
+    def get_job_status(self, job_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get job status from Redis.
+        
+        Args:
+            job_id: Job/operation ID
+            
+        Returns:
+            Dict with status info or None if not found
+        """
+        try:
+            redis_client = self.config.redis.get_client()
+            job_key = self.config.redis.get_job_key(job_id)
+            
+            data = redis_client.hgetall(job_key)
+            if not data:
+                return None
+            
+            # Decode bytes to strings
+            result = {}
+            for k, v in data.items():
+                key = k.decode() if isinstance(k, bytes) else k
+                val = v.decode() if isinstance(v, bytes) else v
+                
+                # Parse numeric fields
+                if key in ("progress", "started_at", "completed_at", "updated_at"):
+                    try:
+                        val = float(val)
+                        if key == "progress":
+                            val = int(val)
+                    except (ValueError, TypeError):
+                        pass
+                
+                # Parse result JSON
+                if key == "result" and val:
+                    try:
+                        val = json.loads(val)
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                
+                result[key] = val
+            
+            return result
+            
+        except Exception as e:
+            self.config.logger.warning(f"Failed to get job status: {e}")
+            return None
+    
+    def update_job_progress(self, job_id: str, step: str = None, progress: int = None):
+        """
+        Update job progress (callable from processors).
+        
+        Args:
+            job_id: Job/operation ID
+            step: Current step name
+            progress: Progress percentage (0-100)
+        """
+        self._set_job_status(job_id, "running", step=step, progress=progress)
 
     @try_catch(
     description="Failed to start queue worker",
@@ -303,7 +420,7 @@ class QueueWorker:
                                     worker_id=worker_id,
                                     error_type=type(e).__name__)
             # Increment error metric
-            self.config.metrics.update_metric('process_errors', logger=self.config.logger)
+            self.config.metrics.update_metric('process_errors')
             # Sleep briefly to prevent tight loops
             await asyncio.sleep(0.1)
                     
@@ -381,15 +498,22 @@ class QueueWorker:
             # Calculate effective timeout for async processors
             effective_timeout = self._calculate_effective_timeout(item)
             
+            # Set job status to running
+            self._set_job_status(operation_id, "running", step="executing", progress=0)
+            
             # Execute processor with appropriate handling based on type
             try:
                 self.config.logger.debug(f"Executing processor {processor_name} (async: {asyncio.iscoroutinefunction(processor)})")
+                
+                # Extract payload for processor call
+                # Tasks expect (job_id, payload) where payload is the actual work data
+                payload = entity.get("payload", entity)
                 
                 if asyncio.iscoroutinefunction(processor):
                     # Async processor - apply timeout
                     self.config.logger.debug(f"Running async processor with timeout {effective_timeout}s")
                     result = await asyncio.wait_for(
-                        processor(entity), 
+                        processor(operation_id, payload), 
                         timeout=effective_timeout
                     )
                 else:
@@ -398,7 +522,7 @@ class QueueWorker:
                     try:
                         # Try to submit to thread pool
                         result = await self._execute_sync_processor(
-                            processor, entity, operation_id
+                            processor, operation_id, payload
                         )
                     except ThreadPoolExhaustionError as e:
                         # Thread pool exhaustion - handle as a normal failure with specific error
@@ -410,8 +534,11 @@ class QueueWorker:
                 # Process was successful
                 self.config.logger.debug(f"Processor execution successful: {operation_id}")
                 
+                # Set job status to completed
+                self._set_job_status(operation_id, "completed", step="done", progress=100, result=result)
+                
                 # Update processed metric
-                self.config.metrics.update_metric('processed', logger=self.config.logger)
+                self.config.metrics.update_metric('processed')
                 
                 # Execute success callback if present
                 on_success = item.get("on_success")
@@ -466,7 +593,7 @@ class QueueWorker:
             
             if success:
                 # Only update average processing time for successful operations
-                self.config.metrics.update_metric('avg_process_time', process_time, logger=self.config.logger)
+                self.config.metrics.update_metric('avg_process_time', process_time)
                 
             # Log completion regardless of outcome
             self.config.logger.debug(f"Item processing took {process_time:.2f}s", 
@@ -488,6 +615,12 @@ class QueueWorker:
         """
         self.config.logger.debug(f"Finding processor: {processor_name} in module: {processor_module}")
         
+        # First try the callables registry by name (before parsing module)
+        processor = self.config.callables.get(processor_name)
+        if processor:
+            self.config.logger.debug(f"Found processor in callables registry: {processor_name}")
+            return processor
+        
         if not processor_module:
             # Try to parse from processor_name if it contains a module path
             parts = processor_name.split('.')
@@ -496,12 +629,13 @@ class QueueWorker:
                 processor_name = parts[-1]
                 self.config.logger.debug(f"Parsed module from name: {processor_module}.{processor_name}")
                 
-        # First try using the callables registry
-        processor = self.config.callables.get(processor_name, processor_module) if processor_module else None
+                # Try registry again with parsed name
+                processor = self.config.callables.get(processor_name)
+                if processor:
+                    self.config.logger.debug(f"Found processor in callables registry after parsing: {processor_name}")
+                    return processor
         
-        if processor:
-            self.config.logger.debug(f"Found processor in callables registry")
-            return processor
+        self.config.logger.debug(f"Processor not found in registry, trying import")
             
         # If not found in registry, try direct import
         if processor_module:
@@ -547,15 +681,15 @@ class QueueWorker:
     description="Failed to execute synchronous processor in thread pool",
     action="Check thread pool configuration and processor implementation"
     )
-    async def _execute_sync_processor(self, processor: Callable, entity: Dict[str, Any], 
-                                    operation_id: str) -> Any:
+    async def _execute_sync_processor(self, processor: Callable, operation_id: str,
+                                    payload: Dict[str, Any]) -> Any:
         """
         Execute a synchronous processor in the thread pool.
         
         Args:
             processor: Sync processor function
-            entity: Entity to process
-            operation_id: Operation ID for logging
+            operation_id: Job/operation ID
+            payload: Payload to process
             
         Returns:
             Result from the processor
@@ -576,7 +710,7 @@ class QueueWorker:
             def submit_to_pool():
                 try:
                     # This executes in a very short-lived thread
-                    future = self._thread_pool.submit(processor, entity)
+                    future = self._thread_pool.submit(processor, operation_id, payload)
                     loop.call_soon_threadsafe(
                         future_submit.set_result, future
                     )
@@ -758,7 +892,7 @@ class QueueWorker:
             item["failure_reason"] = error_reason
                 
             # Update failure metrics
-            self.config.metrics.update_metric('failed', logger=self.config.logger)
+            self.config.metrics.update_metric('failed')
                 
             # Move to failures queue
             failures_queue = self._get_bytes_key('failures')
@@ -769,6 +903,9 @@ class QueueWorker:
             )
                 
             redis_client.lpush(failures_queue, json.dumps(item, default=str).encode())
+                
+            # Set job status to failed
+            self._set_job_status(operation_id, "failed", error=error_reason)
                 
             # Execute failure callback if present
             if "on_failure" in item and item["on_failure"]:
@@ -807,7 +944,7 @@ class QueueWorker:
             item["next_retry_time"] = time.time() + retry_delay
                 
             # Update retry metrics
-            self.config.metrics.update_metric('retried', logger=self.config.logger)
+            self.config.metrics.update_metric('retried')
                 
             # Check if total timeout would be exceeded
             if ("timeout" in item and item["timeout"] is not None and 
@@ -818,7 +955,7 @@ class QueueWorker:
                 item["failure_reason"] = "Total timeout would be exceeded by next retry"
                     
                 # Update timeout metrics
-                self.config.metrics.update_metric('timeouts', logger=self.config.logger)
+                self.config.metrics.update_metric('timeouts')
                     
                 # Execute failure callback
                 if "on_failure" in item and item["on_failure"]:
@@ -835,6 +972,9 @@ class QueueWorker:
                 # Move to failures queue
                 failures_queue = self._get_bytes_key('failures')
                 redis_client.lpush(failures_queue, json.dumps(item, default=str).encode())
+                
+                # Set job status to failed
+                self._set_job_status(operation_id, "failed", error="Operation timed out after total retry period")
                     
                 self.config.logger.error(
                     "Item would exceed timeout, moved to failures queue", 

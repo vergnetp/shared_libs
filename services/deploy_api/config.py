@@ -48,7 +48,7 @@ class Settings(BaseSettings):
         default="redis://localhost:6379",
         validation_alias="REDIS_URL",
     )
-    redis_key_prefix: str = "deploy:"
+    redis_key_prefix: str = "queue:"  # Match job_queue default
     
     # Auth - JWT_SECRET without prefix for compatibility
     jwt_secret: str = Field(

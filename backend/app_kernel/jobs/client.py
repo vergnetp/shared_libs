@@ -227,6 +227,37 @@ class JobClient:
         """Get status of all queues."""
         self._ensure_initialized()
         return await asyncio.to_thread(self._queue_manager.get_queue_status)
+    
+    async def get_job_status(self, job_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get status of a specific job from Redis.
+        
+        Args:
+            job_id: Job/operation ID
+            
+        Returns:
+            Dict with status info (status, step, progress, result, error, timestamps)
+            or None if not found
+        """
+        self._ensure_initialized()
+        return await asyncio.to_thread(self._queue_manager.get_job_status, job_id)
+    
+    async def update_progress(self, job_id: str, step: str = None, progress: int = None):
+        """
+        Update job progress. Call this from within task processors.
+        
+        Args:
+            job_id: Job/operation ID
+            step: Current step name (e.g., "building", "deploying")
+            progress: Progress percentage (0-100)
+        """
+        self._ensure_initialized()
+        await asyncio.to_thread(
+            self._queue_manager.update_job_progress,
+            job_id,
+            step=step,
+            progress=progress,
+        )
 
 
 # Module-level instance, initialized by init_app_kernel()
