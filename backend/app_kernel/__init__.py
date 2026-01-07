@@ -69,12 +69,22 @@ from .settings import (
 
 from .app import init_app_kernel, get_kernel, KernelRuntime
 
+# Environment loading
+from .env import (
+    load_env_hierarchy,
+    get_env,
+    get_env_bool,
+    get_env_int,
+    get_env_list,
+)
+
 # Re-export commonly used items
 from .auth import (
     UserIdentity,
     get_current_user,
     get_current_user_optional,
     require_admin,
+    require_auth,
     get_request_context,
     AuthError,
     UserStore,
@@ -113,6 +123,7 @@ from .health import create_health_router
 
 from .db import (
     init_kernel_schema,
+    init_saas_schema,
     cleanup_expired_idempotency_keys,
     cleanup_old_rate_limits,
     db_connection,
@@ -121,6 +132,23 @@ from .db import (
     get_db_manager,
     init_schema,
     close_db,
+)
+
+# SaaS - multi-tenant workspace/team functionality
+from .saas import (
+    WorkspaceStore,
+    MemberStore,
+    InviteStore,
+    require_workspace_member,
+    require_workspace_admin,
+    require_workspace_owner,
+    create_saas_router,
+)
+
+# Integrations - optional external module wrappers
+from .integrations import (
+    send_email,
+    is_email_configured,
 )
 
 # Bootstrap - simplified service creation
@@ -156,11 +184,19 @@ __all__ = [
     "CorsSettings",
     "SecuritySettings",
     
+    # Environment
+    "load_env_hierarchy",
+    "get_env",
+    "get_env_bool",
+    "get_env_int",
+    "get_env_list",
+    
     # Auth
     "UserIdentity",
     "get_current_user",
     "get_current_user_optional",
     "require_admin",
+    "require_auth",
     "get_request_context",
     "AuthError",
     "UserStore",
@@ -203,6 +239,20 @@ __all__ = [
     
     # Schema
     "init_kernel_schema",
+    "init_saas_schema",
     "cleanup_expired_idempotency_keys",
     "cleanup_old_rate_limits",
+    
+    # SaaS
+    "WorkspaceStore",
+    "MemberStore",
+    "InviteStore",
+    "require_workspace_member",
+    "require_workspace_admin",
+    "require_workspace_owner",
+    "create_saas_router",
+    
+    # Integrations
+    "send_email",
+    "is_email_configured",
 ]

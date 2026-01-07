@@ -117,6 +117,10 @@ class ServiceConfig:
     auth_enabled: bool = True
     allow_self_signup: bool = False
     
+    # SaaS (workspaces, members, invites)
+    saas_enabled: bool = False
+    saas_invite_base_url: Optional[str] = None  # e.g., "https://app.example.com/invite"
+    
     # Redis (optional - enables jobs, rate limiting, idempotency)
     redis_url: Optional[str] = None
     redis_key_prefix: str = "queue:"  # Match job_queue default
@@ -146,6 +150,17 @@ class ServiceConfig:
     worker_count: int = 4
     job_max_attempts: int = 3
     
+    # Email (optional - enables invite emails, notifications)
+    email_enabled: bool = False
+    email_provider: str = "smtp"  # smtp, ses, sendgrid
+    email_from: Optional[str] = None
+    email_reply_to: Optional[str] = None
+    smtp_host: Optional[str] = None
+    smtp_port: int = 587
+    smtp_user: Optional[str] = None
+    smtp_password: Optional[str] = None
+    smtp_use_tls: bool = True
+    
     # Debug
     debug: bool = False
     log_level: str = "INFO"
@@ -159,11 +174,42 @@ class ServiceConfig:
             prefix: Optional prefix for env vars (e.g., "MY_APP_")
         
         Environment variables:
+            # Auth
             {prefix}JWT_SECRET: Required for production
+            {prefix}AUTH_ENABLED: Enable auth (default: true)
+            {prefix}ALLOW_SELF_SIGNUP: Allow self-registration (default: false)
+            
+            # SaaS
+            {prefix}SAAS_ENABLED: Enable workspaces/teams (default: false)
+            {prefix}SAAS_INVITE_BASE_URL: Base URL for invite links
+            
+            # Database
+            {prefix}DATABASE_NAME: DB name or file path
+            {prefix}DATABASE_TYPE: sqlite, postgres, mysql (default: sqlite)
+            {prefix}DATABASE_HOST: DB host (default: localhost)
+            {prefix}DATABASE_PORT: DB port
+            {prefix}DATABASE_USER: DB user
+            {prefix}DATABASE_PASSWORD: DB password
+            
+            # Redis
             {prefix}REDIS_URL: Enables jobs, rate limiting
-            {prefix}database_name: For health checks
+            {prefix}REDIS_KEY_PREFIX: Key prefix (default: queue:)
+            
+            # Email
+            {prefix}EMAIL_ENABLED: Enable email (default: false)
+            {prefix}EMAIL_PROVIDER: smtp, ses, sendgrid (default: smtp)
+            {prefix}EMAIL_FROM: Sender address
+            {prefix}EMAIL_REPLY_TO: Reply-to address
+            {prefix}SMTP_HOST: SMTP server host
+            {prefix}SMTP_PORT: SMTP port (default: 587)
+            {prefix}SMTP_USER: SMTP username
+            {prefix}SMTP_PASSWORD: SMTP password
+            {prefix}SMTP_USE_TLS: Use TLS (default: true)
+            
+            # Other
             {prefix}CORS_ORIGINS: Comma-separated origins
             {prefix}DEBUG: Enable debug mode
+            {prefix}LOG_LEVEL: Logging level (default: INFO)
         """
         def env(key: str, default: Any = None) -> Any:
             return os.environ.get(f"{prefix}{key}", default)
@@ -186,9 +232,16 @@ class ServiceConfig:
             jwt_expiry_hours=env_int("JWT_EXPIRY_HOURS", 24),
             auth_enabled=env_bool("AUTH_ENABLED", True),
             allow_self_signup=env_bool("ALLOW_SELF_SIGNUP", False),
+            saas_enabled=env_bool("SAAS_ENABLED", False),
+            saas_invite_base_url=env("SAAS_INVITE_BASE_URL"),
             redis_url=env("REDIS_URL"),
             redis_key_prefix=env("REDIS_KEY_PREFIX", "queue:"),
-            database_name=env("database_name"),
+            database_name=env("DATABASE_NAME"),
+            database_type=env("DATABASE_TYPE", "sqlite"),
+            database_host=env("DATABASE_HOST", "localhost"),
+            database_port=env_int("DATABASE_PORT", 0) or None,
+            database_user=env("DATABASE_USER"),
+            database_password=env("DATABASE_PASSWORD"),
             cors_origins=env_list("CORS_ORIGINS", ["*"]),
             cors_credentials=env_bool("CORS_CREDENTIALS", True),
             rate_limit_enabled=env_bool("RATE_LIMIT_ENABLED", True),
@@ -198,8 +251,164 @@ class ServiceConfig:
             stream_lease_ttl=env_int("STREAM_LEASE_TTL", 300),
             worker_count=env_int("WORKER_COUNT", 4),
             job_max_attempts=env_int("JOB_MAX_ATTEMPTS", 3),
+            # Email
+            email_enabled=env_bool("EMAIL_ENABLED", False),
+            email_provider=env("EMAIL_PROVIDER", "smtp"),
+            email_from=env("EMAIL_FROM"),
+            email_reply_to=env("EMAIL_REPLY_TO"),
+            smtp_host=env("SMTP_HOST"),
+            smtp_port=env_int("SMTP_PORT", 587),
+            smtp_user=env("SMTP_USER"),
+            smtp_password=env("SMTP_PASSWORD"),
+            smtp_use_tls=env_bool("SMTP_USE_TLS", True),
+            # Debug
             debug=env_bool("DEBUG", False),
             log_level=env("LOG_LEVEL", "INFO"),
+        )
+    
+    @classmethod
+    def from_manifest(cls, manifest_path: str = "manifest.yaml") -> "ServiceConfig":
+        """
+        Load config from manifest.yaml with env var interpolation.
+        
+        Manifest values can use ${ENV_VAR} or ${ENV_VAR:-default} syntax.
+        Environment variables override manifest values.
+        
+        Args:
+            manifest_path: Path to manifest.yaml
+            
+        Example manifest.yaml:
+            name: my-service
+            version: "1.0.0"
+            
+            database:
+              type: sqlite
+              path: ${DATABASE_PATH:-./data/app.db}
+            
+            redis:
+              url: ${REDIS_URL}
+              key_prefix: "myapp:"
+            
+            auth:
+              jwt_secret: ${JWT_SECRET}
+              allow_self_signup: false
+            
+            saas:
+              enabled: true
+              invite_base_url: ${SAAS_INVITE_BASE_URL}
+            
+            email:
+              enabled: ${EMAIL_ENABLED:-false}
+              from: ${EMAIL_FROM:-noreply@example.com}
+              smtp_host: ${SMTP_HOST}
+              smtp_port: 587
+              smtp_user: ${SMTP_USER}
+              smtp_password: ${SMTP_PASSWORD}
+        """
+        import re
+        import yaml
+        from pathlib import Path
+        
+        manifest_file = Path(manifest_path)
+        if not manifest_file.exists():
+            raise FileNotFoundError(f"Manifest not found: {manifest_path}")
+        
+        with open(manifest_file) as f:
+            manifest = yaml.safe_load(f)
+        
+        def interpolate(value: Any) -> Any:
+            """Interpolate ${ENV_VAR} and ${ENV_VAR:-default} in strings."""
+            if not isinstance(value, str):
+                return value
+            
+            # Pattern: ${VAR} or ${VAR:-default}
+            pattern = r'\$\{([^}:]+)(?::-([^}]*))?\}'
+            
+            def replacer(match):
+                var_name = match.group(1)
+                default = match.group(2)
+                return os.environ.get(var_name, default if default is not None else "")
+            
+            result = re.sub(pattern, replacer, value)
+            
+            # Convert string bools
+            if result.lower() in ("true", "yes", "1"):
+                return True
+            if result.lower() in ("false", "no", "0"):
+                return False
+            
+            # Try to convert to int
+            try:
+                return int(result)
+            except (ValueError, TypeError):
+                pass
+            
+            return result if result else None
+        
+        def get_nested(d: dict, *keys, default=None):
+            """Get nested dict value with interpolation."""
+            for key in keys:
+                if not isinstance(d, dict):
+                    return default
+                d = d.get(key, default)
+                if d is default:
+                    return default
+            return interpolate(d) if d is not None else default
+        
+        # Extract config sections
+        db = manifest.get("database", {})
+        redis = manifest.get("redis", {})
+        auth = manifest.get("auth", {})
+        saas = manifest.get("saas", {})
+        email = manifest.get("email", {})
+        cors = manifest.get("cors", {})
+        jobs = manifest.get("jobs", {})
+        
+        return cls(
+            # Auth
+            jwt_secret=interpolate(auth.get("jwt_secret", "dev-secret-change-me")),
+            jwt_expiry_hours=interpolate(auth.get("jwt_expiry_hours", 24)),
+            auth_enabled=interpolate(auth.get("enabled", True)),
+            allow_self_signup=interpolate(auth.get("allow_self_signup", False)),
+            
+            # SaaS
+            saas_enabled=interpolate(saas.get("enabled", False)),
+            saas_invite_base_url=interpolate(saas.get("invite_base_url")),
+            
+            # Redis
+            redis_url=interpolate(redis.get("url")),
+            redis_key_prefix=interpolate(redis.get("key_prefix", "queue:")),
+            
+            # Database
+            database_name=interpolate(db.get("path") or db.get("name")),
+            database_type=interpolate(db.get("type", "sqlite")),
+            database_host=interpolate(db.get("host", "localhost")),
+            database_port=interpolate(db.get("port")),
+            database_user=interpolate(db.get("user")),
+            database_password=interpolate(db.get("password")),
+            
+            # CORS
+            cors_origins=interpolate(cors.get("origins", ["*"])) or ["*"],
+            cors_credentials=interpolate(cors.get("credentials", True)),
+            
+            # Jobs
+            worker_count=interpolate(jobs.get("worker_count", 4)),
+            job_max_attempts=interpolate(jobs.get("max_attempts", 3)),
+            
+            # Email
+            email_enabled=interpolate(email.get("enabled", False)),
+            email_provider=interpolate(email.get("provider", "smtp")),
+            email_from=interpolate(email.get("from")),
+            email_reply_to=interpolate(email.get("reply_to")),
+            smtp_host=interpolate(email.get("smtp_host")),
+            smtp_port=interpolate(email.get("smtp_port", 587)),
+            smtp_user=interpolate(email.get("smtp_user")),
+            smtp_password=interpolate(email.get("smtp_password")),
+            smtp_use_tls=interpolate(email.get("smtp_use_tls", True)),
+            
+            # Debug
+            debug=interpolate(manifest.get("debug", False)),
+            log_level=interpolate(manifest.get("log_level", "INFO")),
         )
 
 
@@ -223,6 +432,7 @@ def create_service(
     
     # Config
     config: Optional[ServiceConfig] = None,
+    manifest_path: Optional[str] = None,  # Path to manifest.yaml for auto-wiring
     
     # Database schema init (async function that takes db connection)
     schema_init: Optional[Callable] = None,
@@ -257,6 +467,9 @@ def create_service(
             - (prefix, APIRouter, tags) tuple
         tasks: Dict of task_name -> handler for background jobs
         config: ServiceConfig (or uses defaults/env vars)
+        manifest_path: Path to manifest.yaml for auto-wiring integrations
+            When provided, kernel auto-configures:
+            - billing: section → billing routes + tasks
         schema_init: Async function(db) to initialize app database tables
         version: Service version
         description: API description
@@ -273,27 +486,87 @@ def create_service(
         Configured FastAPI application
     
     Example:
-        async def init_tables(db):
-            await db.execute("CREATE TABLE IF NOT EXISTS widgets ...")
-        
+        # Simple - just config
         app = create_service(
             name="widget_service",
             routers=[widgets_router],
-            config=ServiceConfig(
-                database_name="./data/widgets.db",
-                database_type="sqlite",
-            ),
+            config=ServiceConfig.from_env(),
+        )
+        
+        # Full manifest with auto-wiring (billing, etc.)
+        app = create_service(
+            name="my-saas",
+            routers=[my_router],
+            config=ServiceConfig.from_manifest("manifest.yaml"),
+            manifest_path="manifest.yaml",  # Enables auto-wiring
             schema_init=init_tables,
         )
     """
+    # Load .env hierarchy first (before any config loading)
+    # This ensures env vars are available for ServiceConfig and manifest interpolation
+    from .env import load_env_hierarchy
+    
+    if manifest_path:
+        # Use manifest location to determine service directory
+        from pathlib import Path
+        service_dir = str(Path(manifest_path).parent.resolve())
+        load_env_hierarchy(service_dir=service_dir)
+    else:
+        # Fallback: load from current working directory
+        load_env_hierarchy()
+    
     # Use provided config or load from env
     cfg = config or ServiceConfig.from_env()
     
-    # Build job registry if tasks provided
+    # Read manifest for auto-wiring integrations
+    manifest = None
+    if manifest_path:
+        import yaml
+        import re
+        from pathlib import Path
+        
+        manifest_file = Path(manifest_path)
+        if manifest_file.exists():
+            with open(manifest_file) as f:
+                content = f.read()
+            
+            # Interpolate env vars
+            def _interpolate(match):
+                var_name = match.group(1)
+                default = match.group(2)
+                return os.environ.get(var_name, default if default is not None else "")
+            
+            content = re.sub(r'\$\{([^}:]+)(?::-([^}]*))?\}', _interpolate, content)
+            manifest = yaml.safe_load(content)
+    
+    # Collect additional routers/tasks from integrations
+    integration_routers = []
+    integration_tasks = {}
+    billing_enabled = False
+    
+    # Setup billing integration if billing: section exists in manifest
+    if manifest and manifest.get("billing"):
+        from .db import get_db_connection
+        from .auth.deps import require_auth
+        from .integrations.billing import setup_kernel_billing
+        
+        billing_router, billing_tasks = setup_kernel_billing(
+            manifest["billing"],
+            get_db_connection,
+            require_auth,
+        )
+        
+        if billing_router:
+            integration_routers.append(billing_router)
+            integration_tasks.update(billing_tasks)
+            billing_enabled = True
+    
+    # Build job registry - merge app tasks with integration tasks
+    all_tasks = {**(tasks or {}), **integration_tasks}
     registry = None
-    if tasks:
+    if all_tasks:
         registry = JobRegistry()
-        for task_name, handler in tasks.items():
+        for task_name, handler in all_tasks.items():
             registry.register(task_name, handler)
     
     # Build kernel settings from service config
@@ -338,10 +611,158 @@ def create_service(
                 await init_schema(init_auth_schema)
                 logger.info("Auth schema initialized")
             
+            # Initialize SAAS schema if saas enabled
+            if cfg.saas_enabled:
+                from .db.schema import init_saas_schema
+                await init_schema(init_saas_schema)
+                logger.info("SaaS schema initialized (workspaces, members, invites)")
+            
             # Initialize app schema if provided
             if schema_init:
                 await init_schema(schema_init)
                 logger.info("Database schema initialized")
+        
+        # Setup email integration (if enabled)
+        if cfg.email_enabled:
+            from .integrations.email import setup_kernel_email
+            if setup_kernel_email(cfg):
+                logger.info(f"Email configured: {cfg.smtp_host}:{cfg.smtp_port}")
+            else:
+                logger.warning("Email enabled but setup failed - check SMTP settings")
+        
+        # Setup billing catalog (seed products/prices from manifest)
+        if billing_enabled and manifest_path:
+            from .integrations.billing import seed_billing_catalog
+            from .db import get_db_connection
+            
+            try:
+                # Initialize billing tables first
+                try:
+                    from ..billing.services import BillingService
+                    from .db import init_schema as run_init_schema
+                    
+                    async def init_billing_schema(db):
+                        """Create billing tables."""
+                        await db.execute("""
+                            CREATE TABLE IF NOT EXISTS billing_product (
+                                id TEXT PRIMARY KEY,
+                                name TEXT NOT NULL,
+                                slug TEXT UNIQUE NOT NULL,
+                                description TEXT,
+                                features TEXT,
+                                metadata TEXT,
+                                active INTEGER DEFAULT 1,
+                                product_type TEXT DEFAULT 'subscription',
+                                shippable INTEGER DEFAULT 0,
+                                stripe_product_id TEXT,
+                                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                            )
+                        """)
+                        await db.execute("""
+                            CREATE TABLE IF NOT EXISTS billing_price (
+                                id TEXT PRIMARY KEY,
+                                product_id TEXT NOT NULL,
+                                amount_cents INTEGER NOT NULL,
+                                currency TEXT DEFAULT 'usd',
+                                interval TEXT,
+                                interval_count INTEGER DEFAULT 1,
+                                nickname TEXT,
+                                metadata TEXT,
+                                active INTEGER DEFAULT 1,
+                                stripe_price_id TEXT,
+                                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                            )
+                        """)
+                        await db.execute("""
+                            CREATE TABLE IF NOT EXISTS billing_customer (
+                                id TEXT PRIMARY KEY,
+                                user_id TEXT UNIQUE NOT NULL,
+                                email TEXT NOT NULL,
+                                name TEXT,
+                                metadata TEXT,
+                                stripe_customer_id TEXT,
+                                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                            )
+                        """)
+                        await db.execute("""
+                            CREATE TABLE IF NOT EXISTS billing_subscription (
+                                id TEXT PRIMARY KEY,
+                                customer_id TEXT NOT NULL,
+                                price_id TEXT NOT NULL,
+                                status TEXT DEFAULT 'active',
+                                current_period_start TEXT,
+                                current_period_end TEXT,
+                                trial_end TEXT,
+                                cancel_at_period_end INTEGER DEFAULT 0,
+                                cancelled_at TEXT,
+                                metadata TEXT,
+                                stripe_subscription_id TEXT,
+                                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                            )
+                        """)
+                        await db.execute("""
+                            CREATE TABLE IF NOT EXISTS billing_invoice (
+                                id TEXT PRIMARY KEY,
+                                customer_id TEXT,
+                                subscription_id TEXT,
+                                stripe_invoice_id TEXT,
+                                status TEXT,
+                                amount_due INTEGER,
+                                amount_paid INTEGER,
+                                currency TEXT,
+                                invoice_pdf TEXT,
+                                hosted_invoice_url TEXT,
+                                period_start TEXT,
+                                period_end TEXT,
+                                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                            )
+                        """)
+                        await db.execute("""
+                            CREATE TABLE IF NOT EXISTS billing_payment_method (
+                                id TEXT PRIMARY KEY,
+                                customer_id TEXT NOT NULL,
+                                stripe_payment_method_id TEXT,
+                                type TEXT,
+                                card_last4 TEXT,
+                                card_brand TEXT,
+                                is_default INTEGER DEFAULT 0,
+                                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                            )
+                        """)
+                        await db.execute("""
+                            CREATE TABLE IF NOT EXISTS billing_order (
+                                id TEXT PRIMARY KEY,
+                                customer_id TEXT NOT NULL,
+                                price_id TEXT NOT NULL,
+                                product_id TEXT NOT NULL,
+                                quantity INTEGER DEFAULT 1,
+                                amount_cents INTEGER NOT NULL,
+                                currency TEXT DEFAULT 'usd',
+                                status TEXT DEFAULT 'pending',
+                                product_type TEXT,
+                                shipping_address TEXT,
+                                tracking_number TEXT,
+                                shipped_at TEXT,
+                                delivered_at TEXT,
+                                stripe_payment_intent_id TEXT,
+                                stripe_checkout_session_id TEXT,
+                                metadata TEXT,
+                                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                            )
+                        """)
+                    
+                    await run_init_schema(init_billing_schema)
+                    logger.info("Billing schema initialized")
+                except Exception as e:
+                    logger.warning(f"Billing schema init skipped: {e}")
+                
+                # Seed catalog
+                result = await seed_billing_catalog(manifest_path, get_db_connection)
+                if result.get("products_created"):
+                    logger.info(f"Billing: seeded {len(result['products_created'])} products")
+            except Exception as e:
+                logger.error(f"Billing catalog seed failed: {e}")
         
         # Run app startup hook
         if on_startup:
@@ -429,6 +850,10 @@ def create_service(
                 prefix, router, tags = router_def
                 app.include_router(router, prefix=f"{api_prefix}{prefix}", tags=tags)
     
+    # Mount integration routers (billing, etc.)
+    for router in integration_routers:
+        app.include_router(router, prefix=api_prefix)
+    
     # Root endpoint
     @app.get("/api")
     async def api_root():
@@ -512,6 +937,8 @@ def _build_kernel_settings(
             allow_self_signup=cfg.allow_self_signup,
             auth_prefix="/api/v1/auth",
             enable_audit_routes=False,
+            enable_saas_routes=cfg.saas_enabled,
+            saas_invite_base_url=cfg.saas_invite_base_url,
         ),
         
         health_checks=tuple(health_checks)

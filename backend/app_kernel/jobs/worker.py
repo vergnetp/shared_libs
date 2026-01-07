@@ -204,7 +204,7 @@ async def run_worker(
     
     Usage:
         # worker.py
-        from backend.app_kernel.jobs import run_worker
+        from ..jobs import run_worker
         from .workers.documents import ingest_document
         from .workers.chat import process_chat
         
@@ -246,7 +246,7 @@ async def run_worker(
     
     # Use backend.log module
     try:
-        from backend.log import info, error, warning, debug, critical, init_logger
+        from ...log import info, error, warning, debug, critical, init_logger
         
         # Initialize the logger
         init_logger(service_name="worker", min_level=log_level, quiet_init=True)
@@ -327,8 +327,8 @@ async def run_worker(
     
     # Import job_queue components
     try:
-        from backend.job_queue import QueueWorker, QueueConfig
-        from backend.job_queue.config import (
+        from ...job_queue import QueueWorker, QueueConfig
+        from ...job_queue.config import (
             QueueRedisConfig,
             QueueWorkerConfig,
             QueueRetryConfig,

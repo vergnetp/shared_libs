@@ -379,6 +379,12 @@ def _mount_kernel_routers(
         if user_store is not None:
             from .auth.router import create_auth_router
             
+            # If SaaS is enabled, create personal workspace on signup
+            on_signup = None
+            if features.enable_saas_routes:
+                from .saas.deps import get_or_create_personal_workspace
+                on_signup = get_or_create_personal_workspace
+            
             auth_router = create_auth_router(
                 user_store=user_store,
                 token_secret=settings.auth.token_secret,
@@ -386,6 +392,7 @@ def _mount_kernel_routers(
                 refresh_token_expires_days=settings.auth.refresh_token_expires_days,
                 allow_self_signup=features.allow_self_signup,
                 prefix=features.auth_prefix,
+                on_signup=on_signup,
             )
             app.include_router(auth_router, prefix=prefix)
             signup_status = "enabled" if features.allow_self_signup else "disabled"
@@ -411,3 +418,15 @@ def _mount_kernel_routers(
         logger.info(f"Job routes: enabled at {features.job_routes_prefix} (mount with create_jobs_router)")
         # NOTE: Apps should call create_jobs_router(get_db=their_get_db) and mount it
         # because kernel doesn't know the app's database dependency
+    
+    # -------------------------------------------------------------------------
+    # SaaS routes (workspaces, members, invites)
+    # -------------------------------------------------------------------------
+    if features.enable_saas_routes:
+        from .saas.router import create_saas_router
+        
+        saas_router = create_saas_router(
+            invite_base_url=features.saas_invite_base_url,
+        )
+        app.include_router(saas_router, prefix=f"{prefix}/api/v1")
+        logger.info(f"SaaS routes: enabled (workspaces, members, invites)")

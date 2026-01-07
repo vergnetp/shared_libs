@@ -231,3 +231,7 @@ async def get_request_context(
 ) -> RequestContext:
     """Get the full request context including optional user."""
     return await _get_auth_deps().get_request_context(request, credentials)
+
+
+# Alias for consistency with common naming
+require_auth = get_current_user

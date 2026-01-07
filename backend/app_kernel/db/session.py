@@ -12,14 +12,14 @@ Usage:
     )
     
     # In routes (FastAPI dependency)
-    from backend.app_kernel.db import db_connection
+    from ..db import db_connection
     
     @app.get("/users")
     async def get_users(db=Depends(db_connection)):
         return await db.find_entities("users")
     
     # In workers/scripts (context manager)
-    from backend.app_kernel.db import get_db_connection
+    from ..db import get_db_connection
     
     async with get_db_connection() as db:
         await db.save_entity("jobs", {"id": "123", "status": "done"})
@@ -53,7 +53,7 @@ def init_db_session(
     """
     global _db_manager
     
-    from backend.databases.manager import DatabaseManager
+    from ...databases.manager import DatabaseManager
     
     # Build kwargs based on database type
     if database_type == "sqlite":
@@ -139,6 +139,6 @@ async def close_db():
     """Close database connections on shutdown."""
     global _db_manager
     if _db_manager is not None:
-        from backend.databases.manager import DatabaseManager
+        from ...databases.manager import DatabaseManager
         await DatabaseManager.close_all()
         _db_manager = None

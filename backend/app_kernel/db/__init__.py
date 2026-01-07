@@ -35,12 +35,13 @@ from .session import (
 
 from .schema import (
     init_kernel_schema,
+    init_saas_schema,
     cleanup_expired_idempotency_keys,
     cleanup_old_rate_limits,
 )
 
 # Re-export connection types so apps don't import from databases directly
-from backend.databases.connections import AsyncConnection, SyncConnection
+from ...databases.connections import AsyncConnection, SyncConnection
 
 __all__ = [
     # Connection management
@@ -53,6 +54,7 @@ __all__ = [
     
     # Kernel schema
     "init_kernel_schema",
+    "init_saas_schema",
     "cleanup_expired_idempotency_keys",
     "cleanup_old_rate_limits",
     

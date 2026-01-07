@@ -1,0 +1,117 @@
+# Example manifest.yaml for SaaS with billing
+# Copy this to your service directory and customize
+
+name: my-saas
+version: "1.0.0"
+description: My SaaS Application
+
+# =============================================================================
+# Database
+# =============================================================================
+database:
+  type: sqlite
+  path: ${DATABASE_PATH:-./data/app.db}
+
+# =============================================================================
+# Redis (optional - for jobs, rate limiting)
+# =============================================================================
+redis:
+  url: ${REDIS_URL:-redis://localhost:6379}
+  key_prefix: "myapp:"
+
+# =============================================================================
+# Auth
+# =============================================================================
+auth:
+  jwt_secret: ${JWT_SECRET}
+  jwt_expiry_hours: 24
+  allow_self_signup: true
+
+# =============================================================================
+# SaaS (workspaces, members, invites)
+# =============================================================================
+saas:
+  enabled: true
+  invite_base_url: ${SAAS_INVITE_BASE_URL:-http://localhost:3000/invite}
+
+# =============================================================================
+# Email (for invites, notifications)
+# =============================================================================
+email:
+  enabled: ${EMAIL_ENABLED:-false}
+  from: ${EMAIL_FROM:-noreply@example.com}
+  smtp_host: ${SMTP_HOST}
+  smtp_port: ${SMTP_PORT:-587}
+  smtp_user: ${SMTP_USER}
+  smtp_password: ${SMTP_PASSWORD}
+
+# =============================================================================
+# Billing - This enables auto-wiring!
+# =============================================================================
+billing:
+  # Stripe credentials
+  stripe_secret_key: ${STRIPE_SECRET_KEY}
+  stripe_publishable_key: ${STRIPE_PUBLISHABLE_KEY}
+  stripe_webhook_secret: ${STRIPE_WEBHOOK_SECRET}
+  
+  # Defaults
+  default_currency: usd
+  trial_days: 14
+  
+  # Products and prices - auto-created at startup
+  products:
+    - slug: free
+      name: Free Plan
+      description: Get started for free
+      features:
+        - basic_access
+        - 5_widgets
+      prices:
+        - amount: 0
+          interval: month
+    
+    - slug: pro
+      name: Pro Plan
+      description: Everything you need to grow
+      features:
+        - basic_access
+        - unlimited_widgets
+        - api_access
+        - priority_support
+      prices:
+        - amount: 1999      # $19.99/month
+          interval: month
+          nickname: monthly
+        - amount: 19900     # $199/year (save 17%)
+          interval: year
+          nickname: yearly
+    
+    - slug: enterprise
+      name: Enterprise
+      description: For large teams
+      features:
+        - basic_access
+        - unlimited_widgets
+        - api_access
+        - priority_support
+        - sso
+        - dedicated_support
+        - custom_integrations
+      prices:
+        - amount: 9900      # $99/month
+          interval: month
+          nickname: monthly
+
+# =============================================================================
+# Debug
+# =============================================================================
+debug: ${DEBUG:-false}
+log_level: ${LOG_LEVEL:-INFO}
+
+# =============================================================================
+# CORS
+# =============================================================================
+cors:
+  origins:
+    - http://localhost:3000
+    - https://myapp.example.com

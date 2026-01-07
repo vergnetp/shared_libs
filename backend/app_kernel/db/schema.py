@@ -170,3 +170,67 @@ async def cleanup_old_rate_limits(conn: Any, older_than_hours: int = 24) -> int:
     )
     
     return count
+
+
+async def init_saas_schema(conn: Any) -> None:
+    """
+    Create SaaS-related tables (workspaces, members, invites).
+    
+    Call this when enable_saas_routes=True.
+    Safe to call multiple times (CREATE IF NOT EXISTS).
+    
+    Args:
+        conn: Database connection with execute() method
+    """
+    # Workspaces - teams/organizations
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS workspaces (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            slug TEXT UNIQUE,
+            owner_id TEXT NOT NULL,
+            is_personal INTEGER DEFAULT 0,
+            settings_json TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        )
+    """)
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_workspaces_owner ON workspaces(owner_id)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_workspaces_slug ON workspaces(slug)")
+    
+    # Workspace members
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS workspace_members (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            role TEXT DEFAULT 'member',
+            invited_by TEXT,
+            joined_at TEXT,
+            created_at TEXT,
+            updated_at TEXT,
+            UNIQUE(workspace_id, user_id)
+        )
+    """)
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_wm_workspace ON workspace_members(workspace_id)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_wm_user ON workspace_members(user_id)")
+    
+    # Workspace invites
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS workspace_invites (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL,
+            email TEXT NOT NULL,
+            role TEXT DEFAULT 'member',
+            token TEXT UNIQUE NOT NULL,
+            invited_by TEXT NOT NULL,
+            status TEXT DEFAULT 'pending',
+            expires_at TEXT,
+            accepted_at TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        )
+    """)
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_wi_workspace ON workspace_invites(workspace_id)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_wi_email ON workspace_invites(email)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_wi_token ON workspace_invites(token)")

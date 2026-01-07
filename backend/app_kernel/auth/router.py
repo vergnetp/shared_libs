@@ -132,8 +132,8 @@ class AuthServiceAdapter(UserStore):
     backend.auth user storage.
     
     Usage:
-        from backend.auth import AuthService
-        from backend.app_kernel.auth import AuthServiceAdapter
+        from ...auth import AuthService
+        from ..auth import AuthServiceAdapter
         
         auth_service = AuthService(...)
         user_store = AuthServiceAdapter(auth_service)
@@ -175,8 +175,8 @@ class AuthServiceAdapter(UserStore):
         if existing:
             raise ValueError(f"User with email {email or username} already exists")
         
-        # Import User model from backend.auth
-        from backend.auth import User
+        # Import User model from ...auth
+        from ...auth import User
         
         user = User(
             email=email or username,
@@ -227,6 +227,7 @@ def create_auth_router(
     refresh_token_expires_days: int = 30,
     allow_self_signup: bool = False,
     prefix: str = "/auth",
+    on_signup: Callable = None,  # async callback(user_id, user_email) called after signup
 ) -> APIRouter:
     """
     Create auth router.
@@ -238,6 +239,8 @@ def create_auth_router(
         refresh_token_expires_days: Refresh token TTL
         allow_self_signup: If True, enable /register endpoint
         prefix: URL prefix for routes
+        on_signup: Optional async callback called after successful signup.
+                   Signature: async (user_id: str, user_email: str) -> None
         
     Returns:
         FastAPI router with auth endpoints
@@ -496,6 +499,13 @@ def create_auth_router(
                     status_code=status.HTTP_409_CONFLICT,
                     detail=str(e),
                 )
+            
+            # Call on_signup callback if provided (e.g., to create personal workspace)
+            if on_signup:
+                try:
+                    await on_signup(user["id"], user.get("email", ""))
+                except Exception:
+                    pass  # Don't fail signup if callback fails
             
             return UserResponse(
                 id=user["id"],

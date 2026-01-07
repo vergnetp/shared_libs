@@ -598,7 +598,7 @@ class ModelManager:
             
             # Load reranker
             print("[ModelManager] Loading reranker...")
-            from backend.ai.reranker import get_reranker
+            from ..reranker import get_reranker
             self._reranker = get_reranker()
             print("[ModelManager] Reranker ready")
             

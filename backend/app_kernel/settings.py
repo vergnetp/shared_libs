@@ -157,6 +157,12 @@ class FeatureSettings:
     enable_audit_routes: bool = False
     audit_path: str = "/audit"
     
+    # SaaS routes (workspaces, members, invites)
+    enable_saas_routes: bool = False
+    saas_prefix: str = "/workspaces"
+    # Base URL for invite links (e.g., "https://app.example.com/invite")
+    saas_invite_base_url: str = None
+    
     # Router prefix for all kernel routes (empty = mount at root)
     kernel_prefix: str = ""
     
@@ -192,6 +198,8 @@ class FeatureSettings:
             allow_self_signup=env_bool("KERNEL_ALLOW_SIGNUP", False),
             enable_job_routes=env_bool("KERNEL_ENABLE_JOBS", True),
             enable_audit_routes=env_bool("KERNEL_ENABLE_AUDIT", False),
+            enable_saas_routes=env_bool("KERNEL_ENABLE_SAAS", False),
+            saas_invite_base_url=os.environ.get("KERNEL_SAAS_INVITE_URL"),
         )
 
 

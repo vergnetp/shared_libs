@@ -7,9 +7,6 @@ Shared utilities:
     from ai.reranker import rerank, get_reranker
     from ai.vectordb import MemoryStore, Document
 
-Agents:
-    from ai.ai_agents import Agent
-
 Documents:
     from ai.documents import DocumentStore
 """
@@ -21,7 +18,6 @@ from . import reranker
 from . import vectordb
 
 # Submodules
-from . import ai_agents
 from . import documents
 
 __all__ = [
@@ -29,6 +25,5 @@ __all__ = [
     "embeddings", 
     "reranker",
     "vectordb",
-    "ai_agents",
     "documents",
 ]
