@@ -4,13 +4,15 @@ Domain Service - Automatic domain provisioning for deployments.
 Handles:
 - Auto-generating subdomains from container names
 - Creating Cloudflare DNS records
-- Configuring nginx virtual hosts
+- Configuring nginx virtual hosts with HTTPS (using Cloudflare Origin Certificate)
 - Custom domain aliases
 
 Usage:
     domain_svc = DomainService(
         cloudflare_token="...",
         base_domain="digitalpixo.com",
+        origin_cert="-----BEGIN CERTIFICATE-----...",
+        origin_key="-----BEGIN PRIVATE KEY-----...",
     )
     
     # Auto-provision domain for a deployment
@@ -38,6 +40,11 @@ import re
 from ..cloud.cloudflare import CloudflareClient, CloudflareError
 
 
+# Cloudflare Origin Certificate paths on servers
+ORIGIN_CERT_PATH = "/local/nginx/certs/origin.pem"
+ORIGIN_KEY_PATH = "/local/nginx/certs/origin.key"
+
+
 @dataclass
 class DomainResult:
     """Result of domain provisioning."""
@@ -45,6 +52,7 @@ class DomainResult:
     domain: Optional[str] = None  # The provisioned domain
     dns_created: bool = False     # Whether DNS record was created
     nginx_configured: bool = False  # Whether nginx was configured
+    ssl_configured: bool = False   # Whether SSL cert was deployed
     server_ips: List[str] = field(default_factory=list)
     error: Optional[str] = None
     aliases: List[str] = field(default_factory=list)  # Custom domain aliases
@@ -56,7 +64,7 @@ class DomainService:
     
     Generates subdomains like: {workspace}-{project}-{env}-{service}.{base_domain}
     Creates DNS records pointing to all server IPs.
-    Configures nginx virtual hosts on each server.
+    Configures nginx virtual hosts with HTTPS on each server.
     """
     
     DEFAULT_BASE_DOMAIN = "digitalpixo.com"
@@ -65,6 +73,8 @@ class DomainService:
         self,
         cloudflare_token: str,
         base_domain: str = None,
+        origin_cert: str = None,
+        origin_key: str = None,
         log: Callable[[str], None] = None,
     ):
         """
@@ -73,10 +83,14 @@ class DomainService:
         Args:
             cloudflare_token: Cloudflare API token with DNS edit permissions
             base_domain: Base domain for subdomains (default: digitalpixo.com)
+            origin_cert: Cloudflare Origin Certificate (PEM format)
+            origin_key: Origin Certificate private key (PEM format)
             log: Optional logging callback
         """
         self.cf = CloudflareClient(cloudflare_token)
         self.base_domain = base_domain or self.DEFAULT_BASE_DOMAIN
+        self.origin_cert = origin_cert
+        self.origin_key = origin_key
         self.log = log or (lambda msg: None)
     
     def container_name_to_subdomain(self, container_name: str) -> str:
@@ -120,6 +134,48 @@ class DomainService:
         subdomain = self.container_name_to_subdomain(container_name)
         return f"{subdomain}.{self.base_domain}"
     
+    async def _ensure_ssl_cert(
+        self,
+        agent: Any,
+        ip: str,
+    ) -> bool:
+        """
+        Ensure SSL certificate is deployed to server.
+        
+        Args:
+            agent: NodeAgentClient for the server
+            ip: Server IP (for logging)
+            
+        Returns:
+            True if cert is ready
+        """
+        if not self.origin_cert or not self.origin_key:
+            self.log(f"   ⚠️ No origin certificate configured - HTTPS disabled")
+            return False
+        
+        try:
+            # Check if cert already exists
+            cert_exists = await agent.file_exists(ORIGIN_CERT_PATH)
+            
+            if not cert_exists:
+                self.log(f"   📜 Deploying SSL certificate to {ip}...")
+                
+                # Ensure certs directory exists
+                await agent.create_directory("/local/nginx/certs")
+                
+                # Write certificate and key
+                await agent.write_file(ORIGIN_CERT_PATH, self.origin_cert)
+                await agent.write_file(ORIGIN_KEY_PATH, self.origin_key)
+                
+                # Secure the key file
+                await agent.execute(f"chmod 600 {ORIGIN_KEY_PATH}")
+                
+            return True
+            
+        except Exception as e:
+            self.log(f"   ⚠️ Failed to deploy SSL cert to {ip}: {e}")
+            return False
+    
     async def provision_domain(
         self,
         container_name: str,
@@ -133,7 +189,8 @@ class DomainService:
         
         1. Generate subdomain from container name
         2. Create/update Cloudflare DNS A records for each server IP
-        3. Configure nginx virtual host on each server
+        3. Deploy SSL certificate to servers (if configured)
+        4. Configure nginx virtual host with HTTPS on each server
         
         Args:
             container_name: Container name (e.g., "fc153d_ai_prod_api")
@@ -173,20 +230,29 @@ class DomainService:
             self.log(f"   ❌ DNS failed: {e}")
             return result
         
-        # Step 2: Configure nginx virtual hosts
+        # Step 2: Deploy SSL certificates and configure nginx
         try:
-            self.log(f"   Configuring nginx virtual hosts...")
+            self.log(f"   Configuring nginx virtual hosts with HTTPS...")
+            
+            ssl_enabled = bool(self.origin_cert and self.origin_key)
             
             nginx_config = self._generate_nginx_vhost(
                 domain=domain,
                 container_name=container_name,
                 container_port=container_port,
                 upstream_ips=server_ips,
+                ssl_enabled=ssl_enabled,
             )
             
-            # Deploy nginx config to each server
+            # Deploy to each server
             for ip in server_ips:
                 agent = agent_client_factory(ip)
+                
+                # Deploy SSL cert if configured
+                if ssl_enabled:
+                    ssl_ok = await self._ensure_ssl_cert(agent, ip)
+                    if ssl_ok:
+                        result.ssl_configured = True
                 
                 # Write nginx config file
                 config_path = f"/local/nginx/conf.d/{domain}.conf"
@@ -199,7 +265,7 @@ class DomainService:
                 # Test nginx config
                 test_result = await agent.test_nginx_config()
                 if not test_result.success:
-                    self.log(f"   ⚠️ Nginx config test failed on {ip}")
+                    self.log(f"   ⚠️ Nginx config test failed on {ip}: {test_result.error}")
                     # Remove bad config
                     await agent.delete_file(config_path)
                     continue
@@ -211,7 +277,7 @@ class DomainService:
                     continue
             
             result.nginx_configured = True
-            self.log(f"   ✅ Nginx configured on all servers")
+            self.log(f"   ✅ Nginx configured on all servers (HTTPS: {'enabled' if ssl_enabled else 'disabled'})")
             
         except Exception as e:
             result.error = f"Nginx configuration failed: {e}"
@@ -270,12 +336,15 @@ class DomainService:
         
         # Update nginx config to include alias
         try:
+            ssl_enabled = bool(self.origin_cert and self.origin_key)
+            
             nginx_config = self._generate_nginx_vhost(
                 domain=primary_domain,
                 container_name=container_name,
                 container_port=container_port,
                 upstream_ips=server_ips,
                 aliases=[alias_domain],
+                ssl_enabled=ssl_enabled,
             )
             
             for ip in server_ips:
@@ -346,13 +415,15 @@ class DomainService:
         container_port: int,
         upstream_ips: List[str],
         aliases: List[str] = None,
+        ssl_enabled: bool = True,
     ) -> str:
         """
-        Generate nginx virtual host configuration.
+        Generate nginx virtual host configuration with HTTPS.
         
         Creates:
         - Upstream block with all server IPs (least_conn)
-        - Server block listening on 80
+        - Server block on 443 with SSL (Cloudflare Origin Cert)
+        - Server block on 80 redirecting to HTTPS
         - Proxy pass to upstream
         
         Args:
@@ -361,6 +432,7 @@ class DomainService:
             container_port: Port the container listens on
             upstream_ips: List of backend server IPs
             aliases: Optional list of domain aliases
+            ssl_enabled: Whether to enable HTTPS
             
         Returns:
             Nginx configuration string
@@ -369,7 +441,6 @@ class DomainService:
         upstream_name = container_name.replace("-", "_").replace(".", "_")
         
         # Build upstream block with all backends
-        # For distributed LB: each nginx knows all backends
         upstream_servers = "\n".join([
             f"    server {ip}:{container_port};"
             for ip in upstream_ips
@@ -381,20 +452,8 @@ class DomainService:
             server_names.extend(aliases)
         server_name_str = " ".join(server_names)
         
-        config = f"""# Auto-generated by DomainService
-# Domain: {domain}
-# Container: {container_name}
-
-upstream {upstream_name} {{
-    least_conn;
-{upstream_servers}
-}}
-
-server {{
-    listen 80;
-    server_name {server_name_str};
-    
-    # Cloudflare real IP
+        # Cloudflare IP ranges for real_ip
+        cloudflare_ips = """    # Cloudflare real IP
     set_real_ip_from 103.21.244.0/22;
     set_real_ip_from 103.22.200.0/22;
     set_real_ip_from 103.31.4.0/22;
@@ -410,10 +469,10 @@ server {{
     set_real_ip_from 190.93.240.0/20;
     set_real_ip_from 197.234.240.0/22;
     set_real_ip_from 198.41.128.0/17;
-    real_ip_header CF-Connecting-IP;
-    
-    location / {{
-        proxy_pass http://{upstream_name};
+    real_ip_header CF-Connecting-IP;"""
+        
+        # Proxy settings block
+        proxy_settings = f"""        proxy_pass http://{upstream_name};
         proxy_http_version 1.1;
         
         # Headers
@@ -434,10 +493,84 @@ server {{
         # Buffering
         proxy_buffering on;
         proxy_buffer_size 4k;
-        proxy_buffers 8 4k;
+        proxy_buffers 8 4k;"""
+        
+        if ssl_enabled:
+            config = f"""# Auto-generated by DomainService
+# Domain: {domain}
+# Container: {container_name}
+# SSL: Cloudflare Origin Certificate
+
+upstream {upstream_name} {{
+    least_conn;
+{upstream_servers}
+}}
+
+# HTTPS server
+server {{
+    listen 443 ssl http2;
+    server_name {server_name_str};
+    
+    # Cloudflare Origin Certificate
+    ssl_certificate {ORIGIN_CERT_PATH};
+    ssl_certificate_key {ORIGIN_KEY_PATH};
+    
+    # SSL settings
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;
+    ssl_prefer_server_ciphers off;
+    
+{cloudflare_ips}
+    
+    location / {{
+{proxy_settings}
     }}
     
-    # Health check endpoint (for monitoring)
+    # Health check endpoint
+    location /health {{
+        access_log off;
+        proxy_pass http://{upstream_name};
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 5s;
+    }}
+}}
+
+# HTTP redirect to HTTPS
+server {{
+    listen 80;
+    server_name {server_name_str};
+    
+{cloudflare_ips}
+    
+    # For Cloudflare, just proxy (CF handles HTTPS to client)
+    location / {{
+{proxy_settings}
+    }}
+}}
+"""
+        else:
+            # HTTP only (no SSL cert configured)
+            config = f"""# Auto-generated by DomainService
+# Domain: {domain}
+# Container: {container_name}
+# SSL: Disabled (no origin certificate)
+
+upstream {upstream_name} {{
+    least_conn;
+{upstream_servers}
+}}
+
+server {{
+    listen 80;
+    server_name {server_name_str};
+    
+{cloudflare_ips}
+    
+    location / {{
+{proxy_settings}
+    }}
+    
+    # Health check endpoint
     location /health {{
         access_log off;
         proxy_pass http://{upstream_name};

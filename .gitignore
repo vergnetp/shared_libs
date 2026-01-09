@@ -37,3 +37,5 @@ Thumbs.db  # Windows
 # Secrets and environment files - SECURITY CRITICAL
 .env*
 secrets*.json
+*.pem
+*.key

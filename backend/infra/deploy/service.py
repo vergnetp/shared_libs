@@ -62,6 +62,8 @@ class MultiDeployConfig:
     cloudflare_token: Optional[str] = None  # Required if setup_domain=True
     base_domain: str = "digitalpixo.com"  # Base domain for subdomains
     domain_aliases: List[str] = field(default_factory=list)  # Custom domain aliases
+    origin_cert: Optional[str] = None  # Cloudflare Origin Certificate (PEM)
+    origin_key: Optional[str] = None   # Origin Certificate private key (PEM)
     
     # Source config
     source_type: DeploySource = DeploySource.CODE
@@ -358,6 +360,8 @@ class DeploymentService:
             domain_svc = DomainService(
                 cloudflare_token=config.cloudflare_token,
                 base_domain=config.base_domain,
+                origin_cert=config.origin_cert,
+                origin_key=config.origin_key,
                 log=self.log,
             )
             
