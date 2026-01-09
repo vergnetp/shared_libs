@@ -41,8 +41,12 @@ from ..cloud.cloudflare import CloudflareClient, CloudflareError
 
 
 # Cloudflare Origin Certificate paths on servers
-ORIGIN_CERT_PATH = "/local/nginx/certs/origin.pem"
-ORIGIN_KEY_PATH = "/local/nginx/certs/origin.key"
+# SSL cert paths (host vs container)
+# Write files to HOST path, but nginx config references CONTAINER path
+HOST_CERT_PATH = "/local/nginx/certs/origin.pem"
+HOST_KEY_PATH = "/local/nginx/certs/origin.key"
+NGINX_CERT_PATH = "/etc/nginx/certs/origin.pem"  # Inside container
+NGINX_KEY_PATH = "/etc/nginx/certs/origin.key"   # Inside container
 
 
 @dataclass
@@ -65,6 +69,8 @@ class DomainService:
     Generates subdomains like: {workspace}-{project}-{env}-{service}.{base_domain}
     Creates DNS records pointing to all server IPs.
     Configures nginx virtual hosts with HTTPS on each server.
+    
+    SSL certificates are fetched automatically from vault (Infisical or env vars).
     """
     
     DEFAULT_BASE_DOMAIN = "digitalpixo.com"
@@ -73,8 +79,6 @@ class DomainService:
         self,
         cloudflare_token: str,
         base_domain: str = None,
-        origin_cert: str = None,
-        origin_key: str = None,
         log: Callable[[str], None] = None,
     ):
         """
@@ -83,15 +87,22 @@ class DomainService:
         Args:
             cloudflare_token: Cloudflare API token with DNS edit permissions
             base_domain: Base domain for subdomains (default: digitalpixo.com)
-            origin_cert: Cloudflare Origin Certificate (PEM format)
-            origin_key: Origin Certificate private key (PEM format)
             log: Optional logging callback
         """
         self.cf = CloudflareClient(cloudflare_token)
         self.base_domain = base_domain or self.DEFAULT_BASE_DOMAIN
-        self.origin_cert = origin_cert
-        self.origin_key = origin_key
         self.log = log or (lambda msg: None)
+        
+        # Fetch certs from vault
+        from ..utils.vault import get_origin_cert, get_origin_key
+        self.origin_cert = get_origin_cert()
+        self.origin_key = get_origin_key()
+        
+        # Debug
+        if self.origin_cert:
+            self.log(f"   🔐 Origin certificate loaded ({len(self.origin_cert)} bytes)")
+        else:
+            self.log(f"   ⚠️ No origin certificate found - HTTPS will be disabled")
     
     def container_name_to_subdomain(self, container_name: str) -> str:
         """
@@ -154,26 +165,32 @@ class DomainService:
             return False
         
         try:
-            # Check if cert already exists
-            cert_exists = await agent.file_exists(ORIGIN_CERT_PATH)
+            self.log(f"   📜 Deploying SSL certificate to {ip}...")
             
-            if not cert_exists:
-                self.log(f"   📜 Deploying SSL certificate to {ip}...")
-                
-                # Ensure certs directory exists
-                await agent.create_directory("/local/nginx/certs")
-                
-                # Write certificate and key
-                await agent.write_file(ORIGIN_CERT_PATH, self.origin_cert)
-                await agent.write_file(ORIGIN_KEY_PATH, self.origin_key)
-                
-                # Secure the key file
-                await agent.execute(f"chmod 600 {ORIGIN_KEY_PATH}")
-                
+            # Ensure certs directory exists
+            dir_result = await agent.create_directory("/local/nginx/certs")
+            if not dir_result.success:
+                self.log(f"   ⚠️ Failed to create certs directory on {ip}: {dir_result.error}")
+                return False
+            
+            # Write certificate
+            cert_result = await agent.write_file(HOST_CERT_PATH, self.origin_cert, permissions="644")
+            if not cert_result.success:
+                self.log(f"   ⚠️ Failed to write certificate on {ip}: {cert_result.error}")
+                return False
+            
+            # Write key
+            key_result = await agent.write_file(HOST_KEY_PATH, self.origin_key, permissions="600")
+            if not key_result.success:
+                self.log(f"   ⚠️ Failed to write key on {ip}: {key_result.error}")
+                return False
+            
+            self.log(f"   ✅ SSL certificate deployed to {ip}")
             return True
             
         except Exception as e:
             self.log(f"   ⚠️ Failed to deploy SSL cert to {ip}: {e}")
+            return False
             return False
     
     async def provision_domain(
@@ -236,27 +253,29 @@ class DomainService:
             
             ssl_enabled = bool(self.origin_cert and self.origin_key)
             
-            nginx_config = self._generate_nginx_vhost(
-                domain=domain,
-                container_name=container_name,
-                container_port=container_port,
-                upstream_ips=server_ips,
-                ssl_enabled=ssl_enabled,
-            )
-            
             # Deploy to each server
             for ip in server_ips:
                 agent = agent_client_factory(ip)
                 
                 # Deploy SSL cert if configured
+                server_ssl_ok = False
                 if ssl_enabled:
-                    ssl_ok = await self._ensure_ssl_cert(agent, ip)
-                    if ssl_ok:
+                    server_ssl_ok = await self._ensure_ssl_cert(agent, ip)
+                    if server_ssl_ok:
                         result.ssl_configured = True
+                
+                # Generate config for this server (with or without SSL based on cert success)
+                server_nginx_config = self._generate_nginx_vhost(
+                    domain=domain,
+                    container_name=container_name,
+                    container_port=container_port,
+                    upstream_ips=server_ips,
+                    ssl_enabled=server_ssl_ok,  # Only enable SSL if cert was deployed
+                )
                 
                 # Write nginx config file
                 config_path = f"/local/nginx/conf.d/{domain}.conf"
-                write_result = await agent.write_file(config_path, nginx_config)
+                write_result = await agent.write_file(config_path, server_nginx_config)
                 
                 if not write_result.success:
                     self.log(f"   ⚠️ Failed to write nginx config on {ip}")
@@ -508,12 +527,13 @@ upstream {upstream_name} {{
 
 # HTTPS server
 server {{
-    listen 443 ssl http2;
+    listen 443 ssl;
+    http2 on;
     server_name {server_name_str};
     
     # Cloudflare Origin Certificate
-    ssl_certificate {ORIGIN_CERT_PATH};
-    ssl_certificate_key {ORIGIN_KEY_PATH};
+    ssl_certificate {NGINX_CERT_PATH};
+    ssl_certificate_key {NGINX_KEY_PATH};
     
     # SSL settings
     ssl_protocols TLSv1.2 TLSv1.3;
