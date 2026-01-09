@@ -2,14 +2,10 @@ import os
 import hashlib
 from typing import List
 
-try:
-    from .logger import Logger
-except ImportError:
-    from logger import Logger
-
 
 def log(msg):
-    Logger.log(msg)
+    """Simple logging."""
+    pass  # Suppress logging for now
 
 
 class DeploymentPortResolver:

@@ -32,6 +32,14 @@ from .locks import (
     get_deployment_lock_manager,
 )
 
+from .env_builder import (
+    DeployEnvBuilder,
+    build_deploy_env,
+    build_deploy_volumes,
+    build_stateful_service_env,
+    is_stateful_service,
+)
+
 
 __all__ = [
     # Generator
@@ -54,4 +62,10 @@ __all__ = [
     "DeploymentLock",
     "DeploymentLockManager",
     "get_deployment_lock_manager",
+    # Env builder
+    "DeployEnvBuilder",
+    "build_deploy_env",
+    "build_deploy_volumes",
+    "build_stateful_service_env",
+    "is_stateful_service",
 ]

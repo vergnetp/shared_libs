@@ -29,17 +29,39 @@ class DeploySource(Enum):
         raise ValueError(f"'{value}' is not a valid {cls.__name__}")
 
 
+# Known stateful services (use TCP stream proxy, not HTTP)
+STATEFUL_SERVICES = {
+    "postgres", "postgresql", "mysql", "mariadb", 
+    "redis", "mongo", "mongodb", "opensearch", "elasticsearch"
+}
+
+
 @dataclass
 class MultiDeployConfig:
     """Deployment configuration for multi-server deploys."""
     # App config
-    name: str
+    name: str  # Service name
     port: int = 8000
     container_port: Optional[int] = None  # For IMAGE_FILE: internal port
     host_port: Optional[int] = None       # For IMAGE_FILE: external port
     env_vars: Dict[str, str] = field(default_factory=dict)
     environment: str = "prod"  # prod/staging/dev/test/uat
     tags: List[str] = field(default_factory=list)
+    
+    # Project context (for unique container naming)
+    project: Optional[str] = None  # Project name (defaults to service name)
+    workspace_id: Optional[str] = None  # User/workspace ID
+    
+    # Service mesh / sidecar config
+    depends_on: List[str] = field(default_factory=list)  # Services this depends on
+    setup_sidecar: bool = True  # Set up nginx sidecar after deploy
+    is_stateful: bool = False   # Is this a stateful service (postgres, redis, etc.)
+    
+    # Domain config
+    setup_domain: bool = False  # Auto-provision domain
+    cloudflare_token: Optional[str] = None  # Required if setup_domain=True
+    base_domain: str = "digitalpixo.com"  # Base domain for subdomains
+    domain_aliases: List[str] = field(default_factory=list)  # Custom domain aliases
     
     # Source config
     source_type: DeploySource = DeploySource.CODE
@@ -65,6 +87,11 @@ class MultiDeployConfig:
     snapshot_id: Optional[str] = None
     region: str = "lon1"
     size: str = "s-1vcpu-1gb"
+    
+    def __post_init__(self):
+        """Auto-detect if this is a stateful service."""
+        if self.name.lower() in STATEFUL_SERVICES:
+            self.is_stateful = True
 
 
 @dataclass
@@ -75,6 +102,9 @@ class ServerResult:
     success: bool
     error: Optional[str] = None
     url: Optional[str] = None
+    # Sidecar info
+    internal_port: Optional[int] = None  # Port on nginx for service discovery
+    sidecar_configured: bool = False
 
 
 @dataclass 
@@ -85,6 +115,18 @@ class MultiDeployResult:
     successful_count: int = 0
     failed_count: int = 0
     error: Optional[str] = None
+    # Architecture info
+    service_name: Optional[str] = None
+    project: Optional[str] = None
+    environment: Optional[str] = None
+    container_name: Optional[str] = None
+    internal_port: Optional[int] = None  # Sidecar port for service discovery
+    depends_on: List[str] = field(default_factory=list)
+    # Dependent containers that were restarted (when deploying stateful services)
+    restarted_dependents: List[str] = field(default_factory=list)
+    # Domain info
+    domain: Optional[str] = None  # Auto-provisioned domain
+    domain_aliases: List[str] = field(default_factory=list)  # Custom aliases
     
     @property
     def urls(self) -> List[str]:
@@ -177,6 +219,7 @@ class DeploymentService:
         3. Prepare code on each server (upload or git clone)
         4. Build image on each server
         5. Run container on each server
+        6. Setup sidecar for service discovery
         """
         try:
             # Validate
@@ -206,7 +249,10 @@ class DeploymentService:
                 return MultiDeployResult(success=False, error="No servers available")
             
             total = len(servers)
+            project_name = config.project or config.name
             self.log(f"🚀 Deploying {config.name} to {total} server{'s' if total > 1 else ''} [{config.environment}]")
+            if config.depends_on:
+                self.log(f"   Dependencies: {', '.join(config.depends_on)}")
             
             # Step 2: Wait for agents
             self.log(f"⏳ Checking node agents...")
@@ -221,31 +267,308 @@ class DeploymentService:
                 if not dockerfile:
                     return MultiDeployResult(success=False, error="Failed to get Dockerfile")
             
-            # Step 4: Deploy to all servers
+            # Step 4: Deploy to all servers (includes sidecar setup)
             self.log(f"🔨 Building and deploying...")
-            results = await self._deploy_to_servers(config, ready_servers, dockerfile)
+            results, container_name, internal_port = await self._deploy_to_servers(config, ready_servers, dockerfile)
             
             successful = [r for r in results if r.success]
             failed = [r for r in results if not r.success]
+            successful_ips = [s.ip for s in successful]
+            
+            # Build result
+            result = MultiDeployResult(
+                success=len(successful) > 0,
+                servers=results,
+                successful_count=len(successful),
+                failed_count=len(failed),
+                # Architecture info
+                service_name=config.name,
+                project=project_name,
+                environment=config.environment,
+                container_name=container_name,
+                internal_port=internal_port,
+                depends_on=config.depends_on,
+            )
+            
+            # Step 5: Setup domain (if requested)
+            if result.success and config.setup_domain and config.cloudflare_token:
+                domain_result = await self._setup_domain(
+                    config=config,
+                    container_name=container_name,
+                    server_ips=successful_ips,
+                )
+                if domain_result:
+                    result.domain = domain_result.domain
+                    result.domain_aliases = domain_result.aliases
+            
+            # Step 6: If this is a stateful service, find and restart dependent containers
+            if result.success and config.is_stateful:
+                restarted = await self._restart_dependent_containers(
+                    config, ready_servers, container_name
+                )
+                if restarted:
+                    result.restarted_dependents = restarted
             
             # Summary
             self.log(f"{'═' * 50}")
             self.log(f"✅ Deployment Complete: {len(successful)}/{total} successful")
             if successful:
                 self.log(f"📋 Access:")
+                if result.domain:
+                    self.log(f"   🌐 https://{result.domain}")
                 for s in successful:
                     self.log(f"   • {s.url}")
+                if internal_port:
+                    self.log(f"🔀 Service mesh: nginx:{internal_port} → {config.name}")
             
-            return MultiDeployResult(
-                success=len(successful) > 0,
-                servers=results,
-                successful_count=len(successful),
-                failed_count=len(failed),
-            )
+            return result
             
         except Exception as e:
             self.log(f"❌ Error: {e}")
             return MultiDeployResult(success=False, error=str(e))
+    
+    # =========================================================================
+    # Domain Setup
+    # =========================================================================
+    
+    async def _setup_domain(
+        self,
+        config: MultiDeployConfig,
+        container_name: str,
+        server_ips: List[str],
+    ):
+        """
+        Set up auto-generated domain for deployment.
+        
+        Creates:
+        - Cloudflare DNS A records pointing to all server IPs
+        - Nginx virtual host on each server
+        
+        Args:
+            config: Deployment config
+            container_name: Full container name
+            server_ips: List of successful server IPs
+            
+        Returns:
+            DomainResult or None if failed
+        """
+        from ..networking.domains import DomainService
+        
+        try:
+            domain_svc = DomainService(
+                cloudflare_token=config.cloudflare_token,
+                base_domain=config.base_domain,
+                log=self.log,
+            )
+            
+            # Determine container port
+            if config.source_type == DeploySource.IMAGE_FILE and config.container_port:
+                container_port = config.container_port
+            else:
+                container_port = config.port
+            
+            # Provision domain
+            result = await domain_svc.provision_domain(
+                container_name=container_name,
+                server_ips=server_ips,
+                container_port=container_port,
+                agent_client_factory=self._agent,
+                proxied=True,
+            )
+            
+            # Add aliases if specified
+            if result.success and config.domain_aliases:
+                for alias in config.domain_aliases:
+                    alias_result = await domain_svc.add_domain_alias(
+                        primary_domain=result.domain,
+                        alias_domain=alias,
+                        server_ips=server_ips,
+                        container_name=container_name,
+                        container_port=container_port,
+                        agent_client_factory=self._agent,
+                        create_dns=alias.endswith(config.base_domain),  # Only create DNS for our domains
+                    )
+                    if alias_result.success:
+                        result.aliases.append(alias)
+            
+            return result
+            
+        except Exception as e:
+            self.log(f"⚠️ Domain setup failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
+    # =========================================================================
+    # Dependent Container Restart (when stateful services are deployed)
+    # =========================================================================
+    
+    async def _restart_dependent_containers(
+        self,
+        config: MultiDeployConfig,
+        servers: List[Dict[str, str]],
+        new_service_container: str,
+    ) -> List[str]:
+        """
+        Find and restart containers that depend on the newly deployed stateful service.
+        
+        When deploying postgres/redis/etc, we need to restart app containers so they
+        pick up the new DATABASE_URL/REDIS_URL env vars.
+        
+        Args:
+            config: The deployment config (for project/env info)
+            servers: List of servers to check
+            new_service_container: Name of the newly deployed container
+            
+        Returns:
+            List of container names that were restarted
+        """
+        from ..utils.naming import DeploymentNaming
+        from .env_builder import DeployEnvBuilder, is_stateful_service
+        
+        project_name = config.project or config.name
+        workspace_id = config.workspace_id or "default"
+        
+        # Build prefix to match: {workspace}_{project}_{env}_
+        container_prefix = f"{workspace_id}_{project_name}_{config.environment}_"
+        
+        self.log(f"🔄 Checking for dependent containers to restart...")
+        
+        restarted = []
+        
+        for server in servers:
+            ip = server["ip"]
+            agent = self._agent(ip)
+            
+            try:
+                # List all containers
+                result = await agent.list_containers()
+                if not result.success:
+                    continue
+                
+                containers = result.data.get("containers", [])
+                
+                for container in containers:
+                    name = container.get("Names", container.get("name", ""))
+                    state = container.get("State", container.get("status", ""))
+                    
+                    # Skip non-running containers
+                    if state.lower() != "running":
+                        continue
+                    
+                    # Skip the container we just deployed
+                    if name == new_service_container:
+                        continue
+                    
+                    # Skip if not in same project/env
+                    if not name.startswith(container_prefix):
+                        continue
+                    
+                    # Parse service name from container name
+                    parts = name.split("_")
+                    if len(parts) < 4:
+                        continue
+                    
+                    service_name = "_".join(parts[3:])
+                    
+                    # Skip other stateful services
+                    if is_stateful_service(service_name):
+                        continue
+                    
+                    # This is an app container in the same project/env - restart it
+                    self.log(f"   🔄 Restarting {name} to inject new env vars...")
+                    
+                    try:
+                        # Get container's current config via inspect
+                        inspect_result = await agent.inspect_container(name)
+                        if not inspect_result.success:
+                            self.log(f"      ⚠️ Failed to inspect {name}")
+                            continue
+                        
+                        inspect_data = inspect_result.data
+                        
+                        # Extract original config
+                        image = inspect_data.get("Config", {}).get("Image", "")
+                        original_env = inspect_data.get("Config", {}).get("Env", [])
+                        
+                        # Parse port mappings
+                        port_bindings = inspect_data.get("HostConfig", {}).get("PortBindings", {})
+                        ports = {}
+                        for container_port, bindings in port_bindings.items():
+                            if bindings:
+                                host_port = bindings[0].get("HostPort", "")
+                                # container_port is like "8000/tcp"
+                                cp = container_port.split("/")[0]
+                                if host_port:
+                                    ports[host_port] = cp
+                        
+                        # Parse volumes
+                        mounts = inspect_data.get("Mounts", [])
+                        volumes = []
+                        for mount in mounts:
+                            if mount.get("Type") == "bind":
+                                src = mount.get("Source", "")
+                                dst = mount.get("Destination", "")
+                                if src and dst:
+                                    volumes.append(f"{src}:{dst}")
+                        
+                        # Build new env vars with updated service discovery
+                        env_builder = DeployEnvBuilder(
+                            user=workspace_id,
+                            project=project_name,
+                            env=config.environment,
+                            service=service_name,
+                        )
+                        
+                        # Add the new dependency
+                        env_builder.add_dependency(config.name)
+                        
+                        # Merge with original env (keeping user-defined vars)
+                        new_env_dict = env_builder.build_env_vars()
+                        
+                        # Parse original env into dict
+                        original_env_dict = {}
+                        for e in original_env:
+                            if "=" in e:
+                                k, v = e.split("=", 1)
+                                original_env_dict[k] = v
+                        
+                        # Merge: new env vars override, but keep others
+                        merged_env = {**original_env_dict, **new_env_dict}
+                        
+                        # Stop and remove old container
+                        await agent.stop_container(name)
+                        await agent.remove_container(name)
+                        
+                        # Start with updated env
+                        run_result = await agent.run_container(
+                            name=name,
+                            image=image,
+                            ports=ports,
+                            env_vars=merged_env,
+                            volumes=volumes if volumes else None,
+                            restart_policy="unless-stopped",
+                            replace_existing=False,
+                        )
+                        
+                        if run_result.success:
+                            self.log(f"      ✅ Restarted {name}")
+                            restarted.append(name)
+                        else:
+                            self.log(f"      ❌ Failed to restart {name}: {run_result.error}")
+                            
+                    except Exception as e:
+                        self.log(f"      ⚠️ Error restarting {name}: {e}")
+                        
+            except Exception as e:
+                self.log(f"   ⚠️ Error checking server {ip}: {e}")
+        
+        if restarted:
+            self.log(f"🔄 Restarted {len(restarted)} dependent container(s)")
+        else:
+            self.log(f"   No dependent containers found")
+        
+        return restarted
     
     # =========================================================================
     # Server Collection
@@ -418,16 +741,42 @@ class DeploymentService:
         config: MultiDeployConfig,
         servers: List[Dict[str, str]],
         dockerfile: Optional[str] = None,
-    ) -> List[ServerResult]:
-        """Deploy to all servers in parallel."""
+    ) -> tuple[List[ServerResult], str, Optional[int]]:
+        """
+        Deploy to all servers in parallel.
+        
+        Returns:
+            Tuple of (results, container_name, internal_port)
+        """
+        from ..utils.naming import DeploymentNaming
+        from ..networking.service import NginxService
+        from ..networking.ports import DeploymentPortResolver
+        
+        project_name = config.project or config.name
+        workspace_id = config.workspace_id or "default"
+        
+        container_name = DeploymentNaming.get_container_name(
+            workspace_id=workspace_id,
+            project=project_name,
+            env=config.environment,
+            service_name=config.name,
+        )
+        
+        # Pre-calculate internal port for sidecar (same for all servers)
+        internal_port = None
+        if config.setup_sidecar:
+            internal_port = DeploymentPortResolver.get_internal_port(
+                workspace_id, project_name, config.environment, config.name
+            )
         
         async def deploy_one(server: Dict[str, str], is_first: bool) -> ServerResult:
             ip = server["ip"]
             name = server["name"]
             agent = self._agent(ip)
+            sidecar_configured = False
             
             try:
-                self.log(f"🔄 [{name}] Deploying...")
+                self.log(f"🔄 [{name}] Deploying {container_name}...")
                 
                 # Step 1: Prepare code/image
                 if config.source_type == DeploySource.CODE:
@@ -483,19 +832,21 @@ class DeploymentService:
                     # IMAGE_FILE - already loaded
                     image = config.image
                 
-                # Step 3: Run container
-                self.log(f"   [{name}] Starting container...")
+                # Step 3: Run container with proper name
+                self.log(f"   [{name}] Starting container {container_name}...")
                 
                 # Determine port mapping
                 if config.source_type == DeploySource.IMAGE_FILE and config.container_port and config.host_port:
                     port_mapping = {str(config.host_port): str(config.container_port)}
                     expose_port = config.host_port
+                    container_port = config.container_port
                 else:
                     port_mapping = {str(config.port): str(config.port)}
                     expose_port = config.port
+                    container_port = config.port
                 
                 result = await agent.run_container(
-                    name=config.name,
+                    name=container_name,  # Use proper container name
                     image=image,
                     ports=port_mapping,
                     env_vars=config.env_vars,
@@ -506,7 +857,50 @@ class DeploymentService:
                 url = f"http://{ip}:{expose_port}"
                 self.log(f"   [{name}] ✅ Running at {url}")
                 
-                return ServerResult(ip=ip, name=name, success=True, url=url)
+                # Step 4: Setup sidecar (nginx proxy for service discovery)
+                if config.setup_sidecar:
+                    try:
+                        self.log(f"   [{name}] Setting up nginx sidecar...")
+                        nginx = NginxService(agent, log=self.log)  # Use actual logger
+                        
+                        # Ensure nginx is running - this will start it if not running
+                        nginx_result = await nginx.ensure_running()
+                        if not nginx_result.success:
+                            self.log(f"   [{name}] ⚠️ Failed to start nginx: {nginx_result.error}")
+                            # Don't fail the deploy, but continue without sidecar
+                        else:
+                            # Setup sidecar config - always use server IP as backend
+                            # This works because container is exposed on host port
+                            sidecar_result = await nginx.setup_service_sidecar(
+                                user_id=workspace_id,
+                                project=project_name,
+                                environment=config.environment,
+                                service=config.name,
+                                container_name=container_name,
+                                container_port=expose_port,  # Use exposed port
+                                is_stateful=config.is_stateful,
+                                mode="multi_server",  # Always use multi_server mode with backends
+                                backends=[{"ip": ip, "port": expose_port}],  # Single backend with server IP
+                            )
+                            
+                            if sidecar_result.success:
+                                sidecar_configured = True
+                                self.log(f"   [{name}] 🔀 Sidecar: nginx:{internal_port} → {ip}:{expose_port}")
+                            else:
+                                self.log(f"   [{name}] ⚠️ Sidecar config failed: {sidecar_result.error}")
+                    except Exception as se:
+                        import traceback
+                        self.log(f"   [{name}] ⚠️ Sidecar error: {se}")
+                        traceback.print_exc()
+                
+                return ServerResult(
+                    ip=ip, 
+                    name=name, 
+                    success=True, 
+                    url=url,
+                    internal_port=internal_port,
+                    sidecar_configured=sidecar_configured,
+                )
                 
             except Exception as e:
                 self.log(f"   [{name}] ❌ {e}")
@@ -516,7 +910,7 @@ class DeploymentService:
         tasks = [deploy_one(s, i == 0) for i, s in enumerate(servers)]
         results = await asyncio.gather(*tasks)
         
-        return list(results)
+        return list(results), container_name, internal_port
 
 
 # Convenience function

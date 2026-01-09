@@ -18,7 +18,7 @@ Multi-tenancy:
 """
 
 # Module-level version constant (importable)
-AGENT_VERSION = "1.7.2"
+AGENT_VERSION = "1.8.3"
 
 # The node agent Flask app code - embedded as a string for cloud-init
 NODE_AGENT_CODE = '''#!/usr/bin/env python3
@@ -27,7 +27,7 @@ Node Agent - SSH-Free Deployments for SaaS
 Runs on port 9999, protected by API key.
 """
 
-AGENT_VERSION = "1.7.2"  # Fixed IPv6 SSH hole
+AGENT_VERSION = "1.8.3"  # Fixed nginx reload/test to use docker inspect
 
 from flask import Flask, request, jsonify
 from functools import wraps
@@ -253,6 +253,20 @@ def stop_container(name):
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/containers/<n>/start', methods=['POST'])
+@require_api_key
+def start_container(n):
+    """Start a stopped container"""
+    try:
+        result = run_cmd(['docker', 'start', n], timeout=30)
+        if result.returncode == 0:
+            return jsonify({'status': 'started'})
+        else:
+            return jsonify({'status': 'error', 'error': result.stderr}), 500
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/containers/<name>/remove', methods=['POST'])
 @require_api_key
 def remove_container(name):
@@ -304,6 +318,24 @@ def container_status(name):
 
 
 # ========================================
+
+
+@app.route('/containers/<n>/inspect', methods=['GET'])
+@require_api_key
+def inspect_container(n):
+    """Get full container inspection data (for recreating with same config)"""
+    try:
+        result = run_cmd(['docker', 'inspect', n])
+        if result.returncode == 0:
+            import json
+            data = json.loads(result.stdout)
+            if data and len(data) > 0:
+                return jsonify(data[0])
+            return jsonify({'error': 'No data returned'}), 404
+        else:
+            return jsonify({'error': 'Container not found'}), 404
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 # IMAGE OPERATIONS
 # ========================================
 
@@ -842,6 +874,158 @@ def write_file():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/files/mkdir', methods=['POST'])
+@require_api_key
+def make_directory():
+    """Create directory with parents"""
+    try:
+        data = request.get_json()
+        path = data.get('path')
+        mode = data.get('mode', '755')
+        
+        if not path:
+            return jsonify({'error': 'path required'}), 400
+        
+        # Security check
+        if not is_path_allowed(path):
+            return jsonify({'error': 'Path not allowed'}), 403
+        
+        dir_path = Path(path)
+        dir_path.mkdir(parents=True, exist_ok=True)
+        dir_path.chmod(int(mode, 8))
+        
+        return jsonify({'status': 'created', 'path': path})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/files/read', methods=['GET'])
+@require_api_key
+def read_file():
+    """Read file contents"""
+    try:
+        path = request.args.get('path')
+        
+        if not path:
+            return jsonify({'error': 'path required'}), 400
+        
+        # Security check
+        if not is_path_allowed(path):
+            return jsonify({'error': 'Path not allowed'}), 403
+        
+        file_path = Path(path)
+        if not file_path.exists():
+            return jsonify({'error': 'File not found'}), 404
+        
+        content = file_path.read_text()
+        return jsonify({'content': content, 'path': path})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/files/exists', methods=['GET'])
+@require_api_key
+def file_exists():
+    """Check if file exists"""
+    try:
+        path = request.args.get('path')
+        
+        if not path:
+            return jsonify({'error': 'path required'}), 400
+        
+        file_path = Path(path)
+        return jsonify({'exists': file_path.exists(), 'path': path})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/files/delete', methods=['POST'])
+@require_api_key
+def delete_file():
+    """Delete a file"""
+    try:
+        data = request.get_json()
+        path = data.get('path')
+        
+        if not path:
+            return jsonify({'error': 'path required'}), 400
+        
+        # Security check
+        if not is_path_allowed(path):
+            return jsonify({'error': 'Path not allowed'}), 403
+        
+        file_path = Path(path)
+        if file_path.exists():
+            file_path.unlink()
+            return jsonify({'status': 'deleted', 'path': path})
+        else:
+            return jsonify({'status': 'not_found', 'path': path})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/containers/<n>/exec', methods=['POST'])
+@require_api_key
+def exec_in_container(n):
+    """Execute command in running container"""
+    try:
+        data = request.get_json()
+        command = data.get('command', [])
+        
+        if not command:
+            return jsonify({'error': 'command required'}), 400
+        
+        # Build docker exec command
+        cmd = ['docker', 'exec', n] + command
+        result = run_cmd(cmd)
+        
+        return jsonify({
+            'returncode': result.returncode,
+            'stdout': result.stdout,
+            'stderr': result.stderr,
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# ========================================
+# DOCKER NETWORKS
+# ========================================
+
+@app.route('/networks/create', methods=['POST'])
+@require_api_key
+def create_network():
+    """Create Docker network"""
+    try:
+        data = request.get_json()
+        name = data.get('name')
+        
+        if not name:
+            return jsonify({'error': 'name required'}), 400
+        
+        result = run_cmd(['docker', 'network', 'create', name])
+        if result.returncode == 0:
+            return jsonify({'status': 'created', 'name': name})
+        else:
+            return jsonify({'error': result.stderr}), 400
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/networks/<n>', methods=['GET'])
+@require_api_key
+def get_network(n):
+    """Get Docker network details"""
+    try:
+        result = run_cmd(['docker', 'network', 'inspect', n])
+        if result.returncode == 0:
+            return jsonify({'network': json.loads(result.stdout)})
+        else:
+            return jsonify({'error': 'Network not found'}), 404
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/upload/tar', methods=['POST'])
 @require_api_key
 def upload_tar():
@@ -1015,15 +1199,52 @@ def service_status(name):
 @app.route('/nginx/reload', methods=['POST'])
 @require_api_key
 def reload_nginx():
-    """Reload nginx configuration"""
+    """Reload nginx configuration (works with both Docker and systemctl)"""
     try:
-        # Test config first
+        # Try Docker first - use docker inspect for reliable check
+        docker_check = run_cmd(['docker', 'inspect', '-f', '{{.State.Running}}', 'nginx'])
+        if docker_check.returncode == 0 and docker_check.stdout.strip() == 'true':
+            # Nginx running in container
+            test = run_cmd(['docker', 'exec', 'nginx', 'nginx', '-t'])
+            if test.returncode != 0:
+                return jsonify({'status': 'error', 'error': test.stderr}), 400
+            
+            result = run_cmd(['docker', 'exec', 'nginx', 'nginx', '-s', 'reload'])
+            return jsonify({
+                'status': 'reloaded' if result.returncode == 0 else 'failed',
+                'mode': 'docker'
+            })
+        
+        # Fallback to systemctl (nginx on host)
         test = run_cmd(['nginx', '-t'])
         if test.returncode != 0:
             return jsonify({'status': 'error', 'error': test.stderr}), 400
         
         result = run_cmd(['systemctl', 'reload', 'nginx'])
-        return jsonify({'status': 'reloaded' if result.returncode == 0 else 'failed'})
+        return jsonify({
+            'status': 'reloaded' if result.returncode == 0 else 'failed',
+            'mode': 'systemctl'
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/nginx/test', methods=['GET'])
+@require_api_key
+def test_nginx_config():
+    """Test nginx configuration"""
+    try:
+        # Try Docker first - use docker inspect for reliable check
+        docker_check = run_cmd(['docker', 'inspect', '-f', '{{.State.Running}}', 'nginx'])
+        if docker_check.returncode == 0 and docker_check.stdout.strip() == 'true':
+            result = run_cmd(['docker', 'exec', 'nginx', 'nginx', '-t'])
+        else:
+            result = run_cmd(['nginx', '-t'])
+        
+        return jsonify({
+            'valid': result.returncode == 0,
+            'output': result.stderr or result.stdout,
+        })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

@@ -175,6 +175,10 @@ class NodeAgentClient:
         """Stop a container."""
         return await self._request("POST", f"/containers/{name}/stop", timeout=30)
     
+    async def start_container(self, name: str) -> AgentResponse:
+        """Start a stopped container."""
+        return await self._request("POST", f"/containers/{name}/start", timeout=30)
+    
     async def remove_container(self, name: str) -> AgentResponse:
         """Remove a container."""
         return await self._request("POST", f"/containers/{name}/remove")
@@ -183,9 +187,37 @@ class NodeAgentClient:
         """Get container status."""
         return await self._request("GET", f"/containers/{name}/status")
     
+    async def inspect_container(self, name: str) -> AgentResponse:
+        """Get full container inspection data (for recreating with same config)."""
+        return await self._request("GET", f"/containers/{name}/inspect")
+    
     async def container_logs(self, name: str, lines: int = 100) -> AgentResponse:
         """Get container logs."""
         return await self._request("GET", f"/containers/{name}/logs?lines={lines}")
+    
+    async def exec_in_container(
+        self, 
+        name: str, 
+        command: List[str],
+        timeout: int = 30,
+    ) -> AgentResponse:
+        """
+        Execute command inside a running container.
+        
+        Args:
+            name: Container name
+            command: Command and arguments as list (e.g., ["nginx", "-t"])
+            timeout: Request timeout in seconds
+            
+        Returns:
+            AgentResponse with stdout/stderr in data
+        """
+        return await self._request(
+            "POST", 
+            f"/containers/{name}/exec",
+            {"command": command},
+            timeout=timeout,
+        )
     
     # =========================================================================
     # Images
@@ -639,3 +671,304 @@ class NodeAgentClient:
             "error": run_result.error,
             "logs": error_logs,
         }
+
+    # =========================================================================
+    # File & Directory Management
+    # =========================================================================
+    
+    async def create_directory(self, path: str, mode: str = "755") -> AgentResponse:
+        """
+        Create a directory on the server.
+        
+        Args:
+            path: Directory path to create
+            mode: Permission mode (default: 755)
+            
+        Returns:
+            AgentResponse
+        """
+        return await self._request(
+            "POST", 
+            "/files/mkdir",
+            {"path": path, "mode": mode},
+        )
+    
+    async def read_file(self, path: str) -> AgentResponse:
+        """
+        Read a file from the server.
+        
+        Args:
+            path: File path
+            
+        Returns:
+            AgentResponse with data["content"]
+        """
+        return await self._request("GET", f"/files/read?path={path}")
+    
+    async def file_exists(self, path: str) -> bool:
+        """Check if a file exists."""
+        result = await self._request("GET", f"/files/exists?path={path}")
+        return result.success and result.data.get("exists", False)
+    
+    async def delete_file(self, path: str) -> AgentResponse:
+        """Delete a file."""
+        return await self._request("POST", "/files/delete", {"path": path})
+    
+    # =========================================================================
+    # Nginx Management
+    # =========================================================================
+    
+    async def ensure_nginx_running(
+        self,
+        nginx_conf_path: str = "/local/nginx/nginx.conf",
+        conf_d_path: str = "/local/nginx/conf.d",
+        stream_d_path: str = "/local/nginx/stream.d",
+        certs_path: str = "/local/nginx/certs",
+        logs_path: str = "/local/nginx/logs",
+    ) -> AgentResponse:
+        """
+        Ensure nginx container is running with proper config mounts.
+        
+        Creates config directories and starts nginx if not running.
+        Also opens firewall ports 80 and 443.
+        
+        Args:
+            nginx_conf_path: Host path to nginx.conf
+            conf_d_path: Host path to HTTP configs
+            stream_d_path: Host path to stream (TCP) configs
+            certs_path: Host path to SSL certs
+            logs_path: Host path to nginx logs
+            
+        Returns:
+            AgentResponse
+        """
+        # Create directories
+        for path in [conf_d_path, stream_d_path, certs_path, logs_path]:
+            await self.create_directory(path)
+        
+        # Open firewall ports for HTTP/HTTPS
+        await self.firewall_allow(80, "tcp")
+        await self.firewall_allow(443, "tcp")
+        
+        # Check if nginx is running
+        status = await self.container_status("nginx")
+        if status.success:
+            container_state = status.data.get("status", "").lower()
+            if container_state == "running":
+                return AgentResponse(success=True, data={"status": "already_running"})
+            elif container_state in ("exited", "stopped", "dead", "created"):
+                # Container exists but not running - try to start it
+                start_result = await self.start_container("nginx")
+                if start_result.success:
+                    return AgentResponse(success=True, data={"status": "restarted"})
+                # If start failed, remove and recreate
+                await self.remove_container("nginx")
+        
+        # Write default nginx.conf if not exists
+        if not await self.file_exists(nginx_conf_path):
+            default_conf = self._get_default_nginx_conf()
+            await self.write_file(nginx_conf_path, default_conf)
+        
+        # Start nginx container (replace_existing=True to handle edge cases)
+        result = await self.run_container(
+            name="nginx",
+            image="nginx:alpine",
+            ports={"80": "80", "443": "443"},
+            volumes=[
+                f"{nginx_conf_path}:/etc/nginx/nginx.conf:ro",
+                f"{conf_d_path}:/etc/nginx/conf.d:ro",
+                f"{stream_d_path}:/etc/nginx/stream.d:ro",
+                f"{certs_path}:/etc/nginx/certs:ro",
+                f"{logs_path}:/var/log/nginx",
+            ],
+            restart_policy="unless-stopped",
+            replace_existing=True,  # Replace if exists in bad state
+        )
+        
+        return result
+    
+    async def firewall_allow(
+        self,
+        port: int,
+        proto: str = "tcp",
+        source: str = None,
+    ) -> AgentResponse:
+        """
+        Open a port in the firewall (ufw).
+        
+        Args:
+            port: Port number to allow
+            proto: Protocol (tcp/udp)
+            source: Optional source IP/CIDR to allow from
+            
+        Returns:
+            AgentResponse
+        """
+        data = {"port": port, "proto": proto}
+        if source:
+            data["source"] = source
+        return await self._request("POST", "/firewall/allow", json=data)
+    
+    async def test_nginx_config(self) -> AgentResponse:
+        """
+        Test nginx configuration for errors.
+        Uses the /nginx/test endpoint which works with both Docker and systemctl nginx.
+        
+        Returns:
+            AgentResponse with success=True if config is valid
+        """
+        result = await self._request("GET", "/nginx/test")
+        if result.success:
+            # Check the 'valid' field in the response
+            is_valid = result.data.get("valid", False)
+            if not is_valid:
+                return AgentResponse(
+                    success=False,
+                    error=result.data.get("output", "Invalid nginx configuration"),
+                    data=result.data,
+                )
+        return result
+    
+    async def write_nginx_config(
+        self,
+        config_name: str,
+        content: str,
+        config_type: str = "http",  # "http" or "stream"
+        reload: bool = True,
+    ) -> AgentResponse:
+        """
+        Write an nginx config file and optionally reload.
+        
+        Args:
+            config_name: Config filename (without .conf extension)
+            content: Config content
+            config_type: "http" for HTTP configs, "stream" for TCP configs
+            reload: Reload nginx after writing
+            
+        Returns:
+            AgentResponse
+        """
+        if config_type == "stream":
+            path = f"/local/nginx/stream.d/{config_name}.conf"
+        else:
+            path = f"/local/nginx/conf.d/{config_name}.conf"
+        
+        # Ensure directory exists
+        await self.create_directory(f"/local/nginx/{config_type == 'stream' and 'stream.d' or 'conf.d'}")
+        
+        # Write config
+        result = await self.write_file(path, content)
+        if not result.success:
+            return result
+        
+        # Reload nginx
+        if reload:
+            # Test config first
+            test_result = await self.test_nginx_config()
+            if not test_result.success:
+                # Config invalid - delete the file
+                await self.delete_file(path)
+                return AgentResponse(
+                    success=False,
+                    error=f"Invalid nginx config: {test_result.error}",
+                )
+            
+            return await self.reload_nginx()
+        
+        return result
+    
+    async def remove_nginx_config(
+        self,
+        config_name: str,
+        config_type: str = "http",
+        reload: bool = True,
+    ) -> AgentResponse:
+        """
+        Remove an nginx config file and reload.
+        
+        Args:
+            config_name: Config filename (without .conf extension)
+            config_type: "http" or "stream"
+            reload: Reload nginx after removing
+            
+        Returns:
+            AgentResponse
+        """
+        if config_type == "stream":
+            path = f"/local/nginx/stream.d/{config_name}.conf"
+        else:
+            path = f"/local/nginx/conf.d/{config_name}.conf"
+        
+        result = await self.delete_file(path)
+        
+        if reload and result.success:
+            await self.reload_nginx()
+        
+        return result
+    
+    def _get_default_nginx_conf(self) -> str:
+        """Get default nginx.conf content."""
+        return '''# Auto-generated nginx.conf
+user nginx;
+worker_processes auto;
+error_log /var/log/nginx/error.log warn;
+pid /var/run/nginx.pid;
+
+events {
+    worker_connections 4096;
+    use epoll;
+    multi_accept on;
+}
+
+http {
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+
+    log_format main '$remote_addr - $remote_user [$time_local] "$request" '
+                    '$status $body_bytes_sent "$http_referer" '
+                    '"$http_user_agent" "$http_x_forwarded_for"';
+
+    access_log /var/log/nginx/access.log main;
+
+    sendfile on;
+    tcp_nopush on;
+    tcp_nodelay on;
+    keepalive_timeout 65;
+    types_hash_max_size 2048;
+    client_max_body_size 100M;
+
+    gzip on;
+    gzip_vary on;
+    gzip_proxied any;
+    gzip_comp_level 6;
+    gzip_types text/plain text/css text/xml application/json application/javascript 
+               application/xml application/xml+rss text/javascript;
+
+    limit_req_zone $binary_remote_addr zone=api:10m rate=100r/s;
+
+    include /etc/nginx/conf.d/*.conf;
+}
+
+stream {
+    include /etc/nginx/stream.d/*.conf;
+}
+'''
+    
+    # =========================================================================
+    # Docker Network Management
+    # =========================================================================
+    
+    async def create_network(self, name: str) -> AgentResponse:
+        """Create a Docker network."""
+        return await self._request("POST", "/networks/create", {"name": name})
+    
+    async def network_exists(self, name: str) -> bool:
+        """Check if a Docker network exists."""
+        result = await self._request("GET", f"/networks/{name}")
+        return result.success
+    
+    async def ensure_network(self, name: str) -> AgentResponse:
+        """Create network if it doesn't exist."""
+        if await self.network_exists(name):
+            return AgentResponse(success=True, data={"status": "exists"})
+        return await self.create_network(name)
