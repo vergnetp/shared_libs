@@ -14,7 +14,8 @@ from typing import List, Optional, Callable
 # TODO: Remove before production / real clients
 # These IPs can SSH into all droplets for debugging
 EMERGENCY_ADMIN_IPS = [
-    "90.126.99.163",  # Phil - France (update when back in London, then recreate snapshot)
+    "90.126.99.163",  # Phil - France
+    "80.76.56.13",    # Phil - London
 ]
 # =============================================================================
 
@@ -88,26 +89,33 @@ def build_cloudinit_script(
     # Firewall setup - restrict SSH to emergency admin IPs only
     if EMERGENCY_ADMIN_IPS:
         lines.extend([
-            "# Firewall setup - restrict SSH access",
+            "# Firewall setup - reset any existing rules from snapshot",
             "log '========================================='",
             "log 'CONFIGURING FIREWALL'",
             "log '========================================='",
             "apt-get install -y ufw",
+            "# Reset firewall to clear any rules from snapshot",
+            "ufw --force reset",
             "ufw default deny incoming",
             "ufw default allow outgoing",
             "# Allow node agent port from anywhere",
-            "ufw allow 9999/tcp",
+            "ufw allow 9999/tcp comment 'Node Agent API'",
+            "# Allow SSH from anywhere (password protected)",
+            "ufw allow 22/tcp comment 'SSH'",
+            "# Allow HTTP/HTTPS for web traffic",
+            "ufw allow 80/tcp comment 'HTTP'",
+            "ufw allow 443/tcp comment 'HTTPS'",
         ])
+        # Add emergency admin IPs for extra logging/tracking (SSH already open)
         for ip in EMERGENCY_ADMIN_IPS:
-            lines.append(f"# Emergency admin SSH access")
-            lines.append(f"ufw allow from {ip} to any port 22")
-            lines.append(f"log 'Allowed SSH from emergency admin: {ip}'")
+            lines.append(f"# Emergency admin IP noted: {ip}")
+            lines.append(f"log 'Admin IP registered: {ip}'")
         lines.extend([
             "ufw --force enable",
-            "log 'Firewall configured - SSH restricted to admin IPs only'",
+            "log 'Firewall configured - SSH open, HTTP/HTTPS open'",
             "",
         ])
-        log(f"  🔒 Firewall: SSH restricted to {len(EMERGENCY_ADMIN_IPS)} admin IP(s)")
+        log(f"  🔒 Firewall: SSH open, HTTP/HTTPS open, Agent port 9999 open")
     
     # Docker installation
     if config.install_docker:

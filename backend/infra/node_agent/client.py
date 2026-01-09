@@ -787,28 +787,6 @@ class NodeAgentClient:
         
         return result
     
-    async def firewall_allow(
-        self,
-        port: int,
-        proto: str = "tcp",
-        source: str = None,
-    ) -> AgentResponse:
-        """
-        Open a port in the firewall (ufw).
-        
-        Args:
-            port: Port number to allow
-            proto: Protocol (tcp/udp)
-            source: Optional source IP/CIDR to allow from
-            
-        Returns:
-            AgentResponse
-        """
-        data = {"port": port, "proto": proto}
-        if source:
-            data["source"] = source
-        return await self._request("POST", "/firewall/allow", json=data)
-    
     async def test_nginx_config(self) -> AgentResponse:
         """
         Test nginx configuration for errors.
