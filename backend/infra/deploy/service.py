@@ -292,10 +292,22 @@ class DeploymentService:
             
             # Step 5: Setup domain (if requested)
             if result.success and config.setup_domain and config.cloudflare_token:
+                # Get actual host port from successful deployment URL
+                # URL format: http://ip:port
+                actual_host_port = None
+                if successful:
+                    try:
+                        url = successful[0].url
+                        if url and ':' in url:
+                            actual_host_port = int(url.split(':')[-1])
+                    except:
+                        pass
+                
                 domain_result = await self._setup_domain(
                     config=config,
                     container_name=container_name,
                     server_ips=successful_ips,
+                    actual_host_port=actual_host_port,
                 )
                 if domain_result:
                     result.domain = domain_result.domain
@@ -320,6 +332,22 @@ class DeploymentService:
                     self.log(f"   • {s.url}")
                 if internal_port:
                     self.log(f"🔀 Service mesh: nginx:{internal_port} → {config.name}")
+                
+                # Architecture visualization
+                self.log(f"")
+                self.log(f"📐 Architecture:")
+                if result.domain:
+                    self.log(f"   ☁️  Cloudflare DNS: {result.domain}")
+                    self.log(f"   │")
+                    for i, s in enumerate(successful):
+                        port = s.url.split(':')[-1] if s.url else '?'
+                        prefix = "├" if i < len(successful) - 1 else "└"
+                        self.log(f"   {prefix}── 🖥️  {s.ip}:443 (nginx vhost)")
+                        self.log(f"   {'│' if i < len(successful) - 1 else ' '}       └── 🐳 {container_name}:{port}")
+                else:
+                    for i, s in enumerate(successful):
+                        port = s.url.split(':')[-1] if s.url else '?'
+                        self.log(f"   🖥️  {s.ip}:{port} → 🐳 {container_name}")
             
             return result
             
@@ -336,6 +364,7 @@ class DeploymentService:
         config: MultiDeployConfig,
         container_name: str,
         server_ips: List[str],
+        actual_host_port: Optional[int] = None,
     ):
         """
         Set up auto-generated domain for deployment.
@@ -348,6 +377,7 @@ class DeploymentService:
             config: Deployment config
             container_name: Full container name
             server_ips: List of successful server IPs
+            actual_host_port: Actual host port from toggle deployment (overrides config)
             
         Returns:
             DomainResult or None if failed
@@ -361,8 +391,10 @@ class DeploymentService:
                 log=self.log,
             )
             
-            # Determine container port
-            if config.source_type == DeploySource.IMAGE_FILE and config.container_port:
+            # Determine container port - prefer actual_host_port from toggle deployment
+            if actual_host_port:
+                container_port = actual_host_port
+            elif config.source_type == DeploySource.IMAGE_FILE and config.container_port:
                 container_port = config.container_port
             else:
                 container_port = config.port
@@ -743,40 +775,80 @@ class DeploymentService:
         dockerfile: Optional[str] = None,
     ) -> tuple[List[ServerResult], str, Optional[int]]:
         """
-        Deploy to all servers in parallel.
+        Deploy to all servers in parallel with zero-downtime toggle support.
+        
+        Toggle deployment pattern:
+        1. Check which container (primary/secondary) is currently running
+        2. Deploy to the OTHER container name/port
+        3. Health check new container
+        4. Update nginx to point to new container
+        5. Remove old container
         
         Returns:
             Tuple of (results, container_name, internal_port)
         """
-        from ..utils.naming import DeploymentNaming
+        from ..utils.naming import DeploymentNaming, PortResolver
         from ..networking.service import NginxService
         from ..networking.ports import DeploymentPortResolver
         
         project_name = config.project or config.name
         workspace_id = config.workspace_id or "default"
         
-        container_name = DeploymentNaming.get_container_name(
+        # Get BASE container name (without _secondary)
+        base_container_name = DeploymentNaming.get_container_name(
             workspace_id=workspace_id,
             project=project_name,
             env=config.environment,
             service_name=config.name,
+            secondary=False,
         )
         
-        # Pre-calculate internal port for sidecar (same for all servers)
+        # Pre-calculate internal port for sidecar (same for all servers, STABLE)
         internal_port = None
         if config.setup_sidecar:
             internal_port = DeploymentPortResolver.get_internal_port(
                 workspace_id, project_name, config.environment, config.name
             )
         
+        # Calculate base host port for toggle
+        base_host_port = PortResolver.get_host_port(
+            workspace_id, project_name, config.environment, config.name,
+            str(config.port)
+        )
+        
         async def deploy_one(server: Dict[str, str], is_first: bool) -> ServerResult:
             ip = server["ip"]
             name = server["name"]
             agent = self._agent(ip)
             sidecar_configured = False
+            old_container_name = None
             
             try:
-                self.log(f"🔄 [{name}] Deploying {container_name}...")
+                # Step 0: Determine toggle - check what's running
+                toggle_result = await self._determine_toggle(
+                    agent, base_container_name, base_host_port
+                )
+                new_container_name = toggle_result["name"]
+                new_host_port = toggle_result["port"]
+                old_container_name = toggle_result.get("old_name")
+                is_first_deploy = toggle_result["is_first"]
+                
+                if is_first_deploy:
+                    self.log(f"🔄 [{name}] First deployment → {new_container_name}")
+                else:
+                    self.log(f"🔄 [{name}] Toggle: {old_container_name} → {new_container_name}")
+                
+                # Step 0b: CRITICAL - Remove target container if it exists (crashed/stopped)
+                # This handles the case where previous deploy failed and left a dead container
+                try:
+                    target_status = await agent.container_status(new_container_name)
+                    if target_status.success:
+                        # Container exists (running, stopped, or crashed) - remove it first
+                        self.log(f"   [{name}] Removing existing {new_container_name}...")
+                        await agent.stop_container(new_container_name)
+                        await agent.remove_container(new_container_name)
+                except Exception:
+                    pass  # Container doesn't exist, that's fine
                 
                 # Step 1: Prepare code/image
                 if config.source_type == DeploySource.CODE:
@@ -832,21 +904,26 @@ class DeploymentService:
                     # IMAGE_FILE - already loaded
                     image = config.image
                 
-                # Step 3: Run container with proper name
-                self.log(f"   [{name}] Starting container {container_name}...")
-                
-                # Determine port mapping
+                # Step 3: Determine port mapping
                 if config.source_type == DeploySource.IMAGE_FILE and config.container_port and config.host_port:
-                    port_mapping = {str(config.host_port): str(config.container_port)}
-                    expose_port = config.host_port
+                    # For IMAGE_FILE, use configured ports but apply toggle offset if secondary
+                    if DeploymentNaming.is_secondary_container(new_container_name):
+                        expose_port = config.host_port + PortResolver.SECONDARY_PORT_OFFSET
+                    else:
+                        expose_port = config.host_port
                     container_port = config.container_port
+                    port_mapping = {str(expose_port): str(container_port)}
                 else:
-                    port_mapping = {str(config.port): str(config.port)}
-                    expose_port = config.port
+                    # Use toggle port
+                    expose_port = new_host_port
                     container_port = config.port
+                    port_mapping = {str(expose_port): str(container_port)}
+                
+                # Step 4: Run NEW container (old one still running for zero-downtime)
+                self.log(f"   [{name}] Starting container {new_container_name}...")
                 
                 result = await agent.run_container(
-                    name=container_name,  # Use proper container name
+                    name=new_container_name,
                     image=image,
                     ports=port_mapping,
                     env_vars=config.env_vars,
@@ -857,30 +934,31 @@ class DeploymentService:
                 url = f"http://{ip}:{expose_port}"
                 self.log(f"   [{name}] ✅ Running at {url}")
                 
-                # Step 4: Setup sidecar (nginx proxy for service discovery)
+                # Step 5: Health check (TODO: implement proper health check)
+                # For now, just check container is running
+                await asyncio.sleep(1)  # Brief pause to let container start
+                
+                # Step 6: Setup sidecar to point to NEW container
                 if config.setup_sidecar:
                     try:
                         self.log(f"   [{name}] Setting up nginx sidecar...")
-                        nginx = NginxService(agent, log=self.log)  # Use actual logger
+                        nginx = NginxService(agent, log=self.log)
                         
-                        # Ensure nginx is running - this will start it if not running
                         nginx_result = await nginx.ensure_running()
                         if not nginx_result.success:
                             self.log(f"   [{name}] ⚠️ Failed to start nginx: {nginx_result.error}")
-                            # Don't fail the deploy, but continue without sidecar
                         else:
-                            # Setup sidecar config - always use server IP as backend
-                            # This works because container is exposed on host port
+                            # Point nginx to NEW container port
                             sidecar_result = await nginx.setup_service_sidecar(
                                 user_id=workspace_id,
                                 project=project_name,
                                 environment=config.environment,
                                 service=config.name,
-                                container_name=container_name,
-                                container_port=expose_port,  # Use exposed port
+                                container_name=new_container_name,
+                                container_port=expose_port,  # NEW port
                                 is_stateful=config.is_stateful,
-                                mode="multi_server",  # Always use multi_server mode with backends
-                                backends=[{"ip": ip, "port": expose_port}],  # Single backend with server IP
+                                mode="multi_server",
+                                backends=[{"ip": ip, "port": expose_port}],
                             )
                             
                             if sidecar_result.success:
@@ -892,6 +970,16 @@ class DeploymentService:
                         import traceback
                         self.log(f"   [{name}] ⚠️ Sidecar error: {se}")
                         traceback.print_exc()
+                
+                # Step 7: Remove OLD container (after nginx switch)
+                if old_container_name:
+                    try:
+                        self.log(f"   [{name}] Cleaning up old container {old_container_name}...")
+                        await agent.stop_container(old_container_name)
+                        await agent.remove_container(old_container_name)
+                        self.log(f"   [{name}] ✅ Removed {old_container_name}")
+                    except Exception as cleanup_err:
+                        self.log(f"   [{name}] ⚠️ Cleanup warning: {cleanup_err}")
                 
                 return ServerResult(
                     ip=ip, 
@@ -910,7 +998,166 @@ class DeploymentService:
         tasks = [deploy_one(s, i == 0) for i, s in enumerate(servers)]
         results = await asyncio.gather(*tasks)
         
-        return list(results), container_name, internal_port
+        # Return base container name (clients use this to identify the service)
+        return list(results), base_container_name, internal_port
+    
+    async def _determine_toggle(
+        self,
+        agent: NodeAgentClient,
+        base_container_name: str,
+        base_host_port: int,
+    ) -> Dict[str, Any]:
+        """
+        Determine which container/port to use based on what's running.
+        
+        Toggle logic:
+        - If nothing RUNNING → use base (port 8xxx, name "base")
+        - If base RUNNING → use secondary (port 18xxx, name "base_secondary")
+        - If secondary RUNNING → use base (port 8xxx, name "base")
+        
+        Note: We only consider RUNNING containers. Stopped/crashed containers
+        are cleaned up before deploying (in deploy_one).
+        
+        Returns:
+            {
+                "name": container name to deploy,
+                "port": host port to use,
+                "old_name": container to remove after (or None),
+                "is_first": True if first deployment
+            }
+        """
+        from ..utils.naming import DeploymentNaming, PortResolver
+        
+        secondary_container_name = DeploymentNaming.get_secondary_container_name(base_container_name)
+        secondary_port = PortResolver.get_secondary_port(base_host_port)
+        
+        # Check which container is RUNNING (not just exists)
+        primary_running = await self._is_container_running(agent, base_container_name)
+        secondary_running = await self._is_container_running(agent, secondary_container_name)
+        
+        if not primary_running and not secondary_running:
+            # Nothing running - use base
+            return {
+                "name": base_container_name,
+                "port": base_host_port,
+                "old_name": None,
+                "is_first": True,
+            }
+        elif primary_running:
+            # Primary running - deploy to secondary
+            return {
+                "name": secondary_container_name,
+                "port": secondary_port,
+                "old_name": base_container_name,
+                "is_first": False,
+            }
+        else:
+            # Secondary running - deploy to primary
+            return {
+                "name": base_container_name,
+                "port": base_host_port,
+                "old_name": secondary_container_name,
+                "is_first": False,
+            }
+    
+    async def _is_container_running(self, agent: NodeAgentClient, container_name: str) -> bool:
+        """Check if a container is running (not just exists)."""
+        try:
+            status = await agent.container_status(container_name)
+            return (
+                status.success and 
+                status.data.get("status", "").lower() == "running"
+            )
+        except Exception:
+            return False
+    
+    async def find_running_container(
+        self,
+        agent: NodeAgentClient,
+        workspace_id: str,
+        project: str,
+        env: str,
+        service: str,
+    ) -> Optional[str]:
+        """
+        Find which container (primary or secondary) is running for a service.
+        
+        Args:
+            agent: NodeAgentClient for the server
+            workspace_id: Workspace ID
+            project: Project name
+            env: Environment
+            service: Service name
+            
+        Returns:
+            Container name if found running, None otherwise
+        """
+        from ..utils.naming import DeploymentNaming
+        
+        base_name = DeploymentNaming.get_container_name(
+            workspace_id, project, env, service, secondary=False
+        )
+        secondary_name = DeploymentNaming.get_secondary_container_name(base_name)
+        
+        for name in [base_name, secondary_name]:
+            if await self._is_container_running(agent, name):
+                return name
+        
+        return None
+    
+    async def find_service_container(
+        self,
+        agent: NodeAgentClient,
+        workspace_id: str,
+        project: str,
+        env: str,
+        service: str,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Find container for a service (running or stopped).
+        
+        Returns info about the container that exists, preferring running over stopped.
+        
+        Returns:
+            {"name": str, "status": str, "port": int} or None
+        """
+        from ..utils.naming import DeploymentNaming, PortResolver
+        
+        base_name = DeploymentNaming.get_container_name(
+            workspace_id, project, env, service, secondary=False
+        )
+        secondary_name = DeploymentNaming.get_secondary_container_name(base_name)
+        base_port = PortResolver.get_host_port(workspace_id, project, env, service)
+        secondary_port = PortResolver.get_secondary_port(base_port)
+        
+        containers = [
+            (base_name, base_port),
+            (secondary_name, secondary_port),
+        ]
+        
+        # Check for running first
+        for name, port in containers:
+            try:
+                status = await agent.container_status(name)
+                if status.success and status.data.get("status", "").lower() == "running":
+                    return {"name": name, "status": "running", "port": port}
+            except Exception:
+                pass
+        
+        # Then check for any existing
+        for name, port in containers:
+            try:
+                status = await agent.container_status(name)
+                if status.success:
+                    return {
+                        "name": name, 
+                        "status": status.data.get("status", "unknown"),
+                        "port": port
+                    }
+            except Exception:
+                pass
+        
+        return None
 
 
 # Convenience function

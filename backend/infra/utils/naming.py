@@ -220,20 +220,56 @@ class DeploymentNaming:
         return service_name
 
     @staticmethod
-    def get_container_name(workspace_id: str, project: str, env: str, service_name: str) -> str:
+    def get_container_name(workspace_id: str, project: str, env: str, service_name: str, secondary: bool = False) -> str:
         """Generate Docker container name using the standard convention.
 
-        Format: ``<ws_short>_<project>_<env>_<service>``
+        Format: ``<ws_short>_<project>_<env>_<service>`` (primary)
+        Format: ``<ws_short>_<project>_<env>_<service>_secondary`` (secondary)
         
         This is the SERVICE IDENTITY and LOCK KEY.
+        
+        For zero-downtime deployments, we use toggle between primary and secondary.
 
         Examples:
         - get_container_name("7f3a2b...", "hostomatic", "prod", "api") -> "7f3a2b_hostomatic_prod_api"
-        - get_container_name("7f3a2b...", "mediator", "dev", "storage") -> "7f3a2b_mediator_dev_storage"
+        - get_container_name("7f3a2b...", "hostomatic", "prod", "api", secondary=True) -> "7f3a2b_hostomatic_prod_api_secondary"
         """
         ws_short = DeploymentNaming.get_workspace_short(workspace_id)
         effective_service = DeploymentNaming.get_service_name(service_name)
-        return f"{ws_short}_{project}_{env}_{effective_service}"
+        base_name = f"{ws_short}_{project}_{env}_{effective_service}"
+        return f"{base_name}_secondary" if secondary else base_name
+
+    @staticmethod
+    def get_secondary_container_name(container_name: str) -> str:
+        """Get the secondary version of a container name.
+        
+        If already secondary, returns primary.
+        If primary, returns secondary.
+        
+        Examples:
+            "myapp_prod_api" -> "myapp_prod_api_secondary"
+            "myapp_prod_api_secondary" -> "myapp_prod_api"
+        """
+        if container_name.endswith("_secondary"):
+            return container_name[:-10]  # Remove "_secondary"
+        return f"{container_name}_secondary"
+    
+    @staticmethod
+    def is_secondary_container(container_name: str) -> bool:
+        """Check if a container name is a secondary (toggle) container."""
+        return container_name.endswith("_secondary")
+    
+    @staticmethod
+    def get_base_container_name(container_name: str) -> str:
+        """Get the base (non-secondary) container name.
+        
+        Examples:
+            "myapp_prod_api" -> "myapp_prod_api"
+            "myapp_prod_api_secondary" -> "myapp_prod_api"
+        """
+        if container_name.endswith("_secondary"):
+            return container_name[:-10]
+        return container_name
 
     @staticmethod
     def get_container_name_pattern(workspace_id: str, project: str, env: str, service_name: str) -> str:
@@ -386,3 +422,96 @@ class DeploymentNaming:
     def get_container_name_legacy(user: str, project: str, env: str, service_name: str) -> str:
         """DEPRECATED: Use get_container_name with workspace_id instead."""
         return DeploymentNaming.get_container_name(user, project, env, service_name)
+
+
+class PortResolver:
+    """
+    Port resolution for deployment system with toggle support.
+    
+    For zero-downtime deployments:
+    - Base port: deterministic port in 8000-8999 range
+    - Secondary port: base_port + 10000 (18000-18999 range)
+    - Internal port: stable port in 5000-5999 range (never changes)
+    
+    The internal port is what other services connect to via nginx.
+    It stays constant regardless of which backend (base/secondary) is active.
+    """
+    
+    SECONDARY_PORT_OFFSET = 10000
+    
+    @staticmethod
+    def get_host_port(
+        workspace_id: str, project: str, env: str, service_name: str,
+        container_port: str = "8000", base_port: int = 8000
+    ) -> int:
+        """
+        Generate deterministic host port for mapping.
+        
+        This is the BASE port used in toggle deployments.
+        Secondary deployments use base_port + 10000.
+        
+        Args:
+            workspace_id: Workspace/user ID
+            project: Project name
+            env: Environment
+            service_name: Service name
+            container_port: Container port being mapped
+            base_port: Base port range start (default: 8000)
+            
+        Returns:
+            Base host port (8000-8999 range)
+        """
+        import hashlib
+        ws_short = DeploymentNaming.get_workspace_short(workspace_id)
+        hash_input = f"{ws_short}_{project}_{env}_{service_name}_{container_port}"
+        hash_value = int(hashlib.md5(hash_input.encode()).hexdigest()[:8], 16)
+        port_offset = hash_value % 1000
+        return base_port + port_offset
+    
+    @staticmethod
+    def get_secondary_port(base_port: int) -> int:
+        """Get secondary port from base port (+10000)."""
+        return base_port + PortResolver.SECONDARY_PORT_OFFSET
+    
+    @staticmethod
+    def is_secondary_port(port: int) -> bool:
+        """Check if port is a secondary (toggle) port."""
+        return port >= 18000 and port < 19000
+    
+    @staticmethod
+    def get_base_port(port: int) -> int:
+        """Get base port from either base or secondary port."""
+        if PortResolver.is_secondary_port(port):
+            return port - PortResolver.SECONDARY_PORT_OFFSET
+        return port
+    
+    @staticmethod
+    def get_internal_port(
+        workspace_id: str, project: str, env: str, service_name: str,
+        base_port: int = 5000
+    ) -> int:
+        """
+        Generate deterministic INTERNAL port for nginx to listen on.
+        
+        This port is STABLE across deployments and toggle states.
+        Apps always connect to localhost:INTERNAL_PORT regardless of backend changes.
+        
+        The hash input does NOT include container_port or version - only project/env/service.
+        This ensures the internal port never changes for a given service.
+        
+        Args:
+            workspace_id: Workspace/user ID
+            project: Project name
+            env: Environment
+            service_name: Service name
+            base_port: Internal port range start (default: 5000)
+            
+        Returns:
+            Internal port (5000-5999 range)
+        """
+        import hashlib
+        ws_short = DeploymentNaming.get_workspace_short(workspace_id)
+        hash_input = f"{ws_short}_{project}_{env}_{service_name}_internal"
+        hash_value = int(hashlib.md5(hash_input.encode()).hexdigest()[:8], 16)
+        port_offset = hash_value % 1000
+        return base_port + port_offset

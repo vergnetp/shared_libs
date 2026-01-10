@@ -67,8 +67,47 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     - X-Frame-Options: DENY
     - X-XSS-Protection: 1; mode=block
     - Referrer-Policy: strict-origin-when-cross-origin
-    - Cache-Control: no-store (for API responses)
+    - Cache-Control: smart caching based on content type
+    
+    Cache strategy:
+    - Static assets with hash in filename (Vite/Svelte): long cache (1 year)
+    - Static assets without hash (.js, .css, etc): short cache (1 hour)
+    - HTML files: no-cache (always revalidate)
+    - API responses: no-store
     """
+    
+    # Extensions that are static assets
+    STATIC_EXTENSIONS = {'.js', '.css', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico', '.woff', '.woff2', '.ttf', '.eot', '.webp', '.avif', '.mp4', '.webm', '.map'}
+    
+    # Pattern for hashed filenames (Vite/webpack style: name.abc123.js or name-abc123.js)
+    # Matches: main.a1b2c3d4.js, style-5f6g7h8i.css, etc.
+    HASH_PATTERN_CHARS = set('0123456789abcdef')
+    
+    def _has_hash_in_filename(self, path: str) -> bool:
+        """Check if filename contains a hash (for cache busting)."""
+        # Get filename without extension
+        parts = path.split('/')
+        if not parts:
+            return False
+        filename = parts[-1]
+        
+        # Look for patterns like .abc123. or -abc123.
+        # Vite uses: name-[hash].ext or name.[hash].ext
+        name_parts = filename.rsplit('.', 1)
+        if len(name_parts) < 2:
+            return False
+        
+        name = name_parts[0]
+        
+        # Check for hash separated by . or -
+        for sep in ('.', '-'):
+            if sep in name:
+                potential_hash = name.rsplit(sep, 1)[-1]
+                # Hash is typically 8+ hex characters
+                if len(potential_hash) >= 8 and all(c in self.HASH_PATTERN_CHARS for c in potential_hash.lower()):
+                    return True
+        
+        return False
     
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         response = await call_next(request)
@@ -79,9 +118,27 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["X-XSS-Protection"] = "1; mode=block"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
         
-        # Prevent caching of API responses (exclude static files)
-        if request.url.path.startswith("/api/"):
+        path = request.url.path
+        
+        # Determine cache strategy based on path/content
+        if path.startswith("/api/"):
+            # API responses - never cache
             response.headers["Cache-Control"] = "no-store, max-age=0"
+        
+        elif any(path.endswith(ext) for ext in self.STATIC_EXTENSIONS):
+            # Static assets
+            if self._has_hash_in_filename(path):
+                # Hashed filename (Vite/webpack) - cache for 1 year (immutable)
+                response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+            else:
+                # Non-hashed static file - cache for 1 hour, revalidate
+                response.headers["Cache-Control"] = "public, max-age=3600, must-revalidate"
+        
+        elif path.endswith('.html') or path == '/' or '.' not in path.split('/')[-1]:
+            # HTML files and routes (no extension = likely SPA route) - always revalidate
+            response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
         
         return response
 
