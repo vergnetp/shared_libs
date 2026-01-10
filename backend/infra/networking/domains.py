@@ -200,6 +200,8 @@ class DomainService:
         container_port: int,
         agent_client_factory: Callable[[str], Any],
         proxied: bool = True,
+        force: bool = False,
+        sidecar_port: int = None,
     ) -> DomainResult:
         """
         Provision domain for a deployment.
@@ -212,28 +214,48 @@ class DomainService:
         Args:
             container_name: Container name (e.g., "fc153d_ai_prod_api")
             server_ips: List of server IPs running this container
-            container_port: Port the container listens on
+            container_port: Port the container listens on (fallback if no sidecar)
             agent_client_factory: Factory to create NodeAgentClient for an IP
             proxied: Whether to proxy through Cloudflare (recommended)
+            force: Force reconfiguration even if domain exists
+            sidecar_port: Stable internal sidecar port (use this for zero-downtime toggle)
             
         Returns:
             DomainResult with provisioning status
         """
         domain = self.get_full_domain(container_name)
+        result = DomainResult(success=False, domain=domain, server_ips=server_ips)
+        
+        # Use sidecar port for config if available (stable across toggle deploys)
+        config_port = sidecar_port if sidecar_port else container_port
+        
+        # Check if domain already configured (skip if not forced)
+        if not force:
+            existing_ok = await self._check_existing_domain(
+                domain, server_ips, config_port, agent_client_factory
+            )
+            if existing_ok:
+                self.log(f"🌐 Domain already configured: {domain} (skipping)")
+                result.success = True
+                result.dns_created = True
+                result.nginx_configured = True
+                result.ssl_configured = bool(self.origin_cert)
+                return result
+        
         self.log(f"🌐 Provisioning domain: {domain}")
         
         result = DomainResult(success=False, domain=domain, server_ips=server_ips)
         
-        # Step 1: Create DNS records
+        # Step 1: Replace DNS records (delete old, create new)
         try:
-            self.log(f"   Creating DNS records for {len(server_ips)} server(s)...")
+            self.log(f"   Replacing DNS records for {len(server_ips)} server(s)...")
             
-            for ip in server_ips:
-                self.cf.upsert_a_record(
-                    domain=domain,
-                    ip=ip,
-                    proxied=proxied,
-                )
+            # Replace ALL A records with new IPs (removes stale IPs from old servers)
+            self.cf.replace_a_records(
+                domain=domain,
+                ips=server_ips,
+                proxied=proxied,
+            )
             
             result.dns_created = True
             self.log(f"   ✅ DNS: {domain} → {', '.join(server_ips)}")
@@ -264,13 +286,15 @@ class DomainService:
                     if server_ssl_ok:
                         result.ssl_configured = True
                 
-                # Generate config for this server (with or without SSL based on cert success)
+                # Generate config for this server
+                # Use sidecar_port (stable) if available, otherwise container_port (changes on toggle)
                 server_nginx_config = self._generate_nginx_vhost(
                     domain=domain,
                     container_name=container_name,
                     container_port=container_port,
                     upstream_ips=server_ips,
-                    ssl_enabled=server_ssl_ok,  # Only enable SSL if cert was deployed
+                    ssl_enabled=server_ssl_ok,
+                    use_sidecar_port=sidecar_port,  # Stable port for zero-downtime
                 )
                 
                 # Write nginx config file
@@ -309,6 +333,58 @@ class DomainService:
             self.log(f"   🎉 Domain ready: https://{domain}")
         
         return result
+    
+    async def _check_existing_domain(
+        self,
+        domain: str,
+        server_ips: List[str],
+        container_port: int,
+        agent_client_factory: Callable[[str], Any],
+    ) -> bool:
+        """
+        Check if domain is already properly configured.
+        
+        Returns True if:
+        1. DNS records exist for all server IPs
+        2. Nginx config exists on all servers
+        3. SSL cert exists (if we have origin cert configured)
+        
+        This allows skipping domain provisioning on redeploys.
+        """
+        try:
+            # Check DNS records
+            existing_records = self.cf.list_records(domain)
+            existing_ips = {r.content for r in existing_records if r.type == "A"}
+            
+            if not all(ip in existing_ips for ip in server_ips):
+                self.log(f"   ℹ️ DNS check: missing IPs (have {existing_ips}, need {server_ips})")
+                return False  # Missing DNS records
+            
+            # Check nginx config on each server
+            for ip in server_ips:
+                agent = agent_client_factory(ip)
+                config_path = f"/local/nginx/conf.d/{domain}.conf"
+                
+                # Check if config file exists
+                exists_result = await agent.file_exists(config_path)
+                if not exists_result:
+                    self.log(f"   ℹ️ Nginx config missing on {ip}")
+                    return False  # Missing nginx config
+                
+                # Check SSL cert if we have origin cert
+                if self.origin_cert:
+                    cert_path = "/local/nginx/certs/origin.crt"
+                    cert_exists = await agent.file_exists(cert_path)
+                    if not cert_exists:
+                        self.log(f"   ℹ️ SSL cert missing on {ip}")
+                        return False  # Missing SSL cert
+            
+            return True  # All checks passed
+            
+        except Exception as e:
+            # On any error, fall back to full provisioning
+            self.log(f"   ℹ️ Domain check failed: {e}")
+            return False
     
     async def add_domain_alias(
         self,
@@ -435,23 +511,29 @@ class DomainService:
         upstream_ips: List[str],
         aliases: List[str] = None,
         ssl_enabled: bool = True,
+        use_sidecar_port: int = None,
     ) -> str:
         """
         Generate nginx virtual host configuration with HTTPS.
         
         Creates:
-        - Upstream block with all server IPs (least_conn)
+        - Upstream block pointing to localhost (sidecar or direct)
         - Server block on 443 with SSL (Cloudflare Origin Cert)
         - Server block on 80 redirecting to HTTPS
         - Proxy pass to upstream
         
+        Note: Cloudflare handles load balancing across servers.
+        Each server's nginx vhost only proxies to its own container
+        (via sidecar if available, direct if not).
+        
         Args:
             domain: Primary domain
             container_name: Container name (for upstream naming)
-            container_port: Port the container listens on
-            upstream_ips: List of backend server IPs
+            container_port: Port the container listens on (used if no sidecar)
+            upstream_ips: List of backend server IPs (for reference, not used in config)
             aliases: Optional list of domain aliases
             ssl_enabled: Whether to enable HTTPS
+            use_sidecar_port: If set, proxy to localhost:sidecar_port (stable across toggle deploys)
             
         Returns:
             Nginx configuration string
@@ -459,11 +541,12 @@ class DomainService:
         # Create safe upstream name
         upstream_name = container_name.replace("-", "_").replace(".", "_")
         
-        # Build upstream block with all backends
-        upstream_servers = "\n".join([
-            f"    server {ip}:{container_port};"
-            for ip in upstream_ips
-        ])
+        # Use sidecar port if available (stable across toggle deploys)
+        # Otherwise fall back to container port (changes on toggle)
+        backend_port = use_sidecar_port if use_sidecar_port else container_port
+        
+        # Always proxy to localhost - Cloudflare does cross-server load balancing
+        upstream_servers = f"    server 127.0.0.1:{backend_port};"
         
         # Server names (primary + aliases)
         server_names = [domain]

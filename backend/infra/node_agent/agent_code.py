@@ -27,7 +27,7 @@ Node Agent - SSH-Free Deployments for SaaS
 Runs on port 9999, protected by API key.
 """
 
-AGENT_VERSION = "1.8.3"  # Fixed nginx reload/test to use docker inspect
+AGENT_VERSION = "1.8.6"  # Removed --no-cache, rely on Dockerfile structure for caching
 
 from flask import Flask, request, jsonify
 from functools import wraps
@@ -588,7 +588,7 @@ def build_image():
         dockerfile_path = Path(context_path) / 'Dockerfile'
         dockerfile_path.write_text(dockerfile)
         
-        # Build
+        # Build image (cache-friendly - Dockerfile structure handles cache busting)
         cmd = ['docker', 'build', '-t', image_tag, context_path]
         result = run_cmd(cmd, timeout=600)  # 10 min timeout for builds
         
@@ -1059,6 +1059,17 @@ def upload_tar():
             with tarfile.open(fileobj=tar_file.stream, mode='r:gz') as tar:
                 tar.extractall(extract_path)
             
+            # DEBUG: Check for version in HTML files after extract
+            for html_file in extract_dir.rglob('*index*.html'):
+                try:
+                    content = html_file.read_text(errors='ignore')
+                    import re
+                    title_match = re.search(r'<title>([^<]+)</title>', content, re.IGNORECASE)
+                    if title_match:
+                        print(f"[DEBUG] AGENT EXTRACT: {html_file} has title: {title_match.group(1)}")
+                except:
+                    pass
+            
             return jsonify({'status': 'extracted', 'path': extract_path})
         
         # Legacy JSON/base64 method (high memory)
@@ -1083,6 +1094,17 @@ def upload_tar():
         tar_buffer = io.BytesIO(tar_data)
         with tarfile.open(fileobj=tar_buffer, mode='r:gz') as tar:
             tar.extractall(extract_path)
+        
+        # DEBUG: Check for version in HTML files after extract
+        for html_file in extract_dir.rglob('*index*.html'):
+            try:
+                content = html_file.read_text(errors='ignore')
+                import re
+                title_match = re.search(r'<title>([^<]+)</title>', content, re.IGNORECASE)
+                if title_match:
+                    print(f"[DEBUG] AGENT EXTRACT: {html_file} has title: {title_match.group(1)}")
+            except:
+                pass
         
         return jsonify({'status': 'extracted', 'path': extract_path})
     except Exception as e:

@@ -121,6 +121,8 @@ from .reliability import (
 
 from .health import create_health_router
 
+from .middleware import CacheBustedStaticFiles
+
 from .db import (
     init_kernel_schema,
     init_saas_schema,
@@ -228,6 +230,9 @@ __all__ = [
     
     # Health
     "create_health_router",
+    
+    # Static files
+    "CacheBustedStaticFiles",
     
     # Database
     "init_db_session",

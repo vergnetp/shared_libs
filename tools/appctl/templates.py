@@ -22,6 +22,7 @@ from backend.app_kernel import (
     create_service,
     ServiceConfig,
     get_logger,
+    CacheBustedStaticFiles,
 )
 
 from .config import get_settings
@@ -133,6 +134,11 @@ def create_app():
         # Health checks
         health_checks=[check_database{redis_health_arg}],
     )
+    
+    # Mount static files (if directory exists)
+    static_path = Path(__file__).parent / "static"
+    if static_path.exists():
+        app.mount("/", CacheBustedStaticFiles(directory=str(static_path), html=True), name="static")
     
     return app
 

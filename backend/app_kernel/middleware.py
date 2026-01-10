@@ -6,23 +6,123 @@ Provides:
 - SecurityHeadersMiddleware: Add security headers to responses
 - RequestLoggingMiddleware: Log all requests with timing
 - ErrorHandlingMiddleware: Global error handling
+- CacheBustedStaticFiles: Static file serving with smart cache headers
 
 All middleware is auto-configured by init_app_kernel() based on settings.
 """
 import uuid
 import time
 import logging
-from typing import Callable, Tuple
+from pathlib import Path
+from typing import Callable, Tuple, Optional
 
 from fastapi import FastAPI, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.staticfiles import StaticFiles
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .settings import CorsSettings, SecuritySettings
 
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Cache-Busted Static Files
+# =============================================================================
+
+class CacheBustedStaticFiles(StaticFiles):
+    """
+    StaticFiles with smart cache control headers.
+    
+    - HTML files: no-cache (always revalidate)
+    - Hashed assets (main.abc123.js): immutable, 1 year cache
+    - Non-hashed assets: 1 hour cache with revalidate
+    
+    Usage:
+        from app_kernel.middleware import CacheBustedStaticFiles
+        
+        app.mount("/", CacheBustedStaticFiles(directory="static", html=True), name="static")
+    
+    This replaces FastAPI's default StaticFiles to ensure HTML pages
+    are never cached by browsers or CDNs (like Cloudflare).
+    """
+    
+    # Extensions that are static assets
+    STATIC_EXTENSIONS = {'.js', '.css', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico', '.woff', '.woff2', '.ttf', '.eot', '.webp', '.avif', '.mp4', '.webm', '.map'}
+    
+    # Characters that make up a hash
+    HASH_CHARS = set('0123456789abcdef')
+    
+    def _has_hash_in_filename(self, path: str) -> bool:
+        """Check if filename contains a hash (Vite/webpack style)."""
+        if not path:
+            return False
+        
+        filename = Path(path).name
+        name_parts = filename.rsplit('.', 1)
+        if len(name_parts) < 2:
+            return False
+        
+        name = name_parts[0]
+        
+        # Check for hash separated by . or -
+        for sep in ('.', '-'):
+            if sep in name:
+                potential_hash = name.rsplit(sep, 1)[-1]
+                if len(potential_hash) >= 8 and all(c in self.HASH_CHARS for c in potential_hash.lower()):
+                    return True
+        
+        return False
+    
+    def _get_cache_headers(self, path: str) -> dict:
+        """Determine cache headers based on file path."""
+        suffix = Path(path).suffix.lower()
+        
+        if suffix == '.html' or not suffix:
+            # HTML - never cache
+            return {
+                'Cache-Control': 'no-cache, no-store, must-revalidate',
+                'Pragma': 'no-cache',
+                'Expires': '0',
+                'CDN-Cache-Control': 'no-store',
+                'Cloudflare-CDN-Cache-Control': 'no-store',
+            }
+        elif suffix in self.STATIC_EXTENSIONS:
+            if self._has_hash_in_filename(path):
+                # Hashed asset - cache forever
+                return {'Cache-Control': 'public, max-age=31536000, immutable'}
+            else:
+                # Non-hashed asset - cache 1 hour
+                return {'Cache-Control': 'public, max-age=3600, must-revalidate'}
+        else:
+            # Unknown - short cache
+            return {'Cache-Control': 'public, max-age=300, must-revalidate'}
+    
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Override to inject cache headers into responses."""
+        if scope["type"] != "http":
+            await super().__call__(scope, receive, send)
+            return
+        
+        path = scope.get("path", "")
+        cache_headers = self._get_cache_headers(path)
+        
+        async def send_with_headers(message):
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers", []))
+                
+                # Add our cache headers
+                for key, value in cache_headers.items():
+                    headers.append((key.lower().encode(), value.encode()))
+                
+                message = {**message, "headers": headers}
+            
+            await send(message)
+        
+        await super().__call__(scope, receive, send_with_headers)
 
 
 # =============================================================================
@@ -139,6 +239,9 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
             response.headers["Pragma"] = "no-cache"
             response.headers["Expires"] = "0"
+            # Tell Cloudflare not to cache this
+            response.headers["CDN-Cache-Control"] = "no-store"
+            response.headers["Cloudflare-CDN-Cache-Control"] = "no-store"
         
         return response
 

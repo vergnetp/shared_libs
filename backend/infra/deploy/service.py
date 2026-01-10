@@ -6,6 +6,7 @@ All deployment logic lives here. API is just a thin wrapper.
 
 from __future__ import annotations
 import asyncio
+import aiohttp
 from dataclasses import dataclass, field
 from typing import Dict, Any, List, Optional, Callable, Literal
 from enum import Enum
@@ -74,6 +75,7 @@ class MultiDeployConfig:
     git_url: Optional[str] = None
     git_branch: str = "main"
     git_token: Optional[str] = None
+    git_folders: Optional[List[Dict[str, Any]]] = None  # [{path: str, isMain: bool}]
     
     # For IMAGE source (registry)
     image: Optional[str] = None
@@ -308,6 +310,7 @@ class DeploymentService:
                     container_name=container_name,
                     server_ips=successful_ips,
                     actual_host_port=actual_host_port,
+                    sidecar_port=internal_port,  # Stable port for zero-downtime vhost
                 )
                 if domain_result:
                     result.domain = domain_result.domain
@@ -365,6 +368,7 @@ class DeploymentService:
         container_name: str,
         server_ips: List[str],
         actual_host_port: Optional[int] = None,
+        sidecar_port: Optional[int] = None,
     ):
         """
         Set up auto-generated domain for deployment.
@@ -378,6 +382,7 @@ class DeploymentService:
             container_name: Full container name
             server_ips: List of successful server IPs
             actual_host_port: Actual host port from toggle deployment (overrides config)
+            sidecar_port: Stable internal port (nginx sidecar) - use for zero-downtime
             
         Returns:
             DomainResult or None if failed
@@ -399,13 +404,14 @@ class DeploymentService:
             else:
                 container_port = config.port
             
-            # Provision domain
+            # Provision domain with sidecar_port for zero-downtime
             result = await domain_svc.provision_domain(
                 container_name=container_name,
                 server_ips=server_ips,
                 container_port=container_port,
                 agent_client_factory=self._agent,
                 proxied=True,
+                sidecar_port=sidecar_port,  # Stable port for vhost config
             )
             
             # Add aliases if specified
@@ -932,40 +938,82 @@ class DeploymentService:
                     raise Exception(f"Run failed: {result.error}")
                 
                 url = f"http://{ip}:{expose_port}"
-                self.log(f"   [{name}] ✅ Running at {url}")
+                self.log(f"   [{name}] ✅ Container started at {url}")
                 
-                # Step 5: Health check (TODO: implement proper health check)
-                # For now, just check container is running
-                await asyncio.sleep(1)  # Brief pause to let container start
+                # Step 5: Health check - wait for NEW container to be ready
+                # This is CRITICAL for zero-downtime: don't switch nginx until confirmed healthy
+                health_url = f"{url}/health"
+                max_attempts = 30  # 30 seconds max wait
+                healthy = False
                 
-                # Step 6: Setup sidecar to point to NEW container
+                self.log(f"   [{name}] ⏳ Waiting for health check...")
+                for attempt in range(max_attempts):
+                    try:
+                        # Try common health endpoints
+                        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=2)) as session:
+                            # Try /health first, then /api/health, then root
+                            for endpoint in ['/health', '/api/health', '/api/v1/health', '/']:
+                                try:
+                                    check_url = f"http://{ip}:{expose_port}{endpoint}"
+                                    async with session.get(check_url) as resp:
+                                        if resp.status < 500:  # 2xx, 3xx, 4xx all mean "app is responding"
+                                            healthy = True
+                                            self.log(f"   [{name}] ✅ Health check passed ({endpoint})")
+                                            break
+                                except:
+                                    continue
+                        if healthy:
+                            break
+                    except Exception as e:
+                        pass
+                    
+                    if attempt < max_attempts - 1:
+                        await asyncio.sleep(1)
+                
+                if not healthy:
+                    # Container not healthy - abort and keep old container running
+                    self.log(f"   [{name}] ❌ Health check failed after {max_attempts}s - aborting switch")
+                    # Stop the unhealthy new container
+                    try:
+                        await agent.stop_container(new_container_name)
+                        await agent.remove_container(new_container_name)
+                    except:
+                        pass
+                    raise Exception(f"Health check failed - new container not responding")
+                
+                # Step 6: Setup sidecar to point to NEW container (safe - we confirmed it's healthy)
                 if config.setup_sidecar:
                     try:
                         self.log(f"   [{name}] Setting up nginx sidecar...")
                         nginx = NginxService(agent, log=self.log)
                         
-                        nginx_result = await nginx.ensure_running()
-                        if not nginx_result.success:
-                            self.log(f"   [{name}] ⚠️ Failed to start nginx: {nginx_result.error}")
+                        # Quick check if nginx already running (skip full ensure for toggle deploys)
+                        status = await agent.container_status("nginx")
+                        nginx_running = status.success and status.data.get("status", "").lower() == "running"
+                        
+                        if not nginx_running:
+                            nginx_result = await nginx.ensure_running()
+                            if not nginx_result.success:
+                                self.log(f"   [{name}] ⚠️ Failed to start nginx: {nginx_result.error}")
+                        
+                        # Point nginx to NEW container port (this is the critical switch)
+                        sidecar_result = await nginx.setup_service_sidecar(
+                            user_id=workspace_id,
+                            project=project_name,
+                            environment=config.environment,
+                            service=config.name,
+                            container_name=new_container_name,
+                            container_port=expose_port,  # NEW port
+                            is_stateful=config.is_stateful,
+                            mode="multi_server",
+                            backends=[{"ip": ip, "port": expose_port}],
+                        )
+                        
+                        if sidecar_result.success:
+                            sidecar_configured = True
+                            self.log(f"   [{name}] 🔀 Sidecar: nginx:{internal_port} → {ip}:{expose_port}")
                         else:
-                            # Point nginx to NEW container port
-                            sidecar_result = await nginx.setup_service_sidecar(
-                                user_id=workspace_id,
-                                project=project_name,
-                                environment=config.environment,
-                                service=config.name,
-                                container_name=new_container_name,
-                                container_port=expose_port,  # NEW port
-                                is_stateful=config.is_stateful,
-                                mode="multi_server",
-                                backends=[{"ip": ip, "port": expose_port}],
-                            )
-                            
-                            if sidecar_result.success:
-                                sidecar_configured = True
-                                self.log(f"   [{name}] 🔀 Sidecar: nginx:{internal_port} → {ip}:{expose_port}")
-                            else:
-                                self.log(f"   [{name}] ⚠️ Sidecar config failed: {sidecar_result.error}")
+                            self.log(f"   [{name}] ⚠️ Sidecar config failed: {sidecar_result.error}")
                     except Exception as se:
                         import traceback
                         self.log(f"   [{name}] ⚠️ Sidecar error: {se}")

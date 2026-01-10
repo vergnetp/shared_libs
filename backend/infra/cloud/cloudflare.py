@@ -317,6 +317,57 @@ class CloudflareClient:
         self._request("DELETE", f"/zones/{record.zone_id}/dns_records/{record.id}")
         return True
     
+    def delete_all_a_records(self, domain: str) -> int:
+        """
+        Delete ALL A records for a domain.
+        
+        Args:
+            domain: Full domain name
+            
+        Returns:
+            Number of records deleted
+        """
+        zone_id = self.get_zone_id(domain)
+        records = self.list_records(zone_id=zone_id, record_type="A", name=domain)
+        
+        for record in records:
+            self._request("DELETE", f"/zones/{zone_id}/dns_records/{record.id}")
+        
+        return len(records)
+    
+    def replace_a_records(
+        self,
+        domain: str,
+        ips: List[str],
+        proxied: bool = True,
+        ttl: int = 1,
+    ) -> List[DNSRecord]:
+        """
+        Replace ALL A records for a domain with new IPs.
+        
+        Deletes all existing A records, then creates new ones.
+        Use this for multi-server deployments to ensure clean state.
+        
+        Args:
+            domain: Full domain name
+            ips: List of IPv4 addresses
+            proxied: Enable Cloudflare proxy
+            ttl: TTL in seconds (1 = auto)
+            
+        Returns:
+            List of created DNSRecords
+        """
+        # Delete all existing A records
+        deleted = self.delete_all_a_records(domain)
+        
+        # Create new records for each IP
+        created = []
+        for ip in ips:
+            record = self.create_record(domain, "A", ip, proxied=proxied, ttl=ttl)
+            created.append(record)
+        
+        return created
+    
     # =========================================================================
     # Convenience Methods
     # =========================================================================
