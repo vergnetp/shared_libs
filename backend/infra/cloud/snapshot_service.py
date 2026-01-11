@@ -327,7 +327,7 @@ class SnapshotService:
             yield from log(f"🖥️ Creating temporary droplet in {region}...", step=4)
             
             temp_name = f"snapshot-builder-{int(time.time())}"
-            droplet_data = self._create_temp_droplet(
+            droplet_data, droplet_error = self._create_temp_droplet(
                 name=temp_name,
                 region=region,
                 size=size,
@@ -337,7 +337,9 @@ class SnapshotService:
             )
             
             if not droplet_data:
-                yield from done(success=False, error="Failed to create droplet")
+                error_msg = f"Failed to create droplet: {droplet_error}" if droplet_error else "Failed to create droplet"
+                yield from log(f"❌ {error_msg}")
+                yield from done(success=False, error=error_msg)
                 return
             
             droplet_id = droplet_data.get("id")
@@ -644,8 +646,13 @@ class SnapshotService:
         image: str,
         ssh_key_id: str,
         user_data: str = None,
-    ) -> Optional[Dict[str, Any]]:
-        """Create temporary droplet for snapshot building."""
+    ) -> tuple:
+        """
+        Create temporary droplet for snapshot building.
+        
+        Returns:
+            (droplet_data, error_message) - droplet_data is None on failure
+        """
         payload = {
             "name": name,
             "region": region,
@@ -657,17 +664,26 @@ class SnapshotService:
         if user_data:
             payload["user_data"] = user_data
         
-        resp = requests.post(
-            "https://api.digitalocean.com/v2/droplets",
-            headers=self.headers,
-            json=payload,
-            timeout=30,
-        )
-        
-        if resp.status_code not in (200, 201, 202):
-            return None
-        
-        return resp.json().get("droplet", {})
+        try:
+            resp = requests.post(
+                "https://api.digitalocean.com/v2/droplets",
+                headers=self.headers,
+                json=payload,
+                timeout=30,
+            )
+            
+            if resp.status_code not in (200, 201, 202):
+                # Extract error message from DO API
+                try:
+                    error_data = resp.json()
+                    error_msg = error_data.get("message") or error_data.get("id") or resp.text[:200]
+                except:
+                    error_msg = f"HTTP {resp.status_code}: {resp.text[:200]}"
+                return None, error_msg
+            
+            return resp.json().get("droplet", {}), None
+        except requests.exceptions.RequestException as e:
+            return None, f"Request failed: {str(e)}"
     
     def _wait_for_droplet_active(self, droplet_id: int, timeout: int = 120) -> Optional[str]:
         """Wait for droplet to become active, return IP."""
@@ -1038,7 +1054,7 @@ class SnapshotService:
             yield log(f"   Image ID: {base_snapshot['id']}, Region: {region}")
             
             droplet_name = f"build-{name}-{int(time.time())}"
-            droplet_data = self._create_temp_droplet(
+            droplet_data, droplet_error = self._create_temp_droplet(
                 droplet_name,
                 region,
                 "s-1vcpu-1gb",  # Small is enough for Docker builds
@@ -1047,8 +1063,9 @@ class SnapshotService:
             )
             
             if not droplet_data:
-                yield log("❌ Failed to create droplet")
-                yield done(False, error="Droplet creation failed")
+                error_msg = f"Failed to create droplet: {droplet_error}" if droplet_error else "Droplet creation failed"
+                yield log(f"❌ {error_msg}")
+                yield done(False, error=error_msg)
                 return
             
             droplet_id = droplet_data["id"]

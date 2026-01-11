@@ -1775,6 +1775,13 @@ def get_node_agent_install_script(
     Returns:
         Shell script lines as string (ready to embed in cloud-init)
     """
+    import gzip
+    import base64
+    
+    # Compress the agent code to fit within cloud-init 64KB limit
+    compressed = gzip.compress(NODE_AGENT_CODE.encode('utf-8'))
+    b64_agent = base64.b64encode(compressed).decode('ascii')
+    
     # Build environment section for systemd
     env_lines = []
     if allowed_ips:
@@ -1801,11 +1808,9 @@ log 'Installing Flask with --ignore-installed...'
 pip3 install --ignore-installed --break-system-packages flask
 log 'Flask installed'
 
-# Write node agent script
-log 'Writing node agent script to /usr/local/bin/node_agent.py...'
-cat > /usr/local/bin/node_agent.py << 'AGENT_EOF'
-{NODE_AGENT_CODE}
-AGENT_EOF
+# Write node agent script (compressed to fit cloud-init limit)
+log 'Decompressing and writing node agent script...'
+echo '{b64_agent}' | base64 -d | gunzip > /usr/local/bin/node_agent.py
 
 chmod +x /usr/local/bin/node_agent.py
 log 'Node agent script written'
