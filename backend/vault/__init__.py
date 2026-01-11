@@ -14,6 +14,11 @@ Usage:
     
     # With file fallback
     cert = get_secret("CERTIFICATE_PEM", filename="certificate.pem")
+    
+    # Rotate a secret
+    from shared_libs.backend.vault import SecretsRotator
+    rotator = SecretsRotator()
+    result = await rotator.rotate_secret("DB_PASSWORD", containers=["api"])
 
 Configuration (env vars for Infisical):
     INFISICAL_TOKEN - Service token from Infisical
@@ -25,8 +30,22 @@ from .service import (
     get_secret,
     vault_status,
 )
+from .rotator import (
+    SecretsRotator,
+    RotationResult,
+    generate_password,
+    generate_api_key,
+    InfisicalClient,
+)
 
 __all__ = [
+    # Read secrets
     "get_secret",
     "vault_status",
+    # Rotate secrets
+    "SecretsRotator",
+    "RotationResult",
+    "generate_password",
+    "generate_api_key",
+    "InfisicalClient",
 ]

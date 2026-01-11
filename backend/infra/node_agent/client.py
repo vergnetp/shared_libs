@@ -111,6 +111,72 @@ class NodeAgentClient:
         """Get comprehensive health status."""
         return await self._request("GET", "/health")
     
+    async def get_metrics(self) -> AgentResponse:
+        """Get container and system metrics (CPU, memory, disk)."""
+        return await self._request("GET", "/metrics")
+    
+    async def check_containers_health(self) -> AgentResponse:
+        """Health check all running containers on the server."""
+        return await self._request("GET", "/health/containers")
+    
+    async def check_container_health(self, name: str) -> AgentResponse:
+        """Health check a specific container."""
+        return await self._request("GET", f"/containers/{name}/health")
+    
+    async def restart_container(self, name: str) -> AgentResponse:
+        """Restart a container."""
+        return await self._request("POST", f"/containers/{name}/restart")
+    
+    # =========================================================================
+    # Cron/Scheduler Management
+    # =========================================================================
+    
+    async def list_cron_jobs(self) -> AgentResponse:
+        """List all managed cron jobs on the server."""
+        return await self._request("GET", "/cron/jobs")
+    
+    async def remove_cron_job(self, job_id: str) -> AgentResponse:
+        """Remove a cron job by ID."""
+        return await self._request("POST", "/cron/remove", {"id": job_id})
+    
+    async def schedule_docker_run(
+        self,
+        job_id: str,
+        schedule: str,
+        image: str,
+        container_name: str = "",
+        env_vars: Dict[str, str] = None,
+        volumes: List[str] = None,
+        network: str = "",
+        command: str = "",
+        description: str = "",
+    ) -> AgentResponse:
+        """
+        Schedule a Docker container to run on a cron schedule.
+        
+        Args:
+            job_id: Unique identifier for the job
+            schedule: Cron schedule (e.g., "0 2 * * *")
+            image: Docker image to run
+            container_name: Base container name (timestamp will be appended)
+            env_vars: Environment variables
+            volumes: Volume mounts (e.g., ["/host/path:/container/path"])
+            network: Docker network to use
+            command: Command to run in container
+            description: Optional description
+        """
+        return await self._request("POST", "/cron/run-docker", {
+            "id": job_id,
+            "schedule": schedule,
+            "image": image,
+            "container_name": container_name,
+            "env": env_vars or {},
+            "volumes": volumes or [],
+            "network": network,
+            "command": command,
+            "description": description,
+        })
+    
     # =========================================================================
     # Containers
     # =========================================================================

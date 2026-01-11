@@ -18,7 +18,7 @@ Multi-tenancy:
 """
 
 # Module-level version constant (importable)
-AGENT_VERSION = "1.8.8"
+AGENT_VERSION = "1.9.3"
 
 # The node agent Flask app code - embedded as a string for cloud-init
 NODE_AGENT_CODE = '''#!/usr/bin/env python3
@@ -27,7 +27,7 @@ Node Agent - SSH-Free Deployments for SaaS
 Runs on port 9999, protected by API key.
 """
 
-AGENT_VERSION = "1.8.8"  # Added detailed build logging
+AGENT_VERSION = "1.9.3"  # Metrics, health checks, restart
 
 from flask import Flask, request, jsonify
 from functools import wraps
@@ -197,6 +197,12 @@ def run_container():
     try:
         data = request.get_json()
         
+        # Security: Validate volume mounts
+        volumes = data.get('volumes') or []
+        valid, error = validate_volume_mounts(volumes)
+        if not valid:
+            return jsonify({'status': 'error', 'error': error}), 403
+        
         cmd = ['docker', 'run', '-d']
         
         if data.get('name'):
@@ -277,6 +283,403 @@ def remove_container(name):
             return jsonify({'status': 'removed'})
         else:
             return jsonify({'status': 'error', 'error': result.stderr}), 500
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+
+@app.route('/metrics', methods=['GET'])
+@require_api_key
+def get_metrics():
+    """Get container and system metrics"""
+    try:
+        # Get docker stats for all running containers
+        result = run_cmd(['docker', 'stats', '--no-stream', '--format', 
+            '{"name":"{{.Name}}","cpu":"{{.CPUPerc}}","memory":"{{.MemUsage}}","mem_perc":"{{.MemPerc}}","net":"{{.NetIO}}","block":"{{.BlockIO}}"}'])
+        
+        containers = []
+        if result.returncode == 0 and result.stdout.strip():
+            for line in result.stdout.strip().split('\n'):
+                try:
+                    containers.append(json.loads(line))
+                except:
+                    pass
+        
+        # Get system metrics
+        import shutil
+        disk = shutil.disk_usage('/')
+        
+        # Get memory info
+        mem_info = {}
+        try:
+            with open('/proc/meminfo', 'r') as f:
+                for line in f:
+                    parts = line.split(':')
+                    if len(parts) == 2:
+                        key = parts[0].strip()
+                        val = parts[1].strip().split()[0]
+                        if key in ('MemTotal', 'MemAvailable', 'MemFree'):
+                            mem_info[key] = int(val) * 1024
+        except:
+            pass
+        
+        # Get CPU load
+        load_avg = (0, 0, 0)
+        try:
+            load_avg = os.getloadavg()
+        except:
+            pass
+        
+        return jsonify({
+            'containers': containers,
+            'system': {
+                'disk_total': disk.total,
+                'disk_used': disk.used,
+                'disk_free': disk.free,
+                'disk_percent': round(disk.used / disk.total * 100, 1),
+                'mem_total': mem_info.get('MemTotal', 0),
+                'mem_available': mem_info.get('MemAvailable', 0),
+                'mem_used': mem_info.get('MemTotal', 0) - mem_info.get('MemAvailable', 0),
+                'mem_percent': round((1 - mem_info.get('MemAvailable', 0) / max(mem_info.get('MemTotal', 1), 1)) * 100, 1) if mem_info.get('MemTotal') else 0,
+                'load_1m': round(load_avg[0], 2),
+                'load_5m': round(load_avg[1], 2),
+                'load_15m': round(load_avg[2], 2),
+            }
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+
+
+@app.route('/health/containers', methods=['GET'])
+@require_api_key
+def health_check_containers():
+    """Health check all running containers"""
+    try:
+        result = run_cmd(['docker', 'ps', '--format', 
+            '{"name":"{{.Names}}","status":"{{.Status}}","state":"{{.State}}","image":"{{.Image}}","ports":"{{.Ports}}"}'])
+        
+        containers = []
+        if result.returncode == 0 and result.stdout.strip():
+            for line in result.stdout.strip().split('\n'):
+                try:
+                    c = json.loads(line)
+                    status = c.get('status', '')
+                    health = 'unknown'
+                    if '(healthy)' in status:
+                        health = 'healthy'
+                    elif '(unhealthy)' in status:
+                        health = 'unhealthy'
+                    elif '(starting)' in status:
+                        health = 'starting'
+                    elif c.get('state', '').lower() == 'running':
+                        health = 'running'
+                    
+                    uptime = ''
+                    if 'Up ' in status:
+                        uptime = status.split('Up ')[1].split(' (')[0] if ' (' in status else status.split('Up ')[1]
+                    
+                    containers.append({
+                        'name': c.get('name', ''),
+                        'image': c.get('image', ''),
+                        'state': c.get('state', ''),
+                        'health': health,
+                        'uptime': uptime,
+                        'ports': c.get('ports', ''),
+                    })
+                except:
+                    pass
+        
+        total = len(containers)
+        healthy = sum(1 for c in containers if c['health'] in ('healthy', 'running'))
+        unhealthy = sum(1 for c in containers if c['health'] == 'unhealthy')
+        
+        return jsonify({
+            'containers': containers,
+            'summary': {
+                'total': total,
+                'healthy': healthy,
+                'unhealthy': unhealthy,
+                'status': 'healthy' if unhealthy == 0 and total > 0 else 'unhealthy' if unhealthy > 0 else 'empty'
+            }
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/containers/<n>/health', methods=['GET'])
+@require_api_key
+def container_health(name):
+    """Health check a specific container"""
+    try:
+        result = run_cmd(['docker', 'inspect', '--format', 
+            '{{.State.Running}} {{.State.Health.Status}} {{.State.StartedAt}}', name])
+        
+        if result.returncode != 0:
+            return jsonify({'error': f'Container not found: {name}'}), 404
+        
+        parts = result.stdout.strip().split()
+        running = parts[0].lower() == 'true' if parts else False
+        health_status = parts[1] if len(parts) > 1 else 'none'
+        started_at = parts[2] if len(parts) > 2 else ''
+        
+        return jsonify({
+            'name': name,
+            'running': running,
+            'health': health_status if health_status != 'none' else ('running' if running else 'stopped'),
+            'started_at': started_at,
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+
+@app.route('/containers/<n>/restart', methods=['POST'])
+@require_api_key
+def restart_container(name):
+    """Restart a container"""
+    try:
+        result = run_cmd(['docker', 'restart', name])
+        if result.returncode == 0:
+            return jsonify({'status': 'restarted', 'name': name})
+        else:
+            return jsonify({'error': result.stderr.strip() or f'Failed to restart: {name}'}), 500
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# =============================================================================
+# Cron/Scheduler Management
+# =============================================================================
+
+CRON_MARKER = "# DEPLOY_API_MANAGED"
+
+# Security: Block dangerous volume mounts that could escape container sandbox
+BLOCKED_VOLUME_PREFIXES = [
+    '/',           # Root filesystem
+    '/etc',        # System config
+    '/var/run',    # Docker socket, runtime
+    '/root',       # Root home
+    '/home',       # User homes
+    '/boot',       # Boot partition
+    '/proc',       # Process info
+    '/sys',        # System info
+    '/dev',        # Devices
+    '/lib',        # System libraries
+    '/usr',        # System binaries
+    '/bin',        # Binaries
+    '/sbin',       # System binaries
+]
+
+def validate_volume_mounts(volumes):
+    """
+    Validate volume mounts for security.
+    Returns (valid, error_message).
+    """
+    if not volumes:
+        return True, None
+    
+    for vol in volumes:
+        # Parse host:container or host:container:mode
+        parts = vol.split(':')
+        if len(parts) < 2:
+            continue
+        host_path = parts[0]
+        
+        # Normalize path
+        host_path = host_path.rstrip('/')
+        if not host_path:
+            host_path = '/'
+        
+        # Check against blocked prefixes
+        for blocked in BLOCKED_VOLUME_PREFIXES:
+            if host_path == blocked or host_path.startswith(blocked + '/'):
+                return False, f'Volume mount not allowed for security: {host_path}'
+        
+        # Block docker socket specifically
+        if 'docker.sock' in host_path:
+            return False, 'Docker socket mount not allowed'
+    
+    return True, None
+
+@app.route('/cron/jobs', methods=['GET'])
+@require_api_key
+def list_cron_jobs():
+    """List all managed cron jobs"""
+    try:
+        result = run_cmd(['crontab', '-l'])
+        if result.returncode != 0:
+            return jsonify({'jobs': [], 'raw': ''})
+        
+        jobs = []
+        lines = result.stdout.strip().split('\n')
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            # Look for our marker comments
+            if line.startswith(CRON_MARKER):
+                # Parse marker: # DEPLOY_API_MANAGED:job_id:description
+                parts = line.split(':', 2)
+                job_id = parts[1] if len(parts) > 1 else 'unknown'
+                description = parts[2] if len(parts) > 2 else ''
+                # Next line is the actual cron entry
+                if i + 1 < len(lines):
+                    cron_line = lines[i + 1].strip()
+                    if cron_line and not cron_line.startswith('#'):
+                        # Parse cron: minute hour day month weekday command
+                        cron_parts = cron_line.split(None, 5)
+                        if len(cron_parts) >= 6:
+                            jobs.append({
+                                'id': job_id,
+                                'description': description,
+                                'schedule': ' '.join(cron_parts[:5]),
+                                'command': cron_parts[5],
+                                'raw': cron_line,
+                            })
+                    i += 1
+            i += 1
+        
+        return jsonify({'jobs': jobs, 'count': len(jobs)})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/cron/remove', methods=['POST'])
+@require_api_key
+def remove_cron_job():
+    """Remove a cron job by ID"""
+    try:
+        data = request.get_json() or {}
+        job_id = data.get('id')
+        
+        if not job_id:
+            return jsonify({'error': 'Missing required field: id'}), 400
+        
+        # Get current crontab
+        result = run_cmd(['crontab', '-l'])
+        if result.returncode != 0:
+            return jsonify({'status': 'not_found', 'id': job_id})
+        
+        # Remove job with matching ID
+        marker = f"{CRON_MARKER}:{job_id}:"
+        new_lines = []
+        lines = result.stdout.strip().split('\n')
+        found = False
+        i = 0
+        while i < len(lines):
+            if marker in lines[i]:
+                found = True
+                i += 2  # Skip marker and cron line
+                continue
+            if lines[i].strip():
+                new_lines.append(lines[i])
+            i += 1
+        
+        if not found:
+            return jsonify({'status': 'not_found', 'id': job_id})
+        
+        # Install updated crontab
+        if new_lines:
+            new_cron = '\n'.join(new_lines) + '\n'
+            proc = subprocess.run(['crontab', '-'], input=new_cron, text=True, capture_output=True)
+        else:
+            # Remove crontab entirely if empty
+            proc = subprocess.run(['crontab', '-r'], capture_output=True)
+        
+        if proc.returncode != 0 and 'no crontab' not in proc.stderr.lower():
+            return jsonify({'error': f'Failed to update cron: {proc.stderr}'}), 500
+        
+        return jsonify({'status': 'removed', 'id': job_id})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/cron/run-docker', methods=['POST'])
+@require_api_key
+def schedule_docker_run():
+    """Schedule a Docker container to run on a schedule"""
+    try:
+        data = request.get_json() or {}
+        job_id = data.get('id')
+        schedule = data.get('schedule')  # e.g., "0 2 * * *"
+        image = data.get('image')
+        container_name = data.get('container_name', '')
+        env_vars = data.get('env', {})
+        volumes = data.get('volumes', [])
+        network = data.get('network', '')
+        command = data.get('command', '')
+        description = data.get('description', '')
+        
+        if not job_id or not schedule or not image:
+            return jsonify({'error': 'Missing required fields: id, schedule, image'}), 400
+        
+        # Security: Validate volume mounts
+        valid, error = validate_volume_mounts(volumes)
+        if not valid:
+            return jsonify({'error': error}), 403
+        
+        # Build docker run command
+        docker_cmd = ['docker', 'run', '--rm']
+        
+        if container_name:
+            # Use timestamp to avoid conflicts
+            docker_cmd.extend(['--name', f'{container_name}_$(date +%Y%m%d_%H%M%S)'])
+        
+        for key, val in env_vars.items():
+            docker_cmd.extend(['-e', f'{key}={val}'])
+        
+        for vol in volumes:
+            docker_cmd.extend(['-v', vol])
+        
+        if network:
+            docker_cmd.extend(['--network', network])
+        
+        docker_cmd.append(image)
+        
+        if command:
+            docker_cmd.extend(command.split())
+        
+        # Build full command with logging
+        full_cmd = ' '.join(docker_cmd) + f' >> /var/log/cron_{job_id}.log 2>&1'
+        
+        # Use the add endpoint logic
+        request_data = {
+            'id': job_id,
+            'schedule': schedule,
+            'command': full_cmd,
+            'description': description or f'Docker: {image}',
+        }
+        
+        # Get current crontab
+        result = run_cmd(['crontab', '-l'])
+        current_cron = result.stdout if result.returncode == 0 else ''
+        
+        # Remove existing job with same ID
+        marker = f"{CRON_MARKER}:{job_id}:"
+        new_lines = []
+        lines = current_cron.strip().split('\n') if current_cron.strip() else []
+        i = 0
+        while i < len(lines):
+            if marker in lines[i]:
+                i += 2
+                continue
+            if lines[i].strip():
+                new_lines.append(lines[i])
+            i += 1
+        
+        # Add new job
+        new_lines.append(f"{CRON_MARKER}:{job_id}:{request_data['description']}")
+        new_lines.append(f"{schedule} {full_cmd}")
+        
+        # Install new crontab
+        new_cron = '\n'.join(new_lines) + '\n'
+        proc = subprocess.run(['crontab', '-'], input=new_cron, text=True, capture_output=True)
+        
+        if proc.returncode != 0:
+            return jsonify({'error': f'Failed to install cron: {proc.stderr}'}), 500
+        
+        return jsonify({'status': 'scheduled', 'id': job_id, 'schedule': schedule, 'command': full_cmd})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
