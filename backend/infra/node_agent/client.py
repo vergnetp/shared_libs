@@ -195,6 +195,60 @@ class NodeAgentClient:
         """Get container logs."""
         return await self._request("GET", f"/containers/{name}/logs?lines={lines}")
     
+    async def get_service_logs(
+        self,
+        workspace_id: str,
+        project: str,
+        environment: str,
+        service: str,
+        lines: int = 200,
+    ) -> AgentResponse:
+        """
+        Get logs for a service by identifiers.
+        
+        Resolves container name (including _secondary) and fetches logs.
+        Tries primary first, falls back to secondary if not found.
+        
+        Args:
+            workspace_id: Workspace/user ID
+            project: Project name
+            environment: Environment (prod, staging, dev)
+            service: Service name
+            lines: Number of log lines
+            
+        Returns:
+            AgentResponse with logs and resolved container_name in data
+        """
+        from ..utils.naming import DeploymentNaming
+        
+        base_name = DeploymentNaming.get_container_name(
+            workspace_id=workspace_id,
+            project=project,
+            env=environment,
+            service_name=service,
+            secondary=False
+        )
+        secondary_name = f"{base_name}_secondary"
+        
+        # Try primary first
+        result = await self.container_logs(base_name, lines)
+        if result.success:
+            result.data['container_name'] = base_name
+            return result
+        
+        # Try secondary
+        result = await self.container_logs(secondary_name, lines)
+        if result.success:
+            result.data['container_name'] = secondary_name
+            return result
+        
+        # Neither found
+        return AgentResponse(
+            success=False,
+            error=f"Container not found. Tried: {base_name}, {secondary_name}",
+            data={'container_name': base_name}
+        )
+    
     async def exec_in_container(
         self, 
         name: str, 
