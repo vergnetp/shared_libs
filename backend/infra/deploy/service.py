@@ -181,17 +181,22 @@ class DeploymentService:
         import io
         import zipfile
         import tarfile
+        import time
         
         # Detect zip by magic bytes (PK = 0x50 0x4B)
         if data[:2] == b'PK':
             zip_buffer = io.BytesIO(data)
             tar_buffer = io.BytesIO()
             
+            # Use current time for all files so Docker detects changes
+            current_time = time.time()
+            
             with zipfile.ZipFile(zip_buffer, 'r') as zf:
                 with tarfile.open(fileobj=tar_buffer, mode='w:gz') as tf:
                     for zip_info in zf.infolist():
                         name = zip_info.filename
                         tar_info = tarfile.TarInfo(name=name)
+                        tar_info.mtime = current_time  # Critical for Docker cache busting!
                         
                         if zip_info.is_dir():
                             tar_info.type = tarfile.DIRTYPE

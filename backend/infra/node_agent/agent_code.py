@@ -27,7 +27,7 @@ Node Agent - SSH-Free Deployments for SaaS
 Runs on port 9999, protected by API key.
 """
 
-AGENT_VERSION = "1.8.6"  # Removed --no-cache, rely on Dockerfile structure for caching
+AGENT_VERSION = "1.8.7"  # Added detailed build logging
 
 from flask import Flask, request, jsonify
 from functools import wraps
@@ -584,13 +584,35 @@ def build_image():
         if not dockerfile:
             return jsonify({'error': 'dockerfile content is required'}), 400
         
+        # DEBUG: Log file timestamps and content before build
+        print(f"[DEBUG] BUILD: context_path={context_path}, image_tag={image_tag}")
+        context = Path(context_path)
+        for html_file in context.rglob('*index*.html'):
+            try:
+                stat = html_file.stat()
+                content = html_file.read_text(errors='ignore')
+                import re
+                title_match = re.search(r'<title>([^<]+)</title>', content, re.IGNORECASE)
+                title = title_match.group(1) if title_match else "NO TITLE"
+                print(f"[DEBUG] BUILD FILE: {html_file} mtime={stat.st_mtime} title={title}")
+            except Exception as e:
+                print(f"[DEBUG] BUILD FILE ERROR: {html_file}: {e}")
+        
         # Write Dockerfile
         dockerfile_path = Path(context_path) / 'Dockerfile'
         dockerfile_path.write_text(dockerfile)
+        print(f"[DEBUG] DOCKERFILE written to {dockerfile_path}")
+        print("[DEBUG] DOCKERFILE content:")
+        print(dockerfile[:500] + "...")
         
         # Build image (cache-friendly - Dockerfile structure handles cache busting)
         cmd = ['docker', 'build', '-t', image_tag, context_path]
+        print(f"[DEBUG] BUILD CMD: {' '.join(cmd)}")
         result = run_cmd(cmd, timeout=600)  # 10 min timeout for builds
+        
+        # Log build output for debugging cache behavior
+        print(f"[DEBUG] BUILD STDOUT (last 2000 chars): {result.stdout[-2000:] if result.stdout else 'empty'}")
+        print(f"[DEBUG] BUILD STDERR (last 1000 chars): {result.stderr[-1000:] if result.stderr else 'empty'}")
         
         if result.returncode == 0:
             return jsonify({
@@ -607,6 +629,8 @@ def build_image():
                 'dockerfile': dockerfile
             }), 500
     except Exception as e:
+        import traceback
+        print(f"[DEBUG] BUILD EXCEPTION: {traceback.format_exc()}")
         return jsonify({'error': str(e)}), 500
 
 

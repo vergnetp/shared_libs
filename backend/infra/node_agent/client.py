@@ -769,11 +769,12 @@ class NodeAgentClient:
             default_conf = self._get_default_nginx_conf()
             await self.write_file(nginx_conf_path, default_conf)
         
-        # Start nginx container (replace_existing=True to handle edge cases)
+        # Start nginx container with host network for localhost access
+        # Note: With host network, ports param is ignored (container uses host ports directly)
         result = await self.run_container(
             name="nginx",
             image="nginx:alpine",
-            ports={"80": "80", "443": "443"},
+            network="host",  # Use host network so nginx can reach localhost:PORT
             volumes=[
                 f"{nginx_conf_path}:/etc/nginx/nginx.conf:ro",
                 f"{conf_d_path}:/etc/nginx/conf.d:ro",

@@ -152,18 +152,19 @@ class NginxService:
         config_name = f"{project}_{environment}_{service}"
         
         # Build backends block
+        # Note: nginx runs with --network host, so use 127.0.0.1 to reach containers
         if mode == "multi_server" and backends:
             backend_lines = []
             for b in backends:
+                # Use 127.0.0.1 since nginx runs with host network
+                # Each server's nginx only routes to its own local containers
                 backend_lines.append(
-                    f"    server {b['ip']}:{b['port']} max_fails=3 fail_timeout=30s;"
+                    f"    server 127.0.0.1:{b['port']} max_fails=3 fail_timeout=30s;"
                 )
             backends_block = "\n".join(backend_lines)
         else:
-            # Single server mode: use host.docker.internal to reach containers on same host
-            # This works because nginx runs in a container and needs to reach sibling containers
-            # via the host's exposed ports (not Docker internal networking)
-            backends_block = f"    server host.docker.internal:{container_port} max_fails=3 fail_timeout=30s;"
+            # Single server mode: use localhost to reach containers on same host
+            backends_block = f"    server 127.0.0.1:{container_port} max_fails=3 fail_timeout=30s;"
         
         if use_stream:
             config = self._generate_stream_sidecar(config_name, internal_port, backends_block, mode)
@@ -229,8 +230,9 @@ class NginxService:
         
         backend_lines = []
         for b in backends:
+            # Use 127.0.0.1 since nginx runs with host network
             backend_lines.append(
-                f"    server {b['ip']}:{b['port']} max_fails=3 fail_timeout=30s;"
+                f"    server 127.0.0.1:{b['port']} max_fails=3 fail_timeout=30s;"
             )
         backends_block = "\n".join(backend_lines)
         
