@@ -104,6 +104,7 @@ class ServerResult:
     success: bool
     error: Optional[str] = None
     url: Optional[str] = None
+    container_name: Optional[str] = None  # Actual container name (may have _secondary suffix)
     # Sidecar info
     internal_port: Optional[int] = None  # Port on nginx for service discovery
     sidecar_configured: bool = False
@@ -1039,6 +1040,7 @@ class DeploymentService:
                     name=name, 
                     success=True, 
                     url=url,
+                    container_name=new_container_name,  # Actual deployed container (may have _secondary)
                     internal_port=internal_port,
                     sidecar_configured=sidecar_configured,
                 )
