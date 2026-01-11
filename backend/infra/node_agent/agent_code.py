@@ -18,7 +18,7 @@ Multi-tenancy:
 """
 
 # Module-level version constant (importable)
-AGENT_VERSION = "1.8.7"
+AGENT_VERSION = "1.8.8"
 
 # The node agent Flask app code - embedded as a string for cloud-init
 NODE_AGENT_CODE = '''#!/usr/bin/env python3
@@ -27,7 +27,7 @@ Node Agent - SSH-Free Deployments for SaaS
 Runs on port 9999, protected by API key.
 """
 
-AGENT_VERSION = "1.8.7"  # Added detailed build logging
+AGENT_VERSION = "1.8.8"  # Added detailed build logging
 
 from flask import Flask, request, jsonify
 from functools import wraps
@@ -288,6 +288,8 @@ def get_logs(name):
     try:
         lines = request.args.get('lines', '100')
         result = run_cmd(['docker', 'logs', '--tail', lines, name])
+        if result.returncode != 0:
+            return jsonify({'error': result.stderr.strip() or f'No such container: {name}'}), 404
         return jsonify({'logs': result.stdout + result.stderr})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
