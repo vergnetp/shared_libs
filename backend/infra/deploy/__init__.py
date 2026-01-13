@@ -40,6 +40,13 @@ from .env_builder import (
     is_stateful_service,
 )
 
+from .history import (
+    DeploymentHistory,
+    DeploymentRecord,
+    DeploymentStatus,
+    get_deployment_history,
+)
+
 
 __all__ = [
     # Generator
@@ -68,4 +75,9 @@ __all__ = [
     "build_deploy_volumes",
     "build_stateful_service_env",
     "is_stateful_service",
+    # History & Rollback
+    "DeploymentHistory",
+    "DeploymentRecord",
+    "DeploymentStatus",
+    "get_deployment_history",
 ]

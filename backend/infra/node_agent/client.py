@@ -351,6 +351,52 @@ class NodeAgentClient:
             timeout=600  # 10 min for large images
         )
     
+    async def tag_image(self, source: str, target: str) -> AgentResponse:
+        """
+        Tag an image for deployment history/rollback.
+        
+        Args:
+            source: Source image (e.g., "myapp:latest" or image ID)
+            target: Target tag (e.g., "myapp:deploy_abc123")
+        """
+        return await self._request(
+            "POST", "/images/tag",
+            {"source": source, "target": target},
+            timeout=30
+        )
+    
+    async def list_images(self, prefix: str = "") -> AgentResponse:
+        """
+        List Docker images, optionally filtered by prefix.
+        
+        Args:
+            prefix: Filter images by repository prefix
+        """
+        params = f"?prefix={prefix}" if prefix else ""
+        return await self._request("GET", f"/images/list{params}", timeout=30)
+    
+    async def cleanup_images(
+        self, 
+        prefix: str, 
+        keep: int = 20,
+        tag_pattern: str = "deploy_"
+    ) -> AgentResponse:
+        """
+        Cleanup old deployment images, keeping the last N.
+        
+        Args:
+            prefix: Image name prefix (e.g., "abc123_prod_api")
+            keep: Number of recent images to keep (default: 20)
+            tag_pattern: Tag pattern to match (default: "deploy_")
+            
+        Returns result with deleted images and any errors.
+        """
+        return await self._request(
+            "POST", "/images/cleanup",
+            {"prefix": prefix, "keep": keep, "tag_pattern": tag_pattern},
+            timeout=60
+        )
+    
     async def load_image(self, image_tar: bytes) -> AgentResponse:
         """Load a Docker image from tar file (docker save output).
         
@@ -848,19 +894,8 @@ class NodeAgentClient:
     ) -> AgentResponse:
         """
         Ensure nginx container is running with proper config mounts.
-        
         Creates config directories and starts nginx if not running.
         Also opens firewall ports 80 and 443.
-        
-        Args:
-            nginx_conf_path: Host path to nginx.conf
-            conf_d_path: Host path to HTTP configs
-            stream_d_path: Host path to stream (TCP) configs
-            certs_path: Host path to SSL certs
-            logs_path: Host path to nginx logs
-            
-        Returns:
-            AgentResponse
         """
         # Create directories
         for path in [conf_d_path, stream_d_path, certs_path, logs_path]:
@@ -870,31 +905,25 @@ class NodeAgentClient:
         await self.firewall_allow(80, "tcp")
         await self.firewall_allow(443, "tcp")
         
+        # Always write nginx.conf to ensure latest settings
+        default_conf = self._get_default_nginx_conf()
+        await self.write_file(nginx_conf_path, default_conf)
+        
         # Check if nginx is running
         status = await self.container_status("nginx")
         if status.success:
             container_state = status.data.get("status", "").lower()
             if container_state == "running":
+                await self.reload_nginx()
                 return AgentResponse(success=True, data={"status": "already_running"})
             elif container_state in ("exited", "stopped", "dead", "created"):
-                # Container exists but not running - try to start it
-                start_result = await self.start_container("nginx")
-                if start_result.success:
-                    return AgentResponse(success=True, data={"status": "restarted"})
-                # If start failed, remove and recreate
                 await self.remove_container("nginx")
         
-        # Write default nginx.conf if not exists
-        if not await self.file_exists(nginx_conf_path):
-            default_conf = self._get_default_nginx_conf()
-            await self.write_file(nginx_conf_path, default_conf)
-        
-        # Start nginx container with host network for localhost access
-        # Note: With host network, ports param is ignored (container uses host ports directly)
+        # Start nginx container with host network
         result = await self.run_container(
             name="nginx",
             image="nginx:alpine",
-            network="host",  # Use host network so nginx can reach localhost:PORT
+            network="host",
             volumes=[
                 f"{nginx_conf_path}:/etc/nginx/nginx.conf:ro",
                 f"{conf_d_path}:/etc/nginx/conf.d:ro",
@@ -903,7 +932,7 @@ class NodeAgentClient:
                 f"{logs_path}:/var/log/nginx",
             ],
             restart_policy="unless-stopped",
-            replace_existing=True,  # Replace if exists in bad state
+            replace_existing=True,
         )
         
         return result
@@ -1022,6 +1051,10 @@ events {
 http {
     include /etc/nginx/mime.types;
     default_type application/octet-stream;
+
+    # Hash bucket sizes for long server names (e.g., 6c007a-ai-prod-ai-agents.digitalpixo.com)
+    server_names_hash_bucket_size 128;
+    server_names_hash_max_size 1024;
 
     log_format main '$remote_addr - $remote_user [$time_local] "$request" '
                     '$status $body_bytes_sent "$http_referer" '

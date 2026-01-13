@@ -18,7 +18,7 @@ Multi-tenancy:
 """
 
 # Module-level version constant (importable)
-AGENT_VERSION = "1.9.3"
+AGENT_VERSION = "1.9.5"
 
 # The node agent Flask app code - embedded as a string for cloud-init
 NODE_AGENT_CODE = '''#!/usr/bin/env python3
@@ -27,7 +27,7 @@ Node Agent - SSH-Free Deployments for SaaS
 Runs on port 9999, protected by API key.
 """
 
-AGENT_VERSION = "1.9.3"  # Metrics, health checks, restart
+AGENT_VERSION = "1.9.5"  # Image tagging, cleanup for rollback
 
 from flask import Flask, request, jsonify
 from functools import wraps
@@ -299,7 +299,7 @@ def get_metrics():
         
         containers = []
         if result.returncode == 0 and result.stdout.strip():
-            for line in result.stdout.strip().split('\n'):
+            for line in result.stdout.strip().split('\\n'):
                 try:
                     containers.append(json.loads(line))
                 except:
@@ -362,7 +362,7 @@ def health_check_containers():
         
         containers = []
         if result.returncode == 0 and result.stdout.strip():
-            for line in result.stdout.strip().split('\n'):
+            for line in result.stdout.strip().split('\\n'):
                 try:
                     c = json.loads(line)
                     status = c.get('status', '')
@@ -513,7 +513,7 @@ def list_cron_jobs():
             return jsonify({'jobs': [], 'raw': ''})
         
         jobs = []
-        lines = result.stdout.strip().split('\n')
+        lines = result.stdout.strip().split('\\n')
         i = 0
         while i < len(lines):
             line = lines[i].strip()
@@ -564,7 +564,7 @@ def remove_cron_job():
         # Remove job with matching ID
         marker = f"{CRON_MARKER}:{job_id}:"
         new_lines = []
-        lines = result.stdout.strip().split('\n')
+        lines = result.stdout.strip().split('\\n')
         found = False
         i = 0
         while i < len(lines):
@@ -581,7 +581,7 @@ def remove_cron_job():
         
         # Install updated crontab
         if new_lines:
-            new_cron = '\n'.join(new_lines) + '\n'
+            new_cron = '\\n'.join(new_lines) + '\\n'
             proc = subprocess.run(['crontab', '-'], input=new_cron, text=True, capture_output=True)
         else:
             # Remove crontab entirely if empty
@@ -658,7 +658,7 @@ def schedule_docker_run():
         # Remove existing job with same ID
         marker = f"{CRON_MARKER}:{job_id}:"
         new_lines = []
-        lines = current_cron.strip().split('\n') if current_cron.strip() else []
+        lines = current_cron.strip().split('\\n') if current_cron.strip() else []
         i = 0
         while i < len(lines):
             if marker in lines[i]:
@@ -673,7 +673,7 @@ def schedule_docker_run():
         new_lines.append(f"{schedule} {full_cmd}")
         
         # Install new crontab
-        new_cron = '\n'.join(new_lines) + '\n'
+        new_cron = '\\n'.join(new_lines) + '\\n'
         proc = subprocess.run(['crontab', '-'], input=new_cron, text=True, capture_output=True)
         
         if proc.returncode != 0:
@@ -777,9 +777,153 @@ def pull_image():
         result = run_cmd(['docker', 'pull', image], timeout=600)
         
         if result.returncode == 0:
-            return jsonify({'status': 'pulled', 'image': image})
+            # Get the image digest for precise rollback
+            inspect_result = run_cmd(['docker', 'inspect', '--format', '{{.Id}}', image], timeout=30)
+            digest = inspect_result.stdout.strip() if inspect_result.returncode == 0 else None
+            return jsonify({'status': 'pulled', 'image': image, 'digest': digest})
         else:
             return jsonify({'status': 'error', 'error': result.stderr}), 500
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/images/tag', methods=['POST'])
+@require_api_key
+def tag_image():
+    """Tag an image for deployment history/rollback"""
+    try:
+        data = request.get_json()
+        source = data.get('source')  # e.g., "myapp:latest" or image ID
+        target = data.get('target')  # e.g., "myapp:deploy_abc123"
+        
+        if not source or not target:
+            return jsonify({'error': 'source and target required'}), 400
+        
+        result = run_cmd(['docker', 'tag', source, target], timeout=30)
+        
+        if result.returncode == 0:
+            return jsonify({'status': 'tagged', 'source': source, 'target': target})
+        else:
+            return jsonify({'status': 'error', 'error': result.stderr}), 500
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/images/list', methods=['GET'])
+@require_api_key
+def list_images():
+    """List Docker images, optionally filtered by prefix"""
+    try:
+        prefix = request.args.get('prefix', '')
+        
+        # Get all images in JSON format
+        result = run_cmd(['docker', 'images', '--format', '{{json .}}'], timeout=30)
+        
+        if result.returncode != 0:
+            return jsonify({'status': 'error', 'error': result.stderr}), 500
+        
+        images = []
+        for line in result.stdout.strip().split('\\n'):
+            if not line:
+                continue
+            try:
+                img = json.loads(line)
+                repo_tag = f"{img.get('Repository', '')}:{img.get('Tag', '')}"
+                # Filter by prefix if provided
+                if prefix and not repo_tag.startswith(prefix):
+                    continue
+                images.append({
+                    'repository': img.get('Repository'),
+                    'tag': img.get('Tag'),
+                    'id': img.get('ID'),
+                    'created': img.get('CreatedAt'),
+                    'size': img.get('Size'),
+                })
+            except json.JSONDecodeError:
+                continue
+        
+        return jsonify({'status': 'ok', 'images': images, 'count': len(images)})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/images/cleanup', methods=['POST'])
+@require_api_key
+def cleanup_images():
+    """
+    Cleanup old deployment images, keeping the last N.
+    
+    Request body:
+        prefix: Image name prefix (e.g., "abc123_prod_api")
+        keep: Number of recent images to keep (default: 20)
+        tag_pattern: Tag pattern to match (default: "deploy_")
+    
+    This finds all images matching {prefix}:{tag_pattern}* and removes
+    all but the most recent {keep} images.
+    """
+    try:
+        data = request.get_json() or {}
+        prefix = data.get('prefix')  # e.g., "abc123_prod_api"
+        keep = int(data.get('keep', 20))
+        tag_pattern = data.get('tag_pattern', 'deploy_')
+        
+        if not prefix:
+            return jsonify({'error': 'prefix required'}), 400
+        
+        if keep < 1:
+            return jsonify({'error': 'keep must be >= 1'}), 400
+        
+        # Get all images with this prefix
+        result = run_cmd(['docker', 'images', '--format', '{{.Repository}}:{{.Tag}} {{.CreatedAt}}', prefix], timeout=30)
+        
+        if result.returncode != 0:
+            return jsonify({'status': 'error', 'error': result.stderr}), 500
+        
+        # Parse and filter deployment images
+        deployment_images = []
+        for line in result.stdout.strip().split('\\n'):
+            if not line:
+                continue
+            parts = line.split(' ', 1)
+            if len(parts) < 2:
+                continue
+            image_tag, created = parts[0], parts[1]
+            
+            # Check if this is a deployment tag
+            if ':' in image_tag:
+                repo, tag = image_tag.rsplit(':', 1)
+                if tag.startswith(tag_pattern):
+                    deployment_images.append({
+                        'image': image_tag,
+                        'tag': tag,
+                        'created': created,
+                    })
+        
+        # Sort by tag (deployment IDs are sortable by time if using timestamps or sequential)
+        # Actually, sort by created date for safety
+        deployment_images.sort(key=lambda x: x['created'], reverse=True)
+        
+        # Keep the most recent N, delete the rest
+        to_delete = deployment_images[keep:]
+        deleted = []
+        errors = []
+        
+        for img in to_delete:
+            del_result = run_cmd(['docker', 'rmi', img['image']], timeout=30)
+            if del_result.returncode == 0:
+                deleted.append(img['image'])
+            else:
+                # Image might be in use, that's OK
+                errors.append({'image': img['image'], 'error': del_result.stderr})
+        
+        return jsonify({
+            'status': 'ok',
+            'found': len(deployment_images),
+            'kept': min(keep, len(deployment_images)),
+            'deleted': deleted,
+            'deleted_count': len(deleted),
+            'errors': errors,
+        })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

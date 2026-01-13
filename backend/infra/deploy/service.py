@@ -52,6 +52,7 @@ class MultiDeployConfig:
     # Project context (for unique container naming)
     project: Optional[str] = None  # Project name (defaults to service name)
     workspace_id: Optional[str] = None  # User/workspace ID
+    deployment_id: Optional[str] = None  # For image tagging (rollback support)
     
     # Service mesh / sidecar config
     depends_on: List[str] = field(default_factory=list)  # Services this depends on
@@ -79,6 +80,7 @@ class MultiDeployConfig:
     
     # For IMAGE source (registry)
     image: Optional[str] = None
+    skip_pull: bool = False  # For rollback: image is already local, don't pull
     
     # For IMAGE_FILE source (local tar)
     image_tar: Optional[bytes] = None
@@ -283,12 +285,22 @@ class DeploymentService:
             failed = [r for r in results if not r.success]
             successful_ips = [s.ip for s in successful]
             
+            # Collect error messages from failed servers
+            error_msg = None
+            if failed:
+                errors = [f"{f.ip}: {f.error}" for f in failed if f.error]
+                if errors:
+                    error_msg = "; ".join(errors)
+                elif not successful:
+                    error_msg = "All deployments failed"
+            
             # Build result
             result = MultiDeployResult(
                 success=len(successful) > 0,
                 servers=results,
                 successful_count=len(successful),
                 failed_count=len(failed),
+                error=error_msg,
                 # Architecture info
                 service_name=config.name,
                 project=project_name,
@@ -299,6 +311,15 @@ class DeploymentService:
             )
             
             # Step 5: Setup domain (if requested)
+            # All servers are now live and serving traffic
+            if successful:
+                self.log(f"")
+                self.log(f"{'─' * 50}")
+                self.log(f"🟢 ALL SERVERS LIVE - Traffic now serving from new version")
+                self.log(f"{'─' * 50}")
+                self.log(f"📋 Background tasks starting (DNS, SSL, tagging)...")
+                self.log(f"")
+            
             if result.success and config.setup_domain and config.cloudflare_token:
                 # Get actual host port from successful deployment URL
                 # URL format: http://ip:port
@@ -330,9 +351,27 @@ class DeploymentService:
                 if restarted:
                     result.restarted_dependents = restarted
             
+            # Step 7: Tag images for rollback and cleanup old deployment images
+            if result.success and container_name:
+                await self._tag_and_cleanup_images(
+                    config=config,
+                    container_name=container_name,
+                    successful_servers=successful,
+                )
+            
+            # Step 8: Tag droplets with service name for fleet filtering
+            if result.success:
+                await self._tag_droplets_with_service(
+                    config=config,
+                    successful_ips=successful_ips,
+                )
+            
             # Summary
             self.log(f"{'═' * 50}")
-            self.log(f"✅ Deployment Complete: {len(successful)}/{total} successful")
+            if len(successful) > 0:
+                self.log(f"✅ Deployment Complete: {len(successful)}/{total} successful")
+            else:
+                self.log(f"❌ Deployment Failed: 0/{total} successful")
             if successful:
                 self.log(f"📋 Access:")
                 if result.domain:
@@ -613,6 +652,135 @@ class DeploymentService:
             self.log(f"   No dependent containers found")
         
         return restarted
+    
+    # =========================================================================
+    # Image Tagging & Cleanup (for Rollback)
+    # =========================================================================
+    
+    async def _tag_and_cleanup_images(
+        self,
+        config: MultiDeployConfig,
+        container_name: str,
+        successful_servers: List,
+        keep_images: int = 20,
+    ):
+        """
+        Tag deployed images for rollback and cleanup old deployment images.
+        
+        After each successful deployment:
+        1. Tag the image with deployment ID for future rollback
+        2. Cleanup old deployment images, keeping only the last N
+        
+        Args:
+            config: Deployment config (contains deployment_id)
+            container_name: Name of the container (used as image name base)
+            successful_servers: List of ServerResult for successful deployments
+            keep_images: Number of deployment images to keep (default: 20)
+        """
+        import time
+        
+        # Use deployment_id from config, or generate one from timestamp
+        deployment_id = config.deployment_id
+        if not deployment_id:
+            deployment_id = str(int(time.time()))
+        
+        # Clean the deployment ID (remove 'deploy_' prefix if present)
+        clean_id = deployment_id.replace("deploy_", "")
+        deploy_tag = f"deploy_{clean_id}"
+        
+        # Get the image name base (container name without suffixes like _secondary)
+        image_base = container_name.rstrip('_primary').rstrip('_secondary')
+        
+        self.log(f"🏷️  Tagging images for rollback ({deploy_tag})...")
+        
+        for server in successful_servers:
+            ip = server.ip
+            agent = self._agent(ip)
+            
+            try:
+                # Get the current image ID from the running container
+                inspect_result = await agent.inspect_container(container_name)
+                if not inspect_result.success:
+                    self.log(f"   ⚠️ Cannot inspect {container_name} on {ip}")
+                    continue
+                
+                # The image could be the image ID or name
+                current_image = inspect_result.data.get("Image", "")
+                if not current_image:
+                    self.log(f"   ⚠️ No image found for {container_name} on {ip}")
+                    continue
+                
+                # Tag the image
+                target_tag = f"{image_base}:{deploy_tag}"
+                tag_result = await agent.tag_image(source=current_image, target=target_tag)
+                
+                if tag_result.success:
+                    self.log(f"   ✅ Tagged: {target_tag} on {ip}")
+                else:
+                    self.log(f"   ⚠️ Tag failed on {ip}: {tag_result.error}")
+                    continue
+                
+                # Cleanup old deployment images
+                cleanup_result = await agent.cleanup_images(
+                    prefix=image_base,
+                    keep=keep_images,
+                    tag_pattern="deploy_"
+                )
+                
+                if cleanup_result.success:
+                    deleted_count = cleanup_result.data.get("deleted_count", 0)
+                    if deleted_count > 0:
+                        self.log(f"   🧹 Cleaned up {deleted_count} old image(s) on {ip}")
+                else:
+                    # Non-fatal - just log
+                    self.log(f"   ⚠️ Cleanup warning on {ip}: {cleanup_result.error}")
+                    
+            except Exception as e:
+                self.log(f"   ⚠️ Error on {ip}: {e}")
+    
+    async def _tag_droplets_with_service(
+        self,
+        config: MultiDeployConfig,
+        successful_ips: List[str],
+    ):
+        """
+        Tag droplets with service name for fleet filtering.
+        
+        Tags format: service:{service_name}
+        This enables:
+        - Filtering droplets by service (e.g., list all deploy-api servers)
+        - Leader election for scheduled jobs
+        """
+        if not successful_ips:
+            return
+            
+        service_tag = f"service:{config.name}"
+        
+        try:
+            # Get all droplets and build IP -> ID map
+            all_droplets = self.do_client.list_droplets()
+            ip_to_droplet = {d.ip: d for d in all_droplets}
+            
+            tagged_count = 0
+            for ip in successful_ips:
+                droplet = ip_to_droplet.get(ip)
+                if not droplet:
+                    continue
+                    
+                # Skip if already tagged
+                if service_tag in (droplet.tags or []):
+                    continue
+                
+                result = self.do_client.tag_droplet(droplet.id, service_tag)
+                if result.success:
+                    tagged_count += 1
+            
+            if tagged_count > 0:
+                self.log(f"🏷️  Tagged {tagged_count} droplet(s) with {service_tag}")
+                
+        except Exception as e:
+            # Non-fatal - just log
+            self.log(f"⚠️ Failed to tag droplets with service: {e}")
     
     # =========================================================================
     # Server Collection
@@ -896,7 +1064,7 @@ class DeploymentService:
                 
                 # Step 2: Build (for code/git) or Pull (for IMAGE)
                 if config.source_type in (DeploySource.CODE, DeploySource.GIT):
-                    self.log(f"   [{name}] Building image...")
+                    self.log(f"   [{name}] Building image... (this may take 1-2 minutes)")
                     result = await agent.build_image(
                         context_path="/app/",
                         image_tag=f"{config.name}:latest",
@@ -907,10 +1075,22 @@ class DeploymentService:
                     
                     image = f"{config.name}:latest"
                 elif config.source_type == DeploySource.IMAGE:
-                    self.log(f"   [{name}] Pulling image...")
-                    result = await agent.pull_image(config.image)
-                    if not result.success and "up to date" not in str(result.error):
-                        raise Exception(f"Pull failed: {result.error}")
+                    if config.skip_pull:
+                        # Local image (e.g., rollback) - verify it exists
+                        self.log(f"   [{name}] Using local image {config.image}")
+                        result = await agent.list_images(prefix=config.image.split(":")[0])
+                        if not result.success:
+                            raise Exception(f"Cannot list images: {result.error}")
+                        # Check if our specific tag exists
+                        tag = config.image.split(":")[-1] if ":" in config.image else "latest"
+                        found = any(img.get("tag") == tag for img in result.data.get("images", []))
+                        if not found:
+                            raise Exception(f"Local image not found: {config.image}")
+                    else:
+                        self.log(f"   [{name}] Pulling image...")
+                        result = await agent.pull_image(config.image)
+                        if not result.success and "up to date" not in str(result.error):
+                            raise Exception(f"Pull failed: {result.error}")
                     image = config.image
                 else:
                     # IMAGE_FILE - already loaded
@@ -955,10 +1135,11 @@ class DeploymentService:
                 self.log(f"   [{name}] ⏳ Waiting for health check...")
                 for attempt in range(max_attempts):
                     try:
-                        # Try common health endpoints
-                        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=2)) as session:
-                            # Try /health first, then /api/health, then root
-                            for endpoint in ['/health', '/api/health', '/api/v1/health', '/']:
+                        # Short timeout per endpoint (0.5s connect, 1s total)
+                        timeout = aiohttp.ClientTimeout(total=1, connect=0.5)
+                        async with aiohttp.ClientSession(timeout=timeout) as session:
+                            # Try common health endpoints - just root and /health
+                            for endpoint in ['/', '/health']:
                                 try:
                                     check_url = f"http://{ip}:{expose_port}{endpoint}"
                                     async with session.get(check_url) as resp:
@@ -966,10 +1147,16 @@ class DeploymentService:
                                             healthy = True
                                             self.log(f"   [{name}] ✅ Health check passed ({endpoint})")
                                             break
-                                except:
+                                except asyncio.TimeoutError:
+                                    continue
+                                except aiohttp.ClientError:
+                                    continue
+                                except Exception:
                                     continue
                         if healthy:
                             break
+                    except asyncio.TimeoutError:
+                        pass
                     except Exception as e:
                         pass
                     
@@ -979,6 +1166,17 @@ class DeploymentService:
                 if not healthy:
                     # Container not healthy - abort and keep old container running
                     self.log(f"   [{name}] ❌ Health check failed after {max_attempts}s - aborting switch")
+                    
+                    # Fetch container logs to help debug
+                    try:
+                        logs_result = await agent.container_logs(new_container_name, lines=30)
+                        if logs_result.success and logs_result.data.get('logs'):
+                            self.log(f"   [{name}] 📋 Container logs (last 30 lines):")
+                            for line in logs_result.data['logs'].strip().split('\n'):
+                                self.log(f"      {line}")
+                    except Exception as log_err:
+                        self.log(f"   [{name}] ⚠️ Could not fetch logs: {log_err}")
+                    
                     # Stop the unhealthy new container
                     try:
                         await agent.stop_container(new_container_name)
@@ -1018,6 +1216,7 @@ class DeploymentService:
                         if sidecar_result.success:
                             sidecar_configured = True
                             self.log(f"   [{name}] 🔀 Sidecar: nginx:{internal_port} → {ip}:{expose_port}")
+                            self.log(f"   [{name}] 🟢 LIVE - New version now serving traffic")
                         else:
                             self.log(f"   [{name}] ⚠️ Sidecar config failed: {sidecar_result.error}")
                     except Exception as se:
@@ -1025,13 +1224,13 @@ class DeploymentService:
                         self.log(f"   [{name}] ⚠️ Sidecar error: {se}")
                         traceback.print_exc()
                 
-                # Step 7: Remove OLD container (after nginx switch)
+                # Step 7: Remove OLD container (after nginx switch - background cleanup)
                 if old_container_name:
                     try:
-                        self.log(f"   [{name}] Cleaning up old container {old_container_name}...")
+                        self.log(f"   [{name}] 🧹 Background: removing old container {old_container_name}...")
                         await agent.stop_container(old_container_name)
                         await agent.remove_container(old_container_name)
-                        self.log(f"   [{name}] ✅ Removed {old_container_name}")
+                        self.log(f"   [{name}] ✅ Cleanup done")
                     except Exception as cleanup_err:
                         self.log(f"   [{name}] ⚠️ Cleanup warning: {cleanup_err}")
                 

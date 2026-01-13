@@ -653,13 +653,15 @@ class SnapshotService:
         Returns:
             (droplet_data, error_message) - droplet_data is None on failure
         """
+        from .digitalocean.client import MANAGED_TAG
+        
         payload = {
             "name": name,
             "region": region,
             "size": size,
             "image": image,
             "ssh_keys": [ssh_key_id],
-            "tags": ["snapshot-builder", "temporary"],
+            "tags": ["snapshot-builder", "temporary", MANAGED_TAG],
         }
         if user_data:
             payload["user_data"] = user_data

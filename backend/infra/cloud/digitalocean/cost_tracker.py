@@ -2,12 +2,17 @@
 DigitalOcean Cost Tracker
 
 Track spending per project/environment using droplet tags.
+
+SAFETY: Only tracks costs for managed droplets (tagged with MANAGED_TAG).
+Personal/unmanaged servers are excluded from cost calculations.
 """
 
 import httpx
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
 from datetime import datetime
+
+from .client import MANAGED_TAG
 
 
 @dataclass
@@ -116,8 +121,17 @@ class CostTracker:
         
         return result
     
+    def _is_managed(self, tags: List[str]) -> bool:
+        """Check if droplet is managed (has MANAGED_TAG) and not a temporary builder."""
+        # Must have MANAGED_TAG and NOT be a snapshot-builder (temporary)
+        return MANAGED_TAG in tags and "snapshot-builder" not in tags
+    
     async def get_droplet_costs(self) -> List[DropletCost]:
-        """Get cost info for all droplets."""
+        """
+        Get cost info for managed droplets only.
+        
+        SAFETY: Excludes personal/unmanaged droplets from cost tracking.
+        """
         droplets = []
         
         async with httpx.AsyncClient() as client:
@@ -132,7 +146,13 @@ class CostTracker:
                 data = response.json()
                 
                 for d in data.get("droplets", []):
-                    tags_info = self._parse_tags(d.get("tags", []))
+                    tags = d.get("tags", [])
+                    
+                    # SAFETY: Skip unmanaged droplets
+                    if not self._is_managed(tags):
+                        continue
+                    
+                    tags_info = self._parse_tags(tags)
                     monthly = self._get_size_cost(d.get("size_slug", ""))
                     
                     droplets.append(DropletCost(

@@ -14,22 +14,47 @@ logger = logging.getLogger(__name__)
 
 async def health_check_handler(task: ScheduledTask) -> Dict[str, Any]:
     """
-    Health check handler - checks all servers and containers.
+    Health check handler - checks all managed servers and containers.
     
     Config options:
-        - server_ips: List of IPs to check (optional, defaults to all)
+        - do_token: DigitalOcean token (required) - used to discover managed droplets
+        - user_id: User ID for API key derivation (required)
+        - server_ips: Optional list of specific IPs to check (overrides auto-discovery)
         - auto_restart: Whether to restart unhealthy containers (default: False)
+        - auto_replace: Whether to replace unreachable servers (default: False) - NOT IMPLEMENTED
+    
+    The handler will:
+    1. Query all managed droplets from DigitalOcean (or use provided server_ips)
+    2. Check health of each server via node_agent
+    3. Optionally restart unhealthy containers
     """
     from ..node_agent import NodeAgentClient
-    from ..cloud import generate_node_agent_key
+    from ..cloud import DOClient, generate_node_agent_key
     
     config = task.config
-    server_ips = config.get("server_ips", [])
+    do_token = config.get("do_token")
+    user_id = config.get("user_id", "")
     auto_restart = config.get("auto_restart", False)
-    api_key = config.get("api_key", "")
     
-    if not api_key:
-        return {"error": "No API key configured"}
+    if not do_token:
+        return {"error": "No DO token configured - cannot discover servers"}
+    
+    # Generate API key from token
+    api_key = generate_node_agent_key(do_token, str(user_id))
+    
+    # Discover managed servers (or use provided list)
+    server_ips = config.get("server_ips", [])
+    if not server_ips:
+        try:
+            client = DOClient(do_token)
+            droplets = client.list_droplets()  # Only returns managed droplets
+            server_ips = [d.ip for d in droplets if d.ip and d.is_active]
+            logger.info(f"Discovered {len(server_ips)} managed servers for health check")
+        except Exception as e:
+            return {"error": f"Failed to discover servers: {e}"}
+    
+    if not server_ips:
+        return {"status": "ok", "message": "No servers to check", "servers": []}
     
     results = {
         "checked": 0,
@@ -83,6 +108,14 @@ async def health_check_handler(task: ScheduledTask) -> Dict[str, Any]:
         except Exception as e:
             results["unreachable"] += 1
             results["servers"].append({"ip": ip, "status": "error", "error": str(e)})
+    
+    # Summary status
+    if results["unreachable"] > 0:
+        results["status"] = "degraded"
+    elif results["unhealthy"] > 0:
+        results["status"] = "unhealthy"
+    else:
+        results["status"] = "healthy"
     
     return results
 

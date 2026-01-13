@@ -261,15 +261,70 @@ class DeploymentNaming:
     
     @staticmethod
     def get_base_container_name(container_name: str) -> str:
-        """Get the base (non-secondary) container name.
+        """Get the base container name, stripping any toggle suffix.
+        
+        Handles both _primary and _secondary suffixes.
         
         Examples:
             "myapp_prod_api" -> "myapp_prod_api"
+            "myapp_prod_api_primary" -> "myapp_prod_api"
             "myapp_prod_api_secondary" -> "myapp_prod_api"
         """
         if container_name.endswith("_secondary"):
             return container_name[:-10]
+        if container_name.endswith("_primary"):
+            return container_name[:-8]
         return container_name
+    
+    @staticmethod
+    def get_local_image_name(container_name: str, version: int = None, deployment_id: str = None) -> str:
+        """Generate local Docker image name for a deployment.
+        
+        Uses version tag if available (successful deploys), otherwise deployment_id tag.
+        
+        Args:
+            container_name: Container name (may include _primary/_secondary suffix)
+            version: Version number (for successful deployments)
+            deployment_id: Deployment ID (fallback for failed/pending deployments)
+            
+        Returns:
+            Image name like "abc12_proj_prod_svc:v5" or "abc12_proj_prod_svc:deploy_xyz"
+            
+        Examples:
+            get_local_image_name("abc_proj_prod_api_primary", version=5) -> "abc_proj_prod_api:v5"
+            get_local_image_name("abc_proj_prod_api", deployment_id="xyz123") -> "abc_proj_prod_api:deploy_xyz123"
+        """
+        base_name = DeploymentNaming.get_base_container_name(container_name)
+        
+        if version is not None:
+            return f"{base_name}:v{version}"
+        elif deployment_id:
+            clean_id = deployment_id.replace("deploy_", "")
+            return f"{base_name}:deploy_{clean_id}"
+        else:
+            return f"{base_name}:latest"
+    
+    @staticmethod
+    def parse_image_version(image_name: str) -> Optional[int]:
+        """Extract version number from image tag.
+        
+        Args:
+            image_name: Image name like "abc_proj_prod_api:v5"
+            
+        Returns:
+            Version number (5) or None if not a version tag
+            
+        Examples:
+            parse_image_version("abc_proj_prod_api:v5") -> 5
+            parse_image_version("abc_proj_prod_api:deploy_xyz") -> None
+            parse_image_version("abc_proj_prod_api:latest") -> None
+        """
+        if ":" not in image_name:
+            return None
+        tag = image_name.split(":")[-1]
+        if tag.startswith("v") and tag[1:].isdigit():
+            return int(tag[1:])
+        return None
 
     @staticmethod
     def get_container_name_pattern(workspace_id: str, project: str, env: str, service_name: str) -> str:

@@ -1,6 +1,6 @@
 """DigitalOcean cloud provider."""
 
-from .client import DOClient, DOAPIError, Droplet, DropletSize, Region, ServerManager
+from .client import DOClient, DOAPIError, Droplet, DropletSize, Region, ServerManager, MANAGED_TAG
 
 __all__ = [
     "DOClient",
@@ -9,4 +9,5 @@ __all__ = [
     "DropletSize",
     "Region",
     "ServerManager",
+    "MANAGED_TAG",
 ]

@@ -1,6 +1,6 @@
 """Cloud providers and infrastructure."""
 
-from .digitalocean import DOClient, DOAPIError, Droplet, ServerManager
+from .digitalocean import DOClient, DOAPIError, Droplet, ServerManager, MANAGED_TAG
 from .cloudflare import CloudflareClient, CloudflareError, DNSRecord
 from .cloudinit import (
     CloudInitConfig,
@@ -44,6 +44,7 @@ __all__ = [
     "DOAPIError",
     "Droplet",
     "ServerManager",
+    "MANAGED_TAG",
     # Cloudflare
     "CloudflareClient",
     "CloudflareError",

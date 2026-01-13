@@ -2,6 +2,11 @@
 DigitalOcean Client - Server provisioning and management.
 
 Clean interface for DO API operations.
+
+SAFETY: This client protects unmanaged droplets by default.
+All droplets created through this system are tagged with MANAGED_TAG.
+list_droplets() only returns managed droplets unless include_unmanaged=True.
+delete_droplet() refuses to delete unmanaged droplets unless force=True.
 """
 
 from __future__ import annotations
@@ -16,6 +21,11 @@ if TYPE_CHECKING:
     from ...context import DeploymentContext
 
 from ...core.result import Result, ServerResult
+
+
+# Tag applied to ALL droplets created through this system
+# Used to protect personal/unmanaged servers from being listed or deleted
+MANAGED_TAG = "deployed-via-api"
 
 
 class DropletSize(Enum):
@@ -59,6 +69,11 @@ class Droplet:
         return self.status == "active"
     
     @property
+    def is_managed(self) -> bool:
+        """Check if this droplet is managed by our system (has MANAGED_TAG)."""
+        return MANAGED_TAG in (self.tags or [])
+    
+    @property
     def project(self) -> Optional[str]:
         """Extract project name from tags (project:xxx)."""
         for tag in self.tags:
@@ -72,6 +87,14 @@ class Droplet:
         for tag in self.tags:
             if tag.startswith("env:"):
                 return tag[4:]
+        return None
+    
+    @property
+    def service(self) -> Optional[str]:
+        """Extract service name from tags (service:xxx)."""
+        for tag in self.tags:
+            if tag.startswith("service:"):
+                return tag[8:]
         return None
     
     def to_dict(self) -> Dict[str, Any]:
@@ -88,7 +111,9 @@ class Droplet:
             "vpc_uuid": self.vpc_uuid,
             "project": self.project,
             "environment": self.environment,
+            "service": self.service,
             "image": self.image,
+            "is_managed": self.is_managed,
         }
     
     @classmethod
@@ -262,8 +287,11 @@ class DOClient:
         if not vpc_uuid and auto_vpc:
             vpc_uuid = self.ensure_vpc(region=region)
         
-        # Build tags - always include project and environment for filtering
+        # Build tags - always include MANAGED_TAG, project and environment for filtering
         all_tags = list(tags or [])
+        # CRITICAL: Always add MANAGED_TAG so we can identify our droplets
+        if MANAGED_TAG not in all_tags:
+            all_tags.append(MANAGED_TAG)
         if project:
             all_tags.append(f"project:{project}")
         if environment:
@@ -330,34 +358,47 @@ systemctl restart node_agent 2>/dev/null || true
         tag: Optional[str] = None,
         project: Optional[str] = None,
         environment: Optional[str] = None,
+        service: Optional[str] = None,
+        include_unmanaged: bool = False,
         page: int = 1,
         per_page: int = 100,
     ) -> List[Droplet]:
         """
         List droplets.
         
+        SAFETY: By default, only returns droplets tagged with MANAGED_TAG.
+        Personal/unmanaged servers are protected from accidental operations.
+        Temporary snapshot-builder droplets are also excluded from listings.
+        
         Args:
-            tag: Filter by exact tag
+            tag: Filter by exact tag (overrides default MANAGED_TAG filter)
             project: Filter by project name (e.g., "deploy-api")
             environment: Filter by environment (e.g., "prod", "staging")
+            service: Filter by service name (e.g., "deploy-api", "nginx")
+            include_unmanaged: If True, return ALL droplets (use with caution!)
             page: Page number
             per_page: Results per page
             
         Returns:
-            List of Droplet objects
+            List of Droplet objects (only managed droplets unless include_unmanaged=True)
             
         Note: DO API only supports filtering by ONE tag at a time.
-              If both project and environment are specified, we filter by project
-              first, then filter results by environment client-side.
+              Additional filters (project, environment, service) are applied client-side.
         """
         params = {"page": page, "per_page": per_page}
         
         # Determine which tag to use for API filtering
+        # Priority: explicit tag > project tag > MANAGED_TAG (default safety)
         filter_tag = tag
         if project and not tag:
             filter_tag = f"project:{project}"
         elif environment and not tag and not project:
             filter_tag = f"env:{environment}"
+        elif service and not tag and not project and not environment:
+            filter_tag = f"service:{service}"
+        elif not tag and not project and not environment and not service and not include_unmanaged:
+            # Default: only show managed droplets
+            filter_tag = MANAGED_TAG
         
         if filter_tag:
             params["tag_name"] = filter_tag
@@ -371,10 +412,104 @@ systemctl restart node_agent 2>/dev/null || true
             env_tag = f"env:{environment}"
             droplets = [d for d in droplets if env_tag in (d.tags or [])]
         
+        if service and (project or environment or tag):
+            # Already filtered by something else, now filter by service
+            service_tag = f"service:{service}"
+            droplets = [d for d in droplets if service_tag in (d.tags or [])]
+        
+        # Extra safety: even with explicit tag filters, exclude unmanaged unless requested
+        if not include_unmanaged and tag and tag != MANAGED_TAG:
+            # User provided a specific tag, but we still filter to managed only
+            droplets = [d for d in droplets if d.is_managed]
+        
+        # Always exclude temporary snapshot-builder droplets from listings
+        # (they can still be deleted via delete_droplet which allows snapshot-builder tag)
+        droplets = [d for d in droplets if "snapshot-builder" not in (d.tags or [])]
+        
         return droplets
     
-    def delete_droplet(self, droplet_id: int) -> Result:
-        """Delete a droplet."""
+    def tag_droplet(self, droplet_id: int, tag: str) -> Result:
+        """
+        Add a tag to a droplet.
+        
+        Args:
+            droplet_id: ID of the droplet to tag
+            tag: Tag to add (e.g., "service:deploy-api")
+            
+        Returns:
+            Result indicating success or failure
+        """
+        try:
+            # First, create the tag if it doesn't exist
+            try:
+                self._post("/tags", {"name": tag})
+            except DOAPIError:
+                pass  # Tag likely already exists
+            
+            # Tag the droplet
+            self._post(f"/tags/{tag}/resources", {
+                "resources": [{"resource_id": str(droplet_id), "resource_type": "droplet"}]
+            })
+            return Result.ok(f"Tagged droplet {droplet_id} with '{tag}'")
+        except DOAPIError as e:
+            return Result.fail(f"Failed to tag droplet: {e}")
+    
+    def untag_droplet(self, droplet_id: int, tag: str) -> Result:
+        """
+        Remove a tag from a droplet.
+        
+        Args:
+            droplet_id: ID of the droplet
+            tag: Tag to remove
+            
+        Returns:
+            Result indicating success or failure
+        """
+        try:
+            # Use DELETE with body to remove tag from resource
+            import requests
+            resp = requests.delete(
+                f"{self.base_url}/tags/{tag}/resources",
+                headers={"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"},
+                json={"resources": [{"resource_id": str(droplet_id), "resource_type": "droplet"}]}
+            )
+            if resp.status_code not in (200, 204):
+                return Result.fail(f"Failed to untag: {resp.text}")
+            return Result.ok(f"Removed tag '{tag}' from droplet {droplet_id}")
+        except Exception as e:
+            return Result.fail(f"Failed to untag droplet: {e}")
+    
+    def delete_droplet(self, droplet_id: int, force: bool = False) -> Result:
+        """
+        Delete a droplet.
+        
+        SAFETY: Refuses to delete unmanaged droplets unless force=True.
+        This protects personal servers from accidental deletion.
+        
+        Exception: Droplets with 'snapshot-builder' tag are always deletable
+        (they're temporary builders created by our snapshot system).
+        
+        Args:
+            droplet_id: ID of the droplet to delete
+            force: If True, delete even if droplet is unmanaged (dangerous!)
+            
+        Returns:
+            Result indicating success or failure
+        """
+        # Safety check: verify droplet is managed before deleting
+        if not force:
+            droplet = self.get_droplet(droplet_id)
+            if droplet is None:
+                return Result.fail(f"Droplet {droplet_id} not found")
+            
+            # Allow deletion if: managed OR has snapshot-builder tag (temporary)
+            is_builder = "snapshot-builder" in (droplet.tags or [])
+            if not droplet.is_managed and not is_builder:
+                return Result.fail(
+                    f"Droplet {droplet_id} ({droplet.name}) is not managed by this system. "
+                    f"Missing tag '{MANAGED_TAG}'. Use force=True to delete anyway."
+                )
+        
         try:
             self._delete(f"/droplets/{droplet_id}")
             return Result.ok(f"Droplet {droplet_id} deleted")
