@@ -688,26 +688,34 @@ class DeploymentService:
         clean_id = deployment_id.replace("deploy_", "")
         deploy_tag = f"deploy_{clean_id}"
         
-        # Get the image name base (container name without suffixes like _secondary)
-        image_base = container_name.rstrip('_primary').rstrip('_secondary')
-        
         self.log(f"🏷️  Tagging images for rollback ({deploy_tag})...")
         
         for server in successful_servers:
             ip = server.ip
             agent = self._agent(ip)
             
+            # Use server's actual container name (may differ per server due to toggle)
+            actual_container_name = server.container_name or container_name
+            
+            # Get the image name base (container name without suffixes)
+            if actual_container_name.endswith("_secondary"):
+                image_base = actual_container_name[:-10]
+            elif actual_container_name.endswith("_primary"):
+                image_base = actual_container_name[:-8]
+            else:
+                image_base = actual_container_name
+            
             try:
                 # Get the current image ID from the running container
-                inspect_result = await agent.inspect_container(container_name)
+                inspect_result = await agent.inspect_container(actual_container_name)
                 if not inspect_result.success:
-                    self.log(f"   ⚠️ Cannot inspect {container_name} on {ip}")
+                    self.log(f"   ⚠️ Cannot inspect {actual_container_name} on {ip}")
                     continue
                 
                 # The image could be the image ID or name
                 current_image = inspect_result.data.get("Image", "")
                 if not current_image:
-                    self.log(f"   ⚠️ No image found for {container_name} on {ip}")
+                    self.log(f"   ⚠️ No image found for {actual_container_name} on {ip}")
                     continue
                 
                 # Tag the image
