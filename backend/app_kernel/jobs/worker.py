@@ -105,13 +105,34 @@ class JobWorkerManager:
         """Create a wrapper that handles context creation."""
         registry = self._registry  # Capture reference
         
-        async def wrapper(entity: Dict[str, Any]) -> Any:
+        async def wrapper(entity, *args, **kwargs) -> Any:
             # Fail fast if task no longer registered
             if not registry.has(task_name):
                 raise UnknownTaskError(f"Task '{task_name}' is not registered")
             
+            # Handle entity that might be JSON string (from Redis serialization)
+            if isinstance(entity, str):
+                import json
+                try:
+                    entity = json.loads(entity)
+                except json.JSONDecodeError:
+                    # If it's not valid JSON, wrap it as payload
+                    entity = {"payload": entity}
+            
+            # Ensure entity is a dict
+            if not isinstance(entity, dict):
+                entity = {"payload": entity}
+            
             # Extract job metadata
             payload = entity.get("payload", entity)
+            
+            # Also handle payload that might be JSON string
+            if isinstance(payload, str):
+                import json
+                try:
+                    payload = json.loads(payload)
+                except json.JSONDecodeError:
+                    pass  # Keep as string if not valid JSON
             
             # Build context (no domain assumptions - just pass through metadata)
             ctx = JobContext(
@@ -184,6 +205,60 @@ async def stop_workers():
     await manager.stop()
 
 
+def _create_json_deserializing_wrapper(task_name: str, processor):
+    """
+    Create a wrapper that handles JSON deserialization from Redis.
+    
+    The job_queue library stores entities as JSON strings in Redis.
+    This wrapper ensures the entity/payload are properly deserialized
+    before being passed to the processor.
+    """
+    import json
+    
+    async def wrapper(entity, *args, **kwargs) -> Any:
+        # Handle entity that might be JSON string (from Redis serialization)
+        if isinstance(entity, str):
+            try:
+                entity = json.loads(entity)
+            except json.JSONDecodeError:
+                entity = {"payload": entity}
+        
+        # Ensure entity is a dict
+        if not isinstance(entity, dict):
+            entity = {"payload": entity}
+        
+        # Extract payload
+        payload = entity.get("payload", entity)
+        
+        # Handle payload that might be JSON string (double serialization)
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except json.JSONDecodeError:
+                pass  # Keep as string if not valid JSON
+        
+        # Build context
+        ctx = JobContext(
+            job_id=entity.get("operation_id", "unknown"),
+            task_name=task_name,
+            attempt=entity.get("attempts", 0) + 1,
+            max_attempts=entity.get("max_attempts", 3),
+            user_id=entity.get("user_id"),
+            metadata=entity.get("metadata", {})
+        )
+        
+        # Call the processor
+        if asyncio.iscoroutinefunction(processor):
+            return await processor(payload, ctx)
+        else:
+            return await asyncio.to_thread(processor, payload, ctx)
+    
+    # Preserve name for queue system
+    wrapper.__name__ = task_name
+    wrapper.__module__ = "app_kernel.jobs"
+    return wrapper
+
+
 async def run_worker(
     tasks: Dict[str, Any],
     redis_url: str = None,
@@ -192,6 +267,7 @@ async def run_worker(
     init_app = None,
     shutdown_app = None,
     log_level: str = None,
+    manifest_path: str = None,
 ):
     """
     Run a worker process with the given tasks.
@@ -201,6 +277,7 @@ async def run_worker(
     - Logging setup
     - Queue configuration
     - Worker lifecycle
+    - Auto-adds kernel integration tasks (e.g., store_request_metrics) if manifest provided
     
     Usage:
         # worker.py
@@ -221,6 +298,7 @@ async def run_worker(
                     "document_ingest": ingest_document,
                     "chat_response": process_chat,
                 },
+                manifest_path="manifest.yaml",  # Auto-adds kernel integration tasks
                 init_app=init,
                 shutdown_app=shutdown,
             ))
@@ -233,6 +311,7 @@ async def run_worker(
         init_app: Optional async function to initialize app dependencies
         shutdown_app: Optional async function to cleanup app dependencies
         log_level: Logging level (default: LOG_LEVEL env var or INFO)
+        manifest_path: Path to manifest.yaml for auto-adding kernel integration tasks
     """
     import os
     import sys
@@ -312,6 +391,30 @@ async def run_worker(
         
         logger = StdlibLoggerWrapper(_stdlib_logger)
     
+    # Auto-add kernel integration tasks based on manifest
+    all_tasks = dict(tasks)  # Copy to avoid mutating input
+    if manifest_path:
+        try:
+            import yaml
+            from pathlib import Path
+            manifest_file = Path(manifest_path)
+            if manifest_file.exists():
+                with open(manifest_file) as f:
+                    manifest = yaml.safe_load(f)
+                
+                # Check if request_metrics is enabled
+                observability = manifest.get("observability", {})
+                request_metrics = observability.get("request_metrics", {})
+                if request_metrics.get("enabled", False):
+                    from ..observability.request_metrics import store_request_metrics
+                    all_tasks["store_request_metrics"] = store_request_metrics
+                    logger.info("Added kernel task: store_request_metrics")
+        except Exception as e:
+            logger.warning(f"Could not load manifest for integration tasks: {e}")
+    
+    # Use all_tasks instead of tasks from here on
+    tasks = all_tasks
+    
     if not redis_url:
         logger.error("REDIS_URL environment variable required")
         sys.exit(1)
@@ -364,9 +467,10 @@ async def run_worker(
     
     logger.info(f"Queue config initialized: redis={redis_url}, key_prefix={key_prefix}, workers={worker_count}")
     
-    # Register processors
+    # Register processors with JSON deserialization wrapper
     for task_name, processor in tasks.items():
-        config.callables.register(processor, name=task_name)
+        wrapped = _create_json_deserializing_wrapper(task_name, processor)
+        config.callables.register(wrapped, name=task_name)
     
     # Create worker
     worker = QueueWorker(config=config)

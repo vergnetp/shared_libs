@@ -16,6 +16,8 @@ from .vault import (
     vault_status,
 )
 
+from .encryption import Encryption
+
 __all__ = [
     "DeploymentNaming",
     "DONaming",
@@ -28,4 +30,6 @@ __all__ = [
     "get_origin_cert",
     "get_origin_key",
     "vault_status",
+    # Encryption
+    "Encryption",
 ]

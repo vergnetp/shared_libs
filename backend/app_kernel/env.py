@@ -1,11 +1,11 @@
 """
 Environment loading with hierarchy support.
 
-.env hierarchy (later files override earlier):
-  1. {root}/.env                    (shared defaults)
-  2. {root}/services/.env           (all services)  
-  3. {root}/services/{service}/.env (specific service)
-  4. Environment variables          (always win)
+.env hierarchy (highest priority first):
+  1. System environment variables  (always win)
+  2. {service}/.env                (service-specific)
+  3. {services}/.env               (all services)  
+  4. {root}/.env                   (shared defaults)
 
 Usage:
     from app_kernel.env import load_env_hierarchy
@@ -32,14 +32,19 @@ def load_env_hierarchy(
     extra_env_files: Optional[List[str]] = None,
 ) -> List[Path]:
     """
-    Load .env files from least to most specific.
-    Later files override earlier ones. Environment variables always win.
+    Load .env files with correct priority (system env vars always win).
+    
+    Priority (highest to lowest):
+      1. System environment variables (already in os.environ)
+      2. Service-specific .env (most specific)
+      3. Services directory .env
+      4. Root .env (least specific defaults)
     
     Args:
         service_file: Any file in the service directory (e.g., __file__)
         service_dir: Explicit service directory path
         root_dir: Explicit root directory (defaults to grandparent of service_dir)
-        extra_env_files: Additional .env files to load last
+        extra_env_files: Additional .env files to load (highest priority after system)
     
     Returns:
         List of .env files that were loaded
@@ -48,10 +53,10 @@ def load_env_hierarchy(
         # In services/deploy_api/config.py:
         load_env_hierarchy(__file__)
         
-        # Loads (if they exist):
+        # System env vars win, then checks (in order):
+        #   services/deploy_api/.env
+        #   services/.env
         #   shared_libs/.env
-        #   shared_libs/services/.env
-        #   shared_libs/services/deploy_api/.env
     """
     try:
         from dotenv import load_dotenv
@@ -96,14 +101,19 @@ def load_env_hierarchy(
     if extra_env_files:
         env_files.extend(Path(f) for f in extra_env_files)
     
-    # Load in order (later overrides earlier)
+    # Load in REVERSE order with override=False
+    # This ensures:
+    #   1. System env vars always win (already in os.environ)
+    #   2. Most specific .env file wins over less specific ones
+    #   3. Root .env only provides defaults for unset vars
     loaded = []
-    for env_file in env_files:
+    for env_file in reversed(env_files):
         if env_file.exists():
-            load_dotenv(env_file, override=True)
+            load_dotenv(env_file, override=False)
             loaded.append(env_file)
     
-    return loaded
+    # Return in original order for clarity
+    return list(reversed(loaded))
 
 
 def get_env(key: str, default: str = None, required: bool = False) -> Optional[str]:

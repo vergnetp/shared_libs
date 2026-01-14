@@ -165,6 +165,12 @@ class ServiceConfig:
     debug: bool = False
     log_level: str = "INFO"
     
+    # Request Metrics (captures latency, errors, geo per request - requires Redis for async storage)
+    request_metrics_enabled: bool = False
+    request_metrics_exclude_paths: List[str] = field(default_factory=lambda: [
+        "/health", "/healthz", "/readyz", "/metrics", "/favicon.ico"
+    ])
+    
     @classmethod
     def from_env(cls, prefix: str = "") -> "ServiceConfig":
         """
@@ -264,6 +270,11 @@ class ServiceConfig:
             # Debug
             debug=env_bool("DEBUG", False),
             log_level=env("LOG_LEVEL", "INFO"),
+            # Request Metrics
+            request_metrics_enabled=env_bool("REQUEST_METRICS_ENABLED", False),
+            request_metrics_exclude_paths=env_list("REQUEST_METRICS_EXCLUDE_PATHS", [
+                "/health", "/healthz", "/readyz", "/metrics", "/favicon.ico"
+            ]),
         )
     
     @classmethod
@@ -364,51 +375,63 @@ class ServiceConfig:
         cors = manifest.get("cors", {})
         jobs = manifest.get("jobs", {})
         
+        # Helper: apply default AFTER interpolation (fixes ${VAR} without env set)
+        def _default(val, default):
+            """Return default if val is None. Handles interpolated empty strings."""
+            return default if val is None else val
+        
         return cls(
             # Auth
-            jwt_secret=interpolate(auth.get("jwt_secret", "dev-secret-change-me")),
-            jwt_expiry_hours=interpolate(auth.get("jwt_expiry_hours", 24)),
-            auth_enabled=interpolate(auth.get("enabled", True)),
-            allow_self_signup=interpolate(auth.get("allow_self_signup", False)),
+            jwt_secret=interpolate(auth.get("jwt_secret")) or "dev-secret-change-me",
+            jwt_expiry_hours=_default(interpolate(auth.get("jwt_expiry_hours")), 24),
+            auth_enabled=_default(interpolate(auth.get("enabled")), True),
+            allow_self_signup=_default(interpolate(auth.get("allow_self_signup")), False),
             
             # SaaS
-            saas_enabled=interpolate(saas.get("enabled", False)),
+            saas_enabled=_default(interpolate(saas.get("enabled")), False),
             saas_invite_base_url=interpolate(saas.get("invite_base_url")),
             
             # Redis
             redis_url=interpolate(redis.get("url")),
-            redis_key_prefix=interpolate(redis.get("key_prefix", "queue:")),
+            redis_key_prefix=interpolate(redis.get("key_prefix")) or "queue:",
             
             # Database
             database_name=interpolate(db.get("path") or db.get("name")),
-            database_type=interpolate(db.get("type", "sqlite")),
-            database_host=interpolate(db.get("host", "localhost")),
+            database_type=interpolate(db.get("type")) or "sqlite",
+            database_host=interpolate(db.get("host")) or "localhost",
             database_port=interpolate(db.get("port")),
             database_user=interpolate(db.get("user")),
             database_password=interpolate(db.get("password")),
             
             # CORS
-            cors_origins=interpolate(cors.get("origins", ["*"])) or ["*"],
-            cors_credentials=interpolate(cors.get("credentials", True)),
+            cors_origins=interpolate(cors.get("origins")) or ["*"],
+            cors_credentials=_default(interpolate(cors.get("credentials")), True),
             
             # Jobs
-            worker_count=interpolate(jobs.get("worker_count", 4)),
-            job_max_attempts=interpolate(jobs.get("max_attempts", 3)),
+            worker_count=_default(interpolate(jobs.get("worker_count")), 4),
+            job_max_attempts=_default(interpolate(jobs.get("max_attempts")), 3),
             
             # Email
-            email_enabled=interpolate(email.get("enabled", False)),
-            email_provider=interpolate(email.get("provider", "smtp")),
+            email_enabled=_default(interpolate(email.get("enabled")), False),
+            email_provider=interpolate(email.get("provider")) or "smtp",
             email_from=interpolate(email.get("from")),
             email_reply_to=interpolate(email.get("reply_to")),
             smtp_host=interpolate(email.get("smtp_host")),
-            smtp_port=interpolate(email.get("smtp_port", 587)),
+            smtp_port=_default(interpolate(email.get("smtp_port")), 587),
             smtp_user=interpolate(email.get("smtp_user")),
             smtp_password=interpolate(email.get("smtp_password")),
-            smtp_use_tls=interpolate(email.get("smtp_use_tls", True)),
+            smtp_use_tls=_default(interpolate(email.get("smtp_use_tls")), True),
             
             # Debug
-            debug=interpolate(manifest.get("debug", False)),
-            log_level=interpolate(manifest.get("log_level", "INFO")),
+            debug=_default(interpolate(manifest.get("debug")), False),
+            log_level=interpolate(manifest.get("log_level")) or "INFO",
+            # Request Metrics (from observability section)
+            request_metrics_enabled=_default(interpolate(
+                manifest.get("observability", {}).get("request_metrics", {}).get("enabled")
+            ), False),
+            request_metrics_exclude_paths=interpolate(
+                manifest.get("observability", {}).get("request_metrics", {}).get("exclude_paths")
+            ) or ["/health", "/healthz", "/readyz", "/metrics", "/favicon.ico"],
         )
 
 
@@ -561,6 +584,12 @@ def create_service(
             integration_tasks.update(billing_tasks)
             billing_enabled = True
     
+    # Setup request metrics task if enabled (requires Redis for async storage)
+    request_metrics_enabled = cfg.request_metrics_enabled and cfg.redis_url
+    if request_metrics_enabled:
+        from .observability.request_metrics import store_request_metrics
+        integration_tasks["store_request_metrics"] = store_request_metrics
+    
     # Build job registry - merge app tasks with integration tasks
     all_tasks = {**(tasks or {}), **integration_tasks}
     registry = None
@@ -616,6 +645,12 @@ def create_service(
                 from .db.schema import init_saas_schema
                 await init_schema(init_saas_schema)
                 logger.info("SaaS schema initialized (workspaces, members, invites)")
+            
+            # Initialize request metrics schema if enabled
+            if request_metrics_enabled:
+                from .observability.request_metrics import RequestMetricsStore
+                await init_schema(RequestMetricsStore.init_schema)
+                logger.info("Request metrics schema initialized")
             
             # Initialize app schema if provided
             if schema_init:
@@ -823,6 +858,31 @@ def create_service(
         mount_routers=True,
     )
     
+    # Add request metrics middleware if enabled
+    if request_metrics_enabled:
+        from .observability.request_metrics import RequestMetricsMiddleware
+        from .jobs import get_job_client
+        
+        # Middleware is added AFTER kernel init so job_client is available
+        app.add_middleware(
+            RequestMetricsMiddleware,
+            job_client=get_job_client(),
+            exclude_paths=set(cfg.request_metrics_exclude_paths),
+        )
+    
+    # Mount request metrics API routes if enabled
+    if request_metrics_enabled:
+        from .observability.request_metrics import create_request_metrics_router
+        from .auth.deps import get_current_user
+        
+        metrics_router = create_request_metrics_router(
+            prefix="/metrics/requests",
+            protect="admin",
+            get_current_user=get_current_user,
+            is_admin=is_admin or _default_is_admin,
+        )
+        app.include_router(metrics_router, prefix=api_prefix)
+    
     # Mount job routes if tasks defined and Redis available
     if tasks and cfg.redis_url:
         from .jobs import create_jobs_router, get_job_client
@@ -901,6 +961,8 @@ def _build_kernel_settings(
         observability=ObservabilitySettings(
             service_name=name,
             log_level="DEBUG" if cfg.debug else cfg.log_level,
+            request_metrics_enabled=cfg.request_metrics_enabled,
+            request_metrics_exclude_paths=tuple(cfg.request_metrics_exclude_paths),
         ),
         
         reliability=ReliabilitySettings(
