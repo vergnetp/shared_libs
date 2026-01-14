@@ -1,4 +1,8 @@
-"""Update context tool - allows agents to remember information about users."""
+"""Update context tool - allows agents to remember information about users.
+
+Thread-safe: Uses locks to prevent race conditions when multiple agents
+update the same user's context concurrently.
+"""
 
 from typing import Any, Optional
 from ..base import Tool, ToolDefinition
@@ -9,34 +13,63 @@ _context_provider = None
 _current_user_id = None
 _current_agent_id = None
 
+# Per-agent context storage for parallel safety
+# Maps agent instance id -> (provider, user_id, agent_id)
+_agent_contexts: dict[int, tuple[Any, str, Optional[str]]] = {}
+
 
 def set_context_tool_provider(
     provider: Any, 
     user_id: str, 
-    agent_id: Optional[str] = None
+    agent_id: Optional[str] = None,
+    instance_id: int = None,
 ):
     """
     Configure the update_context tool with a provider.
     
     Called by Agent before each chat to set up the tool.
+    
+    Args:
+        provider: Context provider instance
+        user_id: Current user ID
+        agent_id: Current agent ID
+        instance_id: Agent instance id() for parallel safety
     """
     global _context_provider, _current_user_id, _current_agent_id
+    
+    # Store both globally (for single-agent compat) and per-instance (for parallel)
     _context_provider = provider
     _current_user_id = user_id
     _current_agent_id = agent_id
+    
+    if instance_id is not None:
+        _agent_contexts[instance_id] = (provider, user_id, agent_id)
 
 
-def clear_context_tool_provider():
+def get_context_for_instance(instance_id: int = None) -> tuple[Any, str, Optional[str]]:
+    """Get context provider info, preferring instance-specific if available."""
+    if instance_id is not None and instance_id in _agent_contexts:
+        return _agent_contexts[instance_id]
+    return (_context_provider, _current_user_id, _current_agent_id)
+
+
+def clear_context_tool_provider(instance_id: int = None):
     """Clear the context provider (for testing)."""
     global _context_provider, _current_user_id, _current_agent_id
     _context_provider = None
     _current_user_id = None
     _current_agent_id = None
+    
+    if instance_id is not None and instance_id in _agent_contexts:
+        del _agent_contexts[instance_id]
 
 
 class UpdateContextTool(Tool):
     """
     Tool for agents to update persistent user context.
+    
+    Thread-safe: Uses locking to prevent race conditions when multiple
+    agents update the same user's context concurrently.
     
     The agent calls this tool when it learns important information
     about the user that should be remembered across conversations.
@@ -69,9 +102,16 @@ class UpdateContextTool(Tool):
         "Always put the data you want to save inside 'updates'."
     )
     
+    def __init__(self, instance_id: int = None):
+        """
+        Args:
+            instance_id: Agent instance id() for parallel safety
+        """
+        self._instance_id = instance_id
+    
     async def execute(self, updates: dict = None, reason: str = "User information update", **kwargs) -> str:
         """
-        Update user context.
+        Update user context (thread-safe).
         
         Args:
             updates: Dict of updates to merge into context
@@ -81,10 +121,16 @@ class UpdateContextTool(Tool):
         Returns:
             Confirmation message
         """
-        global _context_provider, _current_user_id, _current_agent_id
+        # Import here to avoid circular imports
+        from ...concurrency import user_context_lock
+        
+        # Get context for this instance (or global fallback)
+        context_provider, current_user_id, current_agent_id = get_context_for_instance(
+            self._instance_id
+        )
         
         print(f"[DEBUG UpdateContextTool] execute called with updates={updates}, reason={reason}, kwargs={kwargs}")
-        print(f"[DEBUG UpdateContextTool] provider={_context_provider}, user_id={_current_user_id}")
+        print(f"[DEBUG UpdateContextTool] provider={context_provider}, user_id={current_user_id}, instance={self._instance_id}")
         
         # Handle LLMs that put data directly instead of in 'updates'
         # e.g., {"reason": "...", "running_level": "beginner"} instead of {"updates": {"running_level": "beginner"}, "reason": "..."}
@@ -105,22 +151,26 @@ class UpdateContextTool(Tool):
             print("[DEBUG UpdateContextTool] ERROR: updates is empty")
             return "Error: 'updates' object is empty. Please provide data to remember."
         
-        if _context_provider is None:
+        if context_provider is None:
             print("[DEBUG UpdateContextTool] ERROR: Context provider not configured")
             return "Error: Context provider not configured"
         
-        if _current_user_id is None:
+        if current_user_id is None:
             print("[DEBUG UpdateContextTool] ERROR: User ID not set")
             return "Error: User ID not set"
         
         try:
-            print(f"[DEBUG UpdateContextTool] Calling provider.update...")
-            updated = await _context_provider.update(
-                user_id=_current_user_id,
-                updates=updates,
-                reason=reason,
-                agent_id=_current_agent_id,
-            )
+            # Lock on user_id + agent_id to prevent concurrent updates
+            # This is critical for parallel agent execution
+            async with user_context_lock(current_user_id, current_agent_id):
+                print(f"[DEBUG UpdateContextTool] Acquired lock, calling provider.update...")
+                updated = await context_provider.update(
+                    user_id=current_user_id,
+                    updates=updates,
+                    reason=reason,
+                    agent_id=current_agent_id,
+                )
+            
             print(f"[DEBUG UpdateContextTool] Update successful, result={updated}")
             
             # Return brief confirmation

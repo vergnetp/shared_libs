@@ -1,11 +1,16 @@
-"""Message storage - pure CRUD."""
+"""Message storage - pure CRUD with optional thread safety."""
 from __future__ import annotations
 
 from typing import Optional, Any, List
 
 
 class MessageStore:
-    """Message CRUD operations."""
+    """
+    Message CRUD operations.
+    
+    For multi-agent scenarios where agents share a thread,
+    use ThreadSafeMessageStore wrapper.
+    """
     
     def __init__(self, conn: Any):
         self.conn = conn
@@ -242,3 +247,55 @@ class MessageStore:
             return [self._normalize_message(m) for m in messages[:-keep_recent]]
         
         return []  # Not enough messages to summarize
+
+
+class ThreadSafeMessageStore(MessageStore):
+    """
+    Thread-safe message store for multi-agent scenarios.
+    
+    Wraps MessageStore with per-thread locking to ensure
+    message ordering is consistent when multiple agents
+    write to the same thread.
+    
+    Usage:
+        store = ThreadSafeMessageStore(conn)
+        
+        # All operations on same thread are serialized
+        await store.add(thread_id="shared", ...)
+        await store.add(thread_id="shared", ...)  # Waits for previous
+    """
+    
+    def __init__(self, conn: Any, lock_timeout: float = 30.0):
+        super().__init__(conn)
+        self._lock_timeout = lock_timeout
+    
+    async def create(
+        self,
+        thread_id: str,
+        role: str,
+        content: str,
+        **kwargs,
+    ) -> dict:
+        """Create a message (thread-safe)."""
+        from ..concurrency import thread_lock
+        
+        async with thread_lock(thread_id, timeout=self._lock_timeout):
+            return await super().create(thread_id, role, content, **kwargs)
+    
+    async def add(self, thread_id: str, role: str, content: str, **kwargs) -> dict:
+        """Alias for create() (thread-safe)."""
+        return await self.create(thread_id=thread_id, role=role, content=content, **kwargs)
+    
+    async def update_metadata(self, message_id: str, metadata: dict) -> dict:
+        """Update message metadata (thread-safe via message lookup)."""
+        from ..concurrency import get_lock
+        
+        # Get thread_id from message first
+        msg = await self.conn.get_entity("messages", message_id)
+        if not msg:
+            return None
+        
+        thread_id = msg.get("thread_id", "unknown")
+        
+        async with get_lock("thread", thread_id, timeout=self._lock_timeout):
+            return await super().update_metadata(message_id, metadata)

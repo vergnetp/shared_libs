@@ -585,3 +585,111 @@ class CloudflareClient:
         zone_id = self.get_zone_id(domain)
         records = self.list_records(zone_id=zone_id, record_type="A", name=domain)
         return [r.content for r in records]
+    
+    # =========================================================================
+    # DNS Cleanup
+    # =========================================================================
+    
+    def cleanup_orphaned_records(
+        self,
+        zone: str,
+        active_ips: set,
+        log_fn: callable = None,
+    ) -> Dict[str, Any]:
+        """
+        Remove DNS A records pointing to IPs that no longer exist.
+        
+        Compares all A records in a zone against a set of active IPs.
+        Deletes records pointing to IPs not in the active set.
+        
+        IMPORTANT: Only removes PROXIED records (orange cloud in Cloudflare).
+        DNS-only records (gray cloud) are left untouched as they may be
+        manually configured for other purposes.
+        
+        Args:
+            zone: Zone name (e.g., "example.com")
+            active_ips: Set of currently active IP addresses
+            log_fn: Optional logging function
+            
+        Returns:
+            Dict with cleanup stats:
+            {
+                "deleted": [{"name": str, "ip": str}, ...],
+                "kept": int,
+                "skipped_dns_only": int,
+                "errors": [{"name": str, "ip": str, "error": str}, ...]
+            }
+        """
+        log = log_fn or (lambda x: None)
+        
+        try:
+            zone_id = self.get_zone_id(zone)
+            records = self.list_records(zone_id=zone_id, record_type="A")
+            
+            deleted = []
+            errors = []
+            kept = 0
+            skipped_dns_only = 0
+            
+            for record in records:
+                ip = record.content
+                
+                # Skip DNS-only records (not proxied) - these are likely manual entries
+                if not record.proxied:
+                    skipped_dns_only += 1
+                    continue
+                
+                if ip not in active_ips:
+                    try:
+                        self._request("DELETE", f"/zones/{zone_id}/dns_records/{record.id}")
+                        deleted.append({"name": record.name, "ip": ip})
+                        log(f"🧹 Removed orphaned DNS: {record.name} → {ip}")
+                    except Exception as e:
+                        errors.append({"name": record.name, "ip": ip, "error": str(e)})
+                        log(f"⚠️ Failed to delete DNS {record.name}: {e}")
+                else:
+                    kept += 1
+            
+            if deleted:
+                log(f"🧹 DNS cleanup: {len(deleted)} orphaned record(s) removed, {kept} kept, {skipped_dns_only} DNS-only skipped")
+            
+            return {
+                "deleted": deleted,
+                "kept": kept,
+                "skipped_dns_only": skipped_dns_only,
+                "errors": errors,
+            }
+            
+        except CloudflareError as e:
+            log(f"⚠️ DNS cleanup failed: {e.message}")
+            return {"deleted": [], "kept": 0, "skipped_dns_only": 0, "errors": [{"error": e.message}]}
+        except Exception as e:
+            log(f"⚠️ DNS cleanup failed: {e}")
+            return {"deleted": [], "kept": 0, "skipped_dns_only": 0, "errors": [{"error": str(e)}]}
+    
+    def list_dns_records(self, zone_id: str) -> List[Dict[str, Any]]:
+        """
+        List all DNS records in a zone (raw API response).
+        
+        Args:
+            zone_id: Cloudflare zone ID
+            
+        Returns:
+            List of raw record dicts from API
+        """
+        result = self._request("GET", f"/zones/{zone_id}/dns_records")
+        return result.get("result", [])
+    
+    def delete_dns_record(self, zone_id: str, record_id: str) -> bool:
+        """
+        Delete a DNS record by ID.
+        
+        Args:
+            zone_id: Cloudflare zone ID
+            record_id: DNS record ID
+            
+        Returns:
+            True if deleted
+        """
+        self._request("DELETE", f"/zones/{zone_id}/dns_records/{record_id}")
+        return True

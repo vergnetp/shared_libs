@@ -69,9 +69,29 @@ async def execute_tool_call(tool_call: dict) -> ToolResult:
 
 
 async def execute_tool_calls(tool_calls: list[dict]) -> list[ToolResult]:
-    """Execute multiple tool calls."""
-    results = []
-    for tc in tool_calls:
-        result = await execute_tool_call(tc)
-        results.append(result)
-    return results
+    """Execute multiple tool calls in parallel."""
+    import asyncio
+    
+    if not tool_calls:
+        return []
+    
+    # Execute all tool calls concurrently
+    results = await asyncio.gather(
+        *[execute_tool_call(tc) for tc in tool_calls],
+        return_exceptions=True,
+    )
+    
+    # Convert exceptions to error results
+    final_results = []
+    for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            tc = tool_calls[i]
+            final_results.append(ToolResult(
+                tool_call_id=tc.get("id", f"error_{i}"),
+                content=f"Error: {str(result)}",
+                is_error=True,
+            ))
+        else:
+            final_results.append(result)
+    
+    return final_results

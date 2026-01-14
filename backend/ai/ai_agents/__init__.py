@@ -113,6 +113,7 @@ from .context import (
 from .store import (
     ThreadStore,
     MessageStore,
+    ThreadSafeMessageStore,
     AgentStore,
     UserContextStore,
 )
@@ -127,6 +128,19 @@ from .tools import (
 )
 
 from .runner import AgentRunner
+
+# Concurrency utilities for multi-agent safety
+from .concurrency import (
+    get_lock,
+    with_lock,
+    user_context_lock,
+    thread_lock,
+    file_lock,
+    LockManager,
+    get_lock_manager,
+    ThreadSafeTool,
+    thread_safe_tool,
+)
 
 from .limits import (
     RateLimiter,
@@ -178,7 +192,17 @@ from .testing import (
     get_attack_suite,
 )
 
-__version__ = "0.2.0"
+# Multi-agent orchestration
+from .orchestration import (
+    ParallelAgents,
+    parallel_chat,
+    Supervisor,
+    SupervisorConfig,
+    Pipeline,
+    Debate,
+)
+
+__version__ = "0.3.0"
 
 __all__ = [
     # Simple API
@@ -219,6 +243,7 @@ __all__ = [
     # Store
     "ThreadStore",
     "MessageStore",
+    "ThreadSafeMessageStore",
     "AgentStore",
     "UserContextStore",
     # Context
@@ -236,6 +261,16 @@ __all__ = [
     "execute_tool_calls",
     # Runner
     "AgentRunner",
+    # Concurrency (multi-agent safety)
+    "get_lock",
+    "with_lock",
+    "user_context_lock",
+    "thread_lock",
+    "file_lock",
+    "LockManager",
+    "get_lock_manager",
+    "ThreadSafeTool",
+    "thread_safe_tool",
     # Limits (optional Redis)
     "RateLimiter",
     "InMemoryBackend",
@@ -275,4 +310,11 @@ __all__ = [
     "AttackCategory",
     "ATTACK_SUITE",
     "get_attack_suite",
+    # Multi-agent orchestration
+    "ParallelAgents",
+    "parallel_chat",
+    "Supervisor",
+    "SupervisorConfig",
+    "Pipeline",
+    "Debate",
 ]

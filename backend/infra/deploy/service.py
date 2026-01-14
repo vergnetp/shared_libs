@@ -366,6 +366,10 @@ class DeploymentService:
                     successful_ips=successful_ips,
                 )
             
+            # Step 9: DNS cleanup - remove orphaned records pointing to non-existent IPs
+            if result.success and config.cloudflare_token and config.base_domain:
+                await self._cleanup_orphaned_dns(config)
+            
             # Summary
             self.log(f"{'═' * 50}")
             if len(successful) > 0:
@@ -789,6 +793,45 @@ class DeploymentService:
         except Exception as e:
             # Non-fatal - just log
             self.log(f"⚠️ Failed to tag droplets with service: {e}")
+    
+    async def _cleanup_orphaned_dns(self, config: MultiDeployConfig):
+        """
+        Clean up orphaned DNS records after deployment.
+        
+        Removes A records pointing to IPs that no longer exist in DigitalOcean.
+        This prevents DNS clutter from old/destroyed servers.
+        
+        Called automatically at the end of successful deployments.
+        """
+        try:
+            self.log(f"🧹 Checking for orphaned DNS records...")
+            
+            # Get all active droplet IPs from DO
+            all_droplets = self.do_client.list_droplets()
+            active_ips = set()
+            for d in all_droplets:
+                if d.ip:
+                    active_ips.add(d.ip)
+            
+            if not active_ips:
+                self.log(f"⚠️ No active droplets found, skipping DNS cleanup")
+                return
+            
+            # Use CloudflareClient to clean up orphaned records
+            from ..cloud.cloudflare import CloudflareClient
+            
+            cf = CloudflareClient(config.cloudflare_token)
+            result = cf.cleanup_orphaned_records(
+                zone=config.base_domain,
+                active_ips=active_ips,
+                log_fn=self.log,
+            )
+            
+            # Result is logged by CloudflareClient, nothing more to do
+            
+        except Exception as e:
+            # Non-fatal - deployment succeeded, cleanup is best-effort
+            self.log(f"⚠️ DNS cleanup failed: {e}")
     
     # =========================================================================
     # Server Collection

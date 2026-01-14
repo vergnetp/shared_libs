@@ -240,6 +240,204 @@ agent = Agent(..., memory_strategy="first_last", memory_params={"first": 2, "las
 agent = Agent(..., memory_strategy="token_window", memory_params={"max_tokens": 100000})
 ```
 
+## Instructor Integration (Structured Outputs)
+
+Optional integration with [Instructor](https://github.com/jxnl/instructor) for guaranteed structured outputs. Eliminates malformed JSON and XML parsing issues from Llama/Groq/Ollama.
+
+```bash
+pip install instructor pydantic
+```
+
+```python
+from ai_agents.providers import OpenAIProvider, enable_instructor, StructuredResponse
+
+# Wrap your provider
+provider = OpenAIProvider(api_key="...")
+provider = enable_instructor(provider)
+
+# Get guaranteed structured output
+result = await provider.complete_structured(
+    messages=[{"role": "user", "content": "What's 2+2?"}],
+    response_model=StructuredResponse,
+)
+
+# result.tool_calls is always valid - no XML parsing needed
+```
+
+See [providers/INSTRUCTOR.md](providers/INSTRUCTOR.md) for full documentation.
+
+## Parallel Tool Execution
+
+Tool calls are executed in parallel for faster multi-tool responses:
+
+```python
+# If model calls 3 tools simultaneously:
+# - search_documents("query1")
+# - search_documents("query2") 
+# - calculator("2+2")
+
+# All 3 run concurrently, not sequentially
+# Total time = max(tool_time), not sum(tool_times)
+```
+
+## Multi-Agent Orchestration
+
+Coordinate multiple agents for complex tasks.
+
+### Parallel Agents
+
+Run multiple agents on the same input concurrently:
+
+```python
+from ai_agents import Agent, ParallelAgents
+
+researcher = Agent(role="Research analyst", name="Researcher", ...)
+writer = Agent(role="Content writer", name="Writer", ...)
+
+parallel = ParallelAgents([researcher, writer])
+results = await parallel.chat("Analyze AI trends")
+
+for r in results.successful:
+    print(f"{r.agent_name}: {r.content[:100]}...")
+```
+
+### Supervisor Pattern
+
+A planner breaks down tasks and delegates to specialized workers:
+
+```python
+from ai_agents import Agent, Supervisor
+
+supervisor = Supervisor(
+    workers={
+        "Researcher": researcher,
+        "Writer": writer,
+        "Editor": editor,
+    },
+)
+
+result = await supervisor.run("Write a blog post about quantum computing")
+print(result.content)
+```
+
+### Pipeline
+
+Sequential agent processing chain:
+
+```python
+from ai_agents import Pipeline
+
+pipeline = Pipeline([researcher, writer, editor])
+result = await pipeline.run("Write about AI")
+
+# Output flows: researcher → writer → editor
+```
+
+### Debate
+
+Multiple agents discuss and reach conclusions:
+
+```python
+from ai_agents import Debate
+
+debate = Debate(
+    agents=[optimist, pessimist, pragmatist],
+    rounds=3,
+)
+
+result = await debate.run("Should we adopt AI in hiring?")
+print(result.conclusion)
+print(result.consensus_reached)
+```
+
+See [orchestration/README.md](orchestration/README.md) for full documentation.
+
+## Concurrency Safety
+
+When using multi-agent orchestration, the framework handles thread safety automatically:
+
+### What's Automatically Protected
+
+| Resource | Protection | Notes |
+|----------|------------|-------|
+| User Context | ✅ Auto-locked per user_id | `update_context` tool is safe |
+| Agent Instances | ✅ Validated | Duplicate instances rejected |
+| Tool Execution | ✅ Parallel safe | Each call is independent |
+| Thread Messages | ⚠️ Optional | Use `ThreadSafeMessageStore` if agents share threads |
+
+```python
+# User context updates are automatically locked
+# No race conditions when multiple agents update same user
+agent1.chat("My name is Phil")      # Acquires lock
+agent2.chat("I live in London")     # Waits for lock, then updates
+
+# Result: {"name": "Phil", "location": "London"} - no data loss
+```
+
+### Custom Tool Safety
+
+If your tools write to shared resources (database, files, cache, APIs), add the decorator:
+
+```python
+from ai_agents import thread_safe_tool, Tool
+
+@thread_safe_tool("database", key_arg="record_id")
+class UpdateDatabaseTool(Tool):
+    async def execute(self, record_id: str, data: dict):
+        # Automatically locked per record_id
+        await db.update(record_id, data)
+
+@thread_safe_tool("file", key_arg="path")
+class WriteFileTool(Tool):
+    async def execute(self, path: str, content: str):
+        await write_file(path, content)
+
+@thread_safe_tool("cache", key_arg="key") 
+class UpdateCacheTool(Tool):
+    async def execute(self, key: str, value: any):
+        shared_dict[key] = value
+```
+
+### Manual Locking
+
+For fine-grained control outside of tools:
+
+```python
+from ai_agents import get_lock, file_lock, user_context_lock, thread_lock
+
+# Generic named locks
+async with get_lock("my_resource", resource_id):
+    await do_something()
+
+# Convenience locks for common resources
+async with file_lock("/path/to/file"):
+    await write_file(...)
+
+async with user_context_lock(user_id):
+    await update_user(...)
+
+async with thread_lock(thread_id):
+    await add_message(...)
+```
+
+### Important: Single Process Only
+
+The locking mechanism uses `asyncio.Lock` which only works within a single Python process:
+
+```
+✅ Safe: Multiple agents in same process
+   Agent1, Agent2, Agent3 → shared asyncio.Lock → Database
+
+❌ Unsafe: Multiple processes
+   Process1 (Agent1) → Lock A ─┐
+   Process2 (Agent2) → Lock B ─┴→ Database (race condition!)
+```
+
+For multi-process deployments, use database-level locking:
+- PostgreSQL: `SELECT ... FOR UPDATE`
+- Redis: distributed locks (redlock)
+- Files: `fcntl.flock()`
+
 ## User Context (Persistent Memory)
 
 Remember information about users across conversations. Three tiers of flexibility:
@@ -315,11 +513,18 @@ ai_agents/
 ├── security.py         # Audit logging
 ├── testing.py          # Security audit / red team
 ├── definition.py       # AgentDefinition + templates
-├── providers/          # Anthropic, OpenAI, Ollama
+├── providers/          # Anthropic, OpenAI, Ollama, Groq
+│   ├── instructor_support.py  # Structured outputs (optional)
+│   └── INSTRUCTOR.md   # Instructor documentation
 ├── memory/             # Conversation history strategies
 ├── context/            # User context (persistent memory)
 ├── store/              # Thread, message, agent, context storage
-├── tools/              # Function calling (incl. update_context)
+├── tools/              # Function calling (parallel execution)
+├── orchestration/      # Multi-agent patterns
+│   ├── parallel.py     # Parallel agent execution
+│   ├── supervisor.py   # Supervisor + workers pattern
+│   ├── pipeline.py     # Sequential processing
+│   └── debate.py       # Discussion + consensus
 ├── limits/             # Rate limiting + job queue
 ├── guardrails/         # Injection detection
 └── workers/            # Background jobs
