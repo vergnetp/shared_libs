@@ -1,27 +1,27 @@
-"""LLM providers."""
+"""
+LLM providers.
+
+Refactored to use cloud.llm HTTP clients where possible:
+- AnthropicProvider → cloud.llm.AsyncAnthropicClient
+- OpenAIProvider → cloud.llm.AsyncOpenAICompatClient  
+- GroqProvider → cloud.llm.AsyncOpenAICompatClient (Groq base URL)
+
+SDK-based (complex state management):
+- OpenAIAssistantProvider → openai SDK (threads, runs, polling)
+- OllamaProvider → httpx directly (local server)
+"""
 
 from .base import LLMProvider
 from .anthropic import AnthropicProvider
-from .openai import OpenAIProvider, OpenAIAssistantProvider
+from .openai import OpenAIProvider
+from ._openai_assistant import OpenAIAssistantProvider
 from .ollama import OllamaProvider
 from .groq import GroqProvider
 from .cascading import CascadingProvider
 from .tinyroberta import TinyRobertaProvider
 from .registry import get_provider, register_provider, list_providers
 
-# Instructor support (optional - requires `pip install instructor`)
-from .instructor_support import (
-    enable_instructor,
-    is_instructor_available,
-    extract_tool_calls,
-    ToolCallModel,
-    ToolCallList,
-    StructuredResponse,
-    TextResponse,
-)
-
 __all__ = [
-    # Providers
     "LLMProvider",
     "AnthropicProvider",
     "OpenAIProvider",
@@ -33,12 +33,4 @@ __all__ = [
     "get_provider",
     "register_provider",
     "list_providers",
-    # Instructor support
-    "enable_instructor",
-    "is_instructor_available",
-    "extract_tool_calls",
-    "ToolCallModel",
-    "ToolCallList",
-    "StructuredResponse",
-    "TextResponse",
 ]

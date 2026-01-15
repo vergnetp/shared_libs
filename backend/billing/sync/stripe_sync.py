@@ -3,10 +3,14 @@ StripeSync - Syncs your DB entities to Stripe.
 
 Your DB is truth. This service pushes changes to Stripe
 and stores the returned Stripe IDs.
+
+Uses cloud.AsyncStripeClient for:
+- Proper async (non-blocking)
+- Automatic retries with exponential backoff
+- Circuit breaker for resilience
 """
 
 import uuid
-import stripe
 from typing import Dict, Any, Optional, List
 from datetime import datetime, timezone
 
@@ -42,8 +46,23 @@ class StripeSync:
     
     def __init__(self, config: BillingConfig):
         self.config = config
-        stripe.api_key = config.stripe.secret_key
-        stripe.api_version = config.stripe.api_version
+        self._client = None  # Lazy init
+    
+    def _get_client(self):
+        """Get or create AsyncStripeClient."""
+        if self._client is None:
+            from ...cloud import AsyncStripeClient
+            self._client = AsyncStripeClient(
+                api_key=self.config.stripe.secret_key,
+                api_version=self.config.stripe.api_version,
+            )
+        return self._client
+    
+    async def close(self):
+        """Close the Stripe client."""
+        if self._client:
+            await self._client.close()
+            self._client = None
     
     # ──────────────────────────────────────────────────────────────────
     # Product Sync
@@ -74,27 +93,32 @@ class StripeSync:
             if not product:
                 raise ValueError(f"Product {product_id} not found")
         
-        stripe_data = {
-            "name": product["name"],
-            "description": product.get("description") or "",
-            "active": product.get("active", True),
-            "metadata": {
-                "local_id": product["id"],
-                "slug": product["slug"],
-                **(product.get("metadata") or {}),
-            },
+        client = self._get_client()
+        
+        metadata = {
+            "local_id": product["id"],
+            "slug": product["slug"],
+            **(product.get("metadata") or {}),
         }
         
         if product.get("stripe_product_id"):
             # Update existing
-            stripe_product = stripe.Product.modify(
-                product["stripe_product_id"],
-                **stripe_data
+            await client.modify_product(
+                product_id=product["stripe_product_id"],
+                name=product["name"],
+                description=product.get("description") or "",
+                active=product.get("active", True),
+                metadata=metadata,
             )
         else:
             # Create new
-            stripe_product = stripe.Product.create(**stripe_data)
-            product["stripe_product_id"] = stripe_product.id
+            stripe_product = await client.create_product(
+                name=product["name"],
+                description=product.get("description") or "",
+                active=product.get("active", True),
+                metadata=metadata,
+            )
+            product["stripe_product_id"] = stripe_product["id"]
             await conn.save_entity(BillingService.ENTITY_PRODUCT, product)
         
         return product
@@ -139,37 +163,39 @@ class StripeSync:
         if not product.get("stripe_product_id"):
             product = await self.sync_product(conn, billing, product=product)
         
+        client = self._get_client()
+        
         if price.get("stripe_price_id"):
             # Prices are immutable - only update active status
-            stripe_price = stripe.Price.modify(
-                price["stripe_price_id"],
+            await client.modify_price(
+                price_id=price["stripe_price_id"],
                 active=price.get("active", True),
             )
         else:
             # Create new price
-            stripe_data = {
-                "product": product["stripe_product_id"],
-                "currency": price["currency"],
-                "unit_amount": price["amount_cents"],
-                "active": price.get("active", True),
-                "metadata": {
-                    "local_id": price["id"],
-                    **(price.get("metadata") or {}),
-                },
+            metadata = {
+                "local_id": price["id"],
+                **(price.get("metadata") or {}),
             }
             
-            # Add recurring if not one-time
+            # Build recurring dict if not one-time
+            recurring = None
             if price.get("interval"):
-                stripe_data["recurring"] = {
+                recurring = {
                     "interval": price["interval"],
                     "interval_count": price.get("interval_count", 1),
                 }
             
-            if price.get("nickname"):
-                stripe_data["nickname"] = price["nickname"]
-            
-            stripe_price = stripe.Price.create(**stripe_data)
-            price["stripe_price_id"] = stripe_price.id
+            stripe_price = await client.create_price(
+                product_id=product["stripe_product_id"],
+                unit_amount=price["amount_cents"],
+                currency=price["currency"],
+                recurring=recurring,
+                nickname=price.get("nickname"),
+                active=price.get("active", True),
+                metadata=metadata,
+            )
+            price["stripe_price_id"] = stripe_price["id"]
             await conn.save_entity(BillingService.ENTITY_PRICE, price)
         
         return price
@@ -191,26 +217,30 @@ class StripeSync:
         if not customer:
             raise ValueError(f"Customer {customer_id} not found")
         
-        stripe_data = {
-            "email": customer["email"],
-            "name": customer.get("name"),
-            "metadata": {
-                "local_id": customer["id"],
-                "user_id": customer["user_id"],
-                **(customer.get("metadata") or {}),
-            },
+        client = self._get_client()
+        
+        metadata = {
+            "local_id": customer["id"],
+            "user_id": customer["user_id"],
+            **(customer.get("metadata") or {}),
         }
         
         if customer.get("stripe_customer_id"):
             # Update existing
-            stripe_customer = stripe.Customer.modify(
-                customer["stripe_customer_id"],
-                **stripe_data
+            await client.modify_customer(
+                customer_id=customer["stripe_customer_id"],
+                email=customer["email"],
+                name=customer.get("name"),
+                metadata=metadata,
             )
         else:
             # Create new
-            stripe_customer = stripe.Customer.create(**stripe_data)
-            customer["stripe_customer_id"] = stripe_customer.id
+            stripe_customer = await client.create_customer(
+                email=customer["email"],
+                name=customer.get("name"),
+                metadata=metadata,
+            )
+            customer["stripe_customer_id"] = stripe_customer["id"]
             await conn.save_entity(BillingService.ENTITY_CUSTOMER, customer)
         
         return customer
@@ -224,12 +254,12 @@ class StripeSync:
         conn,
         billing: BillingService,
         subscription_id: str,
-        payment_method_id: str = None,
     ) -> Dict[str, Any]:
         """
         Sync a subscription to Stripe.
         
-        For new subscriptions, requires a payment method.
+        If subscription has stripe_subscription_id, updates Stripe.
+        Otherwise creates in Stripe.
         """
         sub = await billing.get_subscription(conn, subscription_id)
         if not sub:
@@ -237,58 +267,56 @@ class StripeSync:
         
         # Ensure customer is synced
         customer = await billing.get_customer(conn, sub["customer_id"])
+        if not customer:
+            raise ValueError(f"Customer {sub['customer_id']} not found")
+        
         if not customer.get("stripe_customer_id"):
             customer = await self.sync_customer(conn, billing, customer["id"])
         
         # Ensure price is synced
         price = await billing.get_price(conn, sub["price_id"])
+        if not price:
+            raise ValueError(f"Price {sub['price_id']} not found")
+        
         if not price.get("stripe_price_id"):
-            price = await self.sync_price(conn, billing, price["id"])
+            price = await self.sync_price(conn, billing, price=price)
+        
+        client = self._get_client()
         
         if sub.get("stripe_subscription_id"):
-            # Update existing subscription
-            update_data = {}
+            # Update existing - fetch current state first
+            stripe_sub = await client.retrieve_subscription(sub["stripe_subscription_id"])
             
-            if sub.get("cancel_at_period_end"):
-                update_data["cancel_at_period_end"] = True
-            
-            if sub.get("prorate_on_next_sync"):
-                # Handle plan change
-                stripe_sub = stripe.Subscription.retrieve(sub["stripe_subscription_id"])
-                update_data["items"] = [{
-                    "id": stripe_sub["items"]["data"][0]["id"],
-                    "price": price["stripe_price_id"],
-                }]
-                update_data["proration_behavior"] = "create_prorations"
-                sub.pop("prorate_on_next_sync", None)
-            
-            if update_data:
-                stripe.Subscription.modify(
-                    sub["stripe_subscription_id"],
-                    **update_data
+            # Handle cancellation
+            if sub.get("status") == "cancelled" and stripe_sub.get("status") != "canceled":
+                await client.modify_subscription(
+                    subscription_id=sub["stripe_subscription_id"],
+                    cancel_at_period_end=True,
                 )
         else:
-            # Create new subscription
-            stripe_data = {
-                "customer": customer["stripe_customer_id"],
-                "items": [{"price": price["stripe_price_id"]}],
-                "metadata": {
+            # Create new subscription in Stripe
+            stripe_sub = await client.create_subscription(
+                customer_id=customer["stripe_customer_id"],
+                items=[{"price": price["stripe_price_id"]}],
+                metadata={
                     "local_id": sub["id"],
                     **(sub.get("metadata") or {}),
                 },
-            }
+            )
             
-            # Add trial if specified
-            if sub.get("trial_end"):
-                trial_end = datetime.fromisoformat(sub["trial_end"].replace("Z", "+00:00"))
-                stripe_data["trial_end"] = int(trial_end.timestamp())
+            # Update local with Stripe data
+            sub["stripe_subscription_id"] = stripe_sub["id"]
+            sub["status"] = stripe_sub["status"]
             
-            # Set payment method if provided
-            if payment_method_id:
-                stripe_data["default_payment_method"] = payment_method_id
+            if stripe_sub.get("current_period_start"):
+                sub["current_period_start"] = datetime.fromtimestamp(
+                    stripe_sub["current_period_start"], tz=timezone.utc
+                ).isoformat()
+            if stripe_sub.get("current_period_end"):
+                sub["current_period_end"] = datetime.fromtimestamp(
+                    stripe_sub["current_period_end"], tz=timezone.utc
+                ).isoformat()
             
-            stripe_sub = stripe.Subscription.create(**stripe_data)
-            sub["stripe_subscription_id"] = stripe_sub.id
             await conn.save_entity(BillingService.ENTITY_SUBSCRIPTION, sub)
         
         return sub
@@ -300,103 +328,108 @@ class StripeSync:
         subscription_id: str,
         immediately: bool = False,
     ) -> Dict[str, Any]:
-        """Cancel subscription in Stripe."""
+        """
+        Cancel subscription in Stripe.
+        
+        Args:
+            immediately: If True, cancel now. If False, cancel at period end.
+        """
         sub = await billing.get_subscription(conn, subscription_id)
         if not sub:
             raise ValueError(f"Subscription {subscription_id} not found")
         
         if not sub.get("stripe_subscription_id"):
-            return sub  # Not synced to Stripe yet
+            return sub  # Not synced, nothing to do
+        
+        client = self._get_client()
         
         if immediately:
-            stripe.Subscription.delete(sub["stripe_subscription_id"])
+            stripe_sub = await client.cancel_subscription(
+                subscription_id=sub["stripe_subscription_id"],
+                invoice_now=False,
+                prorate=True,
+            )
         else:
-            stripe.Subscription.modify(
-                sub["stripe_subscription_id"],
-                cancel_at_period_end=True
+            stripe_sub = await client.modify_subscription(
+                subscription_id=sub["stripe_subscription_id"],
+                cancel_at_period_end=True,
             )
         
+        # Update local state
+        sub["status"] = stripe_sub.get("status", sub["status"])
+        sub["cancel_at_period_end"] = stripe_sub.get("cancel_at_period_end", False)
+        
+        if stripe_sub.get("canceled_at"):
+            sub["cancelled_at"] = datetime.fromtimestamp(
+                stripe_sub["canceled_at"], tz=timezone.utc
+            ).isoformat()
+        
+        await conn.save_entity(BillingService.ENTITY_SUBSCRIPTION, sub)
         return sub
     
-    async def change_subscription_plan(
+    async def update_subscription_price(
         self,
         conn,
         billing: BillingService,
         subscription_id: str,
         new_price_id: str,
-        proration_behavior: str = "always_invoice",
+        proration_behavior: str = "create_prorations",
     ) -> Dict[str, Any]:
         """
-        Change subscription to a different plan/price.
-        
-        Handles upgrades and downgrades with proration.
-        Also cancels any pending cancellation (reactivates).
+        Change subscription to a different price (upgrade/downgrade).
         
         Args:
-            subscription_id: Your subscription ID
-            new_price_id: Your new price ID
-            proration_behavior: How to handle proration
-                - "always_invoice" (default): Charge/credit difference immediately
-                - "create_prorations": Add to next invoice
-                - "none": No proration, new price starts next period
-        
-        Returns:
-            Updated subscription
+            proration_behavior: 'create_prorations', 'none', or 'always_invoice'
         """
         sub = await billing.get_subscription(conn, subscription_id)
         if not sub:
             raise ValueError(f"Subscription {subscription_id} not found")
         
-        old_price_id = sub.get("price_id")
+        if not sub.get("stripe_subscription_id"):
+            raise ValueError(f"Subscription {subscription_id} not synced to Stripe")
         
+        # Ensure new price is synced
         new_price = await billing.get_price(conn, new_price_id)
         if not new_price:
             raise ValueError(f"Price {new_price_id} not found")
         
-        # Ensure price is synced to Stripe
         if not new_price.get("stripe_price_id"):
-            new_price = await self.sync_price(conn, billing, new_price_id)
+            new_price = await self.sync_price(conn, billing, price=new_price)
         
-        if not sub.get("stripe_subscription_id"):
-            raise ValueError("Subscription not synced to Stripe")
+        client = self._get_client()
         
-        # Get current Stripe subscription to find item ID
-        stripe_sub = stripe.Subscription.retrieve(sub["stripe_subscription_id"])
+        # Get current subscription to find item ID
+        stripe_sub = await client.retrieve_subscription(sub["stripe_subscription_id"])
         
-        # Update the subscription item to new price
-        updated_stripe_sub = stripe.Subscription.modify(
-            sub["stripe_subscription_id"],
+        if not stripe_sub.get("items", {}).get("data"):
+            raise ValueError("No subscription items found")
+        
+        item_id = stripe_sub["items"]["data"][0]["id"]
+        
+        # Update subscription with new price
+        updated_sub = await client.modify_subscription(
+            subscription_id=sub["stripe_subscription_id"],
             items=[{
-                "id": stripe_sub["items"]["data"][0]["id"],
+                "id": item_id,
                 "price": new_price["stripe_price_id"],
             }],
             proration_behavior=proration_behavior,
-            # Remove any pending cancellation
-            cancel_at_period_end=False,
         )
         
-        # Update local subscription
+        # Update local
         sub["price_id"] = new_price_id
-        sub["cancel_at_period_end"] = False
-        sub["cancelled_at"] = None
-        sub["status"] = updated_stripe_sub.status
-        sub["current_period_start"] = datetime.fromtimestamp(
-            updated_stripe_sub.current_period_start, tz=timezone.utc
-        ).isoformat()
-        sub["current_period_end"] = datetime.fromtimestamp(
-            updated_stripe_sub.current_period_end, tz=timezone.utc
-        ).isoformat()
+        sub["status"] = updated_sub.get("status", sub["status"])
         
-        await conn.save_entity(
-            BillingService.ENTITY_SUBSCRIPTION, 
-            sub,
-            comment=f"Plan changed: {old_price_id} → {new_price_id}"
-        )
+        if updated_sub.get("current_period_end"):
+            sub["current_period_end"] = datetime.fromtimestamp(
+                updated_sub["current_period_end"], tz=timezone.utc
+            ).isoformat()
         
+        await conn.save_entity(BillingService.ENTITY_SUBSCRIPTION, sub)
         return sub
     
     # ──────────────────────────────────────────────────────────────────
-    # Payment Methods
+    # Payment Method
     # ──────────────────────────────────────────────────────────────────
     
     async def attach_payment_method(
@@ -405,51 +438,41 @@ class StripeSync:
         billing: BillingService,
         customer_id: str,
         payment_method_id: str,
-        set_default: bool = True,
+        set_as_default: bool = True,
     ) -> Dict[str, Any]:
         """
-        Attach a Stripe payment method to a customer.
+        Attach a payment method to a customer.
         
         Args:
-            conn: Database connection
-            billing: BillingService instance
-            customer_id: Your customer ID
             payment_method_id: Stripe PaymentMethod ID (from frontend)
-            set_default: Whether to set as default payment method
+            set_as_default: If True, set as default payment method
         """
         customer = await billing.get_customer(conn, customer_id)
         if not customer:
             raise ValueError(f"Customer {customer_id} not found")
         
-        # Ensure customer is synced
         if not customer.get("stripe_customer_id"):
-            customer = await self.sync_customer(conn, billing, customer_id)
+            customer = await self.sync_customer(conn, billing, customer["id"])
         
-        # Attach payment method
-        stripe.PaymentMethod.attach(
-            payment_method_id,
-            customer=customer["stripe_customer_id"],
+        client = self._get_client()
+        
+        # Attach payment method to customer
+        await client.attach_payment_method(
+            payment_method_id=payment_method_id,
+            customer_id=customer["stripe_customer_id"],
         )
         
-        if set_default:
-            stripe.Customer.modify(
-                customer["stripe_customer_id"],
+        # Set as default if requested
+        if set_as_default:
+            await client.modify_customer(
+                customer_id=customer["stripe_customer_id"],
                 invoice_settings={"default_payment_method": payment_method_id},
             )
         
-        # Store in your DB
-        pm = {
-            "id": payment_method_id,
-            "customer_id": customer_id,
-            "stripe_payment_method_id": payment_method_id,
-            "is_default": set_default,
-        }
-        await conn.save_entity(BillingService.ENTITY_PAYMENT_METHOD, pm)
-        
-        return pm
+        return customer
     
     # ──────────────────────────────────────────────────────────────────
-    # Checkout Session (All Product Types)
+    # Checkout Sessions (Stripe-hosted payment page)
     # ──────────────────────────────────────────────────────────────────
     
     async def create_checkout_session(
@@ -460,209 +483,72 @@ class StripeSync:
         price_id: str,
         success_url: str,
         cancel_url: str,
-        mode: str = None,  # Auto-detect if None
+        mode: str = "subscription",
         quantity: int = 1,
-        collect_shipping: bool = None,  # Auto-detect if None
-        shipping_countries: List[str] = None,  # e.g., ["US", "CA", "GB"]
-        metadata: Dict[str, Any] = None,
-    ) -> str:
+        trial_days: int = None,
+        allow_promotion_codes: bool = False,
+        metadata: Dict[str, str] = None,
+    ) -> Dict[str, Any]:
         """
         Create a Stripe Checkout session.
         
-        Supports subscriptions, one-time purchases, and physical products.
+        Returns session with 'url' to redirect user to.
         
         Args:
-            customer_id: Your customer ID
-            price_id: Your price ID
-            success_url: Redirect after successful payment
-            cancel_url: Redirect if cancelled
-            mode: "subscription" or "payment" (auto-detected from price)
-            quantity: Number of items (default 1)
-            collect_shipping: Collect shipping address (auto for physical)
-            shipping_countries: Allowed shipping countries
-            metadata: Additional metadata for the session
-        
-        Returns:
-            Checkout session URL to redirect user to
+            mode: 'subscription', 'payment', or 'setup'
+            trial_days: Free trial period (subscription mode only)
         """
+        # Ensure customer is synced
         customer = await billing.get_customer(conn, customer_id)
         if not customer:
             raise ValueError(f"Customer {customer_id} not found")
         
         if not customer.get("stripe_customer_id"):
-            customer = await self.sync_customer(conn, billing, customer_id)
+            customer = await self.sync_customer(conn, billing, customer["id"])
         
+        # Ensure price is synced
         price = await billing.get_price(conn, price_id)
         if not price:
             raise ValueError(f"Price {price_id} not found")
         
         if not price.get("stripe_price_id"):
-            price = await self.sync_price(conn, billing, price_id)
+            price = await self.sync_price(conn, billing, price=price)
         
-        product = await billing.get_product(conn, price["product_id"])
-        
-        # Auto-detect mode from price
-        if mode is None:
-            if price.get("interval"):
-                mode = "subscription"
-            else:
-                mode = "payment"
-        
-        # Auto-detect shipping from product type
-        if collect_shipping is None:
-            collect_shipping = product.get("shippable", False) or product.get("product_type") == "physical"
+        client = self._get_client()
         
         # Build checkout params
-        checkout_params = {
-            "customer": customer["stripe_customer_id"],
-            "line_items": [{"price": price["stripe_price_id"], "quantity": quantity}],
-            "mode": mode,
-            "success_url": success_url,
-            "cancel_url": cancel_url,
-            "metadata": {
-                "local_customer_id": customer_id,
-                "local_price_id": price_id,
-                "local_product_id": price["product_id"],
-                "product_type": product.get("product_type", "subscription"),
-                **(metadata or {}),
-            },
+        checkout_metadata = {
+            "local_customer_id": customer_id,
+            "local_price_id": price_id,
+            "product_type": mode,
+            **(metadata or {}),
         }
         
-        # Add shipping if needed
-        if collect_shipping:
-            checkout_params["shipping_address_collection"] = {
-                "allowed_countries": shipping_countries or ["US", "CA", "GB", "AU", "DE", "FR", "NL"],
-            }
+        # Subscription-specific params
+        subscription_data = None
+        if mode == "subscription" and trial_days:
+            subscription_data = {"trial_period_days": trial_days}
         
-        session = stripe.checkout.Session.create(**checkout_params)
-        
-        return session.url
-    
-    async def verify_checkout_session(
-        self,
-        conn,
-        billing: BillingService,
-        session_id: str,
-    ) -> Dict[str, Any]:
-        """
-        Verify and fulfill a checkout session after redirect.
-        
-        Called when user returns from Stripe Checkout. Creates local
-        subscription/order if payment succeeded.
-        
-        Args:
-            session_id: Stripe checkout session ID (from redirect URL)
-            
-        Returns:
-            Dict with status and created subscription/order
-        """
-        # Fetch session with expanded data
-        session = stripe.checkout.Session.retrieve(
-            session_id,
-            expand=["subscription", "line_items", "customer"],
+        session = await client.create_checkout_session(
+            customer_id=customer["stripe_customer_id"],
+            line_items=[{
+                "price": price["stripe_price_id"],
+                "quantity": quantity,
+            }],
+            mode=mode,
+            success_url=success_url,
+            cancel_url=cancel_url,
+            allow_promotion_codes=allow_promotion_codes,
+            subscription_data=subscription_data,
+            metadata=checkout_metadata,
         )
         
-        # Check payment status
-        if session.payment_status != "paid" and session.status != "complete":
-            return {
-                "status": "pending",
-                "payment_status": session.payment_status,
-                "session_status": session.status,
-            }
-        
-        # Get metadata (contains our local IDs)
-        metadata = session.get("metadata", {})
-        local_customer_id = metadata.get("local_customer_id")
-        local_price_id = metadata.get("local_price_id")
-        product_type = metadata.get("product_type", "subscription")
-        
-        result = {
-            "status": "success",
-            "mode": session.mode,
-            "payment_status": session.payment_status,
-        }
-        
-        # Handle subscription
-        if session.mode == "subscription" and session.subscription:
-            stripe_sub = session.subscription
-            if isinstance(stripe_sub, str):
-                stripe_sub = stripe.Subscription.retrieve(stripe_sub)
-            
-            # Check if we already have this subscription
-            existing = await conn.find_entities(
-                BillingService.ENTITY_SUBSCRIPTION,
-                filters={"stripe_subscription_id": stripe_sub.id},
-                limit=1,
-            )
-            
-            if existing:
-                result["subscription_id"] = existing[0]["id"]
-                result["created"] = False
-            else:
-                # Create local subscription
-                sub = {
-                    "id": str(uuid.uuid4()),
-                    "customer_id": local_customer_id,
-                    "price_id": local_price_id,
-                    "status": stripe_sub.status,
-                    "stripe_subscription_id": stripe_sub.id,
-                    "current_period_start": datetime.fromtimestamp(
-                        stripe_sub.current_period_start, tz=timezone.utc
-                    ).isoformat(),
-                    "current_period_end": datetime.fromtimestamp(
-                        stripe_sub.current_period_end, tz=timezone.utc
-                    ).isoformat(),
-                    "cancel_at_period_end": stripe_sub.cancel_at_period_end,
-                    "metadata": {"created_from": "checkout_verify"},
-                }
-                
-                await conn.save_entity(
-                    BillingService.ENTITY_SUBSCRIPTION, 
-                    sub,
-                    comment=f"Subscription created from checkout (price: {local_price_id})"
-                )
-                result["subscription_id"] = sub["id"]
-                result["created"] = True
-        
-        # Handle one-time payment (order)
-        elif session.mode == "payment":
-            # Check if order exists
-            existing = await conn.find_entities(
-                BillingService.ENTITY_ORDER,
-                filters={"stripe_session_id": session.id},
-                limit=1,
-            )
-            
-            if existing:
-                result["order_id"] = existing[0]["id"]
-                result["created"] = False
-            else:
-                # Get line items for order details
-                line_items = session.line_items.data if session.line_items else []
-                
-                order = {
-                    "id": str(uuid.uuid4()),
-                    "customer_id": local_customer_id,
-                    "price_id": local_price_id,
-                    "status": "paid",
-                    "stripe_session_id": session.id,
-                    "stripe_payment_intent_id": session.payment_intent,
-                    "amount_total": session.amount_total,
-                    "currency": session.currency,
-                    "quantity": line_items[0].quantity if line_items else 1,
-                    "shipping_address": dict(session.shipping_details) if session.shipping_details else None,
-                    "metadata": {"created_from": "checkout_verify"},
-                }
-                
-                await conn.save_entity(
-                    BillingService.ENTITY_ORDER, 
-                    order,
-                    comment=f"Order created from checkout (price: {local_price_id})"
-                )
-                result["order_id"] = order["id"]
-                result["created"] = True
-        
-        return result
+        return session
+    
+    async def get_checkout_session(self, session_id: str) -> Dict[str, Any]:
+        """Retrieve a checkout session by ID."""
+        client = self._get_client()
+        return await client.retrieve_checkout_session(session_id)
     
     # ──────────────────────────────────────────────────────────────────
     # Customer Portal
@@ -678,10 +564,7 @@ class StripeSync:
         """
         Create a Stripe Customer Portal session.
         
-        Lets customers manage their subscription, payment methods, etc.
-        
-        Returns:
-            Portal URL to redirect user to
+        Returns the portal URL for redirect.
         """
         customer = await billing.get_customer(conn, customer_id)
         if not customer:
@@ -690,12 +573,14 @@ class StripeSync:
         if not customer.get("stripe_customer_id"):
             raise ValueError(f"Customer {customer_id} not synced to Stripe")
         
-        session = stripe.billing_portal.Session.create(
-            customer=customer["stripe_customer_id"],
+        client = self._get_client()
+        
+        session = await client.create_portal_session(
+            customer_id=customer["stripe_customer_id"],
             return_url=return_url,
         )
         
-        return session.url
+        return session["url"]
     
     # ──────────────────────────────────────────────────────────────────
     # Reconciliation
@@ -720,21 +605,24 @@ class StripeSync:
         if not sub.get("stripe_subscription_id"):
             return sub  # Not synced yet
         
-        stripe_sub = stripe.Subscription.retrieve(sub["stripe_subscription_id"])
+        client = self._get_client()
+        stripe_sub = await client.retrieve_subscription(sub["stripe_subscription_id"])
         
         # Update local state from Stripe
-        sub["status"] = stripe_sub.status
-        sub["current_period_start"] = datetime.fromtimestamp(
-            stripe_sub.current_period_start, tz=timezone.utc
-        ).isoformat()
-        sub["current_period_end"] = datetime.fromtimestamp(
-            stripe_sub.current_period_end, tz=timezone.utc
-        ).isoformat()
-        sub["cancel_at_period_end"] = stripe_sub.cancel_at_period_end
+        sub["status"] = stripe_sub["status"]
+        sub["cancel_at_period_end"] = stripe_sub.get("cancel_at_period_end", False)
         
-        if stripe_sub.canceled_at:
+        if stripe_sub.get("current_period_start"):
+            sub["current_period_start"] = datetime.fromtimestamp(
+                stripe_sub["current_period_start"], tz=timezone.utc
+            ).isoformat()
+        if stripe_sub.get("current_period_end"):
+            sub["current_period_end"] = datetime.fromtimestamp(
+                stripe_sub["current_period_end"], tz=timezone.utc
+            ).isoformat()
+        if stripe_sub.get("canceled_at"):
             sub["cancelled_at"] = datetime.fromtimestamp(
-                stripe_sub.canceled_at, tz=timezone.utc
+                stripe_sub["canceled_at"], tz=timezone.utc
             ).isoformat()
         
         await conn.save_entity(BillingService.ENTITY_SUBSCRIPTION, sub)
@@ -783,18 +671,17 @@ class StripeSync:
         Returns:
             Dict with created subscription/order info
         """
-        # Fetch session from Stripe with expanded data
-        session = stripe.checkout.Session.retrieve(
-            session_id,
-            expand=["subscription", "line_items"]
-        )
+        client = self._get_client()
+        
+        # Fetch session from Stripe
+        session = await client.retrieve_checkout_session(session_id)
         
         # Verify payment completed
-        if session.payment_status != "paid" and session.status != "complete":
+        if session.get("payment_status") != "paid" and session.get("status") != "complete":
             return {
                 "status": "pending",
-                "payment_status": session.payment_status,
-                "session_status": session.status,
+                "payment_status": session.get("payment_status"),
+                "session_status": session.get("status"),
             }
         
         metadata = session.get("metadata", {})
@@ -806,11 +693,13 @@ class StripeSync:
             return {"status": "error", "error": "Missing metadata in session"}
         
         # Handle subscription mode
-        if session.mode == "subscription" and session.subscription:
+        if session.get("mode") == "subscription" and session.get("subscription"):
+            stripe_sub_id = session["subscription"]
+            
             # Check if we already have this subscription
             existing = await conn.find_entities(
                 BillingService.ENTITY_SUBSCRIPTION,
-                filters={"stripe_subscription_id": session.subscription},
+                filters={"stripe_subscription_id": stripe_sub_id},
                 limit=1
             )
             
@@ -822,24 +711,26 @@ class StripeSync:
                 }
             
             # Fetch full subscription details from Stripe
-            stripe_sub = stripe.Subscription.retrieve(session.subscription)
+            stripe_sub = await client.retrieve_subscription(stripe_sub_id)
             
             # Create local subscription
-            import uuid
             sub = {
                 "id": str(uuid.uuid4()),
                 "customer_id": local_customer_id,
                 "price_id": local_price_id,
-                "status": stripe_sub.status,
-                "stripe_subscription_id": session.subscription,
-                "current_period_start": datetime.fromtimestamp(
-                    stripe_sub.current_period_start, tz=timezone.utc
-                ).isoformat(),
-                "current_period_end": datetime.fromtimestamp(
-                    stripe_sub.current_period_end, tz=timezone.utc
-                ).isoformat(),
-                "cancel_at_period_end": stripe_sub.cancel_at_period_end,
+                "status": stripe_sub["status"],
+                "stripe_subscription_id": stripe_sub_id,
+                "cancel_at_period_end": stripe_sub.get("cancel_at_period_end", False),
             }
+            
+            if stripe_sub.get("current_period_start"):
+                sub["current_period_start"] = datetime.fromtimestamp(
+                    stripe_sub["current_period_start"], tz=timezone.utc
+                ).isoformat()
+            if stripe_sub.get("current_period_end"):
+                sub["current_period_end"] = datetime.fromtimestamp(
+                    stripe_sub["current_period_end"], tz=timezone.utc
+                ).isoformat()
             
             await conn.save_entity(BillingService.ENTITY_SUBSCRIPTION, sub)
             
@@ -850,7 +741,7 @@ class StripeSync:
             }
         
         # Handle one-time payment mode
-        elif session.mode == "payment":
+        elif session.get("mode") == "payment":
             # Check if we already have this order
             existing = await conn.find_entities(
                 BillingService.ENTITY_ORDER,
@@ -868,23 +759,22 @@ class StripeSync:
             price = await billing.get_price(conn, local_price_id)
             
             # Create order
-            import uuid
             order = {
                 "id": str(uuid.uuid4()),
                 "customer_id": local_customer_id,
                 "price_id": local_price_id,
                 "status": "paid",
-                "amount_cents": price["amount_cents"] if price else session.amount_total,
-                "currency": price["currency"] if price else session.currency,
+                "amount_cents": price["amount_cents"] if price else session.get("amount_total"),
+                "currency": price["currency"] if price else session.get("currency"),
                 "stripe_session_id": session_id,
-                "stripe_payment_intent_id": session.payment_intent,
+                "stripe_payment_intent_id": session.get("payment_intent"),
                 "product_type": product_type,
             }
             
             # Add shipping if collected
-            if session.shipping_details:
-                order["shipping_name"] = session.shipping_details.get("name")
-                order["shipping_address"] = session.shipping_details.get("address", {})
+            if session.get("shipping_details"):
+                order["shipping_name"] = session["shipping_details"].get("name")
+                order["shipping_address"] = session["shipping_details"].get("address", {})
             
             await conn.save_entity(BillingService.ENTITY_ORDER, order)
             
@@ -894,4 +784,4 @@ class StripeSync:
                 "order_id": order["id"],
             }
         
-        return {"status": "unknown_mode", "mode": session.mode}
+        return {"status": "unknown_mode", "mode": session.get("mode")}

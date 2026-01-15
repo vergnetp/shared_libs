@@ -2,9 +2,11 @@
 Webhook handlers for Stripe events.
 
 Stripe sends events, we update our DB (the golden source).
+
+Note: Uses Stripe SDK for webhook signature verification only.
+SDK import is lazy (inside functions) to avoid loading when webhooks aren't used.
 """
 
-import stripe
 from typing import Dict, Any, Optional, Callable
 from datetime import datetime, timezone
 
@@ -37,7 +39,6 @@ class WebhookHandler:
     
     def __init__(self, config: BillingConfig):
         self.config = config
-        stripe.api_key = config.stripe.secret_key
         
         # Event handlers registry
         self._handlers: Dict[str, Callable] = {
@@ -65,13 +66,17 @@ class WebhookHandler:
             "checkout.session.completed": self._handle_checkout_completed,
         }
     
-    def verify_signature(self, payload: bytes, signature: str) -> stripe.Event:
+    def verify_signature(self, payload: bytes, signature: str):
         """
         Verify webhook signature and construct event.
         
         Raises:
             stripe.error.SignatureVerificationError: If signature is invalid
         """
+        # Lazy import - only load SDK when webhooks are actually used
+        import stripe
+        stripe.api_key = self.config.stripe.secret_key
+        
         return stripe.Webhook.construct_event(
             payload,
             signature,
@@ -100,8 +105,12 @@ class WebhookHandler:
         """
         try:
             event = self.verify_signature(payload, signature)
-        except stripe.error.SignatureVerificationError as e:
-            return {"status": "error", "error": "Invalid signature", "detail": str(e)}
+        except Exception as e:
+            # Catch SignatureVerificationError without importing at module level
+            error_name = type(e).__name__
+            if "SignatureVerification" in error_name:
+                return {"status": "error", "error": "Invalid signature", "detail": str(e)}
+            raise
         
         event_type = event.type
         event_data = event.data.object
@@ -211,11 +220,12 @@ class WebhookHandler:
         stripe_sub: Dict[str, Any],
         billing: BillingService,
     ) -> Dict[str, Any]:
-        """Handle trial_will_end event (3 days before trial ends)."""
+        """Handle subscription.trial_will_end event."""
         sub = await self._find_subscription_by_stripe_id(conn, stripe_sub["id"])
         if not sub:
             return {"action": "ignored", "reason": "subscription not found"}
         
+        # Just log - actual status change comes from subscription.updated
         return {
             "subscription_id": sub["id"],
             "action": "trial_ending",
@@ -225,6 +235,36 @@ class WebhookHandler:
     # ──────────────────────────────────────────────────────────────────
     # Invoice Handlers
     # ──────────────────────────────────────────────────────────────────
+    
+    async def _handle_invoice_paid(
+        self,
+        conn,
+        stripe_invoice: Dict[str, Any],
+        billing: BillingService,
+    ) -> Dict[str, Any]:
+        """Handle invoice.payment_succeeded event."""
+        invoice = await self._upsert_invoice(conn, stripe_invoice, billing)
+        return {"invoice_id": invoice["id"], "action": "paid"}
+    
+    async def _handle_invoice_failed(
+        self,
+        conn,
+        stripe_invoice: Dict[str, Any],
+        billing: BillingService,
+    ) -> Dict[str, Any]:
+        """Handle invoice.payment_failed event."""
+        invoice = await self._upsert_invoice(conn, stripe_invoice, billing)
+        
+        # Mark subscription as past_due if applicable
+        if stripe_invoice.get("subscription"):
+            sub = await self._find_subscription_by_stripe_id(
+                conn, stripe_invoice["subscription"]
+            )
+            if sub:
+                sub["status"] = SubscriptionStatus.PAST_DUE.value
+                await conn.save_entity(BillingService.ENTITY_SUBSCRIPTION, sub)
+        
+        return {"invoice_id": invoice["id"], "action": "payment_failed"}
     
     async def _handle_invoice_created(
         self,
@@ -246,52 +286,6 @@ class WebhookHandler:
         invoice = await self._upsert_invoice(conn, stripe_invoice, billing)
         return {"invoice_id": invoice["id"], "action": "finalized"}
     
-    async def _handle_invoice_paid(
-        self,
-        conn,
-        stripe_invoice: Dict[str, Any],
-        billing: BillingService,
-    ) -> Dict[str, Any]:
-        """Handle invoice.payment_succeeded event."""
-        invoice = await self._upsert_invoice(conn, stripe_invoice, billing)
-        invoice["status"] = "paid"
-        invoice["paid_at"] = datetime.now(timezone.utc).isoformat()
-        
-        await conn.save_entity(BillingService.ENTITY_INVOICE, invoice)
-        
-        if stripe_invoice.get("subscription"):
-            sub = await self._find_subscription_by_stripe_id(
-                conn, stripe_invoice["subscription"]
-            )
-            if sub and sub["status"] != SubscriptionStatus.ACTIVE.value:
-                sub["status"] = SubscriptionStatus.ACTIVE.value
-                await conn.save_entity(BillingService.ENTITY_SUBSCRIPTION, sub)
-        
-        return {"invoice_id": invoice["id"], "action": "paid"}
-    
-    async def _handle_invoice_failed(
-        self,
-        conn,
-        stripe_invoice: Dict[str, Any],
-        billing: BillingService,
-    ) -> Dict[str, Any]:
-        """Handle invoice.payment_failed event."""
-        invoice = await self._upsert_invoice(conn, stripe_invoice, billing)
-        invoice["status"] = "payment_failed"
-        invoice["last_payment_error"] = stripe_invoice.get("last_finalization_error")
-        
-        await conn.save_entity(BillingService.ENTITY_INVOICE, invoice)
-        
-        if stripe_invoice.get("subscription"):
-            sub = await self._find_subscription_by_stripe_id(
-                conn, stripe_invoice["subscription"]
-            )
-            if sub:
-                sub["status"] = SubscriptionStatus.PAST_DUE.value
-                await conn.save_entity(BillingService.ENTITY_SUBSCRIPTION, sub)
-        
-        return {"invoice_id": invoice["id"], "action": "payment_failed"}
-    
     # ──────────────────────────────────────────────────────────────────
     # Customer Handlers
     # ──────────────────────────────────────────────────────────────────
@@ -302,38 +296,15 @@ class WebhookHandler:
         stripe_customer: Dict[str, Any],
         billing: BillingService,
     ) -> Dict[str, Any]:
-        """Handle customer.created event."""
-        customers = await conn.find_entities(
-            BillingService.ENTITY_CUSTOMER,
-            filters={"stripe_customer_id": stripe_customer["id"]},
-            limit=1
-        )
-        
-        if customers:
-            return {"customer_id": customers[0]["id"], "action": "already_exists"}
-        
+        """Handle customer.created event (usually our sync created it)."""
         local_id = stripe_customer.get("metadata", {}).get("local_id")
-        user_id = stripe_customer.get("metadata", {}).get("user_id")
-        
         if local_id:
             customer = await billing.get_customer(conn, local_id)
             if customer:
-                customer["stripe_customer_id"] = stripe_customer["id"]
-                await conn.save_entity(BillingService.ENTITY_CUSTOMER, customer)
-                return {"customer_id": customer["id"], "action": "linked"}
+                return {"customer_id": customer["id"], "action": "already_exists"}
         
-        import uuid
-        customer = {
-            "id": str(uuid.uuid4()),
-            "user_id": user_id or f"stripe:{stripe_customer['id']}",
-            "email": stripe_customer.get("email", ""),
-            "name": stripe_customer.get("name"),
-            "stripe_customer_id": stripe_customer["id"],
-            "metadata": {"created_from_webhook": True},
-        }
-        await conn.save_entity(BillingService.ENTITY_CUSTOMER, customer)
-        
-        return {"customer_id": customer["id"], "action": "created"}
+        # Customer created in Stripe directly (not through our sync)
+        return {"action": "external_customer", "stripe_id": stripe_customer["id"]}
     
     async def _handle_customer_updated(
         self,
@@ -346,12 +317,13 @@ class WebhookHandler:
         if not customer:
             return {"action": "ignored", "reason": "customer not found"}
         
-        customer["email"] = stripe_customer.get("email", customer["email"])
-        customer["name"] = stripe_customer.get("name", customer.get("name"))
+        # Update email if changed in Stripe
+        if stripe_customer.get("email") and stripe_customer["email"] != customer.get("email"):
+            customer["email"] = stripe_customer["email"]
+            await conn.save_entity(BillingService.ENTITY_CUSTOMER, customer)
+            return {"customer_id": customer["id"], "action": "email_updated"}
         
-        await conn.save_entity(BillingService.ENTITY_CUSTOMER, customer)
-        
-        return {"customer_id": customer["id"], "action": "updated"}
+        return {"customer_id": customer["id"], "action": "no_changes"}
     
     # ──────────────────────────────────────────────────────────────────
     # Payment Method Handlers
@@ -364,6 +336,9 @@ class WebhookHandler:
         billing: BillingService,
     ) -> Dict[str, Any]:
         """Handle payment_method.attached event."""
+        if not stripe_pm.get("customer"):
+            return {"action": "ignored", "reason": "no customer"}
+        
         customer = await self._find_customer_by_stripe_id(conn, stripe_pm["customer"])
         if not customer:
             return {"action": "ignored", "reason": "customer not found"}

@@ -62,6 +62,8 @@ from .request_metrics import (
     setup_request_metrics,
     store_request_metrics,
     create_request_metrics_router,
+    mask_sensitive_params,
+    DEFAULT_SENSITIVE_PARAMS,
 )
 
 __all__ = [
@@ -95,4 +97,6 @@ __all__ = [
     "setup_request_metrics",
     "store_request_metrics",
     "create_request_metrics_router",
+    "mask_sensitive_params",
+    "DEFAULT_SENSITIVE_PARAMS",
 ]

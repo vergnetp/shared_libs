@@ -111,6 +111,70 @@ def get_geo_from_headers(request: Request) -> Dict[str, Optional[str]]:
 
 
 # =============================================================================
+# Sensitive Data Masking
+# =============================================================================
+
+# Default param names to mask (case-insensitive substring match)
+DEFAULT_SENSITIVE_PARAMS = {
+    'token', 'key', 'secret', 'password', 'passwd', 'pwd',
+    'api_key', 'apikey', 'auth', 'credential', 'bearer',
+    'access_token', 'refresh_token', 'private',
+}
+
+
+def mask_sensitive_params(
+    query_params: str,
+    sensitive_params: Optional[set] = None,
+    mask_char: str = '*',
+    visible_chars: int = 4,
+) -> str:
+    """
+    Mask sensitive values in query parameter string.
+    
+    Args:
+        query_params: Query string like "do_token=abc123&name=test"
+        sensitive_params: Set of param name substrings to mask (default: DEFAULT_SENSITIVE_PARAMS)
+        mask_char: Character to use for masking (default: *)
+        visible_chars: Number of chars to show at end (default: 4)
+        
+    Returns:
+        Masked query string like "do_token=***3123&name=test"
+        
+    Example:
+        >>> mask_sensitive_params("do_token=dop_v1_abc123def&page=1")
+        "do_token=***3def&page=1"
+    """
+    if not query_params:
+        return query_params
+    
+    sensitive = sensitive_params or DEFAULT_SENSITIVE_PARAMS
+    
+    # Parse query string
+    parts = []
+    for pair in query_params.split('&'):
+        if '=' in pair:
+            key, value = pair.split('=', 1)
+            key_lower = key.lower()
+            
+            # Check if key contains any sensitive substring
+            is_sensitive = any(s in key_lower for s in sensitive)
+            
+            if is_sensitive and value:
+                # Mask value, keep last N chars visible
+                if len(value) > visible_chars:
+                    masked = mask_char * 3 + value[-visible_chars:]
+                else:
+                    masked = mask_char * len(value)
+                parts.append(f"{key}={masked}")
+            else:
+                parts.append(pair)
+        else:
+            parts.append(pair)
+    
+    return '&'.join(parts)
+
+
+# =============================================================================
 # Request Metrics Data
 # =============================================================================
 
@@ -190,6 +254,7 @@ class RequestMetricsMiddleware(BaseHTTPMiddleware):
         job_client: JobClient instance for enqueueing
         task_name: Name of the storage task (default: "store_request_metrics")
         exclude_paths: Paths to exclude from metrics (e.g., health checks)
+        sensitive_params: Param name substrings to mask (default: tokens, keys, passwords)
         include_request_body: Whether to capture request body (default: False)
         include_response_body: Whether to capture response body (default: False)
     """
@@ -205,6 +270,7 @@ class RequestMetricsMiddleware(BaseHTTPMiddleware):
         job_client = None,
         task_name: str = "store_request_metrics",
         exclude_paths: Optional[set] = None,
+        sensitive_params: Optional[set] = None,
         include_request_body: bool = False,
         include_response_body: bool = False,
     ):
@@ -212,6 +278,7 @@ class RequestMetricsMiddleware(BaseHTTPMiddleware):
         self._job_client = job_client
         self._task_name = task_name
         self._exclude_paths = exclude_paths or self.DEFAULT_EXCLUDE_PATHS
+        self._sensitive_params = sensitive_params  # None = use defaults
         self._include_request_body = include_request_body
         self._include_response_body = include_response_body
     
@@ -237,11 +304,15 @@ class RequestMetricsMiddleware(BaseHTTPMiddleware):
         now = datetime.now(timezone.utc)
         geo = get_geo_from_headers(request)
         
+        # Mask sensitive query params (tokens, keys, passwords, etc.)
+        raw_query = str(request.query_params) if request.query_params else None
+        masked_query = mask_sensitive_params(raw_query, self._sensitive_params) if raw_query else None
+        
         metric = RequestMetric(
             request_id=request_id,
             method=request.method,
             path=path,
-            query_params=str(request.query_params) if request.query_params else None,
+            query_params=masked_query,
             client_ip=get_real_ip(request),
             user_agent=request.headers.get("User-Agent"),
             referer=request.headers.get("Referer"),
@@ -307,6 +378,12 @@ class RequestMetricsStore:
     Database store for request metrics (hot data).
     
     Uses the app_kernel database abstraction (works with SQLite/Postgres/MySQL).
+    
+    NOTE: Uses raw SQL instead of Entity Framework intentionally:
+    - No history/versioning needed (would explode DB size at high request volumes)
+    - High-volume writes benefit from direct SQL (no ORM overhead)
+    - Simple schema that won't evolve dynamically
+    - Metrics are append-only, no updates
     
     Usage:
         store = RequestMetricsStore()

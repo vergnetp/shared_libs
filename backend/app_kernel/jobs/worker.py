@@ -105,10 +105,21 @@ class JobWorkerManager:
         """Create a wrapper that handles context creation."""
         registry = self._registry  # Capture reference
         
-        async def wrapper(entity, *args, **kwargs) -> Any:
+        async def wrapper(operation_id, payload_or_entity=None, *args, **kwargs) -> Any:
             # Fail fast if task no longer registered
             if not registry.has(task_name):
                 raise UnknownTaskError(f"Task '{task_name}' is not registered")
+            
+            # queue_worker calls: processor(operation_id, payload)
+            # where operation_id is a string UUID and payload is the entity dict
+            
+            # If called with two args (operation_id, payload), use the second arg as entity
+            if payload_or_entity is not None:
+                entity = payload_or_entity
+            else:
+                # Fallback: old calling convention where first arg is the entity
+                entity = operation_id
+                operation_id = "unknown"
             
             # Handle entity that might be JSON string (from Redis serialization)
             if isinstance(entity, str):
@@ -134,9 +145,11 @@ class JobWorkerManager:
                 except json.JSONDecodeError:
                     pass  # Keep as string if not valid JSON
             
-            # Build context (no domain assumptions - just pass through metadata)
+            # Build context - prefer operation_id from args, fall back to entity
+            job_id = operation_id if operation_id != "unknown" else entity.get("operation_id", "unknown")
+            
             ctx = JobContext(
-                job_id=entity.get("operation_id", "unknown"),
+                job_id=job_id,
                 task_name=task_name,
                 attempt=entity.get("attempts", 0) + 1,
                 max_attempts=entity.get("max_attempts", 3),
@@ -212,10 +225,25 @@ def _create_json_deserializing_wrapper(task_name: str, processor):
     The job_queue library stores entities as JSON strings in Redis.
     This wrapper ensures the entity/payload are properly deserialized
     before being passed to the processor.
+    
+    NOTE: queue_worker calls processors as `processor(operation_id, payload)`
+    where operation_id is a string and payload is the extracted entity data.
+    This wrapper handles that calling convention.
     """
     import json
     
-    async def wrapper(entity, *args, **kwargs) -> Any:
+    async def wrapper(operation_id, payload_or_entity=None, *args, **kwargs) -> Any:
+        # queue_worker calls: processor(operation_id, payload)
+        # where operation_id is a string UUID and payload is the entity dict
+        
+        # If called with two args (operation_id, payload), use the second arg as entity
+        if payload_or_entity is not None:
+            entity = payload_or_entity
+        else:
+            # Fallback: old calling convention where first arg is the entity
+            entity = operation_id
+            operation_id = "unknown"
+        
         # Handle entity that might be JSON string (from Redis serialization)
         if isinstance(entity, str):
             try:
@@ -227,7 +255,7 @@ def _create_json_deserializing_wrapper(task_name: str, processor):
         if not isinstance(entity, dict):
             entity = {"payload": entity}
         
-        # Extract payload
+        # Extract payload - entity from JobClient has {"payload": ..., "task_name": ...}
         payload = entity.get("payload", entity)
         
         # Handle payload that might be JSON string (double serialization)
@@ -237,9 +265,11 @@ def _create_json_deserializing_wrapper(task_name: str, processor):
             except json.JSONDecodeError:
                 pass  # Keep as string if not valid JSON
         
-        # Build context
+        # Build context - prefer operation_id from args, fall back to entity
+        job_id = operation_id if operation_id != "unknown" else entity.get("operation_id", "unknown")
+        
         ctx = JobContext(
-            job_id=entity.get("operation_id", "unknown"),
+            job_id=job_id,
             task_name=task_name,
             attempt=entity.get("attempts", 0) + 1,
             max_attempts=entity.get("max_attempts", 3),

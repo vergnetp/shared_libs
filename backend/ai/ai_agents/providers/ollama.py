@@ -4,9 +4,9 @@ from __future__ import annotations
 from typing import AsyncIterator
 import httpx
 
-# Backend imports (absolute - backend must be in sys.path)
+# Backend imports (relative)
 try:
-    from resilience import circuit_breaker, with_timeout
+    from ....resilience import circuit_breaker, with_timeout
 except ImportError:
     def circuit_breaker(*args, **kwargs):
         def decorator(fn): return fn
@@ -16,7 +16,7 @@ except ImportError:
         return decorator
 
 try:
-    from log import info, error
+    from ....log import info, error
 except ImportError:
     def info(msg, **kwargs): pass
     def error(msg, **kwargs): print(f"[ERROR] {msg}")
