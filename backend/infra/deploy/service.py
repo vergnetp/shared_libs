@@ -6,7 +6,6 @@ All deployment logic lives here. API is just a thin wrapper.
 
 from __future__ import annotations
 import asyncio
-import aiohttp
 from dataclasses import dataclass, field
 from typing import Dict, Any, List, Optional, Callable, Literal
 from enum import Enum
@@ -1184,35 +1183,35 @@ class DeploymentService:
                 healthy = False
                 
                 self.log(f"   [{name}] ⏳ Waiting for health check...")
-                for attempt in range(max_attempts):
-                    try:
-                        # Short timeout per endpoint (0.5s connect, 1s total)
-                        timeout = aiohttp.ClientTimeout(total=1, connect=0.5)
-                        async with aiohttp.ClientSession(timeout=timeout) as session:
-                            # Try common health endpoints - just root and /health
-                            for endpoint in ['/', '/health']:
-                                try:
-                                    check_url = f"http://{ip}:{expose_port}{endpoint}"
-                                    async with session.get(check_url) as resp:
-                                        if resp.status < 500:  # 2xx, 3xx, 4xx all mean "app is responding"
-                                            healthy = True
-                                            self.log(f"   [{name}] ✅ Health check passed ({endpoint})")
-                                            break
-                                except asyncio.TimeoutError:
-                                    continue
-                                except aiohttp.ClientError:
-                                    continue
-                                except Exception:
-                                    continue
+                
+                # Create a quick health check client (no retries, very short timeout)
+                from ...http_client import AsyncHttpClient, HttpConfig, RetryConfig
+                health_config = HttpConfig(
+                    timeout=1,  # 1s total timeout
+                    retry=RetryConfig(max_retries=0),  # No retries - we do manual loop
+                )
+                health_client = AsyncHttpClient(config=health_config)
+                
+                try:
+                    for attempt in range(max_attempts):
+                        # Try common health endpoints - just root and /health
+                        for endpoint in ['/', '/health']:
+                            try:
+                                check_url = f"http://{ip}:{expose_port}{endpoint}"
+                                resp = await health_client.request("GET", check_url, raise_on_error=False)
+                                if resp.status_code < 500:  # 2xx, 3xx, 4xx all mean "app is responding"
+                                    healthy = True
+                                    self.log(f"   [{name}] ✅ Health check passed ({endpoint})")
+                                    break
+                            except Exception:
+                                continue
                         if healthy:
                             break
-                    except asyncio.TimeoutError:
-                        pass
-                    except Exception as e:
-                        pass
-                    
-                    if attempt < max_attempts - 1:
-                        await asyncio.sleep(1)
+                        
+                        if attempt < max_attempts - 1:
+                            await asyncio.sleep(1)
+                finally:
+                    await health_client.close()
                 
                 if not healthy:
                     # Container not healthy - abort and keep old container running

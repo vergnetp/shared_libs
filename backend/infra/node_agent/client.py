@@ -1,10 +1,11 @@
 """
 Node Agent Client - HTTP client for SSH-free deployments
 
+Uses http_client for automatic retries.
+
 Use this client to interact with node agents running on droplets.
 """
 
-import httpx
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
 
@@ -20,6 +21,8 @@ class AgentResponse:
 class NodeAgentClient:
     """
     Client for interacting with node agents on droplets.
+    
+    Uses http_client for automatic retries.
     
     Example:
         client = NodeAgentClient("206.189.122.244", "your-api-key")
@@ -43,6 +46,27 @@ class NodeAgentClient:
         self.api_key = api_key
         self.timeout = timeout
         self.base_url = f"http://{server_ip}:{self.AGENT_PORT}"
+        self._http_client = None
+    
+    def _get_http_client(self):
+        """Get or create async HTTP client."""
+        if self._http_client is None:
+            from ...http_client import AsyncHttpClient, HttpConfig, RetryConfig
+            
+            config = HttpConfig(
+                timeout=self.timeout,
+                retry=RetryConfig(
+                    max_retries=2,
+                    base_delay=1.0,
+                    retry_on_status={500, 502, 503, 504},
+                ),
+                headers={"X-API-Key": self.api_key},
+            )
+            self._http_client = AsyncHttpClient(
+                config=config,
+                base_url=self.base_url,
+            )
+        return self._http_client
     
     async def __aenter__(self):
         """Async context manager entry."""
@@ -50,11 +74,13 @@ class NodeAgentClient:
     
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Async context manager exit."""
-        pass
+        await self.close()
     
-    @property
-    def headers(self) -> Dict[str, str]:
-        return {"X-API-Key": self.api_key}
+    async def close(self):
+        """Close the HTTP client."""
+        if self._http_client:
+            await self._http_client.close()
+            self._http_client = None
     
     async def _request(
         self,
@@ -64,40 +90,39 @@ class NodeAgentClient:
         timeout: int = None,
     ) -> AgentResponse:
         """Make authenticated request to node agent."""
-        timeout = timeout or self.timeout
-        
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.request(
-                    method,
-                    f"{self.base_url}{endpoint}",
-                    headers=self.headers,
-                    json=json_data,
-                    timeout=timeout,
+            client = self._get_http_client()
+            response = await client.request(
+                method,
+                endpoint,
+                json=json_data,
+                raise_on_error=False,
+            )
+            
+            if response.status_code >= 400:
+                return AgentResponse(
+                    success=False,
+                    data={},
+                    error=f"HTTP {response.status_code}: {response.body}",
                 )
-                response.raise_for_status()
-                return AgentResponse(success=True, data=response.json())
+            
+            return AgentResponse(success=True, data=response.json())
                 
-        except httpx.ConnectError:
-            return AgentResponse(
-                success=False,
-                data={},
-                error=f"Cannot connect to agent at {self.server_ip}:{self.AGENT_PORT}"
-            )
-        except httpx.HTTPStatusError as e:
-            return AgentResponse(
-                success=False,
-                data={},
-                error=f"HTTP {e.response.status_code}: {e.response.text}"
-            )
-        except httpx.TimeoutException:
-            return AgentResponse(
-                success=False,
-                data={},
-                error=f"Request timed out after {timeout}s"
-            )
         except Exception as e:
-            return AgentResponse(success=False, data={}, error=str(e))
+            error_msg = str(e)
+            if "connect" in error_msg.lower():
+                return AgentResponse(
+                    success=False,
+                    data={},
+                    error=f"Cannot connect to agent at {self.server_ip}:{self.AGENT_PORT}",
+                )
+            elif "timeout" in error_msg.lower():
+                return AgentResponse(
+                    success=False,
+                    data={},
+                    error=f"Request timed out after {timeout or self.timeout}s",
+                )
+            return AgentResponse(success=False, data={}, error=error_msg)
     
     # =========================================================================
     # Health

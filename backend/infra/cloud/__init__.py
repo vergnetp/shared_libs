@@ -1,7 +1,37 @@
-"""Cloud providers and infrastructure."""
+"""Cloud providers and infrastructure.
 
-from .digitalocean import DOClient, DOAPIError, Droplet, ServerManager, MANAGED_TAG
-from .cloudflare import CloudflareClient, CloudflareError, DNSRecord
+Provides both sync and async clients:
+
+Sync (for scripts):
+    from shared_libs.backend.infra.cloud import DOClient, CloudflareClient, SnapshotService
+    
+Async (for FastAPI):
+    from shared_libs.backend.infra.cloud import AsyncDOClient, AsyncCloudflareClient, AsyncSnapshotService
+"""
+
+# DigitalOcean - sync and async
+from .digitalocean import (
+    DOClient,
+    AsyncDOClient,
+    DOAPIError,
+    DOError,
+    Droplet,
+    DropletSize,
+    Region,
+    Result,
+    ServerManager,
+    MANAGED_TAG,
+)
+
+# Cloudflare - sync and async
+from .cloudflare import (
+    CloudflareClient,
+    AsyncCloudflareClient,
+    CloudflareError,
+    DNSRecord,
+)
+
+# Cloud-init
 from .cloudinit import (
     CloudInitConfig,
     build_cloudinit_script,
@@ -9,11 +39,15 @@ from .cloudinit import (
     get_preset,
     get_preset_info,
 )
+
+# Snapshot service - sync and async
 from .snapshot_service import (
     SnapshotService,
+    AsyncSnapshotService,
     SnapshotConfig,
     SnapshotResult,
     ensure_snapshot,
+    ensure_snapshot_async,
 )
 
 
@@ -39,27 +73,38 @@ def generate_node_agent_key(do_token: str, user_id: str = "") -> str:
 
 
 __all__ = [
-    # DigitalOcean
+    # DigitalOcean - sync
     "DOClient",
     "DOAPIError",
+    "DOError",
     "Droplet",
+    "DropletSize",
+    "Region",
+    "Result",
     "ServerManager",
     "MANAGED_TAG",
-    # Cloudflare
+    # DigitalOcean - async
+    "AsyncDOClient",
+    # Cloudflare - sync
     "CloudflareClient",
     "CloudflareError",
     "DNSRecord",
+    # Cloudflare - async
+    "AsyncCloudflareClient",
     # Cloud-init
     "CloudInitConfig",
     "build_cloudinit_script",
     "SNAPSHOT_PRESETS",
     "get_preset",
     "get_preset_info",
-    # Snapshot service
+    # Snapshot service - sync
     "SnapshotService",
     "SnapshotConfig",
     "SnapshotResult",
     "ensure_snapshot",
+    # Snapshot service - async
+    "AsyncSnapshotService",
+    "ensure_snapshot_async",
     # Utilities
     "generate_node_agent_key",
 ]

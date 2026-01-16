@@ -1,6 +1,8 @@
 """
 Snapshot Service - Create and manage DO snapshots with Docker/node_agent pre-installed.
 
+Uses http_client for automatic retries and circuit breaker.
+
 This is the single source of truth for snapshot creation logic.
 """
 
@@ -11,7 +13,6 @@ import json
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Callable, Generator
-import requests
 
 from .cloudinit import CloudInitConfig, build_cloudinit_script, SNAPSHOT_PRESETS, get_preset
 
@@ -69,13 +70,47 @@ class SnapshotService:
     """
     
     DEPLOYER_KEY_PATH = Path.home() / ".ssh" / "id_ed25519"
+    DO_API_BASE = "https://api.digitalocean.com/v2"
     
     def __init__(self, do_token: str):
         self.do_token = do_token
-        self.headers = {
-            "Authorization": f"Bearer {do_token}",
-            "Content-Type": "application/json",
-        }
+        self._http_client = None  # Lazy init
+    
+    def _get_http_client(self):
+        """Get or create HTTP client with retry config."""
+        if self._http_client is None:
+            from ...http_client import SyncHttpClient, HttpConfig, RetryConfig
+            
+            config = HttpConfig(
+                timeout=30,
+                retry=RetryConfig(
+                    max_retries=3,
+                    base_delay=1.0,
+                    retry_on_status={429, 500, 502, 503, 504},
+                ),
+                headers={
+                    "Authorization": f"Bearer {self.do_token}",
+                    "Content-Type": "application/json",
+                },
+            )
+            self._http_client = SyncHttpClient(
+                config=config,
+                base_url=self.DO_API_BASE,
+            )
+        return self._http_client
+    
+    def _request(self, method: str, path: str, json_data: dict = None) -> dict:
+        """Make API request."""
+        client = self._get_http_client()
+        response = client.request(
+            method=method,
+            url=path,
+            json=json_data,
+            raise_on_error=False,
+        )
+        if response.status_code == 204:
+            return {}
+        return response.json() if response.body else {}
     
     @staticmethod
     def generate_api_key(do_token: str, user_id: str = "") -> str:
@@ -110,14 +145,8 @@ class SnapshotService:
     
     def list_snapshots(self) -> List[Dict[str, Any]]:
         """List all droplet snapshots."""
-        resp = requests.get(
-            "https://api.digitalocean.com/v2/snapshots?resource_type=droplet",
-            headers=self.headers,
-            timeout=30,
-        )
-        if resp.status_code == 200:
-            return resp.json().get("snapshots", [])
-        return []
+        result = self._request("GET", "/snapshots?resource_type=droplet")
+        return result.get("snapshots", [])
     
     def get_snapshot_by_name(self, name: str) -> Optional[Dict[str, Any]]:
         """Find snapshot by name."""
@@ -128,28 +157,23 @@ class SnapshotService:
     
     def delete_snapshot(self, snapshot_id: str) -> bool:
         """Delete a snapshot."""
-        resp = requests.delete(
-            f"https://api.digitalocean.com/v2/snapshots/{snapshot_id}",
-            headers=self.headers,
-            timeout=30,
-        )
-        return resp.status_code in (200, 204)
+        client = self._get_http_client()
+        response = client.request("DELETE", f"/snapshots/{snapshot_id}", raise_on_error=False)
+        return response.status_code in (200, 204)
     
     def transfer_snapshot_to_regions(self, snapshot_id: str, regions: List[str]) -> bool:
         """Transfer a snapshot to multiple regions."""
         if not regions:
             return True
         
-        resp = requests.post(
-            f"https://api.digitalocean.com/v2/images/{snapshot_id}/actions",
-            headers=self.headers,
-            json={
-                "type": "transfer",
-                "regions": regions,
-            },
-            timeout=30,
+        client = self._get_http_client()
+        response = client.request(
+            "POST", 
+            f"/images/{snapshot_id}/actions",
+            json={"type": "transfer", "regions": regions},
+            raise_on_error=False,
         )
-        return resp.status_code in (200, 201)
+        return response.status_code in (200, 201)
     
     def transfer_snapshot_to_all_regions(self, snapshot_id: str, wait: bool = False) -> dict:
         """Transfer a snapshot to all available DO regions.
@@ -161,29 +185,23 @@ class SnapshotService:
         Returns:
             Dict with 'success', 'transferring_to' list of regions
         """
+        client = self._get_http_client()
+        
         # Get all available regions
         try:
-            resp = requests.get(
-                "https://api.digitalocean.com/v2/regions",
-                headers=self.headers,
-                timeout=30,
-            )
-            if resp.status_code != 200:
+            response = client.request("GET", "/regions", raise_on_error=False)
+            if response.status_code != 200:
                 return {"success": False, "error": "Failed to get regions", "transferring_to": []}
             
-            regions_data = resp.json().get("regions", [])
+            regions_data = response.json().get("regions", [])
             all_regions = [r["slug"] for r in regions_data if r.get("available", True)]
             
             # Get snapshot's current region
-            snap_resp = requests.get(
-                f"https://api.digitalocean.com/v2/snapshots/{snapshot_id}",
-                headers=self.headers,
-                timeout=30,
-            )
-            if snap_resp.status_code != 200:
+            snap_response = client.request("GET", f"/snapshots/{snapshot_id}", raise_on_error=False)
+            if snap_response.status_code != 200:
                 return {"success": False, "error": "Failed to get snapshot", "transferring_to": []}
             
-            current_regions = snap_resp.json().get("snapshot", {}).get("regions", [])
+            current_regions = snap_response.json().get("snapshot", {}).get("regions", [])
             
             # Transfer to regions we're not already in
             target_regions = [r for r in all_regions if r not in current_regions]
@@ -601,40 +619,34 @@ class SnapshotService:
         
         public_key = public_key_path.read_text().strip()
         
-        # Check if already registered
-        resp = requests.get(
-            "https://api.digitalocean.com/v2/account/keys",
-            headers=self.headers,
-            timeout=30,
-        )
+        client = self._get_http_client()
         
-        if resp.status_code == 200:
-            for key in resp.json().get("ssh_keys", []):
+        # Check if already registered
+        response = client.request("GET", "/account/keys", raise_on_error=False)
+        
+        if response.status_code == 200:
+            for key in response.json().get("ssh_keys", []):
                 if key.get("public_key", "").strip() == public_key:
                     return str(key["id"])
         
         # Upload new key
-        resp = requests.post(
-            "https://api.digitalocean.com/v2/account/keys",
-            headers=self.headers,
+        response = client.request(
+            "POST", "/account/keys",
             json={"name": "deployer_key", "public_key": public_key},
-            timeout=30,
+            raise_on_error=False,
         )
         
-        if resp.status_code in (200, 201):
-            return str(resp.json().get("ssh_key", {}).get("id"))
+        if response.status_code in (200, 201):
+            return str(response.json().get("ssh_key", {}).get("id"))
         
         return None
     
     def _delete_ssh_key(self, key_id: str) -> bool:
         """Delete SSH key from DO account."""
         try:
-            resp = requests.delete(
-                f"https://api.digitalocean.com/v2/account/keys/{key_id}",
-                headers=self.headers,
-                timeout=30,
-            )
-            return resp.status_code in (200, 204)
+            client = self._get_http_client()
+            response = client.request("DELETE", f"/account/keys/{key_id}", raise_on_error=False)
+            return response.status_code in (200, 204)
         except Exception:
             return False
     
@@ -667,38 +679,31 @@ class SnapshotService:
             payload["user_data"] = user_data
         
         try:
-            resp = requests.post(
-                "https://api.digitalocean.com/v2/droplets",
-                headers=self.headers,
-                json=payload,
-                timeout=30,
-            )
+            client = self._get_http_client()
+            response = client.request("POST", "/droplets", json=payload, raise_on_error=False)
             
-            if resp.status_code not in (200, 201, 202):
+            if response.status_code not in (200, 201, 202):
                 # Extract error message from DO API
                 try:
-                    error_data = resp.json()
-                    error_msg = error_data.get("message") or error_data.get("id") or resp.text[:200]
+                    error_data = response.json()
+                    error_msg = error_data.get("message") or error_data.get("id") or str(response.body)[:200]
                 except:
-                    error_msg = f"HTTP {resp.status_code}: {resp.text[:200]}"
+                    error_msg = f"HTTP {response.status_code}: {str(response.body)[:200]}"
                 return None, error_msg
             
-            return resp.json().get("droplet", {}), None
-        except requests.exceptions.RequestException as e:
+            return response.json().get("droplet", {}), None
+        except Exception as e:
             return None, f"Request failed: {str(e)}"
     
     def _wait_for_droplet_active(self, droplet_id: int, timeout: int = 120) -> Optional[str]:
         """Wait for droplet to become active, return IP."""
+        client = self._get_http_client()
         start = time.time()
         while time.time() - start < timeout:
-            resp = requests.get(
-                f"https://api.digitalocean.com/v2/droplets/{droplet_id}",
-                headers=self.headers,
-                timeout=30,
-            )
+            response = client.request("GET", f"/droplets/{droplet_id}", raise_on_error=False)
             
-            if resp.status_code == 200:
-                droplet = resp.json().get("droplet", {})
+            if response.status_code == 200:
+                droplet = response.json().get("droplet", {})
                 if droplet.get("status") == "active":
                     # Get public IP
                     for network in droplet.get("networks", {}).get("v4", []):
@@ -711,13 +716,10 @@ class SnapshotService:
     
     def _get_droplet_status(self, droplet_id: int) -> Optional[str]:
         """Get droplet status."""
-        resp = requests.get(
-            f"https://api.digitalocean.com/v2/droplets/{droplet_id}",
-            headers=self.headers,
-            timeout=30,
-        )
-        if resp.status_code == 200:
-            return resp.json().get("droplet", {}).get("status")
+        client = self._get_http_client()
+        response = client.request("GET", f"/droplets/{droplet_id}", raise_on_error=False)
+        if response.status_code == 200:
+            return response.json().get("droplet", {}).get("status")
         return None
     
     def _wait_for_setup_stream(self, droplet_ip: str, timeout: int = 900) -> Generator[Dict[str, Any], None, None]:
@@ -924,38 +926,35 @@ class SnapshotService:
     
     def _power_off_droplet(self, droplet_id: int):
         """Power off droplet."""
-        requests.post(
-            f"https://api.digitalocean.com/v2/droplets/{droplet_id}/actions",
-            headers=self.headers,
+        client = self._get_http_client()
+        client.request(
+            "POST", f"/droplets/{droplet_id}/actions",
             json={"type": "power_off"},
-            timeout=30,
+            raise_on_error=False,
         )
     
     def _create_snapshot(self, droplet_id: int, name: str) -> Optional[str]:
         """Create snapshot from droplet."""
-        resp = requests.post(
-            f"https://api.digitalocean.com/v2/droplets/{droplet_id}/actions",
-            headers=self.headers,
+        client = self._get_http_client()
+        response = client.request(
+            "POST", f"/droplets/{droplet_id}/actions",
             json={"type": "snapshot", "name": name},
-            timeout=30,
+            raise_on_error=False,
         )
         
-        if resp.status_code in (200, 201):
-            return resp.json().get("action", {}).get("id")
+        if response.status_code in (200, 201):
+            return response.json().get("action", {}).get("id")
         return None
     
     def _wait_for_snapshot(self, action_id: str, timeout: int = 600) -> bool:
         """Wait for snapshot action to complete."""
+        client = self._get_http_client()
         start = time.time()
         while time.time() - start < timeout:
-            resp = requests.get(
-                f"https://api.digitalocean.com/v2/actions/{action_id}",
-                headers=self.headers,
-                timeout=30,
-            )
+            response = client.request("GET", f"/actions/{action_id}", raise_on_error=False)
             
-            if resp.status_code == 200:
-                status = resp.json().get("action", {}).get("status")
+            if response.status_code == 200:
+                status = response.json().get("action", {}).get("status")
                 if status == "completed":
                     return True
                 elif status == "errored":
@@ -967,11 +966,8 @@ class SnapshotService:
     
     def _delete_droplet(self, droplet_id: int):
         """Delete droplet."""
-        requests.delete(
-            f"https://api.digitalocean.com/v2/droplets/{droplet_id}",
-            headers=self.headers,
-            timeout=30,
-        )
+        client = self._get_http_client()
+        client.request("DELETE", f"/droplets/{droplet_id}", raise_on_error=False)
     
     def build_custom_snapshot_stream(
         self,
@@ -1270,3 +1266,171 @@ def ensure_snapshot(
     """Convenience function to ensure snapshot exists."""
     service = SnapshotService(do_token)
     return service.ensure_snapshot(config, region, size, force_recreate)
+
+
+# =============================================================================
+# Async Snapshot Service
+# =============================================================================
+
+class AsyncSnapshotService:
+    """
+    Async version of SnapshotService for use in FastAPI.
+    
+    Provides async versions of common methods:
+    - list_snapshots()
+    - get_snapshot_by_name()
+    - delete_snapshot()
+    - transfer_snapshot_to_regions()
+    - transfer_snapshot_to_all_regions()
+    
+    For streaming operations (ensure_snapshot_stream, build_custom_snapshot_stream),
+    use the sync SnapshotService with FastAPI's StreamingResponse.
+    
+    Usage:
+        service = AsyncSnapshotService(do_token)
+        snapshots = await service.list_snapshots()
+        await service.delete_snapshot(snapshot_id)
+    """
+    
+    DO_API_BASE = "https://api.digitalocean.com/v2"
+    
+    def __init__(self, do_token: str):
+        self.do_token = do_token
+        self._http_client = None
+    
+    def _get_http_client(self):
+        """Get or create async HTTP client."""
+        if self._http_client is None:
+            from ...http_client import AsyncHttpClient, HttpConfig, RetryConfig
+            
+            config = HttpConfig(
+                timeout=30,
+                retry=RetryConfig(
+                    max_retries=3,
+                    base_delay=1.0,
+                    retry_on_status={429, 500, 502, 503, 504},
+                ),
+                headers={
+                    "Authorization": f"Bearer {self.do_token}",
+                    "Content-Type": "application/json",
+                },
+            )
+            self._http_client = AsyncHttpClient(
+                config=config,
+                base_url=self.DO_API_BASE,
+            )
+        return self._http_client
+    
+    async def close(self):
+        """Close the HTTP client."""
+        if self._http_client:
+            await self._http_client.close()
+            self._http_client = None
+    
+    async def _request(self, method: str, path: str, json_data: dict = None) -> dict:
+        """Make async API request."""
+        client = self._get_http_client()
+        response = await client.request(
+            method=method,
+            url=path,
+            json=json_data,
+            raise_on_error=False,
+        )
+        if response.status_code == 204:
+            return {}
+        return response.json() if response.body else {}
+    
+    @staticmethod
+    def generate_api_key(do_token: str, user_id: str = "") -> str:
+        """Generate deterministic API key (same as sync version)."""
+        return SnapshotService.generate_api_key(do_token, user_id)
+    
+    async def list_snapshots(self) -> List[Dict[str, Any]]:
+        """List all droplet snapshots."""
+        result = await self._request("GET", "/snapshots?resource_type=droplet")
+        return result.get("snapshots", [])
+    
+    async def get_snapshot_by_name(self, name: str) -> Optional[Dict[str, Any]]:
+        """Find snapshot by name."""
+        for snap in await self.list_snapshots():
+            if snap.get("name") == name:
+                return snap
+        return None
+    
+    async def delete_snapshot(self, snapshot_id: str) -> bool:
+        """Delete a snapshot."""
+        client = self._get_http_client()
+        response = await client.request("DELETE", f"/snapshots/{snapshot_id}", raise_on_error=False)
+        return response.status_code in (200, 204)
+    
+    async def transfer_snapshot_to_regions(self, snapshot_id: str, regions: List[str]) -> bool:
+        """Transfer a snapshot to multiple regions."""
+        if not regions:
+            return True
+        
+        client = self._get_http_client()
+        response = await client.request(
+            "POST", 
+            f"/images/{snapshot_id}/actions",
+            json={"type": "transfer", "regions": regions},
+            raise_on_error=False,
+        )
+        return response.status_code in (200, 201)
+    
+    async def transfer_snapshot_to_all_regions(self, snapshot_id: str) -> dict:
+        """Transfer a snapshot to all available DO regions."""
+        client = self._get_http_client()
+        
+        try:
+            # Get all available regions
+            response = await client.request("GET", "/regions", raise_on_error=False)
+            if response.status_code != 200:
+                return {"success": False, "error": "Failed to get regions", "transferring_to": []}
+            
+            regions_data = response.json().get("regions", [])
+            all_regions = [r["slug"] for r in regions_data if r.get("available", True)]
+            
+            # Get snapshot's current regions
+            snap_response = await client.request("GET", f"/snapshots/{snapshot_id}", raise_on_error=False)
+            if snap_response.status_code != 200:
+                return {"success": False, "error": "Failed to get snapshot", "transferring_to": []}
+            
+            current_regions = snap_response.json().get("snapshot", {}).get("regions", [])
+            
+            # Transfer to regions we're not already in
+            target_regions = [r for r in all_regions if r not in current_regions]
+            
+            if not target_regions:
+                return {"success": True, "transferring_to": [], "message": "Already in all regions"}
+            
+            success = await self.transfer_snapshot_to_regions(snapshot_id, target_regions)
+            return {
+                "success": success,
+                "transferring_to": target_regions if success else [],
+            }
+            
+        except Exception as e:
+            return {"success": False, "error": str(e), "transferring_to": []}
+
+
+# Async convenience function
+async def ensure_snapshot_async(
+    do_token: str,
+    config: SnapshotConfig,
+    region: str = "lon1",
+    size: str = "s-1vcpu-1gb",
+    force_recreate: bool = False,
+) -> SnapshotResult:
+    """
+    Async convenience function to ensure snapshot exists.
+    
+    Note: For streaming progress, use SnapshotService.ensure_snapshot_stream()
+    with FastAPI's StreamingResponse.
+    """
+    # For complex operations, we still use sync service in a thread
+    import asyncio
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        None,
+        lambda: ensure_snapshot(do_token, config, region, size, force_recreate)
+    )

@@ -3,11 +3,12 @@ DigitalOcean Cost Tracker
 
 Track spending per project/environment using droplet tags.
 
+Uses http_client for automatic retries.
+
 SAFETY: Only tracks costs for managed droplets (tagged with MANAGED_TAG).
 Personal/unmanaged servers are excluded from cost calculations.
 """
 
-import httpx
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
 from datetime import datetime
@@ -73,16 +74,40 @@ SIZE_PRICING = {
 class CostTracker:
     """Track DigitalOcean costs by project and environment."""
     
+    BASE_URL = "https://api.digitalocean.com/v2"
+    
     def __init__(self, do_token: str):
         self.do_token = do_token
-        self.base_url = "https://api.digitalocean.com/v2"
+        self._http_client = None
     
-    @property
-    def headers(self) -> Dict[str, str]:
-        return {
-            "Authorization": f"Bearer {self.do_token}",
-            "Content-Type": "application/json"
-        }
+    def _get_http_client(self):
+        """Get or create async HTTP client."""
+        if self._http_client is None:
+            from ....http_client import AsyncHttpClient, HttpConfig, RetryConfig
+            
+            config = HttpConfig(
+                timeout=30,
+                retry=RetryConfig(
+                    max_retries=3,
+                    base_delay=1.0,
+                    retry_on_status={429, 500, 502, 503, 504},
+                ),
+                headers={
+                    "Authorization": f"Bearer {self.do_token}",
+                    "Content-Type": "application/json",
+                },
+            )
+            self._http_client = AsyncHttpClient(
+                config=config,
+                base_url=self.BASE_URL,
+            )
+        return self._http_client
+    
+    async def close(self):
+        """Close the HTTP client."""
+        if self._http_client:
+            await self._http_client.close()
+            self._http_client = None
     
     def _get_size_cost(self, size_slug: str) -> float:
         """Get monthly cost for a size slug."""
@@ -133,44 +158,46 @@ class CostTracker:
         SAFETY: Excludes personal/unmanaged droplets from cost tracking.
         """
         droplets = []
+        client = self._get_http_client()
         
-        async with httpx.AsyncClient() as client:
-            page = 1
-            while True:
-                response = await client.get(
-                    f"{self.base_url}/droplets?page={page}&per_page=100",
-                    headers=self.headers,
-                    timeout=30
-                )
-                response.raise_for_status()
-                data = response.json()
+        page = 1
+        while True:
+            response = await client.request(
+                "GET", f"/droplets?page={page}&per_page=100",
+                raise_on_error=False,
+            )
+            
+            if response.status_code != 200:
+                break
+            
+            data = response.json()
+            
+            for d in data.get("droplets", []):
+                tags = d.get("tags", [])
                 
-                for d in data.get("droplets", []):
-                    tags = d.get("tags", [])
-                    
-                    # SAFETY: Skip unmanaged droplets
-                    if not self._is_managed(tags):
-                        continue
-                    
-                    tags_info = self._parse_tags(tags)
-                    monthly = self._get_size_cost(d.get("size_slug", ""))
-                    
-                    droplets.append(DropletCost(
-                        id=d["id"],
-                        name=d["name"],
-                        size=d.get("size_slug", "unknown"),
-                        monthly_cost=monthly,
-                        hourly_cost=round(monthly / 730, 4),  # ~730 hours/month
-                        project=tags_info["project"],
-                        environment=tags_info["environment"],
-                        region=d.get("region", {}).get("slug", "unknown"),
-                    ))
+                # SAFETY: Skip unmanaged droplets
+                if not self._is_managed(tags):
+                    continue
                 
-                # Check for more pages
-                links = data.get("links", {}).get("pages", {})
-                if "next" not in links:
-                    break
-                page += 1
+                tags_info = self._parse_tags(tags)
+                monthly = self._get_size_cost(d.get("size_slug", ""))
+                
+                droplets.append(DropletCost(
+                    id=d["id"],
+                    name=d["name"],
+                    size=d.get("size_slug", "unknown"),
+                    monthly_cost=monthly,
+                    hourly_cost=round(monthly / 730, 4),  # ~730 hours/month
+                    project=tags_info["project"],
+                    environment=tags_info["environment"],
+                    region=d.get("region", {}).get("slug", "unknown"),
+                ))
+            
+            # Check for more pages
+            links = data.get("links", {}).get("pages", {})
+            if "next" not in links:
+                break
+            page += 1
         
         return droplets
     
@@ -206,22 +233,19 @@ class CostTracker:
     
     async def get_billing_history(self, limit: int = 12) -> List[Dict[str, Any]]:
         """Get recent billing history from DO."""
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{self.base_url}/customers/my/billing_history?per_page={limit}",
-                headers=self.headers,
-                timeout=30
-            )
-            response.raise_for_status()
+        client = self._get_http_client()
+        response = await client.request(
+            "GET", f"/customers/my/billing_history?per_page={limit}",
+            raise_on_error=False,
+        )
+        if response.status_code == 200:
             return response.json().get("billing_history", [])
+        return []
     
     async def get_balance(self) -> Dict[str, Any]:
         """Get current account balance."""
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{self.base_url}/customers/my/balance",
-                headers=self.headers,
-                timeout=30
-            )
-            response.raise_for_status()
+        client = self._get_http_client()
+        response = await client.request("GET", "/customers/my/balance", raise_on_error=False)
+        if response.status_code == 200:
             return response.json()
+        return {}

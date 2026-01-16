@@ -1195,6 +1195,26 @@ systemctl restart node_agent 2>/dev/null || true
         
         return action
     
+    async def transfer_snapshot(
+        self,
+        snapshot_id: str,
+        region: str,
+        wait: bool = True,
+        wait_timeout: int = 600,
+    ) -> Dict[str, Any]:
+        """Transfer snapshot to another region."""
+        result = await self._post(f"/images/{snapshot_id}/actions", {
+            "type": "transfer",
+            "region": region,
+        })
+        
+        action = result.get("action", {})
+        
+        if wait and action.get("id"):
+            action = await self._wait_for_action(action["id"], wait_timeout)
+        
+        return action
+    
     async def delete_snapshot(self, snapshot_id: str) -> Result:
         """Delete a snapshot."""
         try:
