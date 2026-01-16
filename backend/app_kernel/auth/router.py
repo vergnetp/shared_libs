@@ -279,6 +279,7 @@ def create_auth_router(
         access_token = create_access_token(
             user_id=user["id"],
             role=user.get("role", "user"),
+            email=user.get("email", ""),
             secret=token_secret,
             expires_minutes=access_token_expires_minutes,
         )
@@ -325,6 +326,7 @@ def create_auth_router(
         access_token = create_access_token(
             user_id=user["id"],
             role=user.get("role", "user"),
+            email=user.get("email", ""),
             secret=token_secret,
             expires_minutes=access_token_expires_minutes,
         )

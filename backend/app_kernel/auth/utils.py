@@ -71,6 +71,7 @@ def verify_password(password: str, password_hash: str) -> bool:
 def create_access_token(
     user_id: str = None,
     role: str = "user",
+    email: str = "",
     secret: str = "",
     expires_minutes: int = 15,
     *,
@@ -81,15 +82,16 @@ def create_access_token(
     Create an access token.
     
     Can be called two ways:
-    1. create_access_token(user_id="123", role="user", secret="...", expires_minutes=15)
+    1. create_access_token(user_id="123", role="user", email="user@example.com", secret="...", expires_minutes=15)
     2. create_access_token(user=user_identity, secret="...", expires_delta=timedelta(...))
     
     Args:
         user_id: User ID to encode
         role: User role
+        email: User email
         secret: Secret key for signing
         expires_minutes: Token expiration in minutes
-        user: UserIdentity object (alternative to user_id/role)
+        user: UserIdentity object (alternative to user_id/role/email)
         expires_delta: Token expiration as timedelta (alternative to expires_minutes)
     
     Returns:
@@ -101,9 +103,11 @@ def create_access_token(
     if user is not None:
         _user_id = user.id
         _role = user.role
+        _email = user.email
     else:
         _user_id = user_id
         _role = role
+        _email = email
     
     if expires_delta is not None:
         expires = now + expires_delta
@@ -112,6 +116,7 @@ def create_access_token(
     
     payload = {
         "sub": _user_id,
+        "email": _email,
         "role": _role,
         "type": "access",
         "iat": now,
