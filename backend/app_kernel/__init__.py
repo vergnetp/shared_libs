@@ -61,6 +61,7 @@ from .settings import (
     JobSettings,
     AuthSettings,
     ObservabilitySettings,
+    TracingSettings,
     ReliabilitySettings,
     FeatureSettings,
     CorsSettings,
@@ -130,7 +131,7 @@ from .reliability import (
 
 from .health import create_health_router
 
-from .middleware import CacheBustedStaticFiles
+from .middleware import CacheBustedStaticFiles, get_trace_store, get_traced_service_name
 
 from .utils import (
     Profiler,
@@ -196,6 +197,7 @@ __all__ = [
     "JobSettings",
     "AuthSettings",
     "ObservabilitySettings",
+    "TracingSettings",
     "ReliabilitySettings",
     "FeatureSettings",
     "CorsSettings",
@@ -257,6 +259,10 @@ __all__ = [
     
     # Static files
     "CacheBustedStaticFiles",
+    
+    # Tracing
+    "get_trace_store",
+    "get_traced_service_name",
     
     # Database
     "init_db_session",

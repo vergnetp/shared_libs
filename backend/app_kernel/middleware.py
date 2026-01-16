@@ -23,10 +23,92 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.staticfiles import StaticFiles
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from .settings import CorsSettings, SecuritySettings
+from .settings import CorsSettings, SecuritySettings, TracingSettings
 
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Tracing Store (lazy loaded, accessed by admin routes)
+# =============================================================================
+
+_trace_store = None
+_service_name = None
+
+
+def get_trace_store():
+    """Get the global trace store instance (for admin routes)."""
+    return _trace_store
+
+
+def get_traced_service_name():
+    """Get the service name being traced."""
+    return _service_name
+
+
+def setup_tracing_middleware(
+    app: FastAPI, 
+    settings: TracingSettings,
+    service_name: str = "unknown",
+    db_path: Optional[str] = None,
+) -> None:
+    """
+    Configure tracing middleware for request profiling.
+    
+    When enabled, traces every request with timing spans for:
+    - The request itself
+    - All outgoing HTTP calls (via http_client)
+    - Any custom spans added with @traced decorator
+    
+    Args:
+        app: FastAPI application
+        settings: TracingSettings configuration
+        service_name: Name of this service (for multi-service filtering)
+        db_path: Path to trace database. If None, uses data/{service_name}_traces.db
+    """
+    global _trace_store, _service_name
+    
+    if not settings.enabled:
+        logger.debug("Tracing: disabled")
+        return
+    
+    _service_name = service_name
+    
+    try:
+        from ..tracing import TracingMiddleware
+        from ..tracing.store import SQLiteTraceStore
+        
+        # Use shared traces.db - services on same server will share traces
+        # This allows the admin dashboard to view all services' traces
+        if db_path is None:
+            db_path = "data/traces.db"
+        
+        # Ensure data directory exists
+        import os
+        db_dir = os.path.dirname(db_path)
+        if db_dir:
+            os.makedirs(db_dir, exist_ok=True)
+        
+        # Create store with service name
+        _trace_store = SQLiteTraceStore(db_path, service_name=service_name)
+        
+        # Add middleware
+        app.add_middleware(
+            TracingMiddleware,
+            store=_trace_store,
+            exclude_paths=set(settings.exclude_paths),
+            sample_rate=settings.sample_rate,
+            save_threshold_ms=settings.save_threshold_ms,
+            save_errors=settings.save_errors,
+        )
+        
+        logger.info(f"Tracing: enabled for '{service_name}', db={db_path}, sample_rate={settings.sample_rate}")
+        
+    except ImportError as e:
+        logger.warning(f"Tracing: could not import tracing module: {e}")
+    except Exception as e:
+        logger.error(f"Tracing: failed to initialize: {e}")
 
 
 # =============================================================================

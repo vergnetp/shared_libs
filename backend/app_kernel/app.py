@@ -158,7 +158,7 @@ def init_app_kernel(
     # =========================================================================
     # 2. Setup CORS middleware (must be early)
     # =========================================================================
-    from .middleware import setup_cors, setup_security_middleware
+    from .middleware import setup_cors, setup_security_middleware, setup_tracing_middleware
     
     setup_cors(app, settings.cors)
     if settings.cors.enabled:
@@ -173,6 +173,15 @@ def init_app_kernel(
         f"headers={settings.security.enable_security_headers}, "
         f"logging={settings.security.enable_request_logging}, "
         f"debug={settings.security.debug}"
+    )
+    
+    # =========================================================================
+    # 3b. Setup tracing middleware (for admin telemetry dashboard)
+    # =========================================================================
+    setup_tracing_middleware(
+        app, 
+        settings.tracing,
+        service_name=settings.observability.service_name,
     )
     
     # =========================================================================

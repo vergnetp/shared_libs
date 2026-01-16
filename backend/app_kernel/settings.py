@@ -78,6 +78,33 @@ class ObservabilitySettings:
 
 
 @dataclass(frozen=True)
+class TracingSettings:
+    """
+    Request tracing settings for telemetry dashboard.
+    
+    When enabled, captures timing spans for each request and
+    all outgoing HTTP calls (via http_client module).
+    
+    Traces are stored in the service's main database (not a separate file).
+    """
+    enabled: bool = True  # Enabled by default
+    
+    # Paths to exclude from tracing
+    exclude_paths: Tuple[str, ...] = (
+        "/health", "/healthz", "/readyz", "/metrics", "/favicon.ico"
+    )
+    
+    # Sample rate (0.0 to 1.0) - for high-traffic scenarios
+    sample_rate: float = 1.0
+    
+    # Only save traces slower than this (0 = save all)
+    save_threshold_ms: float = 0
+    
+    # Always save traces with errors regardless of threshold
+    save_errors: bool = True
+
+
+@dataclass(frozen=True)
 class ReliabilitySettings:
     """Rate limiting and idempotency settings."""
     # Rate limiting
@@ -234,6 +261,7 @@ class KernelSettings:
     jobs: JobSettings = field(default_factory=JobSettings)
     auth: AuthSettings = field(default_factory=AuthSettings)
     observability: ObservabilitySettings = field(default_factory=ObservabilitySettings)
+    tracing: TracingSettings = field(default_factory=TracingSettings)
     reliability: ReliabilitySettings = field(default_factory=ReliabilitySettings)
     features: FeatureSettings = field(default_factory=FeatureSettings)
     cors: CorsSettings = field(default_factory=CorsSettings)

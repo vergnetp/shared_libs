@@ -96,6 +96,7 @@ from .settings import (
     ReliabilitySettings,
     SecuritySettings,
     StreamingSettings,
+    TracingSettings,
 )
 
 
@@ -170,6 +171,13 @@ class ServiceConfig:
     request_metrics_exclude_paths: List[str] = field(default_factory=lambda: [
         "/health", "/healthz", "/readyz", "/metrics", "/favicon.ico"
     ])
+    
+    # Tracing (for admin telemetry dashboard) - enabled by default
+    tracing_enabled: bool = True
+    tracing_exclude_paths: List[str] = field(default_factory=lambda: [
+        "/health", "/healthz", "/readyz", "/metrics", "/favicon.ico"
+    ])
+    tracing_sample_rate: float = 1.0
     
     @classmethod
     def from_env(cls, prefix: str = "") -> "ServiceConfig":
@@ -275,6 +283,9 @@ class ServiceConfig:
             request_metrics_exclude_paths=env_list("REQUEST_METRICS_EXCLUDE_PATHS", [
                 "/health", "/healthz", "/readyz", "/metrics", "/favicon.ico"
             ]),
+            # Tracing - enabled by default
+            tracing_enabled=env_bool("TRACING_ENABLED", True),
+            tracing_sample_rate=float(env("TRACING_SAMPLE_RATE", "1.0")),
         )
     
     @classmethod
@@ -432,6 +443,13 @@ class ServiceConfig:
             request_metrics_exclude_paths=interpolate(
                 manifest.get("observability", {}).get("request_metrics", {}).get("exclude_paths")
             ) or ["/health", "/healthz", "/readyz", "/metrics", "/favicon.ico"],
+            # Tracing (from tracing section) - enabled by default
+            tracing_enabled=_default(interpolate(
+                manifest.get("tracing", {}).get("enabled")
+            ), True),
+            tracing_sample_rate=float(_default(interpolate(
+                manifest.get("tracing", {}).get("sample_rate")
+            ), 1.0)),
         )
 
 
@@ -963,6 +981,12 @@ def _build_kernel_settings(
             log_level="DEBUG" if cfg.debug else cfg.log_level,
             request_metrics_enabled=cfg.request_metrics_enabled,
             request_metrics_exclude_paths=tuple(cfg.request_metrics_exclude_paths),
+        ),
+        
+        tracing=TracingSettings(
+            enabled=cfg.tracing_enabled,
+            exclude_paths=tuple(cfg.tracing_exclude_paths),
+            sample_rate=cfg.tracing_sample_rate,
         ),
         
         reliability=ReliabilitySettings(

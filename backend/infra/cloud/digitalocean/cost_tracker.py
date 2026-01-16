@@ -3,7 +3,7 @@ DigitalOcean Cost Tracker
 
 Track spending per project/environment using droplet tags.
 
-Uses http_client for automatic retries.
+Uses AsyncDOClient from shared cloud module.
 
 SAFETY: Only tracks costs for managed droplets (tagged with MANAGED_TAG).
 Personal/unmanaged servers are excluded from cost calculations.
@@ -13,7 +13,7 @@ from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
 from datetime import datetime
 
-from .client import MANAGED_TAG
+from .client import MANAGED_TAG, AsyncDOClient
 
 
 @dataclass
@@ -72,42 +72,27 @@ SIZE_PRICING = {
 
 
 class CostTracker:
-    """Track DigitalOcean costs by project and environment."""
+    """
+    Track DigitalOcean costs by project and environment.
     
-    BASE_URL = "https://api.digitalocean.com/v2"
+    Uses AsyncDOClient from shared cloud module for all API calls.
+    """
     
     def __init__(self, do_token: str):
         self.do_token = do_token
-        self._http_client = None
+        self._client: Optional[AsyncDOClient] = None
     
-    def _get_http_client(self):
-        """Get or create async HTTP client."""
-        if self._http_client is None:
-            from ....http_client import AsyncHttpClient, HttpConfig, RetryConfig
-            
-            config = HttpConfig(
-                timeout=30,
-                retry=RetryConfig(
-                    max_retries=3,
-                    base_delay=1.0,
-                    retry_on_status={429, 500, 502, 503, 504},
-                ),
-                headers={
-                    "Authorization": f"Bearer {self.do_token}",
-                    "Content-Type": "application/json",
-                },
-            )
-            self._http_client = AsyncHttpClient(
-                config=config,
-                base_url=self.BASE_URL,
-            )
-        return self._http_client
+    def _get_client(self) -> AsyncDOClient:
+        """Get or create async DO client."""
+        if self._client is None:
+            self._client = AsyncDOClient(self.do_token)
+        return self._client
     
     async def close(self):
-        """Close the HTTP client."""
-        if self._http_client:
-            await self._http_client.close()
-            self._http_client = None
+        """Close the client."""
+        if self._client:
+            await self._client.close()
+            self._client = None
     
     def _get_size_cost(self, size_slug: str) -> float:
         """Get monthly cost for a size slug."""
@@ -120,36 +105,24 @@ class CostTracker:
         if base_size in SIZE_PRICING:
             return SIZE_PRICING[base_size]
         
-        # Default estimate based on name pattern
-        if 's-1vcpu' in size_slug:
-            return 6.0
-        elif 's-2vcpu' in size_slug:
-            return 18.0
-        elif 's-4vcpu' in size_slug:
-            return 48.0
-        elif 's-8vcpu' in size_slug:
-            return 96.0
-        
-        return 0.0  # Unknown
+        # Default estimate based on pattern
+        return 6.0  # Minimum droplet cost
+    
+    def _is_managed(self, tags: List[str]) -> bool:
+        """Check if droplet is managed by our system."""
+        return MANAGED_TAG in tags
     
     def _parse_tags(self, tags: List[str]) -> Dict[str, Optional[str]]:
-        """Extract project and environment from tags."""
+        """Parse project/environment from tags."""
         result = {"project": None, "environment": None}
         
         for tag in tags:
-            if tag.startswith("project:"):
-                result["project"] = tag.split(":", 1)[1]
-            elif tag.startswith("env:"):
-                result["environment"] = tag.split(":", 1)[1]
-            elif tag in ("prod", "staging", "dev", "uat"):
-                result["environment"] = tag
+            if tag.startswith("project:") or tag.startswith("project-"):
+                result["project"] = tag.split(":", 1)[-1].split("-", 1)[-1]
+            elif tag.startswith("env:") or tag.startswith("env-"):
+                result["environment"] = tag.split(":", 1)[-1].split("-", 1)[-1]
         
         return result
-    
-    def _is_managed(self, tags: List[str]) -> bool:
-        """Check if droplet is managed (has MANAGED_TAG) and not a temporary builder."""
-        # Must have MANAGED_TAG and NOT be a snapshot-builder (temporary)
-        return MANAGED_TAG in tags and "snapshot-builder" not in tags
     
     async def get_droplet_costs(self) -> List[DropletCost]:
         """
@@ -157,47 +130,32 @@ class CostTracker:
         
         SAFETY: Excludes personal/unmanaged droplets from cost tracking.
         """
-        droplets = []
-        client = self._get_http_client()
+        client = self._get_client()
         
-        page = 1
-        while True:
-            response = await client.request(
-                "GET", f"/droplets?page={page}&per_page=100",
-                raise_on_error=False,
-            )
+        # Get all droplets (include_unmanaged=True so we can filter ourselves)
+        all_droplets = await client.list_droplets(include_unmanaged=True)
+        
+        droplets = []
+        for d in all_droplets:
+            tags = d.tags or []
             
-            if response.status_code != 200:
-                break
+            # SAFETY: Skip unmanaged droplets
+            if not self._is_managed(tags):
+                continue
             
-            data = response.json()
+            tags_info = self._parse_tags(tags)
+            monthly = self._get_size_cost(d.size or "")
             
-            for d in data.get("droplets", []):
-                tags = d.get("tags", [])
-                
-                # SAFETY: Skip unmanaged droplets
-                if not self._is_managed(tags):
-                    continue
-                
-                tags_info = self._parse_tags(tags)
-                monthly = self._get_size_cost(d.get("size_slug", ""))
-                
-                droplets.append(DropletCost(
-                    id=d["id"],
-                    name=d["name"],
-                    size=d.get("size_slug", "unknown"),
-                    monthly_cost=monthly,
-                    hourly_cost=round(monthly / 730, 4),  # ~730 hours/month
-                    project=tags_info["project"],
-                    environment=tags_info["environment"],
-                    region=d.get("region", {}).get("slug", "unknown"),
-                ))
-            
-            # Check for more pages
-            links = data.get("links", {}).get("pages", {})
-            if "next" not in links:
-                break
-            page += 1
+            droplets.append(DropletCost(
+                id=d.id,
+                name=d.name,
+                size=d.size or "unknown",
+                monthly_cost=monthly,
+                hourly_cost=round(monthly / 730, 4),  # ~730 hours/month
+                project=tags_info["project"],
+                environment=tags_info["environment"],
+                region=d.region or "unknown",
+            ))
         
         return droplets
     
@@ -233,19 +191,10 @@ class CostTracker:
     
     async def get_billing_history(self, limit: int = 12) -> List[Dict[str, Any]]:
         """Get recent billing history from DO."""
-        client = self._get_http_client()
-        response = await client.request(
-            "GET", f"/customers/my/billing_history?per_page={limit}",
-            raise_on_error=False,
-        )
-        if response.status_code == 200:
-            return response.json().get("billing_history", [])
-        return []
+        client = self._get_client()
+        return await client.get_billing_history(limit)
     
     async def get_balance(self) -> Dict[str, Any]:
         """Get current account balance."""
-        client = self._get_http_client()
-        response = await client.request("GET", "/customers/my/balance", raise_on_error=False)
-        if response.status_code == 200:
-            return response.json()
-        return {}
+        client = self._get_client()
+        return await client.get_balance()

@@ -41,9 +41,10 @@ Key Concepts:
     - Context vars: Thread/async-safe storage of current context
 
 Integration Points:
-    - http/ module: Auto-creates spans for HTTP calls
+    - http_client module: Auto-creates spans for HTTP calls
     - databases/ module: Can add spans for queries
-    - app_kernel middleware: Creates RequestContext per request
+    - TracingMiddleware: Creates RequestContext per request
+    - SQLiteTraceStore: Persists traces for telemetry dashboard
 """
 
 from .types import (
@@ -66,6 +67,21 @@ from .decorators import (
 )
 
 
+# Lazy imports for optional dependencies
+def __getattr__(name):
+    """Lazy load middleware and store (require starlette/sqlite)."""
+    if name == "TracingMiddleware":
+        from .middleware import TracingMiddleware
+        return TracingMiddleware
+    if name == "SQLiteTraceStore":
+        from .store import SQLiteTraceStore
+        return SQLiteTraceStore
+    if name == "TraceStore":
+        from .store import TraceStore
+        return TraceStore
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 __all__ = [
     # Types
     "SpanKind",
@@ -80,4 +96,9 @@ __all__ = [
     # Decorators
     "traced",
     "TracedOperation",
+    # Middleware (lazy)
+    "TracingMiddleware",
+    # Storage (lazy)
+    "TraceStore",
+    "SQLiteTraceStore",
 ]
