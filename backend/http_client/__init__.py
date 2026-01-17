@@ -5,8 +5,10 @@ Provides sync and async HTTP clients with:
 - Automatic retries with exponential backoff
 - Circuit breaker to prevent cascade failures
 - Request/response tracing
+- Connection pooling for performance
+- Response caching
 - Unified error handling
-- Configurable timeouts
+- HTTP/2 support
 
 Quick Start:
     # Sync client
@@ -25,6 +27,25 @@ Quick Start:
         client.set_bearer_token("your-token")
         response = await client.get("/users")
         users = response.json()
+
+Connection Pooling (RECOMMENDED for high-performance):
+    from http_client import get_pooled_client
+    
+    # Reuses connections - much faster than creating new client each time
+    client = await get_pooled_client("https://api.digitalocean.com")
+    response = await client.get("/v2/droplets", headers={"Authorization": "Bearer xxx"})
+    # Don't close! Pool manages lifecycle
+
+Response Caching:
+    from http_client import cached_request
+    
+    @cached_request(ttl=30)
+    async def get_servers():
+        client = await get_pooled_client("https://api.example.com")
+        return await client.get("/servers")
+    
+    # First call: hits API
+    # Subsequent calls within 30s: returns cached
 
 Configuration:
     from http_client import HttpConfig, RetryConfig, CircuitBreakerConfig
@@ -51,7 +72,7 @@ Error Handling:
 
 Tracing:
     The HTTP clients automatically create spans for each request when
-    a tracing context is active. See the tracing module for details.
+    a tracing context is active. Spans include http_version to verify HTTP/2.
 """
 
 # Configuration
@@ -85,6 +106,25 @@ from .clients import (
     AsyncHttpClient,
 )
 
+# Connection Pooling
+from .pool import (
+    get_pooled_client,
+    get_pool,
+    get_pool_stats,
+    close_pool,
+    ConnectionPool,
+)
+
+# Response Caching
+from .cache import (
+    cached_request,
+    get_cache,
+    get_cache_stats,
+    clear_cache,
+    make_cache_key,
+    ResponseCache,
+)
+
 
 __all__ = [
     # Config
@@ -108,4 +148,17 @@ __all__ = [
     # Clients
     "SyncHttpClient",
     "AsyncHttpClient",
+    # Connection Pooling
+    "get_pooled_client",
+    "get_pool",
+    "get_pool_stats",
+    "close_pool",
+    "ConnectionPool",
+    # Caching
+    "cached_request",
+    "get_cache",
+    "get_cache_stats",
+    "clear_cache",
+    "make_cache_key",
+    "ResponseCache",
 ]

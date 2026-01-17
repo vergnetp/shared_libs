@@ -203,7 +203,7 @@ def init_app_kernel(
     # =========================================================================
     # 5. Initialize streaming lifecycle
     # =========================================================================
-    from .streaming.leases import init_lease_limiter, StreamLeaseConfig
+    from ..streaming.leases import init_lease_limiter, StreamLeaseConfig
     
     stream_config = StreamLeaseConfig(
         limit=settings.streaming.max_concurrent_per_user,

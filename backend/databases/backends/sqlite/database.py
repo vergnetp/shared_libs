@@ -42,7 +42,7 @@ class SqliteDatabase(ConnectionManager):
     
     def _create_sync_connection(self, config: DatabaseConfig):
         """
-        Creates a raw sqlite3 connection.
+        Creates a raw sqlite3 connection with performance optimizations.
         
         Args:
             config (DatabaseConfig): Database configuration.
@@ -54,7 +54,21 @@ class SqliteDatabase(ConnectionManager):
             For SQLite, only the 'database' parameter is used, which should
             be the path to the database file.
         """       
-        return sqlite3.connect(config["database"])        
+        conn = sqlite3.connect(config["database"])
+        
+        # Enable WAL mode for better concurrent read/write performance
+        conn.execute("PRAGMA journal_mode=WAL")
+        
+        # Set busy timeout to wait for locks instead of failing immediately
+        conn.execute("PRAGMA busy_timeout=5000")
+        
+        # NORMAL synchronous is a good balance of safety and speed
+        conn.execute("PRAGMA synchronous=NORMAL")
+        
+        # Enable foreign keys (disabled by default in SQLite)
+        conn.execute("PRAGMA foreign_keys=ON")
+        
+        return conn        
     
     def _wrap_async_connection(self, raw_conn, config: DatabaseConfig):
         """

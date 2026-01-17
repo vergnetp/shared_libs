@@ -128,6 +128,56 @@ from .node_agent import (
     NodeAgentClient,
 )
 
+# Architecture (topology discovery)
+from .architecture import (
+    ArchitectureService,
+    AsyncArchitectureService,
+    ArchitectureTopology,
+    ServiceNode,
+    ServiceEdge,
+    ServerStatus,
+    InfrastructureComponent,
+)
+
+# Provisioning (server lifecycle)
+from .provisioning import (
+    ProvisioningService,
+    AsyncProvisioningService,
+    ProvisionRequest,
+    ProvisionResult,
+)
+
+# Fleet (health monitoring)
+from .fleet import (
+    FleetService,
+    AsyncFleetService,
+    ServerHealth,
+    FleetHealth,
+)
+
+# DNS (cleanup utilities)
+from .dns import (
+    DnsCleanupService,
+    AsyncDnsCleanupService,
+    DnsCleanupResult,
+)
+
+# Registry (service mesh)
+from .registry import (
+    ServiceRegistry,
+    AsyncServiceRegistry,
+    ServiceRecord,
+)
+
+# Streaming (SSE utilities)
+from .streaming import (
+    SSEEmitter,
+    SSEEvent,
+    DeploymentEmitter,
+    sse_response,
+    run_in_thread,
+)
+
 __all__ = [
     # Version
     "__version__",
@@ -220,4 +270,42 @@ __all__ = [
     # Node Agent
     "NODE_AGENT_CODE",
     "NodeAgentClient",
+    
+    # Architecture
+    "ArchitectureService",
+    "AsyncArchitectureService",
+    "ArchitectureTopology",
+    "ServiceNode",
+    "ServiceEdge",
+    "ServerStatus",
+    "InfrastructureComponent",
+    
+    # Provisioning
+    "ProvisioningService",
+    "AsyncProvisioningService",
+    "ProvisionRequest",
+    "ProvisionResult",
+    
+    # Fleet
+    "FleetService",
+    "AsyncFleetService",
+    "ServerHealth",
+    "FleetHealth",
+    
+    # DNS
+    "DnsCleanupService",
+    "AsyncDnsCleanupService",
+    "DnsCleanupResult",
+    
+    # Registry
+    "ServiceRegistry",
+    "AsyncServiceRegistry",
+    "ServiceRecord",
+    
+    # Streaming
+    "SSEEmitter",
+    "SSEEvent",
+    "DeploymentEmitter",
+    "sse_response",
+    "run_in_thread",
 ]

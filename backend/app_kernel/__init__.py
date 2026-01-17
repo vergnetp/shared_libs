@@ -103,7 +103,7 @@ from .jobs import (
     create_jobs_router,
 )
 
-from .streaming import (
+from ..streaming import (
     stream_lease,
     StreamLimitExceeded,
     get_active_streams,

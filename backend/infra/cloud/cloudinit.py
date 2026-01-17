@@ -270,6 +270,8 @@ SNAPSHOT_PRESETS = {
                 "nginx:alpine",
                 "postgres:16-alpine",
                 "redis:7-alpine",
+                "mysql:8",
+                "mongo:7",
                 "opensearchproject/opensearch:2",
                 "qdrant/qdrant:latest",
                 "python:3.11-slim",

@@ -23,6 +23,7 @@ class HttpResponse:
         url: Final URL (after redirects)
         method: HTTP method used
         elapsed_ms: Request duration in milliseconds
+        http_version: HTTP version used (e.g., "HTTP/1.1", "HTTP/2")
     """
     status_code: int
     headers: Dict[str, str]
@@ -30,6 +31,7 @@ class HttpResponse:
     url: str
     method: str
     elapsed_ms: float = 0.0
+    http_version: str = "HTTP/1.1"  # HTTP version (HTTP/1.1, HTTP/2, HTTP/3)
     
     # Metadata
     retry_count: int = 0
@@ -135,9 +137,10 @@ class HttpResponse:
             "url": self.url,
             "method": self.method,
             "elapsed_ms": self.elapsed_ms,
+            "http_version": self.http_version,
             "content_length": len(self.body),
             "headers": dict(self.headers),
         }
     
     def __repr__(self) -> str:
-        return f"HttpResponse({self.status_code}, {self.method} {self.url}, {len(self.body)} bytes)"
+        return f"HttpResponse({self.status_code}, {self.method} {self.url}, {self.http_version}, {len(self.body)} bytes)"

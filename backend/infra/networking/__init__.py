@@ -23,6 +23,7 @@ from .ssl import (
 )
 from .service import NginxService, NginxResult
 from .domains import DomainService, DomainResult
+from .bulk import BulkNginxService, SyncBulkNginxService, BulkNginxResult
 
 __all__ = [
     # Nginx config generation
@@ -37,9 +38,13 @@ __all__ = [
     "StreamConfig",
     "StreamBackend",
     "BackendMode",
-    # Nginx service (high-level)
+    # Nginx service (single server)
     "NginxService",
     "NginxResult",
+    # Bulk nginx service (multi-server)
+    "BulkNginxService",
+    "SyncBulkNginxService",
+    "BulkNginxResult",
     # Port resolution
     "DeploymentPortResolver",
     "get_internal_port",

@@ -36,20 +36,73 @@ class ServiceDependency:
     name: str           # postgres, redis, etc.
     env_prefix: str     # DB_, REDIS_, etc.
     container_port: int # 5432, 6379, etc.
+    is_stateful: bool = True  # True for databases/caches, False for HTTP services
+
+
+@dataclass  
+class StatefulServiceType:
+    """Deployable stateful service type (for UI)."""
+    value: str          # postgres, redis, etc. (used as service name)
+    label: str          # Display label with emoji
+    port: int           # Container port
+    image: str          # Docker image (should match snapshot pre-pulls)
+    env_prefix: str     # Env var prefix (DB_, REDIS_, etc.)
+    description: str = ""  # Optional description
+    
+    def to_dict(self) -> dict:
+        return {
+            "value": self.value,
+            "label": self.label,
+            "port": self.port,
+            "image": self.image,
+            "env_prefix": self.env_prefix,
+            "description": self.description,
+        }
+
+
+# Deployable stateful service types (for frontend UI)
+# Images should match SNAPSHOT_PRESETS["base"].docker_images in cloudinit.py
+STATEFUL_SERVICE_TYPES = [
+    StatefulServiceType("postgres", "🐘 PostgreSQL", 5432, "postgres:16-alpine", "DB", "Relational database"),
+    StatefulServiceType("redis", "⚡ Redis", 6379, "redis:7-alpine", "REDIS", "In-memory cache & pub/sub"),
+    StatefulServiceType("mysql", "🐬 MySQL", 3306, "mysql:8", "DB", "Relational database"),
+    StatefulServiceType("mongo", "🍃 MongoDB", 27017, "mongo:7", "MONGO", "Document database"),
+    StatefulServiceType("opensearch", "🔍 OpenSearch", 9200, "opensearchproject/opensearch:2", "SEARCH", "Search & analytics"),
+    StatefulServiceType("qdrant", "🧠 Qdrant", 6333, "qdrant/qdrant:latest", "VECTOR", "Vector database for AI"),
+]
+
+
+def get_stateful_service_types() -> list:
+    """Get list of deployable stateful service types (for frontend)."""
+    return [s.to_dict() for s in STATEFUL_SERVICE_TYPES]
+
+
+def get_stateful_image(service_type: str) -> Optional[str]:
+    """Get Docker image for a stateful service type."""
+    for s in STATEFUL_SERVICE_TYPES:
+        if s.value == service_type:
+            return s.image
+    return None
 
 
 # Known service types and their env var prefixes
 KNOWN_SERVICES = {
-    "postgres": ServiceDependency("postgres", "DB", 5432),
-    "postgresql": ServiceDependency("postgres", "DB", 5432),
-    "mysql": ServiceDependency("mysql", "DB", 3306),
-    "mariadb": ServiceDependency("mariadb", "DB", 3306),
-    "redis": ServiceDependency("redis", "REDIS", 6379),
-    "mongo": ServiceDependency("mongo", "MONGO", 27017),
-    "mongodb": ServiceDependency("mongodb", "MONGO", 27017),
-    "opensearch": ServiceDependency("opensearch", "SEARCH", 9200),
-    "elasticsearch": ServiceDependency("elasticsearch", "SEARCH", 9200),
+    # Stateful services (TCP stream proxy + credentials)
+    "postgres": ServiceDependency("postgres", "DB", 5432, is_stateful=True),
+    "postgresql": ServiceDependency("postgres", "DB", 5432, is_stateful=True),
+    "mysql": ServiceDependency("mysql", "DB", 3306, is_stateful=True),
+    "mariadb": ServiceDependency("mariadb", "DB", 3306, is_stateful=True),
+    "redis": ServiceDependency("redis", "REDIS", 6379, is_stateful=True),
+    "mongo": ServiceDependency("mongo", "MONGO", 27017, is_stateful=True),
+    "mongodb": ServiceDependency("mongodb", "MONGO", 27017, is_stateful=True),
+    "opensearch": ServiceDependency("opensearch", "SEARCH", 9200, is_stateful=True),
+    "elasticsearch": ServiceDependency("elasticsearch", "SEARCH", 9200, is_stateful=True),
+    "rabbitmq": ServiceDependency("rabbitmq", "RABBITMQ", 5672, is_stateful=True),
+    "kafka": ServiceDependency("kafka", "KAFKA", 9092, is_stateful=True),
 }
+
+# Default port for HTTP services
+DEFAULT_HTTP_PORT = 8000
 
 
 class DeployEnvBuilder:
@@ -250,9 +303,42 @@ class DeployEnvBuilder:
             "ELASTICSEARCH_URL": f"http://localhost:{port}",
         }
     
+    def _build_http_service_env(self, service_name: str) -> Dict[str, str]:
+        """
+        Build env vars for a generic HTTP service.
+        
+        For any service not in KNOWN_SERVICES (workers, APIs, LLMs, etc).
+        Generates {SERVICE_NAME}_URL pointing to localhost:{internal_port}.
+        
+        Users can use this internal URL (fast) or the public domain.
+        """
+        port = self._get_internal_port(service_name)
+        service_upper = service_name.upper().replace("-", "_").replace(".", "_")
+        
+        return {
+            f"{service_upper}_HOST": "localhost",
+            f"{service_upper}_PORT": str(port),
+            f"{service_upper}_URL": f"http://localhost:{port}",
+        }
+    
     def build_env_vars(self) -> Dict[str, str]:
         """
         Build complete env vars dict.
+        
+        Auto-injects connection URLs for ALL service dependencies:
+        
+        Stateful services (special format with credentials):
+        - postgres → DATABASE_URL, DB_HOST, DB_PORT, etc.
+        - redis → REDIS_URL, REDIS_HOST, REDIS_PORT
+        - mongo → MONGO_URL, MONGO_HOST, MONGO_PORT
+        - opensearch → OPENSEARCH_URL, SEARCH_HOST, SEARCH_PORT
+        
+        HTTP services (simple format):
+        - llm → LLM_URL, LLM_HOST, LLM_PORT
+        - worker → WORKER_URL, WORKER_HOST, WORKER_PORT
+        - {any} → {SERVICE}_URL, {SERVICE}_HOST, {SERVICE}_PORT
+        
+        Users can use internal URL (fast) or public domain (https://service.digitalpixo.com).
         
         Returns:
             Dict of environment variables to inject
@@ -267,17 +353,25 @@ class DeployEnvBuilder:
         
         # Service-specific env vars
         for dep in self.dependencies:
-            if dep in ("postgres", "postgresql"):
+            dep_lower = dep.lower()
+            
+            # Stateful services get special handling (with credentials)
+            if dep_lower in ("postgres", "postgresql"):
                 env.update(self._build_postgres_env())
-            elif dep in ("redis",):
+            elif dep_lower in ("redis",):
                 env.update(self._build_redis_env())
-            elif dep in ("mongo", "mongodb"):
+            elif dep_lower in ("mongo", "mongodb"):
                 env.update(self._build_mongo_env())
-            elif dep in ("opensearch", "elasticsearch"):
-                env.update(self._build_search_env(dep))
+            elif dep_lower in ("opensearch", "elasticsearch"):
+                env.update(self._build_search_env(dep_lower))
+            else:
+                # HTTP services get simple URL injection
+                env.update(self._build_http_service_env(dep_lower))
         
         # Base env vars (user-provided) override auto-generated
         env.update(self.base_env_vars)
+        
+        return env
         
         return env
     
@@ -448,5 +542,165 @@ def build_stateful_service_env(
 
 
 def is_stateful_service(service_name: str) -> bool:
-    """Check if a service is a known stateful service."""
-    return service_name.lower() in KNOWN_SERVICES
+    """Check if a service is a known stateful service (needs TCP proxy with credentials)."""
+    service_lower = service_name.lower()
+    if service_lower in KNOWN_SERVICES:
+        return KNOWN_SERVICES[service_lower].is_stateful
+    return False
+
+
+def get_service_container_port(service_name: str) -> int:
+    """Get the container port for a service."""
+    service_lower = service_name.lower()
+    if service_lower in KNOWN_SERVICES:
+        return KNOWN_SERVICES[service_lower].container_port
+    return DEFAULT_HTTP_PORT
+
+
+def get_connection_info(
+    user: str,
+    project: str,
+    env: str,
+    service: str,
+    host: str,
+    port: int,
+) -> Dict[str, str]:
+    """
+    Generate connection info for a stateful service.
+    
+    Returns deterministic credentials based on user/project/env/service.
+    Can be called anytime to regenerate the same connection URL.
+    
+    Args:
+        user: User/workspace ID
+        project: Project name
+        env: Environment (prod, staging, dev)
+        service: Service name (redis, postgres, etc.)
+        host: Server IP or hostname
+        port: Port the service is exposed on
+        
+    Returns:
+        Dict with keys: connection_url, env_var_name, host, port, password, user (if applicable), database (if applicable)
+    """
+    builder = DeployEnvBuilder(user, project, env, service)
+    service_lower = service.lower()
+    
+    result = {
+        "host": host,
+        "port": port,
+        "service": service,
+    }
+    
+    if "redis" in service_lower:
+        password = builder._get_service_password("redis")
+        result.update({
+            "connection_url": f"redis://:{password}@{host}:{port}/0",
+            "env_var_name": "REDIS_URL",
+            "password": password,
+        })
+    elif "postgres" in service_lower:
+        db_user = builder._get_db_user("postgres")
+        db_password = builder._get_service_password("postgres")
+        db_name = builder._get_db_name("postgres")
+        result.update({
+            "connection_url": f"postgresql://{db_user}:{db_password}@{host}:{port}/{db_name}",
+            "env_var_name": "DATABASE_URL",
+            "user": db_user,
+            "password": db_password,
+            "database": db_name,
+        })
+    elif "mysql" in service_lower or "mariadb" in service_lower:
+        db_user = builder._get_db_user("mysql")
+        db_password = builder._get_service_password("mysql")
+        db_name = builder._get_db_name("mysql")
+        result.update({
+            "connection_url": f"mysql://{db_user}:{db_password}@{host}:{port}/{db_name}",
+            "env_var_name": "MYSQL_URL",
+            "user": db_user,
+            "password": db_password,
+            "database": db_name,
+        })
+    elif "mongo" in service_lower:
+        db_user = builder._get_db_user("mongo")
+        db_password = builder._get_service_password("mongo")
+        db_name = builder._get_db_name("mongo")
+        result.update({
+            "connection_url": f"mongodb://{db_user}:{db_password}@{host}:{port}/{db_name}",
+            "env_var_name": "MONGO_URL",
+            "user": db_user,
+            "password": db_password,
+            "database": db_name,
+        })
+    else:
+        result.update({
+            "connection_url": f"{host}:{port}",
+            "env_var_name": f"{service.upper()}_URL",
+        })
+    
+    return result
+
+
+def build_discovered_service_urls(
+    user: str,
+    project: str,
+    env: str,
+    discovered_services: list,
+) -> Dict[str, str]:
+    """
+    Build env vars for all discovered stateful services in a project.
+    
+    This is called when deploying any service - it auto-injects URLs for
+    all stateful services (redis, postgres, etc.) that exist in the same project/env.
+    
+    Args:
+        user: User/workspace ID
+        project: Project name
+        env: Environment (prod, staging, dev)
+        discovered_services: List of dicts with {service_type, host, port}
+            e.g., [{"service_type": "redis", "host": "10.0.0.5", "port": 8453}]
+    
+    Returns:
+        Dict of env vars like:
+        {
+            "REDIS_URL": "redis://:xxx@10.0.0.5:8453/0",
+            "DATABASE_URL": "postgresql://user:xxx@10.0.0.5:5432/db",
+        }
+    """
+    env_vars = {}
+    
+    for svc in discovered_services:
+        service_type = svc.get("service_type", "").lower()
+        host = svc.get("host")
+        port = svc.get("port")
+        
+        if not host or not port:
+            continue
+        
+        info = get_connection_info(
+            user=user,
+            project=project,
+            env=env,
+            service=service_type,
+            host=host,
+            port=port,
+        )
+        
+        # Add connection URL with standard env var name
+        env_var_name = info.get("env_var_name")
+        connection_url = info.get("connection_url")
+        
+        if env_var_name and connection_url:
+            env_vars[env_var_name] = connection_url
+            
+            # Also add individual components for flexibility
+            service_upper = service_type.upper()
+            env_vars[f"{service_upper}_HOST"] = host
+            env_vars[f"{service_upper}_PORT"] = str(port)
+            if info.get("password"):
+                env_vars[f"{service_upper}_PASSWORD"] = info["password"]
+            if info.get("user"):
+                env_vars[f"{service_upper}_USER"] = info["user"]
+            if info.get("database"):
+                env_vars[f"{service_upper}_DB"] = info["database"]
+    
+    return env_vars

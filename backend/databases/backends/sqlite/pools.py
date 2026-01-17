@@ -134,6 +134,24 @@ class SqlitePoolManager(PoolManager):
     async def _create_pool(self, config: DatabaseConfig) -> ConnectionPool:
         db_path = config.config()["database"]
         conn = await aiosqlite.connect(db_path)
+        
+        # Enable WAL mode for better concurrent read/write performance
+        # - Writers don't block readers
+        # - Multiple readers can access concurrently
+        # - Better crash recovery
+        await conn.execute("PRAGMA journal_mode=WAL")
+        
+        # Set busy timeout to wait for locks instead of failing immediately
+        # 5000ms = 5 seconds
+        await conn.execute("PRAGMA busy_timeout=5000")
+        
+        # NORMAL synchronous is a good balance of safety and speed
+        # (FULL is safer but slower, OFF is fast but risks corruption)
+        await conn.execute("PRAGMA synchronous=NORMAL")
+        
+        # Enable foreign keys (disabled by default in SQLite)
+        await conn.execute("PRAGMA foreign_keys=ON")
+        
         return SqliteConnectionPool(
             conn           
         )

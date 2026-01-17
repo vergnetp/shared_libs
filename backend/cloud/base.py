@@ -113,8 +113,24 @@ class BaseCloudClient:
         self.close()
 
 
+# Global pool of async HTTP clients for connection reuse
+_async_http_client_pool: Dict[str, AsyncHttpClient] = {}
+
+
+def _get_pool_key(base_url: str, token: str) -> str:
+    """Generate cache key for HTTP client pool."""
+    import hashlib
+    token_hash = hashlib.sha256(token.encode()).hexdigest()[:16]
+    return f"{base_url}:{token_hash}"
+
+
 class AsyncBaseCloudClient:
-    """Base class for async cloud clients."""
+    """
+    Base class for async cloud clients.
+    
+    Uses connection pooling - HTTP clients are cached per (base_url, token).
+    This means subsequent requests reuse TCP connections (much faster).
+    """
     
     PROVIDER = "cloud"
     BASE_URL = ""
@@ -127,17 +143,28 @@ class AsyncBaseCloudClient:
         self.api_token = api_token
         self.config = config or CloudClientConfig()
         
-        http_config = default_http_config(
-            self.config,
-            circuit_breaker_name=f"{self.PROVIDER}-api-async",
-        )
+        # Use pooled HTTP client for connection reuse
+        pool_key = _get_pool_key(self.BASE_URL, api_token)
         
-        self._client = AsyncHttpClient(
-            config=http_config,
-            base_url=self.BASE_URL,
-            circuit_breaker_name=f"{self.PROVIDER}-api-async",
-        )
-        self._client.set_bearer_token(api_token)
+        if pool_key in _async_http_client_pool:
+            # Reuse existing client (warm connection)
+            self._client = _async_http_client_pool[pool_key]
+            self._owns_client = False
+        else:
+            # Create new client and add to pool
+            http_config = default_http_config(
+                self.config,
+                circuit_breaker_name=f"{self.PROVIDER}-api-async",
+            )
+            
+            self._client = AsyncHttpClient(
+                config=http_config,
+                base_url=self.BASE_URL,
+                circuit_breaker_name=f"{self.PROVIDER}-api-async",
+            )
+            self._client.set_bearer_token(api_token)
+            _async_http_client_pool[pool_key] = self._client
+            self._owns_client = True
     
     def _handle_error(self, response: HttpResponse, provider: str = None) -> None:
         """Convert HTTP errors to cloud-specific errors."""
@@ -164,11 +191,13 @@ class AsyncBaseCloudClient:
             )
     
     async def close(self) -> None:
-        """Close the underlying HTTP client."""
-        await self._client.close()
+        """No-op: pooled clients are managed globally."""
+        # Don't close - connection pool manages lifecycle
+        pass
     
     async def __aenter__(self) -> 'AsyncBaseCloudClient':
         return self
     
     async def __aexit__(self, *args) -> None:
-        await self.close()
+        # Don't close - pool manages lifecycle
+        pass

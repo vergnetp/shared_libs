@@ -1,7 +1,7 @@
 """
 Asynchronous HTTP client.
 
-Uses aiohttp library for async HTTP operations.
+Uses httpx library for async HTTP operations with HTTP/2 support.
 Includes retry, circuit breaker, and tracing integration.
 
 Usage:
@@ -28,7 +28,7 @@ Usage:
     finally:
         await client.close()
 
-Note: Requires aiohttp package: pip install aiohttp
+Note: Requires httpx package: pip install httpx[http2]
 """
 
 from __future__ import annotations
@@ -36,25 +36,20 @@ import time
 import asyncio
 from typing import Dict, Any, Optional, Union, TYPE_CHECKING
 
-# Lazy import for aiohttp
-aiohttp = None
-ClientTimeout = None
-TCPConnector = None
+# Lazy import for httpx
+httpx = None
 
-def _ensure_aiohttp():
-    """Import aiohttp on first use."""
-    global aiohttp, ClientTimeout, TCPConnector
-    if aiohttp is None:
+def _ensure_httpx():
+    """Import httpx on first use."""
+    global httpx
+    if httpx is None:
         try:
-            import aiohttp as _aiohttp
-            from aiohttp import ClientTimeout as _ClientTimeout, TCPConnector as _TCPConnector
-            aiohttp = _aiohttp
-            ClientTimeout = _ClientTimeout
-            TCPConnector = _TCPConnector
+            import httpx as _httpx
+            httpx = _httpx
         except ImportError:
             raise ImportError(
-                "aiohttp is required for AsyncHttpClient. "
-                "Install it with: pip install aiohttp"
+                "httpx is required for AsyncHttpClient. "
+                "Install it with: pip install httpx[http2]"
             )
 
 from .base import BaseHttpClient, DummySpanContext
@@ -71,14 +66,15 @@ class AsyncHttpClient(BaseHttpClient):
     """
     Asynchronous HTTP client with retry and circuit breaker.
     
-    Built on aiohttp library.
+    Built on httpx library with HTTP/2 support.
     
     Features:
+        - HTTP/2 multiplexing (multiple requests on single connection)
+        - Connection pooling with keep-alive
         - Automatic retries with exponential backoff
         - Circuit breaker to prevent cascade failures
         - Request/response tracing
         - Configurable timeouts
-        - Connection pooling
         - Bearer token and custom auth support
     """
     
@@ -87,37 +83,44 @@ class AsyncHttpClient(BaseHttpClient):
         config: HttpConfig = None,
         base_url: str = None,
         circuit_breaker_name: str = None,
+        http2: bool = True,  # Enable HTTP/2 by default
     ):
         super().__init__(config, base_url, circuit_breaker_name)
-        self._session = None
+        self._client = None
         self._auth_header: Optional[str] = None
-        self._owns_session: bool = False
+        self._owns_client: bool = False
+        self._http2 = http2
     
-    async def _get_session(self):
-        """Get or create aiohttp session."""
-        _ensure_aiohttp()  # Ensure aiohttp is available
+    async def _get_client(self):
+        """Get or create httpx async client."""
+        _ensure_httpx()  # Ensure httpx is available
         
-        if self._session is None or self._session.closed:
-            timeout = ClientTimeout(
-                total=self.config.timeout,
+        if self._client is None or self._client.is_closed:
+            timeout = httpx.Timeout(
+                timeout=self.config.timeout,
                 connect=self.config.connect_timeout,
-                sock_read=self.config.get_read_timeout(),
+                read=self.config.get_read_timeout(),
+                write=30.0,
             )
             
-            connector = TCPConnector(
-                ssl=self.config.verify_ssl if self.config.verify_ssl else False,
-                limit=100,  # Connection pool size
-                limit_per_host=20,
+            # Connection pool limits
+            limits = httpx.Limits(
+                max_keepalive_connections=20,  # Keep connections alive
+                max_connections=100,           # Total pool size
+                keepalive_expiry=30.0,         # Keep-alive timeout
             )
             
-            self._session = aiohttp.ClientSession(
+            self._client = httpx.AsyncClient(
+                http2=self._http2,  # Enable HTTP/2!
                 timeout=timeout,
-                connector=connector,
+                limits=limits,
                 headers=self.config.get_default_headers(),
+                verify=self.config.verify_ssl,
+                follow_redirects=self.config.follow_redirects,
             )
-            self._owns_session = True
+            self._owns_client = True
         
-        return self._session
+        return self._client
     
     def set_auth_header(self, scheme: str, credentials: str) -> None:
         """
@@ -176,10 +179,7 @@ class AsyncHttpClient(BaseHttpClient):
             merged_headers["Authorization"] = self._auth_header
         
         # Get timeout
-        request_timeout = None
-        if timeout:
-            _ensure_aiohttp()
-            request_timeout = ClientTimeout(total=timeout)
+        request_timeout = timeout if timeout else None
         
         # Create span for tracing
         span_ctx = self._create_span(method, full_url, merged_headers)
@@ -197,9 +197,9 @@ class AsyncHttpClient(BaseHttpClient):
                 start_time = time.perf_counter()
                 
                 try:
-                    session = await self._get_session()
+                    client = await self._get_client()
                     
-                    async with session.request(
+                    response = await client.request(
                         method=method,
                         url=full_url,
                         params=params,
@@ -207,46 +207,50 @@ class AsyncHttpClient(BaseHttpClient):
                         json=json,
                         headers=merged_headers,
                         timeout=request_timeout,
-                        allow_redirects=self.config.follow_redirects,
-                    ) as response:
-                        # Read body
-                        body = await response.read()
-                        elapsed_ms = (time.perf_counter() - start_time) * 1000
-                        
-                        # Build response
-                        http_response = HttpResponse(
-                            status_code=response.status,
-                            headers=dict(response.headers),
-                            body=body,
-                            url=str(response.url),
-                            method=method,
-                            elapsed_ms=elapsed_ms,
-                            retry_count=attempt,
+                    )
+                    
+                    # Read body
+                    body = response.content
+                    elapsed_ms = (time.perf_counter() - start_time) * 1000
+                    
+                    # Get HTTP version from httpx response
+                    http_version = getattr(response, 'http_version', 'HTTP/1.1') or 'HTTP/1.1'
+                    
+                    # Build response
+                    http_response = HttpResponse(
+                        status_code=response.status_code,
+                        headers=dict(response.headers),
+                        body=body,
+                        url=str(response.url),
+                        method=method,
+                        elapsed_ms=elapsed_ms,
+                        http_version=http_version,
+                        retry_count=attempt,
+                    )
+                    
+                    self._log_response(http_response, attempt)
+                    last_response = http_response
+                    
+                    # Check if should retry on status
+                    if self._should_retry(attempt, response.status_code, None):
+                        attempt += 1
+                        retry_after = self._get_retry_after(response)
+                        delay = self._calculate_retry_delay(
+                            attempt - 1,
+                            self.config.retry,
+                            retry_after
                         )
-                        
-                        self._log_response(http_response, attempt)
-                        last_response = http_response
-                        
-                        # Check if should retry on status
-                        if self._should_retry(attempt, response.status, None):
-                            attempt += 1
-                            retry_after = self._get_retry_after(response)
-                            delay = self._calculate_retry_delay(
-                                attempt - 1,
-                                self.config.retry,
-                                retry_after
-                            )
-                            await asyncio.sleep(delay)
-                            continue
-                        
-                        # Success path
-                        self._record_success()
-                        self._update_span(span, response=http_response)
-                        
-                        if raise_on_error:
-                            http_response.raise_for_status()
-                        
-                        return http_response
+                        await asyncio.sleep(delay)
+                        continue
+                    
+                    # Success path
+                    self._record_success()
+                    self._update_span(span, response=http_response)
+                    
+                    if raise_on_error:
+                        http_response.raise_for_status()
+                    
+                    return http_response
                 
                 except asyncio.TimeoutError:
                     elapsed_ms = (time.perf_counter() - start_time) * 1000
@@ -258,22 +262,28 @@ class AsyncHttpClient(BaseHttpClient):
                 
                 except Exception as e:
                     elapsed_ms = (time.perf_counter() - start_time) * 1000
-                    # Handle aiohttp-specific exceptions
+                    # Handle httpx-specific exceptions
                     exc_name = type(e).__name__
                     
-                    if exc_name in ('ClientConnectorError', 'ClientOSError'):
+                    if exc_name in ('ConnectError', 'ConnectTimeout'):
                         last_exception = HttpConnectionError(
                             message=str(e),
                             url=full_url,
                             method=method,
                         )
-                    elif exc_name == 'ServerDisconnectedError':
-                        last_exception = HttpConnectionError(
-                            message=f"Server disconnected: {e}",
+                    elif exc_name == 'ReadTimeout':
+                        last_exception = HttpTimeoutError(
+                            timeout=timeout or self.config.timeout,
                             url=full_url,
                             method=method,
                         )
-                    elif exc_name in ('ClientError', 'ClientResponseError'):
+                    elif exc_name in ('RemoteProtocolError', 'LocalProtocolError'):
+                        last_exception = HttpConnectionError(
+                            message=f"Protocol error: {e}",
+                            url=full_url,
+                            method=method,
+                        )
+                    elif exc_name == 'HTTPStatusError':
                         last_exception = HttpError(
                             message=str(e),
                             url=full_url,
@@ -365,10 +375,10 @@ class AsyncHttpClient(BaseHttpClient):
         return await self.request("HEAD", url, **kwargs)
     
     async def close(self) -> None:
-        """Close the underlying session."""
-        if self._session and self._owns_session:
-            await self._session.close()
-            self._session = None
+        """Close the underlying client."""
+        if self._client and self._owns_client:
+            await self._client.aclose()
+            self._client = None
     
     async def __aenter__(self) -> 'AsyncHttpClient':
         return self

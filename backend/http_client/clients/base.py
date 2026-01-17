@@ -211,6 +211,7 @@ class BaseHttpClient(ABC):
         
         try:
             from ...tracing import get_context, SpanKind
+            
             ctx = get_context()
             if ctx is None:
                 return None
@@ -240,6 +241,7 @@ class BaseHttpClient(ABC):
             if response:
                 span.set_attribute("http_status_code", response.status_code)
                 span.set_attribute("http_response_body_size", len(response.body))
+                span.set_attribute("http_version", response.http_version)
                 span.set_attribute("elapsed_ms", response.elapsed_ms)
             
             if error:

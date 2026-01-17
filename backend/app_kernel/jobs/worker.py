@@ -469,8 +469,8 @@ async def run_worker(
         )
     except ImportError:
         try:
-            from job_queue import QueueWorker, QueueConfig
-            from job_queue.config import (
+            from shared_libs.backend.job_queue import QueueWorker, QueueConfig
+            from shared_libs.backend.job_queue.config import (
                 QueueRedisConfig,
                 QueueWorkerConfig,
                 QueueRetryConfig,

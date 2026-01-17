@@ -135,7 +135,7 @@ class TracingMiddleware(BaseHTTPMiddleware):
             except Exception:
                 pass
             
-            # Save trace if configured
+            # Save trace if configured (fire-and-forget - non-blocking!)
             if self.store:
                 should_save = (
                     (ctx.duration_ms and ctx.duration_ms >= self.save_threshold_ms) or
@@ -144,13 +144,19 @@ class TracingMiddleware(BaseHTTPMiddleware):
                 )
                 
                 if should_save:
-                    try:
-                        await self._save_trace(ctx)
-                    except Exception as e:
-                        logger.warning(f"Failed to save trace {ctx.request_id}: {e}")
+                    # Fire-and-forget: don't await, let it run in background
+                    import asyncio
+                    asyncio.create_task(self._save_trace_safe(ctx))
             
             # Clear context
             clear_context()
+    
+    async def _save_trace_safe(self, ctx: RequestContext) -> None:
+        """Save trace to store (with error handling for background task)."""
+        try:
+            await self._save_trace(ctx)
+        except Exception as e:
+            logger.warning(f"Failed to save trace {ctx.request_id}: {e}")
     
     async def _save_trace(self, ctx: RequestContext) -> None:
         """Save trace to store."""

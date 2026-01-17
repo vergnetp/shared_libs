@@ -7,11 +7,13 @@ All deployment logic lives here. API is just a thin wrapper.
 from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
-from typing import Dict, Any, List, Optional, Callable, Literal
+from typing import Dict, Any, List, Optional, Callable, Literal, Awaitable
 from enum import Enum
 
 from ..node_agent.client import NodeAgentClient
 from ..cloud.digitalocean import DOClient
+from ..networking.nginx_manager import NginxManager, BackendMode
+from ..networking.ports import DeploymentPortResolver
 
 
 class DeploySource(Enum):
@@ -29,11 +31,8 @@ class DeploySource(Enum):
         raise ValueError(f"'{value}' is not a valid {cls.__name__}")
 
 
-# Known stateful services (use TCP stream proxy, not HTTP)
-STATEFUL_SERVICES = {
-    "postgres", "postgresql", "mysql", "mariadb", 
-    "redis", "mongo", "mongodb", "opensearch", "elasticsearch"
-}
+# Import stateful service detection from env_builder
+from .env_builder import is_stateful_service, KNOWN_SERVICES as KNOWN_SERVICE_DEPS
 
 
 @dataclass
@@ -93,7 +92,7 @@ class MultiDeployConfig:
     
     def __post_init__(self):
         """Auto-detect if this is a stateful service."""
-        if self.name.lower() in STATEFUL_SERVICES:
+        if is_stateful_service(self.name):
             self.is_stateful = True
 
 
@@ -161,11 +160,30 @@ class DeploymentService:
         do_token: str,
         agent_key: str = "hostomatic-agent-key",
         log: LogCallback = None,
+        # Service mesh callbacks (optional - for nginx stream proxy updates)
+        on_service_deployed: Callable[..., Awaitable[None]] = None,
+        get_project_servers: Callable[[str, str, str], Awaitable[List[str]]] = None,
     ):
+        """
+        Initialize deployment service.
+        
+        Args:
+            do_token: DigitalOcean API token
+            agent_key: Node agent authentication key
+            log: Callback for logging messages
+            on_service_deployed: Callback when a service is deployed.
+                Args: (workspace_id, project, env, service, server_ip, 
+                       host_port, container_port, container_name, internal_port, private_ip)
+            get_project_servers: Callback to get all server IPs in a project.
+                Args: (workspace_id, project, env) -> List[str]
+        """
         self.do_token = do_token
         self.agent_key = agent_key
+        self.api_key = agent_key  # Alias for compatibility
         self.log = log or (lambda msg: None)
         self._do_client: Optional[DOClient] = None
+        self._on_service_deployed = on_service_deployed
+        self._get_project_servers = get_project_servers
     
     @property
     def do_client(self) -> DOClient:
@@ -342,7 +360,58 @@ class DeploymentService:
                     result.domain = domain_result.domain
                     result.domain_aliases = domain_result.aliases
             
-            # Step 6: If this is a stateful service, find and restart dependent containers
+            # Step 6: Service mesh - register service and update nginx stream proxies
+            if result.success and container_name:
+                project_name = config.project or config.name
+                workspace_id = config.workspace_id or "default"
+                
+                # 6a: Register this service in the registry
+                for server in successful:
+                    # Extract host port from URL (http://ip:port)
+                    host_port = 0
+                    if server.url and ':' in server.url:
+                        try:
+                            host_port = int(server.url.split(':')[-1])
+                        except:
+                            pass
+                    
+                    # Get container port
+                    service_lower = config.name.lower()
+                    if service_lower in KNOWN_SERVICE_DEPS:
+                        container_port = KNOWN_SERVICE_DEPS[service_lower].container_port
+                    else:
+                        container_port = config.port
+                    
+                    # Get internal port (stable, hash-based)
+                    svc_internal_port = DeploymentPortResolver.get_internal_port(
+                        workspace_id, project_name, config.environment, config.name
+                    )
+                    
+                    # Notify caller about deployment (for service registry)
+                    if self._on_service_deployed:
+                        await self._on_service_deployed(
+                            workspace_id=workspace_id,
+                            project=project_name,
+                            environment=config.environment,
+                            service=config.name,
+                            server_ip=server.ip,
+                            host_port=host_port,
+                            container_port=container_port,
+                            container_name=server.container_name or container_name,
+                            internal_port=svc_internal_port,
+                            private_ip=None,  # TODO: Get from DO API
+                        )
+                
+                # 6b: Update nginx stream configs on ALL servers in project
+                # This enables service mesh: apps call localhost:{internal_port}
+                # Users can use {SERVICE}_URL (internal) or public domain
+                await self._update_all_server_stream_configs(
+                    config=config,
+                    container_name=container_name,
+                    deployed_server_ips=successful_ips,
+                )
+            
+            # Step 7: If this is a stateful service, find and restart dependent containers
             if result.success and config.is_stateful:
                 restarted = await self._restart_dependent_containers(
                     config, ready_servers, container_name
@@ -350,7 +419,7 @@ class DeploymentService:
                 if restarted:
                     result.restarted_dependents = restarted
             
-            # Step 7: Tag images for rollback and cleanup old deployment images
+            # Step 8: Tag images for rollback and cleanup old deployment images
             if result.success and container_name:
                 await self._tag_and_cleanup_images(
                     config=config,
@@ -358,14 +427,14 @@ class DeploymentService:
                     successful_servers=successful,
                 )
             
-            # Step 8: Tag droplets with service name for fleet filtering
+            # Step 9: Tag droplets with service name for fleet filtering
             if result.success:
                 await self._tag_droplets_with_service(
                     config=config,
                     successful_ips=successful_ips,
                 )
             
-            # Step 9: DNS cleanup - remove orphaned records pointing to non-existent IPs
+            # Step 10: DNS cleanup - remove orphaned records pointing to non-existent IPs
             if result.success and config.cloudflare_token and config.base_domain:
                 await self._cleanup_orphaned_dns(config)
             
@@ -484,6 +553,182 @@ class DeploymentService:
             import traceback
             traceback.print_exc()
             return None
+    
+    # =========================================================================
+    # Stream Proxy Setup (Service Mesh)
+    # =========================================================================
+    
+    async def _update_all_server_stream_configs(
+        self,
+        config: MultiDeployConfig,
+        container_name: str,
+        deployed_server_ips: List[str],
+    ) -> bool:
+        """
+        Update nginx stream configs on ALL servers in the project.
+        
+        When deploying ANY service, we update nginx on EVERY server so 
+        other services can reach it via localhost:{internal_port}:
+        
+        - On servers WHERE the service runs: use container mode (Docker DNS)
+        - On servers WHERE the service does NOT run: use IP mode (remote nginx)
+        
+        This gives users flexibility:
+        - Use {SERVICE}_URL (http://localhost:{port}) - fast internal path
+        - Use public domain (https://service.digitalpixo.com) - external access
+        
+        Args:
+            config: Deployment config
+            container_name: Container name of the service
+            deployed_server_ips: Servers where the service was deployed
+        """
+        from .env_builder import KNOWN_SERVICES, DEFAULT_HTTP_PORT
+        
+        self.log(f"")
+        self.log(f"🔀 Updating nginx stream configs for {config.name}...")
+        
+        service_lower = config.name.lower()
+        project_name = config.project or config.name
+        workspace_id = config.workspace_id or "default"
+        
+        # Get container port - from KNOWN_SERVICES or config or default
+        if service_lower in KNOWN_SERVICES:
+            container_port = KNOWN_SERVICES[service_lower].container_port
+        elif config.container_port:
+            container_port = config.container_port
+        else:
+            container_port = config.port or DEFAULT_HTTP_PORT
+        
+        # Get internal port (stable, hash-based)
+        internal_port = DeploymentPortResolver.get_internal_port(
+            workspace_id, project_name, config.environment, config.name
+        )
+        
+        # Get ALL servers in this project (via callback if provided)
+        all_project_servers = []
+        if self._get_project_servers:
+            all_project_servers = await self._get_project_servers(
+                workspace_id, project_name, config.environment
+            )
+        
+        # Also include the deployed servers in case they're not in registry yet
+        all_servers = set(all_project_servers) | set(deployed_server_ips)
+        
+        if not all_servers:
+            self.log(f"   ⚠️ No servers found for project, only updating deployed servers")
+            all_servers = set(deployed_server_ips)
+        
+        self.log(f"   📋 Updating {len(all_servers)} servers (service on {len(deployed_server_ips)})")
+        
+        nginx_mgr = NginxManager()
+        config_filename = f"{project_name}_{config.environment}_{config.name}.conf"
+        config_path = f"/local/nginx/stream.d/{config_filename}"
+        
+        success_count = 0
+        
+        for server_ip in all_servers:
+            # Determine mode for THIS server
+            is_local = server_ip in deployed_server_ips
+            
+            if is_local:
+                # Service runs on THIS server - use container name (Docker DNS)
+                backends = [{"host": container_name, "port": container_port}]
+                mode = BackendMode.CONTAINER
+                backend_desc = f"{container_name}:{container_port}"
+            else:
+                # Service runs on DIFFERENT server - use remote nginx internal port
+                # App calls localhost:internal_port → nginx → remote:internal_port → container
+                # Pick the first deployed server (TODO: load balance across multiple)
+                remote_ip = deployed_server_ips[0]
+                backends = [{"host": remote_ip, "port": internal_port}]
+                mode = BackendMode.IP_PORT
+                backend_desc = f"{remote_ip}:{internal_port}"
+            
+            stream_config = nginx_mgr.generate_stream_config(
+                user=workspace_id,
+                project=project_name,
+                env=config.environment,
+                service=config.name,
+                backends=backends,
+                mode=mode,
+                container_port=container_port,
+            )
+            
+            config_content = stream_config.to_nginx()
+            mode_str = "local" if is_local else "remote"
+            
+            try:
+                client = NodeAgentClient(server_ip, self.api_key)
+                
+                # Ensure stream.d directory exists
+                await client.exec_command(["mkdir", "-p", "/local/nginx/stream.d"])
+                
+                # Write the stream config
+                write_result = await client.write_file(config_path, config_content)
+                if not write_result.success:
+                    self.log(f"   ⚠️ [{server_ip}] Failed to write: {write_result.error}")
+                    continue
+                
+                # Reload nginx
+                reload_result = await client.reload_nginx()
+                if not reload_result.success:
+                    self.log(f"   ⚠️ [{server_ip}] Failed to reload nginx: {reload_result.error}")
+                    continue
+                
+                self.log(f"   ✅ [{server_ip}] localhost:{internal_port} → {backend_desc} ({mode_str})")
+                success_count += 1
+                
+            except Exception as e:
+                self.log(f"   ⚠️ [{server_ip}] Error: {e}")
+        
+        if success_count == len(all_servers):
+            self.log(f"   ✅ Stream configs updated on all {success_count} servers")
+        elif success_count > 0:
+            self.log(f"   ⚠️ Stream configs updated on {success_count}/{len(all_servers)} servers")
+        else:
+            self.log(f"   ❌ Stream config update failed on all servers")
+            return False
+        
+        return True
+    
+    async def _write_stream_config_to_servers(
+        self,
+        server_ips: List[str],
+        config_path: str,
+        config_content: str,
+    ) -> int:
+        """
+        Write stream config file to servers and reload nginx.
+        
+        Returns count of successful servers.
+        """
+        success_count = 0
+        
+        for server_ip in server_ips:
+            try:
+                client = NodeAgentClient(server_ip, self.api_key)
+                
+                # Ensure stream.d directory exists
+                await client.exec_command(["mkdir", "-p", "/local/nginx/stream.d"])
+                
+                # Write the stream config
+                write_result = await client.write_file(config_path, config_content)
+                if not write_result.success:
+                    self.log(f"   ⚠️ [{server_ip}] Failed to write: {write_result.error}")
+                    continue
+                
+                # Reload nginx
+                reload_result = await client.reload_nginx()
+                if not reload_result.success:
+                    self.log(f"   ⚠️ [{server_ip}] Failed to reload nginx: {reload_result.error}")
+                    continue
+                
+                success_count += 1
+                
+            except Exception as e:
+                self.log(f"   ⚠️ [{server_ip}] Error: {e}")
+        
+        return success_count
     
     # =========================================================================
     # Dependent Container Restart (when stateful services are deployed)
@@ -1125,9 +1370,12 @@ class DeploymentService:
                     
                     image = f"{config.name}:latest"
                 elif config.source_type == DeploySource.IMAGE:
-                    if config.skip_pull:
-                        # Local image (e.g., rollback) - verify it exists
-                        self.log(f"   [{name}] Using local image {config.image}")
+                    if config.skip_pull or config.is_stateful:
+                        # Local image (rollback or stateful - pre-pulled in snapshot)
+                        reason = "stateful (pre-pulled)" if config.is_stateful else "rollback"
+                        self.log(f"   [{name}] Using local image {config.image} ({reason})")
+                        # Debug: show key prefix being used
+                        self.log(f"   [{name}] 🔑 Using API key: {self.api_key[:8]}...")
                         result = await agent.list_images(prefix=config.image.split(":")[0])
                         if not result.success:
                             raise Exception(f"Cannot list images: {result.error}")
@@ -1135,7 +1383,14 @@ class DeploymentService:
                         tag = config.image.split(":")[-1] if ":" in config.image else "latest"
                         found = any(img.get("tag") == tag for img in result.data.get("images", []))
                         if not found:
-                            raise Exception(f"Local image not found: {config.image}")
+                            # For stateful, try pulling if not found (maybe new snapshot)
+                            if config.is_stateful:
+                                self.log(f"   [{name}] Image not cached, pulling...")
+                                result = await agent.pull_image(config.image)
+                                if not result.success and "up to date" not in str(result.error):
+                                    raise Exception(f"Pull failed: {result.error}")
+                            else:
+                                raise Exception(f"Local image not found: {config.image}")
                     else:
                         self.log(f"   [{name}] Pulling image...")
                         result = await agent.pull_image(config.image)
@@ -1164,11 +1419,34 @@ class DeploymentService:
                 # Step 4: Run NEW container (old one still running for zero-downtime)
                 self.log(f"   [{name}] Starting container {new_container_name}...")
                 
+                # For stateful services, inject auto-generated credentials
+                container_env = dict(config.env_vars) if config.env_vars else {}
+                container_command = None
+                
+                if config.is_stateful:
+                    from .env_builder import DeployEnvBuilder
+                    env_builder = DeployEnvBuilder(
+                        user=workspace_id,
+                        project=project_name,
+                        env=config.environment,
+                        service=config.name,
+                        base_env_vars=container_env,  # User-provided overrides auto-generated
+                    )
+                    container_env = env_builder.build_stateful_service_env()
+                    
+                    # Redis needs --requirepass command since it doesn't read env vars
+                    service_lower = config.name.lower()
+                    if "redis" in service_lower:
+                        redis_password = container_env.get("REDIS_PASSWORD", "")
+                        if redis_password:
+                            container_command = ["redis-server", "--requirepass", redis_password]
+                
                 result = await agent.run_container(
                     name=new_container_name,
                     image=image,
                     ports=port_mapping,
-                    env_vars=config.env_vars,
+                    env_vars=container_env,
+                    command=container_command,
                 )
                 if not result.success:
                     raise Exception(f"Run failed: {result.error}")
@@ -1184,34 +1462,54 @@ class DeploymentService:
                 
                 self.log(f"   [{name}] ⏳ Waiting for health check...")
                 
-                # Create a quick health check client (no retries, very short timeout)
-                from ...http_client import AsyncHttpClient, HttpConfig, RetryConfig
-                health_config = HttpConfig(
-                    timeout=1,  # 1s total timeout
-                    retry=RetryConfig(max_retries=0),  # No retries - we do manual loop
-                )
-                health_client = AsyncHttpClient(config=health_config)
-                
-                try:
+                # For stateful services (redis, postgres, etc.), use TCP check instead of HTTP
+                # These services don't speak HTTP - they have their own protocols
+                if config.is_stateful:
+                    import socket
                     for attempt in range(max_attempts):
-                        # Try common health endpoints - just root and /health
-                        for endpoint in ['/', '/health']:
-                            try:
-                                check_url = f"http://{ip}:{expose_port}{endpoint}"
-                                resp = await health_client.request("GET", check_url, raise_on_error=False)
-                                if resp.status_code < 500:  # 2xx, 3xx, 4xx all mean "app is responding"
-                                    healthy = True
-                                    self.log(f"   [{name}] ✅ Health check passed ({endpoint})")
-                                    break
-                            except Exception:
-                                continue
-                        if healthy:
-                            break
-                        
+                        try:
+                            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                            sock.settimeout(1)
+                            result = sock.connect_ex((ip, expose_port))
+                            sock.close()
+                            if result == 0:
+                                healthy = True
+                                self.log(f"   [{name}] ✅ TCP port {expose_port} responding")
+                                break
+                        except Exception:
+                            pass
                         if attempt < max_attempts - 1:
                             await asyncio.sleep(1)
-                finally:
-                    await health_client.close()
+                else:
+                    # For regular services, use HTTP health check
+                    # Create a quick health check client (no retries, very short timeout)
+                    from ...http_client import AsyncHttpClient, HttpConfig, RetryConfig
+                    health_config = HttpConfig(
+                        timeout=1,  # 1s total timeout
+                        retry=RetryConfig(max_retries=0),  # No retries - we do manual loop
+                    )
+                    health_client = AsyncHttpClient(config=health_config)
+                    
+                    try:
+                        for attempt in range(max_attempts):
+                            # Try common health endpoints - just root and /health
+                            for endpoint in ['/', '/health']:
+                                try:
+                                    check_url = f"http://{ip}:{expose_port}{endpoint}"
+                                    resp = await health_client.request("GET", check_url, raise_on_error=False)
+                                    if resp.status_code < 500:  # 2xx, 3xx, 4xx all mean "app is responding"
+                                        healthy = True
+                                        self.log(f"   [{name}] ✅ Health check passed ({endpoint})")
+                                        break
+                                except Exception:
+                                    continue
+                            if healthy:
+                                break
+                            
+                            if attempt < max_attempts - 1:
+                                await asyncio.sleep(1)
+                    finally:
+                        await health_client.close()
                 
                 if not healthy:
                     # Container not healthy - abort and keep old container running
