@@ -58,7 +58,6 @@ class DeployJobConfig:
     name: str
     workspace_id: str
     do_token: str
-    agent_key: str
     
     # Project context
     project: Optional[str] = None
@@ -319,7 +318,6 @@ async def _deploy_async(ctx, config: DeployJobConfig) -> MultiDeployResult:
     
     service = DeploymentService(
         do_token=config.do_token,
-        agent_key=config.agent_key,
         log=log_callback,
     )
     
@@ -402,7 +400,6 @@ async def deploy_with_streaming(config: DeployJobConfig):
     try:
         service = DeploymentService(
             do_token=config.do_token,
-            agent_key=config.agent_key,
             log=log_callback,
         )
         
@@ -429,6 +426,9 @@ async def deploy_with_streaming(config: DeployJobConfig):
         # Emit completion
         if result.success:
             emit("log", f"✅ Deployment complete in {duration:.1f}s")
+            # Yield final log before done
+            while not event_queue.empty():
+                yield await event_queue.get()
             yield StreamEvent(
                 type="done",
                 message="Deployment successful",
@@ -443,6 +443,9 @@ async def deploy_with_streaming(config: DeployJobConfig):
             )
         else:
             emit("log", f"❌ Deployment failed: {result.error}")
+            # Yield final log before done
+            while not event_queue.empty():
+                yield await event_queue.get()
             yield StreamEvent(
                 type="done",
                 message="Deployment failed",
@@ -501,7 +504,6 @@ async def rollback_with_streaming(config: DeployJobConfig):
     try:
         service = DeploymentService(
             do_token=config.do_token,
-            agent_key=config.agent_key,
             log=log_callback,
         )
         
@@ -520,6 +522,9 @@ async def rollback_with_streaming(config: DeployJobConfig):
         
         if result.success:
             emit("log", f"✅ Rollback complete in {duration:.1f}s")
+            # Yield final log before done
+            while not event_queue.empty():
+                yield await event_queue.get()
             yield StreamEvent(
                 type="done",
                 message="Rollback successful",
@@ -585,7 +590,6 @@ async def stateful_deploy_with_streaming(config: DeployJobConfig):
     try:
         service = DeploymentService(
             do_token=config.do_token,
-            agent_key=config.agent_key,
             log=log_callback,
         )
         
@@ -614,6 +618,7 @@ async def stateful_deploy_with_streaming(config: DeployJobConfig):
                 user=config.workspace_id,
                 project=config.project or "default",
                 env=config.environment,
+                service=config.name,
             )
             
             service_lower = config.name.lower()
@@ -652,6 +657,10 @@ async def stateful_deploy_with_streaming(config: DeployJobConfig):
                 import re
                 masked_url = re.sub(r'(://[^:]*:)[^@]+(@)', r'\1****\2', connection_url)
             emit("log", f"📡 Connection: {env_var_name}={masked_url}")
+            
+            # Yield any remaining buffered logs before done event
+            while not event_queue.empty():
+                yield await event_queue.get()
             
             yield StreamEvent(
                 type="done",

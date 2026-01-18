@@ -58,7 +58,7 @@ class SetupService:
     ):
         self.do_token = do_token
         self.user_id = user_id
-        self.api_key = generate_node_agent_key(do_token, user_id)
+        self.api_key = generate_node_agent_key(do_token)
         self._log = log or (lambda msg: None)
         self.snapshot_service = SnapshotService(do_token)
     

@@ -24,6 +24,18 @@ MODEL_LIMITS = {
 }
 
 
+def _get_anthropic_client():
+    """Import AsyncAnthropicClient from cloud.llm (relative import)."""
+    try:
+        from ....cloud.llm import AsyncAnthropicClient
+        return AsyncAnthropicClient
+    except ImportError:
+        raise ImportError(
+            "cloud.llm module not found. "
+            "Ensure shared_libs/backend/cloud/llm is available."
+        )
+
+
 class AnthropicProvider(LLMProvider):
     """
     Anthropic Claude provider.
@@ -41,7 +53,7 @@ class AnthropicProvider(LLMProvider):
             api_key: Anthropic API key
             model: Model name (default: claude-sonnet-4-20250514)
         """
-        from ....cloud.llm import AsyncAnthropicClient
+        AsyncAnthropicClient = _get_anthropic_client()
         
         self.model = model
         self._client = AsyncAnthropicClient(

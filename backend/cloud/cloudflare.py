@@ -516,7 +516,10 @@ class AsyncCloudflareClient(AsyncBaseCloudClient):
         params: Dict = None,
     ) -> Dict[str, Any]:
         """Make API request."""
-        response = await self._client.request(
+        # Ensure cached client is initialized (lazy init for async)
+        client = await self._ensure_client()
+        
+        response = await client.request(
             method=method,
             url=path,
             json=data,

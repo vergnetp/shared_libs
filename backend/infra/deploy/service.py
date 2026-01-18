@@ -108,6 +108,19 @@ class ServerResult:
     # Sidecar info
     internal_port: Optional[int] = None  # Port on nginx for service discovery
     sidecar_configured: bool = False
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "ip": self.ip,
+            "name": self.name,
+            "success": self.success,
+            "error": self.error,
+            "url": self.url,
+            "container_name": self.container_name,
+            "internal_port": self.internal_port,
+            "sidecar_configured": self.sidecar_configured,
+        }
 
 
 @dataclass 
@@ -144,7 +157,7 @@ class DeploymentService:
     Orchestrates deployments across multiple servers.
     
     Usage:
-        service = DeploymentService(do_token="...", agent_key="...")
+        service = DeploymentService(do_token="...")
         
         result = await service.deploy(MultiDeployConfig(
             name="myapp",
@@ -158,7 +171,6 @@ class DeploymentService:
     def __init__(
         self,
         do_token: str,
-        agent_key: str = "hostomatic-agent-key",
         log: LogCallback = None,
         # Service mesh callbacks (optional - for nginx stream proxy updates)
         on_service_deployed: Callable[..., Awaitable[None]] = None,
@@ -168,8 +180,7 @@ class DeploymentService:
         Initialize deployment service.
         
         Args:
-            do_token: DigitalOcean API token
-            agent_key: Node agent authentication key
+            do_token: DigitalOcean API token (also used to derive agent auth key)
             log: Callback for logging messages
             on_service_deployed: Callback when a service is deployed.
                 Args: (workspace_id, project, env, service, server_ip, 
@@ -178,8 +189,6 @@ class DeploymentService:
                 Args: (workspace_id, project, env) -> List[str]
         """
         self.do_token = do_token
-        self.agent_key = agent_key
-        self.api_key = agent_key  # Alias for compatibility
         self.log = log or (lambda msg: None)
         self._do_client: Optional[DOClient] = None
         self._on_service_deployed = on_service_deployed
@@ -193,7 +202,7 @@ class DeploymentService:
     
     def _agent(self, ip: str) -> NodeAgentClient:
         """Create agent client for server."""
-        return NodeAgentClient(ip, self.agent_key)
+        return NodeAgentClient(ip, self.do_token)  # NodeAgentClient generates key from do_token
     
     @staticmethod
     def _ensure_tar(data: bytes) -> bytes:
@@ -365,6 +374,9 @@ class DeploymentService:
                 project_name = config.project or config.name
                 workspace_id = config.workspace_id or "default"
                 
+                # Build server_ip -> host_port mapping for stream configs
+                server_host_ports = {}
+                
                 # 6a: Register this service in the registry
                 for server in successful:
                     # Extract host port from URL (http://ip:port)
@@ -374,6 +386,10 @@ class DeploymentService:
                             host_port = int(server.url.split(':')[-1])
                         except:
                             pass
+                    
+                    # Store in mapping for stream config
+                    if host_port:
+                        server_host_ports[server.ip] = host_port
                     
                     # Get container port
                     service_lower = config.name.lower()
@@ -409,6 +425,7 @@ class DeploymentService:
                     config=config,
                     container_name=container_name,
                     deployed_server_ips=successful_ips,
+                    server_host_ports=server_host_ports,
                 )
             
             # Step 7: If this is a stateful service, find and restart dependent containers
@@ -563,6 +580,7 @@ class DeploymentService:
         config: MultiDeployConfig,
         container_name: str,
         deployed_server_ips: List[str],
+        server_host_ports: Dict[str, int] = None,
     ) -> bool:
         """
         Update nginx stream configs on ALL servers in the project.
@@ -570,7 +588,7 @@ class DeploymentService:
         When deploying ANY service, we update nginx on EVERY server so 
         other services can reach it via localhost:{internal_port}:
         
-        - On servers WHERE the service runs: use container mode (Docker DNS)
+        - On servers WHERE the service runs: use 127.0.0.1:host_port
         - On servers WHERE the service does NOT run: use IP mode (remote nginx)
         
         This gives users flexibility:
@@ -581,6 +599,7 @@ class DeploymentService:
             config: Deployment config
             container_name: Container name of the service
             deployed_server_ips: Servers where the service was deployed
+            server_host_ports: Mapping of server_ip -> host_port for local backends
         """
         from .env_builder import KNOWN_SERVICES, DEFAULT_HTTP_PORT
         
@@ -590,6 +609,7 @@ class DeploymentService:
         service_lower = config.name.lower()
         project_name = config.project or config.name
         workspace_id = config.workspace_id or "default"
+        server_host_ports = server_host_ports or {}
         
         # Get container port - from KNOWN_SERVICES or config or default
         if service_lower in KNOWN_SERVICES:
@@ -631,10 +651,12 @@ class DeploymentService:
             is_local = server_ip in deployed_server_ips
             
             if is_local:
-                # Service runs on THIS server - use container name (Docker DNS)
-                backends = [{"host": container_name, "port": container_port}]
-                mode = BackendMode.CONTAINER
-                backend_desc = f"{container_name}:{container_port}"
+                # Service runs on THIS server - use 127.0.0.1:host_port
+                # (nginx on host can't resolve Docker container names)
+                host_port = server_host_ports.get(server_ip, internal_port)
+                backends = [{"host": "127.0.0.1", "port": host_port}]
+                mode = BackendMode.IP_PORT
+                backend_desc = f"127.0.0.1:{host_port}"
             else:
                 # Service runs on DIFFERENT server - use remote nginx internal port
                 # App calls localhost:internal_port → nginx → remote:internal_port → container
@@ -658,10 +680,10 @@ class DeploymentService:
             mode_str = "local" if is_local else "remote"
             
             try:
-                client = NodeAgentClient(server_ip, self.api_key)
+                client = NodeAgentClient(server_ip, self.do_token)
                 
                 # Ensure stream.d directory exists
-                await client.exec_command(["mkdir", "-p", "/local/nginx/stream.d"])
+                await client.create_directory("/local/nginx/stream.d")
                 
                 # Write the stream config
                 write_result = await client.write_file(config_path, config_content)
@@ -706,10 +728,10 @@ class DeploymentService:
         
         for server_ip in server_ips:
             try:
-                client = NodeAgentClient(server_ip, self.api_key)
+                client = NodeAgentClient(server_ip, self.do_token)
                 
                 # Ensure stream.d directory exists
-                await client.exec_command(["mkdir", "-p", "/local/nginx/stream.d"])
+                await client.create_directory("/local/nginx/stream.d")
                 
                 # Write the stream config
                 write_result = await client.write_file(config_path, config_content)
@@ -1375,7 +1397,7 @@ class DeploymentService:
                         reason = "stateful (pre-pulled)" if config.is_stateful else "rollback"
                         self.log(f"   [{name}] Using local image {config.image} ({reason})")
                         # Debug: show key prefix being used
-                        self.log(f"   [{name}] 🔑 Using API key: {self.api_key[:8]}...")
+                        self.log(f"   [{name}] 🔑 Using API key: {agent.api_key[:8]}...")
                         result = await agent.list_images(prefix=config.image.split(":")[0])
                         if not result.success:
                             raise Exception(f"Cannot list images: {result.error}")
@@ -1766,9 +1788,8 @@ class DeploymentService:
 async def deploy(
     config: MultiDeployConfig,
     do_token: str,
-    agent_key: str = "hostomatic-agent-key",
     log: LogCallback = None,
 ) -> MultiDeployResult:
     """Deploy with a single function call."""
-    service = DeploymentService(do_token, agent_key, log)
+    service = DeploymentService(do_token, log)
     return await service.deploy(config)

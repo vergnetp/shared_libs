@@ -1,0 +1,11 @@
+{
+  "name": "my-platform",
+  "private": true,
+  "workspaces": [
+    "shared_libs/frontend",
+    "services/*/frontend"
+  ],
+  "scripts": {
+    "build:deploy_api": "cd services/deploy_api/frontend && npm run build"
+  }
+}

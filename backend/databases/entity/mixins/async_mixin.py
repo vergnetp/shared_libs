@@ -638,7 +638,14 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
             columns_sql, columns_params = self.sql_generator.get_list_columns_sql(entity_name)
             columns_result = await self.execute(columns_sql, columns_params)
             if columns_result:
-                columns = [(row[0], row[1]) for row in columns_result]
+                # Check if this is SQLite's PRAGMA table_info() result
+                # SQLite PRAGMA returns rows in format (cid, name, type, notnull, dflt_value, pk)
+                if isinstance(columns_result[0][0], int) and len(columns_result[0]) >= 3 and isinstance(columns_result[0][1], str):
+                    # For SQLite, column name is at index 1, type at index 2
+                    columns = [(row[1], row[2]) for row in columns_result]
+                else:
+                    # For other databases, column name is at index 0, type at index 1
+                    columns = [(row[0], row[1]) for row in columns_result]
         
         # Create main table if needed
         if not main_exists:
@@ -681,7 +688,14 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
                 columns_sql, columns_params = self.sql_generator.get_list_columns_sql(entity_name)
                 columns_result = await self.execute(columns_sql, columns_params)
                 if columns_result:
-                    columns = [(row[0], row[1]) for row in columns_result]
+                    # Check if this is SQLite's PRAGMA table_info() result
+                    # SQLite PRAGMA returns rows in format (cid, name, type, notnull, dflt_value, pk)
+                    if isinstance(columns_result[0][0], int) and len(columns_result[0]) >= 3 and isinstance(columns_result[0][1], str):
+                        # For SQLite, column name is at index 1, type at index 2
+                        columns = [(row[1], row[2]) for row in columns_result]
+                    else:
+                        # For other databases, column name is at index 0, type at index 1
+                        columns = [(row[0], row[1]) for row in columns_result]
                 
             # Create history table with current columns plus history-specific ones
             history_sql = self.sql_generator.get_create_history_table_sql(entity_name, columns)

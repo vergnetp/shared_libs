@@ -27,6 +27,18 @@ MODEL_LIMITS = {
 }
 
 
+def _get_openai_client():
+    """Import AsyncOpenAICompatClient from cloud.llm (relative import)."""
+    try:
+        from ....cloud.llm import AsyncOpenAICompatClient
+        return AsyncOpenAICompatClient
+    except ImportError:
+        raise ImportError(
+            "cloud.llm module not found. "
+            "Ensure shared_libs/backend/cloud/llm is available."
+        )
+
+
 class OpenAIProvider(LLMProvider):
     """
     OpenAI provider using Chat Completions API.
@@ -45,7 +57,7 @@ class OpenAIProvider(LLMProvider):
             api_key: OpenAI API key
             model: Model name (default: gpt-4o)
         """
-        from ....cloud.llm import AsyncOpenAICompatClient
+        AsyncOpenAICompatClient = _get_openai_client()
         
         self.model = model
         self._client = AsyncOpenAICompatClient(

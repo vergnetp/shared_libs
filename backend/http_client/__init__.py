@@ -112,7 +112,9 @@ from .pool import (
     get_pool,
     get_pool_stats,
     close_pool,
+    configure_pool_limits,
     ConnectionPool,
+    PoolLimits,
 )
 
 # Response Caching
@@ -153,7 +155,9 @@ __all__ = [
     "get_pool",
     "get_pool_stats",
     "close_pool",
+    "configure_pool_limits",
     "ConnectionPool",
+    "PoolLimits",
     # Caching
     "cached_request",
     "get_cache",

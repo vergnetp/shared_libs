@@ -835,6 +835,16 @@ def create_service(
         if on_shutdown:
             await on_shutdown()
         
+        # Close HTTP connection pools (cloud clients, etc.)
+        try:
+            from shared_libs.backend.http_client import close_pool
+            await close_pool()
+            logger.debug("HTTP connection pools closed")
+        except ImportError:
+            pass  # http_client not available
+        except Exception as e:
+            logger.warning(f"Error closing HTTP pools: {e}")
+        
         # Close database
         if cfg.database_name:
             from .db import close_db

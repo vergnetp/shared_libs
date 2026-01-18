@@ -74,26 +74,16 @@ class StripeClient(BaseCloudClient):
         api_version: str = None,
         config: CloudClientConfig = None,
     ):
-        # Don't call super().__init__ - we need custom auth
-        self.api_key = api_key
         self.api_version = api_version or self.API_VERSION
-        self.config = config or CloudClientConfig()
-        
-        from .base import default_http_config
-        from ..http_client import SyncHttpClient
-        
-        http_config = default_http_config(
-            self.config,
-            circuit_breaker_name="stripe-api",
-        )
-        
-        self._client = SyncHttpClient(
-            config=http_config,
-            base_url=self.BASE_URL,
-            circuit_breaker_name="stripe-api",
-        )
-        # Stripe uses Basic auth with API key as username
-        self._client.set_auth_header("Bearer", api_key)
+        self.api_key = api_key  # Alias for backward compat
+        # Call base __init__ which creates _client with our auth headers
+        super().__init__(api_key, config)
+    
+    def _get_auth_headers(self) -> Dict[str, str]:
+        """Stripe uses Basic auth with API key as username."""
+        import base64
+        credentials = base64.b64encode(f"{self.api_token}:".encode()).decode()
+        return {"Authorization": f"Basic {credentials}"}
     
     # =========================================================================
     # HTTP Helpers
@@ -613,24 +603,16 @@ class AsyncStripeClient(AsyncBaseCloudClient):
         api_version: str = None,
         config: CloudClientConfig = None,
     ):
-        self.api_key = api_key
         self.api_version = api_version or self.API_VERSION
-        self.config = config or CloudClientConfig()
-        
-        from .base import default_http_config
-        from ..http_client import AsyncHttpClient
-        
-        http_config = default_http_config(
-            self.config,
-            circuit_breaker_name="stripe-api-async",
-        )
-        
-        self._client = AsyncHttpClient(
-            config=http_config,
-            base_url=self.BASE_URL,
-            circuit_breaker_name="stripe-api-async",
-        )
-        self._client.set_bearer_token(api_key)
+        self.api_key = api_key  # Alias for backward compat
+        # Call base __init__ which sets up config
+        super().__init__(api_key, config)
+    
+    def _get_auth_headers(self) -> Dict[str, str]:
+        """Stripe uses Basic auth with API key as username."""
+        import base64
+        credentials = base64.b64encode(f"{self.api_token}:".encode()).decode()
+        return {"Authorization": f"Basic {credentials}"}
     
     # =========================================================================
     # HTTP Helpers
@@ -644,6 +626,9 @@ class AsyncStripeClient(AsyncBaseCloudClient):
         params: Dict = None,
     ) -> Dict[str, Any]:
         """Make API request."""
+        # Ensure cached client is initialized
+        client = await self._ensure_client()
+        
         headers = {
             "Stripe-Version": self.api_version,
         }
@@ -653,7 +638,7 @@ class AsyncStripeClient(AsyncBaseCloudClient):
         
         form_data = self._flatten_params(data) if data else None
         
-        response = await self._client.request(
+        response = await client.request(
             method=method,
             url=path,
             data=form_data,

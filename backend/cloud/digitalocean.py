@@ -459,11 +459,6 @@ systemctl restart node_agent 2>/dev/null || true
         except DOError as e:
             return Result.fail(str(e))
     
-    def power_off_droplet(self, droplet_id: int) -> Dict[str, Any]:
-        """Power off a droplet."""
-        result = self._post(f"/droplets/{droplet_id}/actions", {"type": "power_off"})
-        return result.get("action", {})
-    
     def _wait_for_droplet(self, droplet_id: int, timeout: int = 300) -> Droplet:
         """Wait for droplet to become active."""
         start = time.time()
@@ -492,14 +487,6 @@ systemctl restart node_agent 2>/dev/null || true
         """Add SSH key to account."""
         result = self._post("/account/keys", {"name": name, "public_key": public_key})
         return result.get("ssh_key", {})
-    
-    def delete_ssh_key(self, key_id: str) -> bool:
-        """Delete SSH key from account."""
-        try:
-            self._delete(f"/account/keys/{key_id}")
-            return True
-        except DOError:
-            return False
     
     def ensure_deployer_key(self) -> str:
         """Ensure deployer SSH key exists locally and on DO."""
@@ -868,7 +855,10 @@ class AsyncDOClient(AsyncBaseCloudClient):
         params: Optional[Dict] = None,
     ) -> Dict[str, Any]:
         """Make API request."""
-        response = await self._client.request(
+        # Ensure cached client is initialized (lazy init for async)
+        client = await self._ensure_client()
+        
+        response = await client.request(
             method=method,
             url=path,
             json=data,
@@ -1053,11 +1043,6 @@ systemctl restart node_agent 2>/dev/null || true
         except DOError as e:
             return Result.fail(str(e))
     
-    async def power_off_droplet(self, droplet_id: int) -> Dict[str, Any]:
-        """Power off a droplet."""
-        result = await self._post(f"/droplets/{droplet_id}/actions", {"type": "power_off"})
-        return result.get("action", {})
-    
     async def _wait_for_droplet(self, droplet_id: int, timeout: int = 300) -> Droplet:
         """Wait for droplet to become active."""
         start = time.time()
@@ -1083,14 +1068,6 @@ systemctl restart node_agent 2>/dev/null || true
         """Add SSH key to account."""
         result = await self._post("/account/keys", {"name": name, "public_key": public_key})
         return result.get("ssh_key", {})
-    
-    async def delete_ssh_key(self, key_id: str) -> bool:
-        """Delete SSH key from account."""
-        try:
-            await self._delete(f"/account/keys/{key_id}")
-            return True
-        except DOError:
-            return False
     
     # =========================================================================
     # VPC
@@ -1221,26 +1198,6 @@ systemctl restart node_agent 2>/dev/null || true
         
         return action
     
-    async def transfer_snapshot(
-        self,
-        snapshot_id: str,
-        region: str,
-        wait: bool = True,
-        wait_timeout: int = 600,
-    ) -> Dict[str, Any]:
-        """Transfer snapshot to another region."""
-        result = await self._post(f"/images/{snapshot_id}/actions", {
-            "type": "transfer",
-            "region": region,
-        })
-        
-        action = result.get("action", {})
-        
-        if wait and action.get("id"):
-            action = await self._wait_for_action(action["id"], wait_timeout)
-        
-        return action
-    
     async def delete_snapshot(self, snapshot_id: str) -> Result:
         """Delete a snapshot."""
         try:
@@ -1322,19 +1279,6 @@ systemctl restart node_agent 2>/dev/null || true
         if not registry:
             return None
         return f"registry.digitalocean.com/{registry.get('name')}"
-    
-    # =========================================================================
-    # Billing
-    # =========================================================================
-    
-    async def get_billing_history(self, limit: int = 12) -> List[Dict[str, Any]]:
-        """Get recent billing history."""
-        result = await self._get("/customers/my/billing_history", params={"per_page": limit})
-        return result.get("billing_history", [])
-    
-    async def get_balance(self) -> Dict[str, Any]:
-        """Get current account balance."""
-        return await self._get("/customers/my/balance")
 
 
 # Backwards compatibility alias

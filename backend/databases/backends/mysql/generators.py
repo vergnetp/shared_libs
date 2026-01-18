@@ -71,13 +71,20 @@ class MySqlSqlGenerator(SqlGenerator, SqlEntityGenerator):
     
     def get_create_history_table_sql(self, entity_name: str, columns: List[Tuple[str, str]]) -> str:
         """Generate MySQL-specific history table SQL."""
+        # History-specific fields that we'll add - filter these from main columns
+        history_fields = {'version', 'history_timestamp', 'history_user_id', 'history_comment'}
+        
         column_defs = []
+        # Add main table columns, excluding history-specific ones
         for name, _ in columns:
+            if name in history_fields:
+                continue
             if name == 'id':
                 column_defs.append(f"[id] VARCHAR(36)")
             else:
                 column_defs.append(f"[{name}] TEXT")
-                
+        
+        # Add history-specific columns
         column_defs.append("[version] INT")
         column_defs.append("[history_timestamp] TEXT")
         column_defs.append("[history_user_id] TEXT")

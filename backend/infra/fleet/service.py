@@ -30,7 +30,7 @@ class _BaseFleetService:
         self.user_id = user_id
         
         from ..cloud import generate_node_agent_key
-        self.api_key = generate_node_agent_key(do_token, user_id)
+        self.api_key = generate_node_agent_key(do_token)
     
     def _calculate_summary(self, servers: List[ServerHealth]) -> Dict[str, Any]:
         """Calculate fleet summary from server health data."""
@@ -139,7 +139,7 @@ class FleetService(_BaseFleetService):
         ip = server_info.get("ip")
         
         try:
-            client = NodeAgentClient(ip, self.api_key, timeout=10)
+            client = NodeAgentClient(ip, self.do_token, timeout=10)
             
             # Ping agent
             ping = client.ping_sync()
@@ -204,7 +204,7 @@ class FleetService(_BaseFleetService):
         for ip in server_ips:
             ip = ip.strip()
             try:
-                client = NodeAgentClient(ip, self.api_key, timeout=10)
+                client = NodeAgentClient(ip, self.do_token, timeout=10)
                 health = client.health_check_sync()
                 results.append({
                     "ip": ip,
@@ -254,7 +254,7 @@ class FleetService(_BaseFleetService):
         for server in servers:
             ip = server.get("ip")
             try:
-                client = NodeAgentClient(ip, self.api_key, timeout=10)
+                client = NodeAgentClient(ip, self.do_token, timeout=10)
                 containers_result = client.list_containers_sync()
                 if containers_result.success:
                     matching = [
@@ -306,7 +306,7 @@ class FleetService(_BaseFleetService):
         for ip in server_ips:
             ip = ip.strip()
             try:
-                client = NodeAgentClient(ip, self.api_key, timeout=30)
+                client = NodeAgentClient(ip, self.do_token, timeout=30)
                 
                 # List containers matching pattern
                 containers_result = client.list_containers_sync()
@@ -421,7 +421,7 @@ class AsyncFleetService(_BaseFleetService):
         ip = server_info.get("ip")
         
         try:
-            async with NodeAgentClient(ip, self.api_key, timeout=10) as client:
+            async with NodeAgentClient(ip, self.do_token, timeout=10) as client:
                 # Ping agent
                 ping = await client.ping()
                 if not ping.success:
@@ -484,7 +484,7 @@ class AsyncFleetService(_BaseFleetService):
         async def check_one(ip: str) -> Dict[str, Any]:
             ip = ip.strip()
             try:
-                async with NodeAgentClient(ip, self.api_key, timeout=10) as client:
+                async with NodeAgentClient(ip, self.do_token, timeout=10) as client:
                     health = await client.health_check()
                     return {
                         "ip": ip,
@@ -535,7 +535,7 @@ class AsyncFleetService(_BaseFleetService):
         async def check_one(server: Dict[str, Any]) -> Dict[str, Any]:
             ip = server.get("ip")
             try:
-                async with NodeAgentClient(ip, self.api_key, timeout=10) as client:
+                async with NodeAgentClient(ip, self.do_token, timeout=10) as client:
                     containers_result = await client.list_containers()
                     if containers_result.success:
                         matching = [
@@ -587,7 +587,7 @@ class AsyncFleetService(_BaseFleetService):
         async def cleanup_one(ip: str) -> Dict[str, Any]:
             ip = ip.strip()
             try:
-                async with NodeAgentClient(ip, self.api_key, timeout=30) as client:
+                async with NodeAgentClient(ip, self.do_token, timeout=30) as client:
                     # List containers matching pattern
                     containers_result = await client.list_containers()
                     if not containers_result.success:

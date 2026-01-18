@@ -28,7 +28,8 @@ Usage:
     finally:
         await client.close()
 
-Note: Requires httpx package: pip install httpx[http2]
+Note: Requires httpx package: pip install httpx
+      For HTTP/2 support: pip install httpx[http2]
 """
 
 from __future__ import annotations
@@ -49,7 +50,7 @@ def _ensure_httpx():
         except ImportError:
             raise ImportError(
                 "httpx is required for AsyncHttpClient. "
-                "Install it with: pip install httpx[http2]"
+                "Install it with: pip install httpx"
             )
 
 from .base import BaseHttpClient, DummySpanContext
@@ -83,7 +84,7 @@ class AsyncHttpClient(BaseHttpClient):
         config: HttpConfig = None,
         base_url: str = None,
         circuit_breaker_name: str = None,
-        http2: bool = True,  # Enable HTTP/2 by default
+        http2: bool = False,  # Disabled by default (requires httpx[http2])
     ):
         super().__init__(config, base_url, circuit_breaker_name)
         self._client = None

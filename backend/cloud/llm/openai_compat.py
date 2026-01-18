@@ -1,16 +1,16 @@
 """
-OpenAI-Compatible LLM Client.
+OpenAI-compatible LLM client.
 
 Works with:
-- OpenAI (api.openai.com)
-- Groq (api.groq.com/openai/v1)
-- Together (api.together.xyz/v1)
+- OpenAI API
+- Groq (https://api.groq.com/openai/v1)
+- Azure OpenAI
 - Any OpenAI-compatible API
 
 Usage:
     # OpenAI
     client = OpenAICompatClient(api_key="sk-...", model="gpt-4o")
-    response = client.chat([{"role": "user", "content": "Hello"}])
+    response = client.chat([{"role": "user", "content": "Hello!"}])
     
     # Groq
     client = OpenAICompatClient(
@@ -19,442 +19,392 @@ Usage:
         model="llama-3.3-70b-versatile"
     )
     
-    # Streaming
-    for chunk in client.chat_stream(messages):
-        print(chunk, end="")
-    
     # Async
     async with AsyncOpenAICompatClient(api_key="...") as client:
         response = await client.chat(messages)
         
+        # Streaming
         async for chunk in client.chat_stream(messages):
             print(chunk, end="")
 """
 
 from __future__ import annotations
+from typing import List, Dict, Any, Optional, AsyncIterator
 import json
-from typing import Iterator, AsyncIterator, Any
 
+from .base import BaseLLMClient, AsyncBaseLLMClient, _stream_sse
 from .types import ChatResponse, ToolCall
+from .errors import LLMError, LLMConnectionError, LLMTimeoutError
 
 
-# Default base URL
 OPENAI_BASE_URL = "https://api.openai.com/v1"
 
 
-def _parse_sse_line(line: str) -> dict | None:
-    """Parse a single SSE line, return data dict or None."""
-    line = line.strip()
-    if not line or not line.startswith("data: "):
-        return None
-    data = line[6:]  # Remove "data: " prefix
-    if data == "[DONE]":
-        return None
-    try:
-        return json.loads(data)
-    except json.JSONDecodeError:
-        return None
-
-
-def _build_chat_payload(
-    model: str,
-    messages: list[dict],
-    temperature: float,
-    max_tokens: int,
-    tools: list[dict] | None,
-    stream: bool = False,
-    **kwargs,
-) -> dict:
-    """Build the request payload for chat completions."""
-    payload = {
-        "model": model,
-        "messages": messages,
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-        "stream": stream,
-    }
-    
-    if tools:
-        payload["tools"] = [
-            {
-                "type": "function",
-                "function": {
-                    "name": t["name"],
-                    "description": t.get("description", ""),
-                    "parameters": t.get("parameters", {"type": "object", "properties": {}}),
-                }
-            }
-            for t in tools
-        ]
-        payload["tool_choice"] = kwargs.get("tool_choice", "auto")
-    
-    # Pass through any extra params
-    for key in ("stop", "presence_penalty", "frequency_penalty", "logit_bias", "user"):
-        if key in kwargs:
-            payload[key] = kwargs[key]
-    
-    return payload
-
-
-def _parse_chat_response(data: dict, model: str) -> ChatResponse:
-    """Parse OpenAI chat completion response."""
-    choice = data["choices"][0]
-    message = choice["message"]
-    
-    # Parse tool calls if present
-    tool_calls = []
-    if message.get("tool_calls"):
-        for tc in message["tool_calls"]:
-            tool_calls.append(ToolCall.from_openai(tc))
-    
-    usage = data.get("usage", {})
-    
-    return ChatResponse(
-        content=message.get("content") or "",
-        model=data.get("model", model),
-        input_tokens=usage.get("prompt_tokens", 0),
-        output_tokens=usage.get("completion_tokens", 0),
-        finish_reason=choice.get("finish_reason", "stop"),
-        tool_calls=tool_calls,
-        raw=data,
-    )
-
-
-class OpenAICompatClient:
+class OpenAICompatClient(BaseLLMClient):
     """
-    Synchronous OpenAI-compatible client.
+    Sync OpenAI-compatible client.
     
-    Uses http_client for non-streaming (retries, circuit breaker).
-    Uses httpx directly for streaming.
+    Works with OpenAI, Groq, Azure OpenAI, and other compatible APIs.
     """
+    
+    PROVIDER = "openai"
+    BASE_URL = OPENAI_BASE_URL
     
     def __init__(
         self,
         api_key: str,
         model: str = "gpt-4o",
-        base_url: str = OPENAI_BASE_URL,
+        base_url: str = None,
         timeout: float = 120.0,
         max_retries: int = 3,
     ):
-        """
-        Initialize OpenAI-compatible client.
+        # Determine provider from base_url
+        if base_url and "groq" in base_url.lower():
+            self.PROVIDER = "groq"
         
-        Args:
-            api_key: API key for authentication
-            model: Default model to use
-            base_url: API base URL (change for Groq, Together, etc.)
-            timeout: Request timeout in seconds
-            max_retries: Max retry attempts for non-streaming requests
-        """
-        self.api_key = api_key
-        self.model = model
-        self.base_url = base_url.rstrip("/")
-        self.timeout = timeout
-        self.max_retries = max_retries
-        
-        # Lazy-init http_client for non-streaming
-        self._http_client = None
-    
-    def _get_http_client(self):
-        """Get or create the HTTP client for non-streaming requests."""
-        if self._http_client is None:
-            from ...http_client import (
-                SyncHttpClient,
-                HttpConfig,
-                RetryConfig,
-            )
-            
-            config = HttpConfig(
-                timeout=self.timeout,
-                retry=RetryConfig(
-                    max_retries=self.max_retries,
-                    base_delay=1.0,
-                    retry_on_status={429, 500, 502, 503, 504},
-                ),
-            )
-            
-            self._http_client = SyncHttpClient(
-                config=config,
-                base_url=self.base_url,
-            )
-            self._http_client.set_bearer_token(self.api_key)
-        
-        return self._http_client
+        super().__init__(
+            api_key=api_key,
+            model=model,
+            base_url=base_url,
+            timeout=timeout,
+            max_retries=max_retries,
+        )
     
     def chat(
         self,
-        messages: list[dict],
+        messages: List[Dict[str, Any]],
+        model: str = None,
         temperature: float = 0.7,
         max_tokens: int = 4096,
-        tools: list[dict] | None = None,
-        model: str | None = None,
+        tools: List[Dict] = None,
+        tool_choice: str = None,
         **kwargs,
     ) -> ChatResponse:
         """
-        Send a chat completion request.
+        Send chat completion request.
         
         Args:
-            messages: List of message dicts with 'role' and 'content'
-            temperature: Sampling temperature (0.0-2.0)
+            messages: List of message dicts [{"role": "user", "content": "..."}]
+            model: Model override (uses instance default if not set)
+            temperature: Sampling temperature (0-2)
             max_tokens: Maximum tokens to generate
-            tools: Optional list of tool definitions
-            model: Override default model
+            tools: Tool definitions for function calling
+            tool_choice: How to select tools ("auto", "none", or specific)
             **kwargs: Additional API parameters
             
         Returns:
-            ChatResponse with content, usage, and any tool calls
+            ChatResponse with content, usage, and tool_calls
         """
-        use_model = model or self.model
-        payload = _build_chat_payload(
-            model=use_model,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            tools=tools,
-            stream=False,
+        model = model or self.model
+        
+        body = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
             **kwargs,
-        )
+        }
         
-        client = self._get_http_client()
-        response = client.post("/chat/completions", json=payload)
+        if tools:
+            body["tools"] = self._format_tools(tools)
+            if tool_choice:
+                body["tool_choice"] = tool_choice
         
-        return _parse_chat_response(response.json(), use_model)
+        try:
+            response = self._client.request("POST", "/chat/completions", json=body)
+        except Exception as e:
+            if "timeout" in str(e).lower():
+                raise LLMTimeoutError(str(e), provider=self.PROVIDER, timeout=self.timeout)
+            if "connect" in str(e).lower():
+                raise LLMConnectionError(str(e), provider=self.PROVIDER)
+            raise LLMError(str(e), provider=self.PROVIDER)
+        
+        if response.status_code >= 400:
+            try:
+                body = response.json()
+            except:
+                body = {}
+            self._handle_error(response.status_code, body, response.text)
+        
+        data = response.json()
+        return self._parse_response(data)
     
     def chat_stream(
         self,
-        messages: list[dict],
+        messages: List[Dict[str, Any]],
+        model: str = None,
         temperature: float = 0.7,
         max_tokens: int = 4096,
-        model: str | None = None,
         **kwargs,
-    ) -> Iterator[str]:
+    ):
         """
-        Stream a chat completion, yielding text chunks.
+        Stream chat completion (sync generator).
         
-        Note: Tools are not supported in streaming mode.
+        Note: Tool calls not supported in streaming mode.
+        
+        Yields:
+            Text chunks as they arrive
+        """
+        model = model or self.model
+        
+        body = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": True,
+            **kwargs,
+        }
+        
+        import requests
+        
+        url = f"{self._base_url}/chat/completions"
+        headers = self._get_auth_headers()
+        headers["Content-Type"] = "application/json"
+        
+        with requests.post(url, json=body, headers=headers, stream=True, timeout=self.timeout) as resp:
+            if resp.status_code >= 400:
+                try:
+                    body = resp.json()
+                except:
+                    body = {}
+                self._handle_error(resp.status_code, body, resp.text)
+            
+            for line in resp.iter_lines(decode_unicode=True):
+                if not line:
+                    continue
+                if line.startswith("data:"):
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data)
+                        delta = chunk.get("choices", [{}])[0].get("delta", {})
+                        content = delta.get("content")
+                        if content:
+                            yield content
+                    except json.JSONDecodeError:
+                        continue
+    
+    def _format_tools(self, tools: List[Dict]) -> List[Dict]:
+        """Format tools for OpenAI API."""
+        formatted = []
+        for tool in tools:
+            if "type" not in tool:
+                # Wrap in function format
+                formatted.append({
+                    "type": "function",
+                    "function": tool,
+                })
+            else:
+                formatted.append(tool)
+        return formatted
+    
+    def _parse_response(self, data: Dict[str, Any]) -> ChatResponse:
+        """Parse OpenAI response into ChatResponse."""
+        choice = data.get("choices", [{}])[0]
+        message = choice.get("message", {})
+        usage = data.get("usage", {})
+        
+        # Parse tool calls
+        tool_calls = []
+        if message.get("tool_calls"):
+            for tc in message["tool_calls"]:
+                tool_calls.append(ToolCall.from_openai(tc))
+        
+        return ChatResponse(
+            content=message.get("content") or "",
+            model=data.get("model", self.model),
+            input_tokens=usage.get("prompt_tokens", 0),
+            output_tokens=usage.get("completion_tokens", 0),
+            finish_reason=choice.get("finish_reason", "stop"),
+            tool_calls=tool_calls,
+            raw=data,
+        )
+
+
+class AsyncOpenAICompatClient(AsyncBaseLLMClient):
+    """
+    Async OpenAI-compatible client with connection pooling.
+    
+    Works with OpenAI, Groq, Azure OpenAI, and other compatible APIs.
+    
+    Usage:
+        async with AsyncOpenAICompatClient(api_key="...") as client:
+            response = await client.chat(messages)
+            
+            # Streaming
+            async for chunk in client.chat_stream(messages):
+                print(chunk, end="")
+    """
+    
+    PROVIDER = "openai"
+    BASE_URL = OPENAI_BASE_URL
+    
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "gpt-4o",
+        base_url: str = None,
+        timeout: float = 120.0,
+        max_retries: int = 3,
+    ):
+        # Determine provider from base_url
+        if base_url and "groq" in base_url.lower():
+            self.PROVIDER = "groq"
+        
+        super().__init__(
+            api_key=api_key,
+            model=model,
+            base_url=base_url,
+            timeout=timeout,
+            max_retries=max_retries,
+        )
+    
+    async def chat(
+        self,
+        messages: List[Dict[str, Any]],
+        model: str = None,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+        tools: List[Dict] = None,
+        tool_choice: str = None,
+        **kwargs,
+    ) -> ChatResponse:
+        """
+        Send async chat completion request.
         
         Args:
             messages: List of message dicts
-            temperature: Sampling temperature
+            model: Model override
+            temperature: Sampling temperature (0-2)
             max_tokens: Maximum tokens to generate
-            model: Override default model
+            tools: Tool definitions for function calling
+            tool_choice: How to select tools
+            **kwargs: Additional API parameters
             
+        Returns:
+            ChatResponse with content, usage, and tool_calls
+        """
+        client = await self._ensure_client()
+        model = model or self.model
+        
+        body = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            **kwargs,
+        }
+        
+        if tools:
+            body["tools"] = self._format_tools(tools)
+            if tool_choice:
+                body["tool_choice"] = tool_choice
+        
+        try:
+            response = await client.request("POST", "/chat/completions", json=body)
+        except Exception as e:
+            if "timeout" in str(e).lower():
+                raise LLMTimeoutError(str(e), provider=self.PROVIDER, timeout=self.timeout)
+            if "connect" in str(e).lower():
+                raise LLMConnectionError(str(e), provider=self.PROVIDER)
+            raise LLMError(str(e), provider=self.PROVIDER)
+        
+        if response.status_code >= 400:
+            try:
+                resp_body = response.json()
+            except:
+                resp_body = {}
+            self._handle_error(response.status_code, resp_body, response.text)
+        
+        data = response.json()
+        return self._parse_response(data)
+    
+    async def chat_stream(
+        self,
+        messages: List[Dict[str, Any]],
+        model: str = None,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+        **kwargs,
+    ) -> AsyncIterator[str]:
+        """
+        Stream chat completion.
+        
+        Note: Tool calls not supported in streaming mode.
+        
         Yields:
             Text chunks as they arrive
         """
         import httpx
         
-        use_model = model or self.model
-        payload = _build_chat_payload(
-            model=use_model,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            tools=None,  # No tools in streaming
-            stream=True,
-            **kwargs,
-        )
+        model = model or self.model
         
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
+        body = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": True,
+            **kwargs,
         }
         
-        with httpx.Client(timeout=self.timeout) as client:
-            with client.stream(
+        headers = self._get_auth_headers()
+        headers["Content-Type"] = "application/json"
+        
+        # Use direct httpx for streaming (pool doesn't support streaming well)
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with client.stream(
                 "POST",
-                f"{self.base_url}/chat/completions",
-                json=payload,
+                f"{self._base_url}/chat/completions",
+                json=body,
                 headers=headers,
             ) as response:
-                response.raise_for_status()
+                if response.status_code >= 400:
+                    text = await response.aread()
+                    try:
+                        resp_body = json.loads(text)
+                    except:
+                        resp_body = {}
+                    self._handle_error(response.status_code, resp_body, text.decode() if isinstance(text, bytes) else text)
                 
-                for line in response.iter_lines():
-                    data = _parse_sse_line(line)
-                    if data:
-                        delta = data.get("choices", [{}])[0].get("delta", {})
-                        if content := delta.get("content"):
-                            yield content
+                async for chunk_data in _stream_sse(response):
+                    delta = chunk_data.get("choices", [{}])[0].get("delta", {})
+                    content = delta.get("content")
+                    if content:
+                        yield content
     
-    def close(self) -> None:
-        """Close the underlying HTTP client."""
-        if self._http_client:
-            self._http_client.close()
-            self._http_client = None
+    def _format_tools(self, tools: List[Dict]) -> List[Dict]:
+        """Format tools for OpenAI API."""
+        formatted = []
+        for tool in tools:
+            if "type" not in tool:
+                formatted.append({
+                    "type": "function",
+                    "function": tool,
+                })
+            else:
+                formatted.append(tool)
+        return formatted
     
-    def __enter__(self) -> "OpenAICompatClient":
-        return self
-    
-    def __exit__(self, *args) -> None:
-        self.close()
-
-
-class AsyncOpenAICompatClient:
-    """
-    Asynchronous OpenAI-compatible client.
-    
-    Uses http_client for non-streaming (retries, circuit breaker).
-    Uses aiohttp directly for streaming.
-    """
-    
-    def __init__(
-        self,
-        api_key: str,
-        model: str = "gpt-4o",
-        base_url: str = OPENAI_BASE_URL,
-        timeout: float = 120.0,
-        max_retries: int = 3,
-    ):
-        """
-        Initialize async OpenAI-compatible client.
+    def _parse_response(self, data: Dict[str, Any]) -> ChatResponse:
+        """Parse OpenAI response into ChatResponse."""
+        choice = data.get("choices", [{}])[0]
+        message = choice.get("message", {})
+        usage = data.get("usage", {})
         
-        Args:
-            api_key: API key for authentication
-            model: Default model to use
-            base_url: API base URL (change for Groq, Together, etc.)
-            timeout: Request timeout in seconds
-            max_retries: Max retry attempts for non-streaming requests
-        """
-        self.api_key = api_key
-        self.model = model
-        self.base_url = base_url.rstrip("/")
-        self.timeout = timeout
-        self.max_retries = max_retries
+        tool_calls = []
+        if message.get("tool_calls"):
+            for tc in message["tool_calls"]:
+                tool_calls.append(ToolCall.from_openai(tc))
         
-        # Lazy-init http_client for non-streaming
-        self._http_client = None
-    
-    def _get_http_client(self):
-        """Get or create the HTTP client for non-streaming requests."""
-        if self._http_client is None:
-            from ...http_client import (
-                AsyncHttpClient,
-                HttpConfig,
-                RetryConfig,
-            )
-            
-            config = HttpConfig(
-                timeout=self.timeout,
-                retry=RetryConfig(
-                    max_retries=self.max_retries,
-                    base_delay=1.0,
-                    retry_on_status={429, 500, 502, 503, 504},
-                ),
-            )
-            
-            self._http_client = AsyncHttpClient(
-                config=config,
-                base_url=self.base_url,
-            )
-            self._http_client.set_bearer_token(self.api_key)
-        
-        return self._http_client
-    
-    async def chat(
-        self,
-        messages: list[dict],
-        temperature: float = 0.7,
-        max_tokens: int = 4096,
-        tools: list[dict] | None = None,
-        model: str | None = None,
-        **kwargs,
-    ) -> ChatResponse:
-        """
-        Send a chat completion request.
-        
-        Args:
-            messages: List of message dicts with 'role' and 'content'
-            temperature: Sampling temperature (0.0-2.0)
-            max_tokens: Maximum tokens to generate
-            tools: Optional list of tool definitions
-            model: Override default model
-            **kwargs: Additional API parameters
-            
-        Returns:
-            ChatResponse with content, usage, and any tool calls
-        """
-        use_model = model or self.model
-        payload = _build_chat_payload(
-            model=use_model,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            tools=tools,
-            stream=False,
-            **kwargs,
+        return ChatResponse(
+            content=message.get("content") or "",
+            model=data.get("model", self.model),
+            input_tokens=usage.get("prompt_tokens", 0),
+            output_tokens=usage.get("completion_tokens", 0),
+            finish_reason=choice.get("finish_reason", "stop"),
+            tool_calls=tool_calls,
+            raw=data,
         )
-        
-        client = self._get_http_client()
-        response = await client.post("/chat/completions", json=payload)
-        
-        return _parse_chat_response(response.json(), use_model)
-    
-    async def chat_stream(
-        self,
-        messages: list[dict],
-        temperature: float = 0.7,
-        max_tokens: int = 4096,
-        model: str | None = None,
-        **kwargs,
-    ) -> AsyncIterator[str]:
-        """
-        Stream a chat completion, yielding text chunks.
-        
-        Note: Tools are not supported in streaming mode.
-        
-        Args:
-            messages: List of message dicts
-            temperature: Sampling temperature
-            max_tokens: Maximum tokens to generate
-            model: Override default model
-            
-        Yields:
-            Text chunks as they arrive
-        """
-        import aiohttp
-        
-        use_model = model or self.model
-        payload = _build_chat_payload(
-            model=use_model,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            tools=None,  # No tools in streaming
-            stream=True,
-            **kwargs,
-        )
-        
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-        
-        timeout = aiohttp.ClientTimeout(total=self.timeout)
-        
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(
-                f"{self.base_url}/chat/completions",
-                json=payload,
-                headers=headers,
-            ) as response:
-                response.raise_for_status()
-                
-                async for line in response.content:
-                    line = line.decode("utf-8")
-                    data = _parse_sse_line(line)
-                    if data:
-                        delta = data.get("choices", [{}])[0].get("delta", {})
-                        if content := delta.get("content"):
-                            yield content
-    
-    async def close(self) -> None:
-        """Close the underlying HTTP client."""
-        if self._http_client:
-            await self._http_client.close()
-            self._http_client = None
-    
-    async def __aenter__(self) -> "AsyncOpenAICompatClient":
-        return self
-    
-    async def __aexit__(self, *args) -> None:
-        await self.close()

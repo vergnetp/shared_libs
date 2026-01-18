@@ -4,14 +4,28 @@ Cloud Provider Clients - Unified interface for cloud APIs.
 Provides sync and async clients for:
 - DigitalOcean (server provisioning, snapshots, VPC, registry)
 - Cloudflare (DNS management, multi-server setup)
-- Stripe (payments, subscriptions, customers)
-- LLM APIs (OpenAI, Anthropic, Groq, Together)
+- Stripe (payments, subscriptions)
+- LLM APIs (OpenAI, Anthropic, Groq)
 
 All clients include:
 - Automatic retries with exponential backoff
-- Circuit breaker to prevent cascade failures
 - Request/response tracing
+- Connection pooling (pooled by base_url)
 - Unified error handling
+
+Connection Pooling:
+    HTTP clients are pooled by base_url automatically. All AsyncDOClient 
+    instances share the same TCP connection pool to api.digitalocean.com.
+    Auth is passed per-request (multi-tenant safe).
+    
+    First request:  TCP + TLS handshake (~200-300ms)
+    Subsequent:     Reuse connection (~20-50ms)
+    
+    Call close_all_cloud_clients() on app shutdown to clean up.
+    
+    For high concurrency, configure pool limits:
+        from http_client import configure_pool_limits, PoolLimits
+        configure_pool_limits(PoolLimits.high_concurrency())
 
 Quick Start:
     # DigitalOcean (sync)
@@ -38,18 +52,21 @@ Quick Start:
     async with AsyncCloudflareClient(api_token="...") as cf:
         await cf.upsert_a_record("api.example.com", "1.2.3.4")
     
-    # LLM - OpenAI (sync)
-    from cloud.llm import OpenAICompatClient
+    # LLM - OpenAI
+    from cloud.llm import AsyncOpenAICompatClient
     
-    client = OpenAICompatClient(api_key="sk-...", model="gpt-4o")
-    response = client.chat([{"role": "user", "content": "Hello"}])
+    async with AsyncOpenAICompatClient(api_key="sk-...") as client:
+        response = await client.chat([{"role": "user", "content": "Hello!"}])
+        print(response.content)
     
-    # LLM - Anthropic (async with streaming)
+    # LLM - Anthropic Claude
     from cloud.llm import AsyncAnthropicClient
     
     async with AsyncAnthropicClient(api_key="sk-ant-...") as client:
-        async for chunk in client.chat_stream(messages):
-            print(chunk, end="")
+        response = await client.chat(
+            messages=[{"role": "user", "content": "Hello!"}],
+            system="You are helpful.",
+        )
 
 Configuration:
     from cloud import CloudClientConfig, DOClient
@@ -57,14 +74,22 @@ Configuration:
     config = CloudClientConfig(
         timeout=60.0,
         max_retries=5,
-        circuit_breaker_threshold=10,
     )
     
     client = DOClient(api_token="xxx", config=config)
+
+Shutdown:
+    from cloud import close_all_cloud_clients
+    
+    # In FastAPI shutdown handler
+    await close_all_cloud_clients()
 """
 
 # Configuration
-from .base import CloudClientConfig
+from .base import (
+    CloudClientConfig,
+    close_all_cloud_clients,
+)
 
 # Errors
 from .errors import (
@@ -75,11 +100,6 @@ from .errors import (
     RateLimitError,
     AuthenticationError,
     NotFoundError,
-    # LLM errors
-    LLMError,
-    LLMRateLimitError,
-    LLMAuthError,
-    LLMContextLengthError,
 )
 
 # DigitalOcean
@@ -107,13 +127,32 @@ from .stripe import (
     AsyncStripeClient,
 )
 
-# LLM - imported as submodule, access via cloud.llm
-# from . import llm  # Uncomment if you want `cloud.llm.OpenAICompatClient`
+# LLM - re-export from submodule for convenience
+from .llm import (
+    # Types
+    ChatResponse,
+    ChatMessage,
+    ToolCall,
+    # Errors
+    LLMError,
+    LLMRateLimitError,
+    LLMAuthError,
+    LLMContextLengthError,
+    LLMTimeoutError,
+    LLMConnectionError,
+    # Clients
+    OpenAICompatClient,
+    AsyncOpenAICompatClient,
+    AnthropicClient,
+    AsyncAnthropicClient,
+)
 
 
 __all__ = [
     # Config
     "CloudClientConfig",
+    # Connection management
+    "close_all_cloud_clients",
     # Errors
     "CloudError",
     "DOError",
@@ -123,10 +162,6 @@ __all__ = [
     "RateLimitError",
     "AuthenticationError",
     "NotFoundError",
-    "LLMError",
-    "LLMRateLimitError",
-    "LLMAuthError",
-    "LLMContextLengthError",
     # DigitalOcean
     "DOClient",
     "AsyncDOClient",
@@ -142,4 +177,20 @@ __all__ = [
     # Stripe
     "StripeClient",
     "AsyncStripeClient",
+    # LLM Types
+    "ChatResponse",
+    "ChatMessage",
+    "ToolCall",
+    # LLM Errors
+    "LLMError",
+    "LLMRateLimitError",
+    "LLMAuthError",
+    "LLMContextLengthError",
+    "LLMTimeoutError",
+    "LLMConnectionError",
+    # LLM Clients
+    "OpenAICompatClient",
+    "AsyncOpenAICompatClient",
+    "AnthropicClient",
+    "AsyncAnthropicClient",
 ]

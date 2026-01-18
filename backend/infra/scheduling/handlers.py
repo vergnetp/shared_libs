@@ -40,7 +40,7 @@ async def health_check_handler(task: ScheduledTask) -> Dict[str, Any]:
         return {"error": "No DO token configured - cannot discover servers"}
     
     # Generate API key from token
-    api_key = generate_node_agent_key(do_token, str(user_id))
+    api_key = generate_node_agent_key(do_token)
     
     # Discover managed servers (or use provided list)
     server_ips = config.get("server_ips", [])

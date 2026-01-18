@@ -9,6 +9,13 @@ Use this client to interact with node agents running on droplets.
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
 
+# httpx is used directly for multipart/streaming uploads (load_image, load_image_stream)
+# These features aren't supported by http_client module, and for these operations:
+# - No retry: retrying a 500MB upload is wasteful
+# - No circuit breaker: one failure doesn't mean we should stop
+# - Long timeouts: 600s for large Docker images
+import httpx
+
 
 @dataclass
 class AgentResponse:
@@ -25,7 +32,7 @@ class NodeAgentClient:
     Uses http_client for automatic retries.
     
     Example:
-        client = NodeAgentClient("206.189.122.244", "your-api-key")
+        client = NodeAgentClient("206.189.122.244", "dop_v1_xxx...")
         
         # Check health
         health = await client.ping()
@@ -41,9 +48,12 @@ class NodeAgentClient:
     
     AGENT_PORT = 9999
     
-    def __init__(self, server_ip: str, api_key: str, timeout: int = 30):
+    def __init__(self, server_ip: str, do_token: str, timeout: int = 30):
+        from ..cloud import generate_node_agent_key
+        
         self.server_ip = server_ip
-        self.api_key = api_key
+        self.do_token = do_token
+        self.api_key = generate_node_agent_key(do_token)  # Generate internally
         self.timeout = timeout
         self.base_url = f"http://{server_ip}:{self.AGENT_PORT}"
         self._http_client = None

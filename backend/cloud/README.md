@@ -90,54 +90,6 @@ async with AsyncStripeClient(api_key="sk_...") as client:
     product = await client.create_product(name="Pro Plan")
 ```
 
-### LLM APIs (OpenAI, Anthropic, Groq)
-
-```python
-# OpenAI
-from cloud.llm import OpenAICompatClient
-
-client = OpenAICompatClient(api_key="sk-...", model="gpt-4o")
-response = client.chat([{"role": "user", "content": "Hello!"}])
-print(response.content)
-
-# Groq (OpenAI-compatible)
-client = OpenAICompatClient(
-    api_key="gsk-...",
-    base_url="https://api.groq.com/openai/v1",
-    model="llama-3.3-70b-versatile"
-)
-
-# Anthropic Claude
-from cloud.llm import AnthropicClient
-
-client = AnthropicClient(api_key="sk-ant-...")
-response = client.chat(
-    messages=[{"role": "user", "content": "Hello!"}],
-    system="You are helpful.",
-)
-
-# Streaming
-for chunk in client.chat_stream(messages):
-    print(chunk, end="", flush=True)
-
-# Async streaming
-from cloud.llm import AsyncAnthropicClient
-
-async with AsyncAnthropicClient(api_key="...") as client:
-    async for chunk in client.chat_stream(messages):
-        print(chunk, end="")
-
-# Tool calls
-response = client.chat(messages, tools=[
-    {"name": "get_weather", "description": "...", "parameters": {...}}
-])
-if response.has_tool_calls:
-    for tc in response.tool_calls:
-        print(f"{tc.name}({tc.arguments})")
-```
-
-See [llm/README.md](llm/README.md) for full documentation.
-
 ## Configuration
 
 ```python
@@ -165,9 +117,6 @@ from cloud import (
     RateLimitError,
     AuthenticationError,
     NotFoundError,
-    LLMError,
-    LLMRateLimitError,
-    LLMAuthError,
 )
 
 # DigitalOcean

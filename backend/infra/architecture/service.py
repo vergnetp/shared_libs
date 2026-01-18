@@ -75,7 +75,7 @@ class _BaseArchitectureService(ABC):
         
         # Generate agent API key
         from ..cloud import generate_node_agent_key
-        self.api_key = generate_node_agent_key(do_token, user_id)
+        self.api_key = generate_node_agent_key(do_token)
     
     # =========================================================================
     # Abstract methods - implemented by sync/async subclasses
@@ -459,7 +459,7 @@ class ArchitectureService(_BaseArchitectureService):
         from ..node_agent import NodeAgentClient
         
         try:
-            client = NodeAgentClient(ip, self.api_key)
+            client = NodeAgentClient(ip, self.do_token)
             
             # Sequential calls (sync)
             containers_result = client.list_containers_sync()
@@ -577,7 +577,7 @@ class AsyncArchitectureService(_BaseArchitectureService):
         from ..node_agent import NodeAgentClient
         
         try:
-            client = NodeAgentClient(ip, self.api_key)
+            client = NodeAgentClient(ip, self.do_token)
             
             # Parallel: get containers AND ping at the same time
             containers_task = client.list_containers()

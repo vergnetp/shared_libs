@@ -43,17 +43,22 @@ def list_providers() -> list[str]:
 def _register_builtins():
     from .anthropic import AnthropicProvider
     from .openai import OpenAIProvider
-    from ._openai_assistant import OpenAIAssistantProvider
     from .ollama import OllamaProvider
     from .groq import GroqProvider
     from .tinyroberta import TinyRobertaProvider
     
     register_provider("anthropic", AnthropicProvider)
     register_provider("openai", OpenAIProvider)
-    register_provider("openai_assistant", OpenAIAssistantProvider)
     register_provider("ollama", OllamaProvider)
     register_provider("groq", GroqProvider)
     register_provider("tinyroberta", TinyRobertaProvider)
+    
+    # OpenAI Assistant requires the openai SDK
+    try:
+        from ._openai_assistant import OpenAIAssistantProvider
+        register_provider("openai_assistant", OpenAIAssistantProvider)
+    except ImportError:
+        pass  # SDK not installed
 
 
 _register_builtins()

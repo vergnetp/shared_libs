@@ -26,6 +26,18 @@ MODEL_LIMITS = {
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 
 
+def _get_openai_compat_client():
+    """Import AsyncOpenAICompatClient from cloud.llm (relative import)."""
+    try:
+        from ....cloud.llm import AsyncOpenAICompatClient
+        return AsyncOpenAICompatClient
+    except ImportError:
+        raise ImportError(
+            "cloud.llm module not found. "
+            "Ensure shared_libs/backend/cloud/llm is available."
+        )
+
+
 class GroqProvider(LLMProvider):
     """
     Groq provider - extremely fast inference.
@@ -47,7 +59,7 @@ class GroqProvider(LLMProvider):
             model: Model name (default: llama-3.3-70b-versatile)
             **kwargs: Ignored (for compatibility)
         """
-        from ....cloud.llm import AsyncOpenAICompatClient
+        AsyncOpenAICompatClient = _get_openai_compat_client()
         
         self.model = model
         self._client = AsyncOpenAICompatClient(

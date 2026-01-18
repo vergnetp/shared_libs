@@ -1,0 +1,21 @@
+{
+  "name": "@myorg/ui",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Shared Svelte UI components, stores, and utilities",
+  "main": "src/index.js",
+  "svelte": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./components/*": "./src/components/*",
+    "./stores/*": "./src/stores/*",
+    "./api/*": "./src/api/*",
+    "./styles/*": "./src/styles/*",
+    "./presets": "./src/presets/index.js"
+  },
+  "peerDependencies": {
+    "svelte": "^4.0.0"
+  },
+  "keywords": ["svelte", "ui", "components"],
+  "license": "MIT"
+}

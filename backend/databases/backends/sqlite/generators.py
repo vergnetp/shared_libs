@@ -63,12 +63,21 @@ class SqliteSqlGenerator(SqlGenerator, SqlEntityGenerator):
     
     def get_create_history_table_sql(self, entity_name: str, columns: List[Tuple[str, str]]) -> str:
         """Generate SQLite-specific history table SQL."""
+        # History-specific fields that we'll add - filter these from main columns
+        history_fields = {'version', 'history_timestamp', 'history_user_id', 'history_comment'}
+        
         # Ensure id is included
         has_id = any(name == 'id' for name, _ in columns)
         column_defs = []
         if not has_id:
             column_defs.append("[id] TEXT")
-        column_defs.extend([f"[{name}] TEXT" for name, _ in columns])
+        
+        # Add main table columns, excluding history-specific ones
+        for name, _ in columns:
+            if name not in history_fields:
+                column_defs.append(f"[{name}] TEXT")
+        
+        # Add history-specific columns
         column_defs.append("[version] INTEGER")
         column_defs.append("[history_timestamp] TEXT")
         column_defs.append("[history_user_id] TEXT")

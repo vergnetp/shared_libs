@@ -14,12 +14,17 @@ SDK-based (complex state management):
 from .base import LLMProvider
 from .anthropic import AnthropicProvider
 from .openai import OpenAIProvider
-from ._openai_assistant import OpenAIAssistantProvider
 from .ollama import OllamaProvider
 from .groq import GroqProvider
 from .cascading import CascadingProvider
 from .tinyroberta import TinyRobertaProvider
 from .registry import get_provider, register_provider, list_providers
+
+# OpenAIAssistantProvider requires the openai SDK - import lazily
+try:
+    from ._openai_assistant import OpenAIAssistantProvider
+except ImportError:
+    OpenAIAssistantProvider = None  # SDK not installed
 
 __all__ = [
     "LLMProvider",

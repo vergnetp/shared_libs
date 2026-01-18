@@ -71,6 +71,51 @@ class PooledClientInfo:
         return time.time() - self.created_at
 
 
+@dataclass
+class PoolLimits:
+    """
+    Connection pool limits per base_url.
+    
+    These control httpx's internal connection pooling for each base URL.
+    With 1000 users hitting the same API, requests queue for available connections.
+    """
+    max_connections: int = 100          # Max concurrent connections per base_url
+    max_keepalive: int = 20             # Idle connections to keep warm
+    keepalive_expiry: float = 60.0      # Seconds before closing idle connection
+    
+    # Presets for common scenarios
+    @classmethod
+    def default(cls) -> "PoolLimits":
+        """Standard settings - good for most APIs."""
+        return cls(max_connections=100, max_keepalive=20)
+    
+    @classmethod  
+    def high_concurrency(cls) -> "PoolLimits":
+        """For high-traffic scenarios (LLM streaming, many users)."""
+        return cls(max_connections=200, max_keepalive=50, keepalive_expiry=120.0)
+    
+    @classmethod
+    def low_traffic(cls) -> "PoolLimits":
+        """For scripts or low-traffic apps."""
+        return cls(max_connections=20, max_keepalive=5, keepalive_expiry=30.0)
+
+
+# Global pool limits (can be changed before first use)
+_pool_limits = PoolLimits.default()
+
+
+def configure_pool_limits(limits: PoolLimits) -> None:
+    """
+    Configure pool limits. Call before first request.
+    
+    Example:
+        from http_client import configure_pool_limits, PoolLimits
+        configure_pool_limits(PoolLimits.high_concurrency())
+    """
+    global _pool_limits
+    _pool_limits = limits
+
+
 class ConnectionPool:
     """
     Global pool of HTTP clients for connection reuse.
@@ -109,7 +154,7 @@ class ConnectionPool:
         self,
         base_url: str,
         config: "HttpConfig" = None,
-        http2: bool = True,
+        http2: bool = False,
     ) -> Any:
         """
         Get existing client or create new one.
@@ -153,7 +198,7 @@ class ConnectionPool:
         self,
         base_url: str,
         config: "HttpConfig" = None,
-        http2: bool = True,
+        http2: bool = False,
     ) -> Any:
         """Create a new httpx.AsyncClient."""
         try:
@@ -161,7 +206,7 @@ class ConnectionPool:
         except ImportError:
             raise ImportError(
                 "httpx is required for connection pooling. "
-                "Install it with: pip install httpx[http2]"
+                "Install it with: pip install httpx"
             )
         
         # Default config values
@@ -175,11 +220,11 @@ class ConnectionPool:
             write=30.0,
         )
         
-        # Generous connection limits for pooling
+        # Use global pool limits
         limits = httpx.Limits(
-            max_keepalive_connections=20,
-            max_connections=100,
-            keepalive_expiry=60.0,  # Keep connections alive longer
+            max_keepalive_connections=_pool_limits.max_keepalive,
+            max_connections=_pool_limits.max_connections,
+            keepalive_expiry=_pool_limits.keepalive_expiry,
         )
         
         return httpx.AsyncClient(
@@ -277,7 +322,7 @@ async def get_pool() -> ConnectionPool:
 async def get_pooled_client(
     base_url: str,
     config: "HttpConfig" = None,
-    http2: bool = True,
+    http2: bool = False,
 ) -> Any:
     """
     Get a pooled httpx client for the given base URL.
@@ -288,7 +333,7 @@ async def get_pooled_client(
     Args:
         base_url: Base URL for the client
         config: Optional HttpConfig for timeout settings
-        http2: Enable HTTP/2 (default True)
+        http2: Enable HTTP/2 (default False, requires httpx[http2])
         
     Returns:
         httpx.AsyncClient ready to use

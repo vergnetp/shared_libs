@@ -42,7 +42,7 @@ class _BaseProvisioningService:
         
         # Generate agent API key
         from ..cloud import generate_node_agent_key
-        self.api_key = generate_node_agent_key(do_token, user_id)
+        self.api_key = generate_node_agent_key(do_token)
     
     def _validate_tags(self, tags: List[str]) -> List[str]:
         """Ensure managed tag is present."""
@@ -251,7 +251,7 @@ class ProvisioningService(_BaseProvisioningService):
                 time.sleep(5)
                 
                 yield emit("progress", "Verifying agent connectivity...")
-                client = NodeAgentClient(result.ip, self.api_key)
+                client = NodeAgentClient(result.ip, self.do_token)
                 
                 max_checks = self.AGENT_WAIT_TIMEOUT // self.AGENT_CHECK_INTERVAL
                 for i in range(max_checks):
@@ -454,7 +454,7 @@ class AsyncProvisioningService(_BaseProvisioningService):
                 await asyncio.sleep(5)
                 
                 yield emit("progress", "Verifying agent connectivity...")
-                client = NodeAgentClient(result.ip, self.api_key)
+                client = NodeAgentClient(result.ip, self.do_token)
                 
                 max_checks = self.AGENT_WAIT_TIMEOUT // self.AGENT_CHECK_INTERVAL
                 for i in range(max_checks):

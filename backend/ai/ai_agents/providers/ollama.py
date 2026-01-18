@@ -1,25 +1,15 @@
 from __future__ import annotations
-"""Ollama provider for local models."""
+"""
+Ollama provider for local models.
+
+Uses httpx directly since Ollama is a local service (no authentication,
+no rate limits). The http_client pool is not needed for localhost.
+"""
 
 from typing import AsyncIterator
+import json
+
 import httpx
-
-# Backend imports (relative)
-try:
-    from ....resilience import circuit_breaker, with_timeout
-except ImportError:
-    def circuit_breaker(*args, **kwargs):
-        def decorator(fn): return fn
-        return decorator
-    def with_timeout(*args, **kwargs):
-        def decorator(fn): return fn
-        return decorator
-
-try:
-    from ....log import info, error
-except ImportError:
-    def info(msg, **kwargs): pass
-    def error(msg, **kwargs): print(f"[ERROR] {msg}")
 
 # Local imports
 from ..core import ProviderResponse, ProviderError
@@ -27,26 +17,50 @@ from .base import LLMProvider
 from .utils import parse_ollama_tool_calls, build_response
 
 
+# Model context limits (varies by model)
+MODEL_LIMITS = {
+    "llama3.2": 128000,
+    "llama3.1": 128000,
+    "mistral": 32768,
+    "mixtral": 32768,
+    "codellama": 16384,
+    "phi3": 128000,
+}
+
+
 class OllamaProvider(LLMProvider):
-    """Ollama provider for local models."""
+    """
+    Ollama provider for local models.
+    
+    Connects to a local Ollama server (default: http://localhost:11434).
+    No authentication required.
+    """
     
     name = "ollama"
     
-    def __init__(self, model: str = "llama3.1", base_url: str = "http://localhost:11434", api_key: str = None, **kwargs):
-        """Initialize Ollama provider.
+    def __init__(
+        self,
+        model: str = "llama3.2",
+        base_url: str = "http://localhost:11434",
+        api_key: str = None,  # Ignored - Ollama doesn't need auth
+        timeout: float = 300.0,
+        **kwargs,
+    ):
+        """
+        Initialize Ollama provider.
         
         Args:
-            model: Model name (e.g., "llama3.2", "mistral")
+            model: Model name (e.g., "llama3.2", "mistral", "codellama")
             base_url: Ollama server URL (default: localhost:11434)
             api_key: Ignored - Ollama doesn't need authentication
+            timeout: Request timeout in seconds (default: 300s for slow models)
             **kwargs: Ignored extra arguments for compatibility
         """
         self.model = model
         self.base_url = base_url.rstrip("/")
-        self.client = httpx.AsyncClient(timeout=300)
+        self.timeout = timeout
+        self._client = httpx.AsyncClient(timeout=timeout)
     
-    @circuit_breaker(name="ollama")
-    @with_timeout(seconds=300)
     async def run(
         self,
         messages: list[dict],
@@ -55,11 +69,20 @@ class OllamaProvider(LLMProvider):
         tools: list[dict] = None,
         **kwargs,
     ) -> ProviderResponse:
-        info("Calling Ollama", model=self.model, message_count=len(messages))
-        print(f"[DEBUG Ollama] Calling {self.base_url}/api/chat with model={self.model}", flush=True)
+        """
+        Run chat completion.
         
+        Args:
+            messages: List of message dicts
+            temperature: Sampling temperature
+            max_tokens: Max tokens to generate
+            tools: Tool definitions (supported by some Ollama models)
+            **kwargs: Additional parameters
+            
+        Returns:
+            ProviderResponse with content and usage
+        """
         try:
-            # Convert tools to Ollama format if provided
             request_body = {
                 "model": self.model,
                 "messages": messages,
@@ -73,14 +96,11 @@ class OllamaProvider(LLMProvider):
             # Add tools if provided (Ollama supports tools for some models)
             if tools:
                 request_body["tools"] = tools
-                print(f"[DEBUG Ollama] Sending {len(tools)} tools", flush=True)
             
-            print(f"[DEBUG Ollama] Sending request...", flush=True)
-            response = await self.client.post(
+            response = await self._client.post(
                 f"{self.base_url}/api/chat",
                 json=request_body,
             )
-            print(f"[DEBUG Ollama] Got response status={response.status_code}", flush=True)
             response.raise_for_status()
             data = response.json()
             
@@ -88,24 +108,17 @@ class OllamaProvider(LLMProvider):
             input_tokens = data.get("prompt_eval_count", 0)
             output_tokens = data.get("eval_count", 0)
             
-            info("Ollama response", input_tokens=input_tokens, output_tokens=output_tokens)
-            print(f"[DEBUG Ollama] Success: {output_tokens} tokens generated", flush=True)
-            
             # Check for tool calls in response
             message = data.get("message", {})
             content = message.get("content", "")
             
             tool_calls = parse_ollama_tool_calls(message.get("tool_calls"))
-            if tool_calls:
-                print(f"[DEBUG Ollama] Got {len(tool_calls)} tool calls", flush=True)
             
             # Check for XML-style tool calls in content (Llama sometimes does this)
             if content and not tool_calls and "<function=" in content:
-                from .groq import _parse_xml_tool_calls
-                content, xml_tool_calls = _parse_xml_tool_calls(content)
+                content, xml_tool_calls = self._parse_xml_tool_calls(content)
                 if xml_tool_calls:
                     tool_calls = xml_tool_calls
-                    print(f"[DEBUG Ollama] Parsed {len(tool_calls)} XML tool calls", flush=True)
             
             return build_response(
                 content=content,
@@ -118,16 +131,11 @@ class OllamaProvider(LLMProvider):
             )
             
         except httpx.HTTPStatusError as e:
-            error("Ollama HTTP error", status=e.response.status_code)
-            print(f"[ERROR Ollama] HTTP {e.response.status_code}: {e.response.text}", flush=True)
-            raise ProviderError(self.name, f"HTTP {e.response.status_code}")
+            raise ProviderError(self.name, f"HTTP {e.response.status_code}: {e.response.text[:200]}")
         except httpx.RequestError as e:
-            error("Ollama request error", error=str(e))
-            print(f"[ERROR Ollama] Request error: {e}", flush=True)
-            raise ProviderError(self.name, str(e))
+            raise ProviderError(self.name, f"Connection error: {e}")
         except Exception as e:
-            print(f"[ERROR Ollama] Unexpected error: {type(e).__name__}: {e}", flush=True)
-            raise
+            raise ProviderError(self.name, str(e))
     
     async def stream(
         self,
@@ -137,7 +145,13 @@ class OllamaProvider(LLMProvider):
         tools: list[dict] = None,
         **kwargs,
     ) -> AsyncIterator[str]:
-        async with self.client.stream(
+        """
+        Stream chat completion.
+        
+        Yields:
+            Text chunks as they arrive
+        """
+        async with self._client.stream(
             "POST",
             f"{self.base_url}/api/chat",
             json={
@@ -150,19 +164,58 @@ class OllamaProvider(LLMProvider):
                 "stream": True,
             },
         ) as response:
-            import json
             async for line in response.aiter_lines():
                 if line:
-                    data = json.loads(line)
-                    if "message" in data and "content" in data["message"]:
-                        yield data["message"]["content"]
+                    try:
+                        data = json.loads(line)
+                        if "message" in data and "content" in data["message"]:
+                            yield data["message"]["content"]
+                    except json.JSONDecodeError:
+                        continue
     
     def count_tokens(self, messages: list[dict]) -> int:
-        # Rough estimate
+        """Rough token estimate (Ollama doesn't expose tokenizer)."""
         total_chars = sum(len(m.get("content", "")) for m in messages)
         return total_chars // 4
     
     @property
     def max_context_tokens(self) -> int:
-        # Varies by model, default to reasonable limit
-        return 8192
+        """Max context window for this model."""
+        return MODEL_LIMITS.get(self.model.split(":")[0], 8192)
+    
+    def _parse_xml_tool_calls(self, content: str) -> tuple[str, list[dict]]:
+        """
+        Parse XML-style tool calls from content.
+        
+        Llama models sometimes output tool calls as:
+        <function=get_weather>{"location": "NYC"}</function>
+        
+        Returns:
+            Tuple of (cleaned content, list of tool calls)
+        """
+        import re
+        
+        tool_calls = []
+        pattern = r'<function=(\w+)>(.*?)</function>'
+        matches = re.findall(pattern, content, re.DOTALL)
+        
+        for name, args_str in matches:
+            try:
+                args = json.loads(args_str.strip())
+            except json.JSONDecodeError:
+                args = {"raw": args_str.strip()}
+            
+            tool_calls.append({
+                "id": f"call_{name}_{len(tool_calls)}",
+                "name": name,
+                "arguments": args,
+            })
+        
+        # Remove tool call XML from content
+        cleaned = re.sub(pattern, '', content, flags=re.DOTALL).strip()
+        
+        return cleaned, tool_calls
+    
+    async def close(self):
+        """Close the HTTP client."""
+        await self._client.aclose()

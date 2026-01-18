@@ -71,12 +71,12 @@ class BulkNginxService:
     ):
         self.do_token = do_token
         self.user_id = user_id
-        self.api_key = generate_node_agent_key(do_token, user_id)
+        self.api_key = generate_node_agent_key(do_token)
         self.log = log or (lambda msg: None)
     
     def _get_nginx_service(self, ip: str) -> NginxService:
         """Create NginxService for a server."""
-        client = NodeAgentClient(ip, self.api_key)
+        client = NodeAgentClient(ip, self.do_token)
         return NginxService(client, log=self.log)
     
     # =========================================================================
@@ -153,7 +153,7 @@ class BulkNginxService:
     
     async def _fix_hash_bucket_size(self, ip: str) -> None:
         """Fix nginx server_names_hash_bucket_size if needed."""
-        client = NodeAgentClient(ip, self.api_key)
+        client = NodeAgentClient(ip, self.do_token)
         
         fix_script = '''
 if ! grep -q "server_names_hash_bucket_size" /etc/nginx/nginx.conf; then
