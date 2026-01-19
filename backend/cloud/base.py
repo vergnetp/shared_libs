@@ -3,12 +3,15 @@ Base Cloud Client.
 
 Shared logic for all cloud provider clients.
 
+Features:
+    - Connection pooling (shared per base_url)
+    - Automatic retry with exponential backoff
+    - Circuit breaker per service
+    - Request tracing integration
+    - Multi-tenant auth (per-request headers)
+
 Connection Pooling:
-    Async: Uses http_client's connection pool (cached by base_url).
-    Sync: Uses requests.Session (HTTP keep-alive).
-    
-    All AsyncDOClient instances share the same connection pool to api.digitalocean.com.
-    Auth is passed per-request (multi-tenant safety).
+    All clients share connection pools via http_client module.
     
     First request:  TCP + TLS handshake (~200-300ms)
     Subsequent:     Reuse connection (~20-50ms)
@@ -21,15 +24,22 @@ Configuration:
 """
 
 from __future__ import annotations
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, TYPE_CHECKING
 from dataclasses import dataclass
 
 from ..http_client import (
     HttpConfig,
     RetryConfig,
+    CircuitBreakerConfig,
+    SyncHttpClient,
+    AsyncHttpClient,
+    get_pooled_sync_client,
     get_pooled_client,
     close_pool,
 )
+
+if TYPE_CHECKING:
+    from ..http_client import HttpResponse
 
 from .errors import CloudError, RateLimitError, AuthenticationError, NotFoundError
 
@@ -40,11 +50,22 @@ class CloudClientConfig:
     timeout: float = 30.0
     max_retries: int = 3
     retry_base_delay: float = 1.0
+    circuit_breaker_enabled: bool = True
+    circuit_breaker_threshold: int = 5
+    circuit_breaker_timeout: float = 60.0
 
 
-def _default_http_config(config: CloudClientConfig = None) -> HttpConfig:
+def _make_http_config(config: CloudClientConfig = None) -> HttpConfig:
     """Create HttpConfig with cloud-appropriate defaults."""
     config = config or CloudClientConfig()
+    
+    cb_config = None
+    if config.circuit_breaker_enabled:
+        cb_config = CircuitBreakerConfig(
+            enabled=True,
+            failure_threshold=config.circuit_breaker_threshold,
+            recovery_timeout=config.circuit_breaker_timeout,
+        )
     
     return HttpConfig(
         timeout=config.timeout,
@@ -53,171 +74,8 @@ def _default_http_config(config: CloudClientConfig = None) -> HttpConfig:
             base_delay=config.retry_base_delay,
             retry_on_status={429, 500, 502, 503, 504},
         ),
-        circuit_breaker=None,
+        circuit_breaker=cb_config,
     )
-
-
-# =============================================================================
-# Sync Client Wrapper (uses requests.Session)
-# =============================================================================
-
-class _SyncClientWrapper:
-    """
-    Wrapper to provide consistent interface for sync HTTP requests.
-    
-    Provides .request() method compatible with what cloud clients expect.
-    Uses requests.Session for HTTP keep-alive.
-    """
-    
-    def __init__(self, base_url: str, timeout: float, auth_headers: Dict[str, str] = None):
-        import requests
-        self._base_url = base_url
-        self._timeout = timeout
-        self._session = requests.Session()
-        if auth_headers:
-            self._session.headers.update(auth_headers)
-    
-    def set_bearer_token(self, token: str):
-        """Update auth token."""
-        self._session.headers["Authorization"] = f"Bearer {token}"
-    
-    def set_auth_headers(self, headers: Dict[str, str]):
-        """Set custom auth headers."""
-        self._session.headers.update(headers)
-    
-    def request(
-        self,
-        method: str,
-        url: str,
-        json: Optional[Dict] = None,
-        data: Optional[Dict] = None,  # For form-encoded (Stripe)
-        params: Optional[Dict] = None,
-        headers: Optional[Dict] = None,
-        raise_on_error: bool = True,  # Ignored - clients handle errors
-        **kwargs,
-    ) -> "_SyncResponseWrapper":
-        """Make HTTP request."""
-        full_url = f"{self._base_url}{url}" if not url.startswith("http") else url
-        
-        resp = self._session.request(
-            method=method,
-            url=full_url,
-            json=json,
-            data=data,
-            params=params,
-            headers=headers,
-            timeout=self._timeout,
-        )
-        
-        return _SyncResponseWrapper(resp)
-    
-    def close(self):
-        """Close the session."""
-        self._session.close()
-
-
-class _SyncResponseWrapper:
-    """Wrapper to provide consistent response interface."""
-    
-    def __init__(self, response):
-        self._response = response
-    
-    @property
-    def status_code(self) -> int:
-        return self._response.status_code
-    
-    @property
-    def body(self) -> bytes:
-        return self._response.content
-    
-    @property
-    def text(self) -> str:
-        return self._response.text
-    
-    @property
-    def headers(self) -> Dict[str, str]:
-        return dict(self._response.headers)
-    
-    def json(self) -> Any:
-        return self._response.json()
-
-
-# =============================================================================
-# Async Client Wrapper (uses pooled httpx)
-# =============================================================================
-
-class _AsyncClientWrapper:
-    """
-    Wrapper around pooled httpx client.
-    
-    Provides .request() method compatible with what cloud clients expect.
-    Adds auth header per-request for multi-tenant safety.
-    """
-    
-    def __init__(self, httpx_client, auth_headers: Dict[str, str] = None):
-        self._client = httpx_client
-        self._auth_headers = auth_headers or {}
-    
-    def set_bearer_token(self, token: str):
-        """Update auth token."""
-        self._auth_headers["Authorization"] = f"Bearer {token}"
-    
-    def set_auth_headers(self, headers: Dict[str, str]):
-        """Set custom auth headers."""
-        self._auth_headers.update(headers)
-    
-    async def request(
-        self,
-        method: str,
-        url: str,
-        json: Optional[Dict] = None,
-        data: Optional[Dict] = None,  # For form-encoded (Stripe)
-        params: Optional[Dict] = None,
-        headers: Optional[Dict] = None,
-        raise_on_error: bool = True,  # Ignored - clients handle errors
-        **kwargs,
-    ) -> "_AsyncResponseWrapper":
-        """Make HTTP request."""
-        req_headers = dict(self._auth_headers)
-        if headers:
-            req_headers.update(headers)
-        
-        response = await self._client.request(
-            method=method,
-            url=url,
-            json=json,
-            data=data,
-            params=params,
-            headers=req_headers,
-        )
-        
-        return _AsyncResponseWrapper(response)
-
-
-class _AsyncResponseWrapper:
-    """Wrapper to provide consistent response interface."""
-    
-    def __init__(self, response):
-        self._response = response
-    
-    @property
-    def status_code(self) -> int:
-        return self._response.status_code
-    
-    @property
-    def body(self) -> bytes:
-        return self._response.content
-    
-    @property
-    def text(self) -> str:
-        return self._response.text
-    
-    @property
-    def headers(self) -> Dict[str, str]:
-        return dict(self._response.headers)
-    
-    def json(self) -> Any:
-        return self._response.json()
 
 
 # =============================================================================
@@ -228,7 +86,7 @@ class BaseCloudClient:
     """
     Base class for sync cloud clients.
     
-    Uses requests.Session for HTTP keep-alive.
+    Uses pooled SyncHttpClient with retry, circuit breaker, and tracing.
     """
     
     PROVIDER = "cloud"
@@ -241,36 +99,48 @@ class BaseCloudClient:
     ):
         self.api_token = api_token
         self.config = config or CloudClientConfig()
+        self._http_config = _make_http_config(self.config)
         
-        # Provide _client for backward compatibility with child classes
-        self._client = _SyncClientWrapper(
-            base_url=self.BASE_URL,
-            timeout=self.config.timeout,
-            auth_headers=self._get_auth_headers(),
+        # Get pooled client with full features (retry, circuit breaker, tracing)
+        self._client: SyncHttpClient = get_pooled_sync_client(
+            self.BASE_URL,
+            self._http_config,
         )
+        
+        # Apply auth - deferred so subclass can override _get_auth_headers
+        self._apply_auth()
     
     def _get_auth_headers(self) -> Dict[str, str]:
         """Get authorization headers. Override for different auth schemes."""
         return {"Authorization": f"Bearer {self.api_token}"}
     
+    def _apply_auth(self) -> None:
+        """Apply auth headers to client. Called after __init__ completes."""
+        auth_headers = self._get_auth_headers()
+        if "Authorization" in auth_headers:
+            # Parse scheme and credentials from header value
+            auth_value = auth_headers["Authorization"]
+            if " " in auth_value:
+                scheme, credentials = auth_value.split(" ", 1)
+                self._client.set_auth_header(scheme, credentials)
+    
     def close(self) -> None:
-        """Close the HTTP session."""
-        if hasattr(self, '_client'):
-            self._client.close()
+        """No-op. Connection pool managed globally via close_pool()."""
+        pass
     
     def __enter__(self) -> 'BaseCloudClient':
         return self
     
     def __exit__(self, *args) -> None:
-        self.close()
+        pass
 
 
 class AsyncBaseCloudClient:
     """
     Base class for async cloud clients.
     
-    Uses connection pooling - all instances share connections to the same base_url.
-    Auth is passed per-request for multi-tenant safety.
+    Uses pooled AsyncHttpClient with retry, circuit breaker, and tracing.
+    All instances share connections to the same base_url.
     """
     
     PROVIDER = "cloud"
@@ -283,22 +153,34 @@ class AsyncBaseCloudClient:
     ):
         self.api_token = api_token
         self.config = config or CloudClientConfig()
-        self._http_config = _default_http_config(self.config)
-        self._client: Optional[_AsyncClientWrapper] = None
+        self._http_config = _make_http_config(self.config)
+        self._client: Optional[AsyncHttpClient] = None
     
-    async def _ensure_client(self) -> _AsyncClientWrapper:
-        """Lazily initialize pooled client wrapped with auth."""
+    async def _ensure_client(self) -> AsyncHttpClient:
+        """Lazily initialize pooled client with auth."""
         if self._client is None:
-            httpx_client = await get_pooled_client(self.BASE_URL, self._http_config)
-            self._client = _AsyncClientWrapper(
-                httpx_client,
-                auth_headers=self._get_auth_headers(),
+            self._client = await get_pooled_client(
+                self.BASE_URL,
+                self._http_config,
             )
+            # Apply auth - called here so subclass overrides are used
+            self._apply_auth()
         return self._client
     
     def _get_auth_headers(self) -> Dict[str, str]:
         """Get authorization headers. Override for different auth schemes."""
         return {"Authorization": f"Bearer {self.api_token}"}
+    
+    def _apply_auth(self) -> None:
+        """Apply auth headers to client."""
+        if self._client is None:
+            return
+        auth_headers = self._get_auth_headers()
+        if "Authorization" in auth_headers:
+            auth_value = auth_headers["Authorization"]
+            if " " in auth_value:
+                scheme, credentials = auth_value.split(" ", 1)
+                self._client.set_auth_header(scheme, credentials)
     
     async def close(self) -> None:
         """No-op. Connection pool managed globally via close_pool()."""

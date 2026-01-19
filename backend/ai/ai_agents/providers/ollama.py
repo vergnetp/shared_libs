@@ -2,30 +2,19 @@ from __future__ import annotations
 """
 Ollama provider for local models.
 
-Uses httpx directly since Ollama is a local service (no authentication,
-no rate limits). The http_client pool is not needed for localhost.
+Uses cloud.llm.AsyncOllamaClient for HTTP operations with proper connection
+pooling, tracing, and error handling.
 """
 
 from typing import AsyncIterator
-import json
-
-import httpx
 
 # Local imports
 from ..core import ProviderResponse, ProviderError
 from .base import LLMProvider
-from .utils import parse_ollama_tool_calls, build_response
+from .utils import build_response
 
-
-# Model context limits (varies by model)
-MODEL_LIMITS = {
-    "llama3.2": 128000,
-    "llama3.1": 128000,
-    "mistral": 32768,
-    "mixtral": 32768,
-    "codellama": 16384,
-    "phi3": 128000,
-}
+# Cloud LLM client (relative import from ai/ai_agents/providers -> cloud/llm)
+from ....cloud.llm import AsyncOllamaClient, LLMError
 
 
 class OllamaProvider(LLMProvider):
@@ -34,6 +23,12 @@ class OllamaProvider(LLMProvider):
     
     Connects to a local Ollama server (default: http://localhost:11434).
     No authentication required.
+    
+    Uses cloud.llm.AsyncOllamaClient for:
+    - Connection pooling
+    - Request tracing
+    - Proper error handling
+    - NDJSON streaming
     """
     
     name = "ollama"
@@ -59,7 +54,13 @@ class OllamaProvider(LLMProvider):
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
-        self._client = httpx.AsyncClient(timeout=timeout)
+        
+        # Create the async client (uses pooled connections)
+        self._client = AsyncOllamaClient(
+            model=model,
+            base_url=base_url,
+            timeout=timeout,
+        )
     
     async def run(
         self,
@@ -83,57 +84,39 @@ class OllamaProvider(LLMProvider):
             ProviderResponse with content and usage
         """
         try:
-            request_body = {
-                "model": self.model,
-                "messages": messages,
-                "options": {
-                    "temperature": temperature,
-                    "num_predict": max_tokens,
-                },
-                "stream": False,
-            }
-            
-            # Add tools if provided (Ollama supports tools for some models)
-            if tools:
-                request_body["tools"] = tools
-            
-            response = await self._client.post(
-                f"{self.base_url}/api/chat",
-                json=request_body,
+            # Use the cloud.llm client
+            response = await self._client.chat(
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                tools=tools,
+                **kwargs,
             )
-            response.raise_for_status()
-            data = response.json()
             
-            # Ollama returns tokens in eval_count / prompt_eval_count
-            input_tokens = data.get("prompt_eval_count", 0)
-            output_tokens = data.get("eval_count", 0)
-            
-            # Check for tool calls in response
-            message = data.get("message", {})
-            content = message.get("content", "")
-            
-            tool_calls = parse_ollama_tool_calls(message.get("tool_calls"))
-            
-            # Check for XML-style tool calls in content (Llama sometimes does this)
-            if content and not tool_calls and "<function=" in content:
-                content, xml_tool_calls = self._parse_xml_tool_calls(content)
-                if xml_tool_calls:
-                    tool_calls = xml_tool_calls
+            # Convert tool calls from cloud.llm format to provider format
+            tool_calls = None
+            if response.tool_calls:
+                tool_calls = [
+                    {
+                        "id": tc.id,
+                        "name": tc.name,
+                        "arguments": tc.arguments,
+                    }
+                    for tc in response.tool_calls
+                ]
             
             return build_response(
-                content=content,
+                content=response.content,
                 model=self.model,
                 provider=self.name,
-                usage={"input": input_tokens, "output": output_tokens},
+                usage={"input": response.input_tokens, "output": response.output_tokens},
                 tool_calls=tool_calls,
-                finish_reason="stop",
-                raw=data,
+                finish_reason=response.finish_reason,
+                raw=response.raw,
             )
             
-        except httpx.HTTPStatusError as e:
-            raise ProviderError(self.name, f"HTTP {e.response.status_code}: {e.response.text[:200]}")
-        except httpx.RequestError as e:
-            raise ProviderError(self.name, f"Connection error: {e}")
+        except LLMError as e:
+            raise ProviderError(self.name, str(e))
         except Exception as e:
             raise ProviderError(self.name, str(e))
     
@@ -151,71 +134,28 @@ class OllamaProvider(LLMProvider):
         Yields:
             Text chunks as they arrive
         """
-        async with self._client.stream(
-            "POST",
-            f"{self.base_url}/api/chat",
-            json={
-                "model": self.model,
-                "messages": messages,
-                "options": {
-                    "temperature": temperature,
-                    "num_predict": max_tokens,
-                },
-                "stream": True,
-            },
-        ) as response:
-            async for line in response.aiter_lines():
-                if line:
-                    try:
-                        data = json.loads(line)
-                        if "message" in data and "content" in data["message"]:
-                            yield data["message"]["content"]
-                    except json.JSONDecodeError:
-                        continue
+        try:
+            async for chunk in self._client.chat_stream(
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                **kwargs,
+            ):
+                yield chunk
+        except LLMError as e:
+            raise ProviderError(self.name, str(e))
+        except Exception as e:
+            raise ProviderError(self.name, str(e))
     
     def count_tokens(self, messages: list[dict]) -> int:
         """Rough token estimate (Ollama doesn't expose tokenizer)."""
-        total_chars = sum(len(m.get("content", "")) for m in messages)
-        return total_chars // 4
+        return self._client.count_tokens(messages)
     
     @property
     def max_context_tokens(self) -> int:
         """Max context window for this model."""
-        return MODEL_LIMITS.get(self.model.split(":")[0], 8192)
-    
-    def _parse_xml_tool_calls(self, content: str) -> tuple[str, list[dict]]:
-        """
-        Parse XML-style tool calls from content.
-        
-        Llama models sometimes output tool calls as:
-        <function=get_weather>{"location": "NYC"}</function>
-        
-        Returns:
-            Tuple of (cleaned content, list of tool calls)
-        """
-        import re
-        
-        tool_calls = []
-        pattern = r'<function=(\w+)>(.*?)</function>'
-        matches = re.findall(pattern, content, re.DOTALL)
-        
-        for name, args_str in matches:
-            try:
-                args = json.loads(args_str.strip())
-            except json.JSONDecodeError:
-                args = {"raw": args_str.strip()}
-            
-            tool_calls.append({
-                "id": f"call_{name}_{len(tool_calls)}",
-                "name": name,
-                "arguments": args,
-            })
-        
-        # Remove tool call XML from content
-        cleaned = re.sub(pattern, '', content, flags=re.DOTALL).strip()
-        
-        return cleaned, tool_calls
+        return self._client.max_context_tokens
     
     async def close(self):
-        """Close the HTTP client."""
-        await self._client.aclose()
+        """No-op. Connection pool managed globally by cloud.llm."""
+        await self._client.close()

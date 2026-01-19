@@ -19,7 +19,7 @@ from typing import List, Dict, Any, Optional, Callable
 
 from .service import NginxService, NginxResult
 from ..node_agent import NodeAgentClient
-from ..cloud import generate_node_agent_key
+from ..providers import generate_node_agent_key
 
 
 @dataclass

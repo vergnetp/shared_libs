@@ -29,7 +29,7 @@ async def health_check_handler(task: ScheduledTask) -> Dict[str, Any]:
     3. Optionally restart unhealthy containers
     """
     from ..node_agent import NodeAgentClient
-    from ..cloud import DOClient, generate_node_agent_key
+    from ..providers import DOClient, generate_node_agent_key
     
     config = task.config
     do_token = config.get("do_token")

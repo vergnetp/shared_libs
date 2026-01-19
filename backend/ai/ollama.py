@@ -10,96 +10,66 @@ Usage:
     
     if is_available():
         await ensure_model("qwen2.5:3b")  # Auto-pulls if missing
+
+Note: This module wraps cloud.llm.OllamaClient for model management.
+      For full LLM functionality (chat, streaming), use cloud.llm directly:
+      
+    from cloud.llm import AsyncOllamaClient
+    
+    async with AsyncOllamaClient(model="qwen2.5:3b") as client:
+        response = await client.chat([{"role": "user", "content": "Hello!"}])
 """
 
-import asyncio
-import httpx
 from typing import Optional, Callable
+
+# Re-export from cloud.llm for backwards compatibility
+from ..cloud.llm import (
+    OllamaClient,
+    AsyncOllamaClient,
+    OLLAMA_DEFAULT_MODEL as DEFAULT_MODEL,
+    OLLAMA_RECOMMENDED_MODELS as RECOMMENDED_MODELS,
+    get_recommended_models,
+    get_default_model,
+)
 
 # Default Ollama endpoint
 DEFAULT_BASE_URL = "http://localhost:11434"
 
-# Recommended models (small, fast, good for RAG)
-RECOMMENDED_MODELS = {
-    "qwen2.5:3b": {
-        "size": "1.9GB",
-        "languages": "multilingual",
-        "description": "Best quality/size ratio",
-    },
-    "llama3.2:3b": {
-        "size": "2.0GB",
-        "languages": "English",
-        "description": "Fast, good for English",
-    },
-}
-
-DEFAULT_MODEL = "qwen2.5:3b"
-
 
 def is_available(base_url: str = None) -> bool:
     """Check if Ollama is running."""
-    base_url = base_url or DEFAULT_BASE_URL
-    try:
-        import httpx
-        with httpx.Client(timeout=2.0) as client:
-            r = client.get(f"{base_url}/api/tags")
-            return r.status_code == 200
-    except Exception:
-        return False
+    client = OllamaClient(base_url=base_url or DEFAULT_BASE_URL)
+    return client.is_available()
 
 
 async def is_available_async(base_url: str = None) -> bool:
     """Check if Ollama is running (async)."""
-    base_url = base_url or DEFAULT_BASE_URL
-    try:
-        async with httpx.AsyncClient(timeout=2.0) as client:
-            r = await client.get(f"{base_url}/api/tags")
-            return r.status_code == 200
-    except Exception:
-        return False
+    client = AsyncOllamaClient(base_url=base_url or DEFAULT_BASE_URL)
+    return await client.is_available()
 
 
 def list_models(base_url: str = None) -> list[str]:
     """List installed models."""
-    base_url = base_url or DEFAULT_BASE_URL
-    try:
-        with httpx.Client(timeout=5.0) as client:
-            r = client.get(f"{base_url}/api/tags")
-            if r.status_code == 200:
-                data = r.json()
-                return [m["name"] for m in data.get("models", [])]
-    except Exception:
-        pass
-    return []
+    client = OllamaClient(base_url=base_url or DEFAULT_BASE_URL)
+    return client.list_models()
 
 
 async def list_models_async(base_url: str = None) -> list[str]:
     """List installed models (async)."""
-    base_url = base_url or DEFAULT_BASE_URL
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            r = await client.get(f"{base_url}/api/tags")
-            if r.status_code == 200:
-                data = r.json()
-                return [m["name"] for m in data.get("models", [])]
-    except Exception:
-        pass
-    return []
+    client = AsyncOllamaClient(base_url=base_url or DEFAULT_BASE_URL)
+    return await client.list_models()
 
 
 def has_model(model: str, base_url: str = None) -> bool:
     """Check if a model is installed."""
-    models = list_models(base_url)
-    # Check exact match or base name match (qwen2.5:3b matches qwen2.5:3b-instruct)
-    base_name = model.split(":")[0]
-    return any(model == m or m.startswith(f"{base_name}:") for m in models)
+    client = OllamaClient(model=model, base_url=base_url or DEFAULT_BASE_URL)
+    return client.has_model(model)
 
 
 async def has_model_async(model: str, base_url: str = None) -> bool:
     """Check if a model is installed (async)."""
-    models = await list_models_async(base_url)
-    base_name = model.split(":")[0]
-    return any(model == m or m.startswith(f"{base_name}:") for m in models)
+    client = AsyncOllamaClient(model=model, base_url=base_url or DEFAULT_BASE_URL)
+    return await client.has_model(model)
 
 
 def pull_model(
@@ -118,45 +88,26 @@ def pull_model(
     Returns:
         True if successful
     """
-    base_url = base_url or DEFAULT_BASE_URL
-    
     print(f"[ollama] Pulling {model}...")
     if progress_callback:
         progress_callback(f"Starting download of {model}", 0)
     
     try:
-        with httpx.Client(timeout=None) as client:
-            with client.stream(
-                "POST",
-                f"{base_url}/api/pull",
-                json={"name": model},
-            ) as response:
-                if response.status_code != 200:
-                    print(f"[ollama] Failed to pull {model}: {response.status_code}")
-                    return False
-                
-                for line in response.iter_lines():
-                    if not line:
-                        continue
-                    try:
-                        import json
-                        data = json.loads(line)
-                        status = data.get("status", "")
-                        
-                        # Calculate progress
-                        completed = data.get("completed", 0)
-                        total = data.get("total", 0)
-                        if total > 0:
-                            pct = (completed / total) * 100
-                            if progress_callback:
-                                progress_callback(status, pct)
-                            print(f"\r[ollama] {status}: {pct:.1f}%", end="", flush=True)
-                        else:
-                            print(f"\r[ollama] {status}", end="", flush=True)
-                            
-                    except Exception:
-                        pass
-                        
+        client = OllamaClient(model=model, base_url=base_url or DEFAULT_BASE_URL)
+        
+        for data in client.pull_model(model):
+            status = data.get("status", "")
+            completed = data.get("completed", 0)
+            total = data.get("total", 0)
+            
+            if total > 0:
+                pct = (completed / total) * 100
+                if progress_callback:
+                    progress_callback(status, pct)
+                print(f"\r[ollama] {status}: {pct:.1f}%", end="", flush=True)
+            else:
+                print(f"\r[ollama] {status}", end="", flush=True)
+        
         print(f"\n[ollama] Successfully pulled {model}")
         return True
         
@@ -171,44 +122,26 @@ async def pull_model_async(
     progress_callback: Callable[[str, float], None] = None,
 ) -> bool:
     """Pull (download) a model (async)."""
-    base_url = base_url or DEFAULT_BASE_URL
-    
     print(f"[ollama] Pulling {model}...")
     if progress_callback:
         progress_callback(f"Starting download of {model}", 0)
     
     try:
-        async with httpx.AsyncClient(timeout=None) as client:
-            async with client.stream(
-                "POST",
-                f"{base_url}/api/pull",
-                json={"name": model},
-            ) as response:
-                if response.status_code != 200:
-                    print(f"[ollama] Failed to pull {model}: {response.status_code}")
-                    return False
-                
-                async for line in response.aiter_lines():
-                    if not line:
-                        continue
-                    try:
-                        import json
-                        data = json.loads(line)
-                        status = data.get("status", "")
-                        
-                        completed = data.get("completed", 0)
-                        total = data.get("total", 0)
-                        if total > 0:
-                            pct = (completed / total) * 100
-                            if progress_callback:
-                                progress_callback(status, pct)
-                            print(f"\r[ollama] {status}: {pct:.1f}%", end="", flush=True)
-                        else:
-                            print(f"\r[ollama] {status}", end="", flush=True)
-                            
-                    except Exception:
-                        pass
-                        
+        client = AsyncOllamaClient(model=model, base_url=base_url or DEFAULT_BASE_URL)
+        
+        async for data in client.pull_model(model):
+            status = data.get("status", "")
+            completed = data.get("completed", 0)
+            total = data.get("total", 0)
+            
+            if total > 0:
+                pct = (completed / total) * 100
+                if progress_callback:
+                    progress_callback(status, pct)
+                print(f"\r[ollama] {status}: {pct:.1f}%", end="", flush=True)
+            else:
+                print(f"\r[ollama] {status}", end="", flush=True)
+        
         print(f"\n[ollama] Successfully pulled {model}")
         return True
         
@@ -260,7 +193,7 @@ async def ensure_model_async(model: str = None, base_url: str = None) -> bool:
 
 def get_recommended() -> dict:
     """Get recommended models for RAG."""
-    return RECOMMENDED_MODELS
+    return get_recommended_models()
 
 
 # Quick test

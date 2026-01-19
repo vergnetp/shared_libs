@@ -3,15 +3,23 @@ Base LLM client.
 
 Shared logic for all LLM provider clients.
 
-Uses http_client for connection pooling, retries, and tracing.
+Uses http_client for connection pooling, retries, circuit breaker, and tracing.
 """
 
 from __future__ import annotations
-from typing import Dict, Any, Optional, AsyncIterator
+from typing import Dict, Any, Optional, AsyncIterator, TYPE_CHECKING
 from dataclasses import dataclass
 import json
 
-from ..base import _SyncClientWrapper, _AsyncClientWrapper
+from ...http_client import (
+    HttpConfig,
+    RetryConfig,
+    CircuitBreakerConfig,
+    SyncHttpClient,
+    AsyncHttpClient,
+    get_pooled_sync_client,
+    get_pooled_client,
+)
 from .errors import (
     LLMError,
     LLMRateLimitError,
@@ -28,13 +36,37 @@ class LLMClientConfig:
     timeout: float = 120.0  # LLM calls can be slow
     max_retries: int = 3
     retry_base_delay: float = 1.0
+    circuit_breaker_enabled: bool = True
+
+
+def _make_llm_http_config(config: LLMClientConfig = None) -> HttpConfig:
+    """Create HttpConfig with LLM-appropriate defaults."""
+    config = config or LLMClientConfig()
+    
+    cb_config = None
+    if config.circuit_breaker_enabled:
+        cb_config = CircuitBreakerConfig(
+            enabled=True,
+            failure_threshold=5,
+            recovery_timeout=60.0,
+        )
+    
+    return HttpConfig(
+        timeout=config.timeout,
+        retry=RetryConfig(
+            max_retries=config.max_retries,
+            base_delay=config.retry_base_delay,
+            retry_on_status={429, 500, 502, 503, 504},
+        ),
+        circuit_breaker=cb_config,
+    )
 
 
 class BaseLLMClient:
     """
     Base class for sync LLM clients.
     
-    Uses requests.Session for HTTP keep-alive.
+    Uses pooled SyncHttpClient with retry, circuit breaker, and tracing.
     """
     
     PROVIDER = "llm"
@@ -54,15 +86,49 @@ class BaseLLMClient:
         self.max_retries = max_retries
         
         self._base_url = base_url or self.BASE_URL
-        self._client = _SyncClientWrapper(
-            base_url=self._base_url,
+        
+        # Create config
+        config = LLMClientConfig(
             timeout=timeout,
-            auth_headers=self._get_auth_headers(),
+            max_retries=max_retries,
         )
+        self._http_config = _make_llm_http_config(config)
+        
+        # Get pooled client
+        self._client: SyncHttpClient = get_pooled_sync_client(
+            self._base_url,
+            self._http_config,
+        )
+        
+        # Store auth headers for per-request use (supports non-standard auth like x-api-key)
+        self._auth_headers = self._get_auth_headers()
     
     def _get_auth_headers(self) -> Dict[str, str]:
         """Get authorization headers. Override for different auth schemes."""
         return {"Authorization": f"Bearer {self.api_key}"}
+    
+    def _request(
+        self,
+        method: str,
+        url: str,
+        json: Optional[Dict] = None,
+        headers: Optional[Dict[str, str]] = None,
+        **kwargs,
+    ):
+        """Make HTTP request with auth headers."""
+        # Merge auth headers with request headers
+        req_headers = dict(self._auth_headers)
+        if headers:
+            req_headers.update(headers)
+        
+        return self._client.request(
+            method=method,
+            url=url,
+            json=json,
+            headers=req_headers,
+            raise_on_error=False,
+            **kwargs,
+        )
     
     def _handle_error(self, status_code: int, body: Dict[str, Any], text: str):
         """Convert HTTP errors to LLM errors."""
@@ -108,23 +174,22 @@ class BaseLLMClient:
         return None
     
     def close(self) -> None:
-        """Close the HTTP session."""
-        if hasattr(self, '_client'):
-            self._client.close()
+        """No-op. Connection pool managed globally."""
+        pass
     
     def __enter__(self) -> "BaseLLMClient":
         return self
     
     def __exit__(self, *args) -> None:
-        self.close()
+        pass
 
 
 class AsyncBaseLLMClient:
     """
     Base class for async LLM clients.
     
-    Uses connection pooling - all instances share connections to the same base_url.
-    Auth is passed per-request for multi-tenant safety.
+    Uses pooled AsyncHttpClient with retry, circuit breaker, and tracing.
+    All instances share connections to the same base_url.
     """
     
     PROVIDER = "llm"
@@ -144,33 +209,55 @@ class AsyncBaseLLMClient:
         self.max_retries = max_retries
         
         self._base_url = base_url or self.BASE_URL
-        self._client: Optional[_AsyncClientWrapper] = None
+        
+        # Create config
+        config = LLMClientConfig(
+            timeout=timeout,
+            max_retries=max_retries,
+        )
+        self._http_config = _make_llm_http_config(config)
+        self._client: Optional[AsyncHttpClient] = None
+        
+        # Store auth headers for per-request use (supports non-standard auth like x-api-key)
+        self._auth_headers = self._get_auth_headers()
     
-    async def _ensure_client(self) -> _AsyncClientWrapper:
-        """Lazily initialize pooled client wrapped with auth."""
+    async def _ensure_client(self) -> AsyncHttpClient:
+        """Lazily initialize pooled client."""
         if self._client is None:
-            from ...http_client import get_pooled_client, HttpConfig, RetryConfig
-            
-            config = HttpConfig(
-                timeout=self.timeout,
-                retry=RetryConfig(
-                    max_retries=self.max_retries,
-                    base_delay=1.0,
-                    retry_on_status={429, 500, 502, 503, 504},
-                ),
-                circuit_breaker=None,
-            )
-            
-            httpx_client = await get_pooled_client(self._base_url, config)
-            self._client = _AsyncClientWrapper(
-                httpx_client,
-                auth_headers=self._get_auth_headers(),
+            self._client = await get_pooled_client(
+                self._base_url,
+                self._http_config,
             )
         return self._client
     
     def _get_auth_headers(self) -> Dict[str, str]:
         """Get authorization headers. Override for different auth schemes."""
         return {"Authorization": f"Bearer {self.api_key}"}
+    
+    async def _request(
+        self,
+        method: str,
+        url: str,
+        json: Optional[Dict] = None,
+        headers: Optional[Dict[str, str]] = None,
+        **kwargs,
+    ):
+        """Make HTTP request with auth headers."""
+        client = await self._ensure_client()
+        
+        # Merge auth headers with request headers
+        req_headers = dict(self._auth_headers)
+        if headers:
+            req_headers.update(headers)
+        
+        return await client.request(
+            method=method,
+            url=url,
+            json=json,
+            headers=req_headers,
+            raise_on_error=False,
+            **kwargs,
+        )
     
     def _handle_error(self, status_code: int, body: Dict[str, Any], text: str):
         """Convert HTTP errors to LLM errors."""
@@ -215,7 +302,7 @@ class AsyncBaseLLMClient:
         return None
     
     async def close(self) -> None:
-        """No-op. Connection pool managed globally via close_pool()."""
+        """No-op. Connection pool managed globally."""
         pass
     
     async def __aenter__(self) -> "AsyncBaseLLMClient":
@@ -223,23 +310,3 @@ class AsyncBaseLLMClient:
     
     async def __aexit__(self, *args) -> None:
         pass
-
-
-async def _stream_sse(response) -> AsyncIterator[Dict[str, Any]]:
-    """
-    Parse Server-Sent Events from streaming response.
-    
-    Yields parsed JSON data from each 'data:' line.
-    """
-    async for line in response.aiter_lines():
-        line = line.strip()
-        if not line:
-            continue
-        if line.startswith("data:"):
-            data = line[5:].strip()
-            if data == "[DONE]":
-                break
-            try:
-                yield json.loads(data)
-            except json.JSONDecodeError:
-                continue

@@ -5,6 +5,7 @@ Provides sync and async clients for:
 - OpenAI (GPT-4o, GPT-4, GPT-3.5)
 - Anthropic Claude (Claude 4, Claude 3.5)
 - Groq (Llama, Mixtral) - via OpenAI-compatible API
+- Ollama (local models: Llama, Qwen, Mistral, etc.)
 - Any OpenAI-compatible API
 
 All clients include:
@@ -40,6 +41,13 @@ Quick Start:
         base_url="https://api.groq.com/openai/v1",
         model="llama-3.3-70b-versatile"
     )
+    
+    # Ollama (local models)
+    from cloud.llm import AsyncOllamaClient
+    
+    async with AsyncOllamaClient(model="llama3.2") as client:
+        response = await client.chat([{"role": "user", "content": "Hello!"}])
+        print(response.content)
     
     # Streaming
     async for chunk in client.chat_stream(messages):
@@ -90,6 +98,16 @@ from .anthropic import (
     AsyncAnthropicClient,
 )
 
+# Ollama clients (local models)
+from .ollama import (
+    OllamaClient,
+    AsyncOllamaClient,
+    OLLAMA_DEFAULT_MODEL,
+    OLLAMA_RECOMMENDED_MODELS,
+    get_default_model,
+    get_recommended_models,
+)
+
 
 __all__ = [
     # Types
@@ -110,4 +128,11 @@ __all__ = [
     # Anthropic
     "AnthropicClient",
     "AsyncAnthropicClient",
+    # Ollama
+    "OllamaClient",
+    "AsyncOllamaClient",
+    "OLLAMA_DEFAULT_MODEL",
+    "OLLAMA_RECOMMENDED_MODELS",
+    "get_default_model",
+    "get_recommended_models",
 ]

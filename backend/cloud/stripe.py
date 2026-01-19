@@ -478,6 +478,8 @@ class StripeClient(BaseCloudClient):
         cancel_url: str,
         metadata: Dict[str, str] = None,
         shipping_address_collection: Dict[str, Any] = None,
+        allow_promotion_codes: bool = None,
+        subscription_data: Dict[str, Any] = None,
     ) -> Dict[str, Any]:
         """
         Create a Checkout Session.
@@ -490,6 +492,8 @@ class StripeClient(BaseCloudClient):
             cancel_url: Redirect URL on cancel
             metadata: Additional data
             shipping_address_collection: {"allowed_countries": ["US", "CA"]}
+            allow_promotion_codes: Allow promo codes at checkout
+            subscription_data: Extra subscription options (trial_period_days, etc.)
         """
         data = {
             "customer": customer,
@@ -502,6 +506,10 @@ class StripeClient(BaseCloudClient):
             data["metadata"] = metadata
         if shipping_address_collection:
             data["shipping_address_collection"] = shipping_address_collection
+        if allow_promotion_codes is not None:
+            data["allow_promotion_codes"] = allow_promotion_codes
+        if subscription_data:
+            data["subscription_data"] = subscription_data
         
         return self._request("POST", "/checkout/sessions", data=data)
     
@@ -950,8 +958,23 @@ class AsyncStripeClient(AsyncBaseCloudClient):
         cancel_url: str,
         metadata: Dict[str, str] = None,
         shipping_address_collection: Dict[str, Any] = None,
+        allow_promotion_codes: bool = None,
+        subscription_data: Dict[str, Any] = None,
     ) -> Dict[str, Any]:
-        """Create a Checkout Session."""
+        """
+        Create a Checkout Session.
+        
+        Args:
+            customer: Stripe customer ID
+            line_items: List of {price: str, quantity: int}
+            mode: 'subscription', 'payment', or 'setup'
+            success_url: Redirect URL on success
+            cancel_url: Redirect URL on cancel
+            metadata: Custom metadata
+            shipping_address_collection: Shipping options
+            allow_promotion_codes: Allow promo codes at checkout
+            subscription_data: Extra subscription options (trial_period_days, etc.)
+        """
         data = {
             "customer": customer,
             "line_items": line_items,
@@ -963,6 +986,10 @@ class AsyncStripeClient(AsyncBaseCloudClient):
             data["metadata"] = metadata
         if shipping_address_collection:
             data["shipping_address_collection"] = shipping_address_collection
+        if allow_promotion_codes is not None:
+            data["allow_promotion_codes"] = allow_promotion_codes
+        if subscription_data:
+            data["subscription_data"] = subscription_data
         return await self._request("POST", "/checkout/sessions", data=data)
     
     async def retrieve_checkout_session(

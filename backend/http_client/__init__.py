@@ -109,13 +109,22 @@ from .clients import (
 # Connection Pooling
 from .pool import (
     get_pooled_client,
+    get_pooled_sync_client,
     get_pool,
+    get_async_pool,
+    get_sync_pool,
     get_pool_stats,
     close_pool,
+    close_sync_pool,
     configure_pool_limits,
     ConnectionPool,
+    AsyncConnectionPool,
+    SyncConnectionPool,
     PoolLimits,
 )
+
+# Streaming
+from .clients.async_client import SSEEvent
 
 # Response Caching
 from .cache import (
@@ -150,13 +159,21 @@ __all__ = [
     # Clients
     "SyncHttpClient",
     "AsyncHttpClient",
+    # Streaming
+    "SSEEvent",
     # Connection Pooling
     "get_pooled_client",
+    "get_pooled_sync_client",
     "get_pool",
+    "get_async_pool",
+    "get_sync_pool",
     "get_pool_stats",
     "close_pool",
+    "close_sync_pool",
     "configure_pool_limits",
     "ConnectionPool",
+    "AsyncConnectionPool",
+    "SyncConnectionPool",
     "PoolLimits",
     # Caching
     "cached_request",

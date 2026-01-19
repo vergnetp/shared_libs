@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Callable, Awaitable
 import re
 
-from ..cloud.cloudflare import CloudflareClient, CloudflareError
+from ..providers.cloudflare import CloudflareClient, CloudflareError
 
 
 # Cloudflare Origin Certificate paths on servers

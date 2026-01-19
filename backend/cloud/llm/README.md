@@ -55,6 +55,39 @@ client = AsyncOpenAICompatClient(
 response = await client.chat(messages)
 ```
 
+### Ollama (Local Models)
+
+```python
+from cloud.llm import OllamaClient, AsyncOllamaClient
+
+# Check availability and models
+client = OllamaClient()
+if client.is_available():
+    models = client.list_models()  # ["llama3.2:latest", "qwen2.5:3b", ...]
+
+# Sync
+client = OllamaClient(model="qwen2.5:3b")  # Best quality/size ratio
+response = client.chat([{"role": "user", "content": "Hello!"}])
+print(response.content)
+
+# Async with streaming
+async with AsyncOllamaClient(model="llama3.2") as client:
+    async for chunk in client.chat_stream(messages):
+        print(chunk, end="", flush=True)
+
+# Model management
+client = AsyncOllamaClient()
+await client.ensure_model("llama3.2")  # Pull if not present
+await client.pull_model("codellama:7b")  # Force pull
+```
+
+**Recommended models:**
+| Model | Size | Context | Best for |
+|-------|------|---------|----------|
+| `qwen2.5:3b` | 1.9GB | 32K | General (default) |
+| `llama3.2:3b` | 2.0GB | 128K | Long context |
+| `codellama:7b` | 3.8GB | 16K | Code |
+
 ## Tool Calling
 
 ```python
@@ -165,7 +198,7 @@ response = await provider.run(messages)
 # - anthropic → AsyncAnthropicClient
 # - openai → AsyncOpenAICompatClient
 # - groq → AsyncOpenAICompatClient (Groq URL)
-# - ollama → httpx directly (local server)
+# - ollama → AsyncOllamaClient (local server)
 ```
 
 ---
@@ -253,6 +286,29 @@ Async Anthropic Claude client.
 
 ### Sync Clients
 
-`OpenAICompatClient` and `AnthropicClient` have the same methods as their async counterparts, but synchronous.
+`OpenAICompatClient`, `AnthropicClient`, and `OllamaClient` have the same methods as their async counterparts, but synchronous.
+
+</div>
+
+<div style="background-color:#f8f9fa; border:1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 24px;">
+
+### class `AsyncOllamaClient`
+
+Async Ollama client for local LLM inference.
+
+<details>
+<summary><strong>Public Methods</strong></summary>
+
+| Method | Args | Returns | Description |
+|--------|------|---------|-------------|
+| `chat` | `messages`, `model?`, `system?`, `temperature?`, `max_tokens?`, `tools?` | `ChatResponse` | Send chat completion |
+| `chat_stream` | `messages`, `model?`, `system?`, `temperature?`, `max_tokens?` | `AsyncIterator[str]` | Stream completion |
+| `is_available` | | `bool` | Check if Ollama server is running |
+| `list_models` | | `List[str]` | List installed models |
+| `has_model` | `model_name` | `bool` | Check if model is installed |
+| `pull_model` | `model_name` | `bool` | Download a model |
+| `ensure_model` | `model_name` | `bool` | Pull model if not present |
+
+</details>
 
 </div>

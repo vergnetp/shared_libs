@@ -32,7 +32,7 @@ from __future__ import annotations
 from typing import List, Dict, Any, Optional, AsyncIterator
 import json
 
-from .base import BaseLLMClient, AsyncBaseLLMClient, _stream_sse
+from .base import BaseLLMClient, AsyncBaseLLMClient
 from .types import ChatResponse, ToolCall
 from .errors import LLMError, LLMConnectionError, LLMTimeoutError
 
@@ -111,7 +111,7 @@ class OpenAICompatClient(BaseLLMClient):
                 body["tool_choice"] = tool_choice
         
         try:
-            response = self._client.request("POST", "/chat/completions", json=body)
+            response = self._request("POST", "/chat/completions", json=body)
         except Exception as e:
             if "timeout" in str(e).lower():
                 raise LLMTimeoutError(str(e), provider=self.PROVIDER, timeout=self.timeout)
@@ -145,6 +145,8 @@ class OpenAICompatClient(BaseLLMClient):
         Yields:
             Text chunks as they arrive
         """
+        import requests
+        
         model = model or self.model
         
         body = {
@@ -156,19 +158,17 @@ class OpenAICompatClient(BaseLLMClient):
             **kwargs,
         }
         
-        import requests
-        
         url = f"{self._base_url}/chat/completions"
-        headers = self._get_auth_headers()
+        headers = dict(self._auth_headers)
         headers["Content-Type"] = "application/json"
         
         with requests.post(url, json=body, headers=headers, stream=True, timeout=self.timeout) as resp:
             if resp.status_code >= 400:
                 try:
-                    body = resp.json()
+                    resp_body = resp.json()
                 except:
-                    body = {}
-                self._handle_error(resp.status_code, body, resp.text)
+                    resp_body = {}
+                self._handle_error(resp.status_code, resp_body, resp.text)
             
             for line in resp.iter_lines(decode_unicode=True):
                 if not line:
@@ -286,7 +286,6 @@ class AsyncOpenAICompatClient(AsyncBaseLLMClient):
         Returns:
             ChatResponse with content, usage, and tool_calls
         """
-        client = await self._ensure_client()
         model = model or self.model
         
         body = {
@@ -303,7 +302,7 @@ class AsyncOpenAICompatClient(AsyncBaseLLMClient):
                 body["tool_choice"] = tool_choice
         
         try:
-            response = await client.request("POST", "/chat/completions", json=body)
+            response = await self._request("POST", "/chat/completions", json=body)
         except Exception as e:
             if "timeout" in str(e).lower():
                 raise LLMTimeoutError(str(e), provider=self.PROVIDER, timeout=self.timeout)
@@ -337,8 +336,7 @@ class AsyncOpenAICompatClient(AsyncBaseLLMClient):
         Yields:
             Text chunks as they arrive
         """
-        import httpx
-        
+        client = await self._ensure_client()
         model = model or self.model
         
         body = {
@@ -350,30 +348,25 @@ class AsyncOpenAICompatClient(AsyncBaseLLMClient):
             **kwargs,
         }
         
-        headers = self._get_auth_headers()
-        headers["Content-Type"] = "application/json"
-        
-        # Use direct httpx for streaming (pool doesn't support streaming well)
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            async with client.stream(
-                "POST",
-                f"{self._base_url}/chat/completions",
-                json=body,
-                headers=headers,
-            ) as response:
-                if response.status_code >= 400:
-                    text = await response.aread()
-                    try:
-                        resp_body = json.loads(text)
-                    except:
-                        resp_body = {}
-                    self._handle_error(response.status_code, resp_body, text.decode() if isinstance(text, bytes) else text)
-                
-                async for chunk_data in _stream_sse(response):
-                    delta = chunk_data.get("choices", [{}])[0].get("delta", {})
-                    content = delta.get("content")
-                    if content:
-                        yield content
+        # Use pooled client's stream_sse for connection reuse and tracing
+        async for event in client.stream_sse(
+            "POST",
+            "/chat/completions",
+            json=body,
+            headers=self._auth_headers,
+        ):
+            # Handle SSE events - event is SSEEvent dataclass with .data attribute
+            if event.data == "[DONE]":
+                break
+            
+            try:
+                data = json.loads(event.data) if event.data else {}
+                delta = data.get("choices", [{}])[0].get("delta", {})
+                content = delta.get("content")
+                if content:
+                    yield content
+            except json.JSONDecodeError:
+                continue
     
     def _format_tools(self, tools: List[Dict]) -> List[Dict]:
         """Format tools for OpenAI API."""

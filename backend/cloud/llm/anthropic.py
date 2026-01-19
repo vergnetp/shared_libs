@@ -115,7 +115,7 @@ class AnthropicClient(BaseLLMClient):
                 body["tool_choice"] = tool_choice
         
         try:
-            response = self._client.request("POST", "/v1/messages", json=body)
+            response = self._request("POST", "/v1/messages", json=body)
         except Exception as e:
             if "timeout" in str(e).lower():
                 raise LLMTimeoutError(str(e), provider=self.PROVIDER, timeout=self.timeout)
@@ -330,7 +330,6 @@ class AsyncAnthropicClient(AsyncBaseLLMClient):
         Returns:
             ChatResponse with content, usage, and tool_calls
         """
-        client = await self._ensure_client()
         model = model or self.model
         
         body = {
@@ -352,7 +351,7 @@ class AsyncAnthropicClient(AsyncBaseLLMClient):
                 body["tool_choice"] = tool_choice
         
         try:
-            response = await client.request("POST", "/v1/messages", json=body)
+            response = await self._request("POST", "/v1/messages", json=body)
         except Exception as e:
             if "timeout" in str(e).lower():
                 raise LLMTimeoutError(str(e), provider=self.PROVIDER, timeout=self.timeout)
@@ -385,8 +384,7 @@ class AsyncAnthropicClient(AsyncBaseLLMClient):
         Yields:
             Text chunks as they arrive
         """
-        import httpx
-        
+        client = await self._ensure_client()
         model = model or self.model
         
         body = {
@@ -403,43 +401,38 @@ class AsyncAnthropicClient(AsyncBaseLLMClient):
         if temperature is not None:
             body["temperature"] = temperature
         
-        headers = self._get_auth_headers()
-        
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            async with client.stream(
-                "POST",
-                f"{self._base_url}/v1/messages",
-                json=body,
-                headers=headers,
-            ) as response:
-                if response.status_code >= 400:
-                    text = await response.aread()
-                    try:
-                        resp_body = json.loads(text)
-                    except:
-                        resp_body = {}
-                    self._handle_error(response.status_code, resp_body, text.decode() if isinstance(text, bytes) else text)
+        # Use pooled client's stream_sse for connection reuse and tracing
+        async for event in client.stream_sse(
+            "POST",
+            "/v1/messages",
+            json=body,
+            headers=self._auth_headers,
+        ):
+            # Handle SSE events - event is SSEEvent dataclass with .data attribute
+            if event.data == "[DONE]":
+                break
+            
+            try:
+                data = json.loads(event.data) if event.data else {}
+                event_type = data.get("type")
                 
-                async for line in response.aiter_lines():
-                    line = line.strip()
-                    if not line:
-                        continue
-                    if line.startswith("data:"):
-                        data = line[5:].strip()
-                        if data == "[DONE]":
-                            break
-                        try:
-                            event = json.loads(data)
-                            event_type = event.get("type")
-                            
-                            if event_type == "content_block_delta":
-                                delta = event.get("delta", {})
-                                if delta.get("type") == "text_delta":
-                                    text = delta.get("text", "")
-                                    if text:
-                                        yield text
-                        except json.JSONDecodeError:
-                            continue
+                # Handle errors in stream
+                if event_type == "error":
+                    error = data.get("error", {})
+                    raise LLMError(
+                        error.get("message", str(data)),
+                        provider=self.PROVIDER,
+                        response_body=data,
+                    )
+                
+                if event_type == "content_block_delta":
+                    delta = data.get("delta", {})
+                    if delta.get("type") == "text_delta":
+                        text = delta.get("text", "")
+                        if text:
+                            yield text
+            except json.JSONDecodeError:
+                continue
     
     def _format_messages(self, messages: List[Dict]) -> List[Dict]:
         """Format messages for Anthropic API."""

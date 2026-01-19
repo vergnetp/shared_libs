@@ -29,7 +29,7 @@ class _BaseFleetService:
         self.do_token = do_token
         self.user_id = user_id
         
-        from ..cloud import generate_node_agent_key
+        from ..providers import generate_node_agent_key
         self.api_key = generate_node_agent_key(do_token)
     
     def _calculate_summary(self, servers: List[ServerHealth]) -> Dict[str, Any]:
@@ -62,7 +62,7 @@ class FleetService(_BaseFleetService):
     
     def list_servers(self) -> List[Any]:
         """List all managed servers."""
-        from ..cloud import DOClient, MANAGED_TAG
+        from ..providers import DOClient, MANAGED_TAG
         
         client = DOClient(self.do_token)
         droplets = client.list_droplets()
@@ -80,7 +80,7 @@ class FleetService(_BaseFleetService):
         Returns:
             Dict with success status
         """
-        from ..cloud import DOClient, MANAGED_TAG
+        from ..providers import DOClient, MANAGED_TAG
         
         client = DOClient(self.do_token)
         try:
@@ -100,7 +100,7 @@ class FleetService(_BaseFleetService):
     
     def get_fleet_health(self) -> FleetHealth:
         """Get health status of all servers in the fleet (sync)."""
-        from ..cloud import DOClient
+        from ..providers import DOClient
         from ..node_agent import NodeAgentClient
         
         # Get all servers
@@ -339,7 +339,7 @@ class AsyncFleetService(_BaseFleetService):
     
     async def list_servers(self) -> List[Any]:
         """List all managed servers."""
-        from ..cloud import AsyncDOClient, MANAGED_TAG
+        from ..providers import AsyncDOClient, MANAGED_TAG
         
         client = AsyncDOClient(self.do_token)
         try:
@@ -360,7 +360,7 @@ class AsyncFleetService(_BaseFleetService):
         Returns:
             Dict with success status
         """
-        from ..cloud import AsyncDOClient, MANAGED_TAG
+        from ..providers import AsyncDOClient, MANAGED_TAG
         
         client = AsyncDOClient(self.do_token)
         try:
@@ -382,7 +382,7 @@ class AsyncFleetService(_BaseFleetService):
     
     async def get_fleet_health(self) -> FleetHealth:
         """Get health status of all servers in the fleet (async, parallel)."""
-        from ..cloud import AsyncDOClient
+        from ..providers import AsyncDOClient
         
         # Get all servers
         try:

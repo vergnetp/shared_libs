@@ -11,7 +11,7 @@ from typing import Dict, Any, List, Optional, Callable, Literal, Awaitable
 from enum import Enum
 
 from ..node_agent.client import NodeAgentClient
-from ..cloud.digitalocean import DOClient
+from ..providers.digitalocean import DOClient
 from ..networking.nginx_manager import NginxManager, BackendMode
 from ..networking.ports import DeploymentPortResolver
 
@@ -102,6 +102,7 @@ class ServerResult:
     ip: str
     name: str
     success: bool
+    droplet_id: Optional[int] = None  # DigitalOcean droplet ID for agent API calls
     error: Optional[str] = None
     url: Optional[str] = None
     container_name: Optional[str] = None  # Actual container name (may have _secondary suffix)
@@ -115,6 +116,7 @@ class ServerResult:
             "ip": self.ip,
             "name": self.name,
             "success": self.success,
+            "droplet_id": self.droplet_id,
             "error": self.error,
             "url": self.url,
             "container_name": self.container_name,
@@ -1084,7 +1086,7 @@ class DeploymentService:
                 return
             
             # Use CloudflareClient to clean up orphaned records
-            from ..cloud.cloudflare import CloudflareClient
+            from ..providers.cloudflare import CloudflareClient
             
             cf = CloudflareClient(config.cloudflare_token)
             result = cf.cleanup_orphaned_records(
@@ -1107,9 +1109,22 @@ class DeploymentService:
         """Collect existing servers and provision new ones."""
         servers = []
         
+        # Build IP -> droplet_id mapping for existing servers
+        droplet_map = {}
+        if config.server_ips:
+            try:
+                all_droplets = self.do_client.list_droplets()
+                droplet_map = {d.ip: d.id for d in all_droplets if d.ip}
+            except Exception:
+                pass  # Best effort - droplet_id will be None
+        
         # Add existing servers
         for ip in config.server_ips:
-            servers.append({"ip": ip, "name": f"existing-{ip}"})
+            servers.append({
+                "ip": ip, 
+                "name": f"existing-{ip}",
+                "droplet_id": droplet_map.get(ip),
+            })
         
         if config.server_ips:
             self.log(f"📡 {len(config.server_ips)} existing server{'s' if len(config.server_ips) > 1 else ''}")
@@ -1161,7 +1176,7 @@ class DeploymentService:
                     droplet = self.do_client.get_droplet(droplet_id)
                     if droplet and droplet.status == "active" and droplet.ip:
                         self.log(f"   ✅ {name} ({droplet.ip})")
-                        return {"ip": droplet.ip, "name": name}
+                        return {"ip": droplet.ip, "name": name, "droplet_id": droplet_id}
                 except:
                     pass
                 await asyncio.sleep(2)
@@ -1316,6 +1331,7 @@ class DeploymentService:
         async def deploy_one(server: Dict[str, str], is_first: bool) -> ServerResult:
             ip = server["ip"]
             name = server["name"]
+            droplet_id = server.get("droplet_id")  # May be None for legacy calls
             agent = self._agent(ip)
             sidecar_configured = False
             old_container_name = None
@@ -1607,7 +1623,8 @@ class DeploymentService:
                 return ServerResult(
                     ip=ip, 
                     name=name, 
-                    success=True, 
+                    success=True,
+                    droplet_id=droplet_id,
                     url=url,
                     container_name=new_container_name,  # Actual deployed container (may have _secondary)
                     internal_port=internal_port,
@@ -1616,7 +1633,7 @@ class DeploymentService:
                 
             except Exception as e:
                 self.log(f"   [{name}] ❌ {e}")
-                return ServerResult(ip=ip, name=name, success=False, error=str(e))
+                return ServerResult(ip=ip, name=name, success=False, droplet_id=droplet_id, error=str(e))
         
         # Deploy in parallel
         tasks = [deploy_one(s, i == 0) for i, s in enumerate(servers)]

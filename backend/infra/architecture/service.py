@@ -74,7 +74,7 @@ class _BaseArchitectureService(ABC):
         self.domain_suffix = domain_suffix
         
         # Generate agent API key
-        from ..cloud import generate_node_agent_key
+        from ..providers import generate_node_agent_key
         self.api_key = generate_node_agent_key(do_token)
     
     # =========================================================================
@@ -444,7 +444,7 @@ class ArchitectureService(_BaseArchitectureService):
     
     def _discover_servers(self) -> List[str]:
         """Discover all managed servers from DigitalOcean (sync)."""
-        from ..cloud import DOClient
+        from ..providers import DOClient
         
         do_client = DOClient(self.do_token)
         droplets = do_client.list_droplets()
@@ -558,7 +558,7 @@ class AsyncArchitectureService(_BaseArchitectureService):
     
     async def _discover_servers(self) -> List[str]:
         """Discover all managed servers from DigitalOcean (async)."""
-        from ..cloud import AsyncDOClient
+        from ..providers import AsyncDOClient
         
         do_client = AsyncDOClient(self.do_token)
         try:

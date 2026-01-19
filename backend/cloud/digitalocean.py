@@ -742,6 +742,80 @@ systemctl restart node_agent 2>/dev/null || true
         
         return action
     
+    def transfer_snapshot_to_all_regions(
+        self,
+        snapshot_id: str,
+        exclude_regions: List[str] = None,
+        wait: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Transfer snapshot to all available regions.
+        
+        Args:
+            snapshot_id: Snapshot to transfer
+            exclude_regions: Regions to skip
+            wait: If True, wait for each transfer to complete (slow!)
+            
+        Returns:
+            Dict with snapshot_id, snapshot_name, already_in, transferring_to, actions
+        """
+        exclude_regions = exclude_regions or []
+        
+        # Get all regions
+        regions = self.list_regions()
+        available = [r["slug"] for r in regions if r.get("available", True)]
+        
+        # Get snapshot info
+        snapshot = self.get_snapshot(snapshot_id)
+        if not snapshot:
+            return {
+                "snapshot_id": snapshot_id,
+                "snapshot_name": None,
+                "already_in": [],
+                "transferring_to": [],
+                "actions": [],
+                "error": "Snapshot not found",
+            }
+        
+        current_regions = snapshot.get("regions", [])
+        target_regions = [
+            r for r in available 
+            if r not in current_regions and r not in exclude_regions
+        ]
+        
+        if not target_regions:
+            return {
+                "snapshot_id": snapshot_id,
+                "snapshot_name": snapshot.get("name"),
+                "already_in": current_regions,
+                "transferring_to": [],
+                "actions": [],
+            }
+        
+        # Start transfers
+        actions = []
+        for region in target_regions:
+            try:
+                action = self.transfer_snapshot(snapshot_id, region, wait=wait)
+                actions.append({
+                    "region": region,
+                    "action_id": action.get("id"),
+                    "status": action.get("status", "in-progress"),
+                })
+            except Exception as e:
+                actions.append({
+                    "region": region,
+                    "error": str(e),
+                })
+        
+        return {
+            "snapshot_id": snapshot_id,
+            "snapshot_name": snapshot.get("name"),
+            "already_in": current_regions,
+            "transferring_to": target_regions,
+            "actions": actions,
+        }
+    
     # =========================================================================
     # Actions
     # =========================================================================
@@ -1205,6 +1279,100 @@ systemctl restart node_agent 2>/dev/null || true
             return Result.ok(f"Snapshot {snapshot_id} deleted")
         except DOError as e:
             return Result.fail(str(e))
+    
+    async def transfer_snapshot(
+        self,
+        snapshot_id: str,
+        region: str,
+        wait: bool = True,
+        wait_timeout: int = 600,
+    ) -> Dict[str, Any]:
+        """Transfer snapshot to another region."""
+        result = await self._post(f"/images/{snapshot_id}/actions", {
+            "type": "transfer",
+            "region": region,
+        })
+        
+        action = result.get("action", {})
+        
+        if wait and action.get("id"):
+            action = await self._wait_for_action(action["id"], wait_timeout)
+        
+        return action
+    
+    async def transfer_snapshot_to_all_regions(
+        self,
+        snapshot_id: str,
+        exclude_regions: List[str] = None,
+        wait: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Transfer snapshot to all available regions.
+        
+        Args:
+            snapshot_id: Snapshot to transfer
+            exclude_regions: Regions to skip
+            wait: If True, wait for each transfer to complete (slow!)
+            
+        Returns:
+            Dict with snapshot_id, snapshot_name, already_in, transferring_to, actions
+        """
+        exclude_regions = exclude_regions or []
+        
+        # Get all regions
+        regions = await self.list_regions()
+        available = [r["slug"] for r in regions if r.get("available", True)]
+        
+        # Get snapshot info
+        snapshot = await self.get_snapshot(snapshot_id)
+        if not snapshot:
+            return {
+                "snapshot_id": snapshot_id,
+                "snapshot_name": None,
+                "already_in": [],
+                "transferring_to": [],
+                "actions": [],
+                "error": "Snapshot not found",
+            }
+        
+        current_regions = snapshot.get("regions", [])
+        target_regions = [
+            r for r in available 
+            if r not in current_regions and r not in exclude_regions
+        ]
+        
+        if not target_regions:
+            return {
+                "snapshot_id": snapshot_id,
+                "snapshot_name": snapshot.get("name"),
+                "already_in": current_regions,
+                "transferring_to": [],
+                "actions": [],
+            }
+        
+        # Start transfers
+        actions = []
+        for region in target_regions:
+            try:
+                action = await self.transfer_snapshot(snapshot_id, region, wait=wait)
+                actions.append({
+                    "region": region,
+                    "action_id": action.get("id"),
+                    "status": action.get("status", "in-progress"),
+                })
+            except Exception as e:
+                actions.append({
+                    "region": region,
+                    "error": str(e),
+                })
+        
+        return {
+            "snapshot_id": snapshot_id,
+            "snapshot_name": snapshot.get("name"),
+            "already_in": current_regions,
+            "transferring_to": target_regions,
+            "actions": actions,
+        }
     
     # =========================================================================
     # Actions

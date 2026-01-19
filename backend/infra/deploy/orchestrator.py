@@ -429,17 +429,27 @@ async def deploy_with_streaming(config: DeployJobConfig):
             # Yield final log before done
             while not event_queue.empty():
                 yield await event_queue.get()
+            
+            # Build done event data
+            done_data = {
+                "success": True,
+                "deployment_id": config.deployment_id,
+                "duration_seconds": duration,
+                "servers": [s.to_dict() for s in result.servers] if result.servers else [],
+                "container_name": result.container_name,
+                "internal_port": result.internal_port,
+            }
+            
+            # Include domain if set up
+            if result.domain:
+                done_data["domain"] = result.domain
+            if result.domain_aliases:
+                done_data["domain_aliases"] = result.domain_aliases
+            
             yield StreamEvent(
                 type="done",
                 message="Deployment successful",
-                data={
-                    "success": True,
-                    "deployment_id": config.deployment_id,
-                    "duration_seconds": duration,
-                    "servers": [s.to_dict() for s in result.servers] if result.servers else [],
-                    "container_name": result.container_name,
-                    "internal_port": result.internal_port,
-                },
+                data=done_data,
             )
         else:
             emit("log", f"❌ Deployment failed: {result.error}")

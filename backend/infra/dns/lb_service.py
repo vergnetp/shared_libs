@@ -65,7 +65,7 @@ class CloudflareLBService:
         Returns:
             LBSetupResult with created records
         """
-        from ..cloud import CloudflareClient
+        from ..providers import CloudflareClient
         
         cf = CloudflareClient(self.cf_token)
         results = []
@@ -105,7 +105,7 @@ class CloudflareLBService:
         Returns:
             LBSetupResult with removal info
         """
-        from ..cloud import CloudflareClient
+        from ..providers import CloudflareClient
         
         cf = CloudflareClient(self.cf_token)
         
@@ -143,7 +143,7 @@ class CloudflareLBService:
         Returns:
             LBSetupResult
         """
-        from ..cloud import CloudflareClient
+        from ..providers import CloudflareClient
         
         cf = CloudflareClient(self.cf_token)
         
@@ -181,7 +181,7 @@ class AsyncCloudflareLBService:
         """
         Setup DNS load balancer by creating A records for each server IP (async).
         """
-        from ..cloud import AsyncCloudflareClient
+        from ..providers import AsyncCloudflareClient
         
         cf = AsyncCloudflareClient(self.cf_token)
         results = []
@@ -216,7 +216,7 @@ class AsyncCloudflareLBService:
     
     async def remove_lb(self, domain: str) -> LBSetupResult:
         """Remove all A records for a domain (async)."""
-        from ..cloud import AsyncCloudflareClient
+        from ..providers import AsyncCloudflareClient
         
         cf = AsyncCloudflareClient(self.cf_token)
         
@@ -245,7 +245,7 @@ class AsyncCloudflareLBService:
         ttl: int = 1,
     ) -> LBSetupResult:
         """Atomically replace all servers in the load balancer (async)."""
-        from ..cloud import AsyncCloudflareClient
+        from ..providers import AsyncCloudflareClient
         
         cf = AsyncCloudflareClient(self.cf_token)
         

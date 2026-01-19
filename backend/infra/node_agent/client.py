@@ -49,7 +49,7 @@ class NodeAgentClient:
     AGENT_PORT = 9999
     
     def __init__(self, server_ip: str, do_token: str, timeout: int = 30):
-        from ..cloud import generate_node_agent_key
+        from ..providers import generate_node_agent_key
         
         self.server_ip = server_ip
         self.do_token = do_token

@@ -16,6 +16,12 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Dict, Any, List, Optional, Callable
 from enum import Enum
 from datetime import datetime
+
+# urllib is used directly for internal health checks (not http_client) because:
+# - Health checks should fail fast (no retry/backoff)
+# - One container down shouldn't trip circuit breakers for others
+# - Internal localhost checks shouldn't pollute tracing/observability
+# - Connection pooling is unnecessary for simple health probes
 import urllib.request
 import urllib.error
 

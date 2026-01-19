@@ -428,7 +428,7 @@ Stripe API client (sync).
 | | `detach_payment_method` | `payment_method_id: str` | `Dict[str, Any]` | Payment Methods | Detach payment method. |
 | | `retrieve_payment_method` | `payment_method_id: str` | `Dict[str, Any]` | Payment Methods | Get a payment method. |
 | | `list_payment_methods` | `customer: str`, `type: str="card"` | `Dict[str, Any]` | Payment Methods | List customer's payment methods. |
-| | `create_checkout_session` | `customer: str`, `line_items: List[Dict]`, `mode: str`, `success_url: str`, `cancel_url: str`, `metadata: Dict`, `shipping_address_collection: Dict` | `Dict[str, Any]` | Checkout | Create a Checkout Session. |
+| | `create_checkout_session` | `customer: str`, `line_items: List[Dict]`, `mode: str`, `success_url: str`, `cancel_url: str`, `metadata: Dict`, `shipping_address_collection: Dict`, `allow_promotion_codes: bool`, `subscription_data: Dict` | `Dict[str, Any]` | Checkout | Create a Checkout Session. |
 | | `retrieve_checkout_session` | `session_id: str`, `expand: List[str]` | `Dict[str, Any]` | Checkout | Get a Checkout Session. |
 | | `create_portal_session` | `customer: str`, `return_url: str` | `Dict[str, Any]` | Portal | Create Customer Portal session. |
 | | `retrieve_invoice` | `invoice_id: str` | `Dict[str, Any]` | Invoices | Get an invoice. |

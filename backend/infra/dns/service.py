@@ -98,7 +98,7 @@ class DnsCleanupService(_BaseDnsCleanupService):
         dry_run: bool = False,
     ) -> DnsCleanupResult:
         """Clean up orphaned DNS records (sync)."""
-        from ..cloud import DOClient, CloudflareClient
+        from ..providers import DOClient, CloudflareClient
         
         try:
             # Get active droplet IPs
@@ -163,7 +163,7 @@ class AsyncDnsCleanupService(_BaseDnsCleanupService):
         dry_run: bool = False,
     ) -> DnsCleanupResult:
         """Clean up orphaned DNS records (async)."""
-        from ..cloud import AsyncDOClient, AsyncCloudflareClient
+        from ..providers import AsyncDOClient, AsyncCloudflareClient
         
         try:
             # Get active droplet IPs

@@ -65,8 +65,17 @@ from .docker import DockerClient, Container, ImageBuilder, BuildConfig
 # SSH
 from .ssh import SSHClient, SSHConfig
 
-# Cloud
-from .cloud import DOClient, DOAPIError, Droplet, ServerManager
+# Cloud Providers (extended clients with infra-specific methods)
+from .providers import (
+    # DigitalOcean
+    DOClient, AsyncDOClient, DOAPIError, DOError, Droplet, Result, MANAGED_TAG, ServerManager,
+    # Cloudflare
+    CloudflareClient, AsyncCloudflareClient, CloudflareError, DNSRecord,
+    # Cloud-init
+    CloudInitConfig, build_cloudinit_script, SNAPSHOT_PRESETS,
+    # Snapshot service
+    SnapshotService, AsyncSnapshotService, SnapshotConfig,
+)
 
 # Networking
 from .networking import (
@@ -217,11 +226,25 @@ __all__ = [
     "SSHClient",
     "SSHConfig",
     
-    # Cloud
+    # Cloud Providers
     "DOClient",
+    "AsyncDOClient",
     "DOAPIError",
+    "DOError",
     "Droplet",
+    "Result",
+    "MANAGED_TAG",
     "ServerManager",
+    "CloudflareClient",
+    "AsyncCloudflareClient",
+    "CloudflareError",
+    "DNSRecord",
+    "CloudInitConfig",
+    "build_cloudinit_script",
+    "SNAPSHOT_PRESETS",
+    "SnapshotService",
+    "AsyncSnapshotService",
+    "SnapshotConfig",
     
     # Networking
     "NginxConfigGenerator",

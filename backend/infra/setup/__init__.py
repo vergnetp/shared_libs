@@ -13,8 +13,8 @@ from dataclasses import dataclass
 from typing import Dict, Any, List, Optional, Iterator, Callable
 import time
 
-from ..cloud import SnapshotService, SnapshotConfig, SNAPSHOT_PRESETS
-from ..cloud import generate_node_agent_key
+from ..providers import SnapshotService, SnapshotConfig, SNAPSHOT_PRESETS
+from ..providers import generate_node_agent_key
 from ..node_agent import AGENT_VERSION
 
 

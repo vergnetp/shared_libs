@@ -41,7 +41,7 @@ class _BaseProvisioningService:
         self.user_id = user_id
         
         # Generate agent API key
-        from ..cloud import generate_node_agent_key
+        from ..providers import generate_node_agent_key
         self.api_key = generate_node_agent_key(do_token)
     
     def _validate_tags(self, tags: List[str]) -> List[str]:
@@ -102,7 +102,7 @@ class ProvisioningService(_BaseProvisioningService):
         environment: str = "prod",
     ) -> ProvisionResult:
         """Provision a new server (sync)."""
-        from ..cloud import DOClient, SnapshotService
+        from ..providers import DOClient, SnapshotService
         from ..utils import generate_friendly_name
         
         client = DOClient(self.do_token)
@@ -154,7 +154,7 @@ class ProvisioningService(_BaseProvisioningService):
     
     def delete_server(self, server_id: int) -> ProvisionResult:
         """Delete a server (sync)."""
-        from ..cloud import DOClient
+        from ..providers import DOClient
         
         client = DOClient(self.do_token)
         try:
@@ -167,7 +167,7 @@ class ProvisioningService(_BaseProvisioningService):
     
     def list_servers(self) -> List[Dict[str, Any]]:
         """List all managed servers (sync)."""
-        from ..cloud import DOClient
+        from ..providers import DOClient
         
         client = DOClient(self.do_token)
         droplets = client.list_droplets()
@@ -195,7 +195,7 @@ class ProvisioningService(_BaseProvisioningService):
                     print(f"Server ready at {event.ip}")
         """
         import time
-        from ..cloud import DOClient, SnapshotService
+        from ..providers import DOClient, SnapshotService
         from ..node_agent import NodeAgentClient
         from ..utils import generate_friendly_name
         
@@ -296,7 +296,7 @@ class AsyncProvisioningService(_BaseProvisioningService):
         environment: str = "prod",
     ) -> ProvisionResult:
         """Provision a new server (async)."""
-        from ..cloud import AsyncDOClient, AsyncSnapshotService
+        from ..providers import AsyncDOClient, AsyncSnapshotService
         from ..utils import generate_friendly_name
         
         client = AsyncDOClient(self.do_token)
@@ -353,7 +353,7 @@ class AsyncProvisioningService(_BaseProvisioningService):
     
     async def delete_server(self, server_id: int) -> ProvisionResult:
         """Delete a server (async)."""
-        from ..cloud import AsyncDOClient
+        from ..providers import AsyncDOClient
         
         client = AsyncDOClient(self.do_token)
         try:
@@ -368,7 +368,7 @@ class AsyncProvisioningService(_BaseProvisioningService):
     
     async def list_servers(self) -> List[Dict[str, Any]]:
         """List all managed servers (async)."""
-        from ..cloud import AsyncDOClient
+        from ..providers import AsyncDOClient
         
         client = AsyncDOClient(self.do_token)
         try:
@@ -398,7 +398,7 @@ class AsyncProvisioningService(_BaseProvisioningService):
                 if event.type == "complete":
                     print(f"Server ready at {event.ip}")
         """
-        from ..cloud import SnapshotService
+        from ..providers import SnapshotService
         from ..node_agent import NodeAgentClient
         from ..utils import generate_friendly_name
         

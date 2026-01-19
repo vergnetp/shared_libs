@@ -67,6 +67,20 @@ class SyncHttpClient(BaseHttpClient):
         super().__init__(config, base_url, circuit_breaker_name)
         self._session: Optional[requests.Session] = None
         self._auth_header: Optional[str] = None
+        self._owns_session: bool = True  # True = we created it, will close it
+    
+    def _inject_session(self, session: requests.Session) -> None:
+        """
+        Inject a pre-existing requests.Session (for connection pooling).
+        
+        When a session is injected, we do NOT own it - the pool manages lifecycle.
+        This allows multiple SyncHttpClient instances to share a single connection pool.
+        
+        Args:
+            session: A requests.Session instance from the pool
+        """
+        self._session = session
+        self._owns_session = False  # Pool manages lifecycle
     
     def _get_session(self) -> requests.Session:
         """Get or create requests session."""
@@ -309,9 +323,187 @@ class SyncHttpClient(BaseHttpClient):
         """HEAD request."""
         return self.request("HEAD", url, **kwargs)
     
+    # =========================================================================
+    # Streaming Methods
+    # =========================================================================
+    
+    def stream_ndjson(
+        self,
+        method: str,
+        url: str,
+        params: Dict[str, Any] = None,
+        data: Any = None,
+        json_body: Any = None,
+        headers: Dict[str, str] = None,
+        timeout: float = None,
+    ):
+        """
+        Stream Newline-Delimited JSON (NDJSON) from an endpoint.
+        
+        Each line in the response is parsed as a separate JSON object.
+        Used by Ollama and other APIs that stream JSON objects line-by-line.
+        Does NOT retry mid-stream.
+        
+        Args:
+            method: HTTP method
+            url: URL or path
+            params: Query parameters
+            data: Form data
+            json_body: JSON body
+            headers: Additional headers
+            timeout: Connection timeout
+            
+        Yields:
+            Parsed JSON objects (dict)
+            
+        Example:
+            for obj in client.stream_ndjson("POST", "/api/chat", json_body=payload):
+                print(obj.get("message", {}).get("content", ""))
+        """
+        import json as json_module
+        
+        # Check circuit breaker
+        self._check_circuit_breaker()
+        
+        # Build URL and headers
+        full_url = self._build_url(url)
+        merged_headers = self._merge_headers(headers)
+        
+        if self._auth_header:
+            merged_headers["Authorization"] = self._auth_header
+        
+        request_timeout = timeout or self.config.timeout
+        
+        try:
+            with self._get_session().request(
+                method=method,
+                url=full_url,
+                params=params,
+                data=data,
+                json=json_body,
+                headers=merged_headers,
+                timeout=request_timeout,
+                stream=True,
+            ) as response:
+                if response.status_code >= 400:
+                    self._record_failure()
+                    raise HttpError(
+                        status_code=response.status_code,
+                        message=f"HTTP {response.status_code}",
+                        response_body=response.text[:500],
+                        url=full_url,
+                        method=method,
+                    )
+                
+                for line in response.iter_lines(decode_unicode=True):
+                    if not line:
+                        continue
+                    try:
+                        yield json_module.loads(line)
+                    except json_module.JSONDecodeError:
+                        continue
+                
+                self._record_success()
+                
+        except requests.exceptions.Timeout:
+            self._record_failure()
+            raise HttpTimeoutError(
+                timeout=request_timeout,
+                url=full_url,
+                method=method,
+            )
+        except requests.exceptions.ConnectionError as e:
+            self._record_failure()
+            raise HttpConnectionError(
+                message=str(e),
+                url=full_url,
+                method=method,
+            )
+    
+    def stream_raw(
+        self,
+        method: str,
+        url: str,
+        params: Dict[str, Any] = None,
+        data: Any = None,
+        json_body: Any = None,
+        headers: Dict[str, str] = None,
+        timeout: float = None,
+        chunk_size: int = 8192,
+    ):
+        """
+        Stream raw bytes from an endpoint.
+        
+        Args:
+            method: HTTP method
+            url: URL or path
+            params: Query parameters
+            data: Form data
+            json_body: JSON body
+            headers: Additional headers
+            timeout: Connection timeout
+            chunk_size: Size of each yielded chunk
+            
+        Yields:
+            bytes chunks
+        """
+        # Check circuit breaker
+        self._check_circuit_breaker()
+        
+        # Build URL and headers
+        full_url = self._build_url(url)
+        merged_headers = self._merge_headers(headers)
+        
+        if self._auth_header:
+            merged_headers["Authorization"] = self._auth_header
+        
+        request_timeout = timeout or self.config.timeout
+        
+        try:
+            with self._get_session().request(
+                method=method,
+                url=full_url,
+                params=params,
+                data=data,
+                json=json_body,
+                headers=merged_headers,
+                timeout=request_timeout,
+                stream=True,
+            ) as response:
+                if response.status_code >= 400:
+                    self._record_failure()
+                    raise HttpError(
+                        status_code=response.status_code,
+                        message=f"HTTP {response.status_code}",
+                        response_body=response.text[:500],
+                        url=full_url,
+                        method=method,
+                    )
+                
+                for chunk in response.iter_content(chunk_size=chunk_size):
+                    if chunk:
+                        yield chunk
+                
+                self._record_success()
+                
+        except requests.exceptions.Timeout:
+            self._record_failure()
+            raise HttpTimeoutError(
+                timeout=request_timeout,
+                url=full_url,
+                method=method,
+            )
+        except requests.exceptions.ConnectionError as e:
+            self._record_failure()
+            raise HttpConnectionError(
+                message=str(e),
+                url=full_url,
+                method=method,
+            )
+    
     def close(self) -> None:
-        """Close the underlying session."""
-        if self._session:
+        """Close the underlying session (only if we own it)."""
+        if self._session and self._owns_session:
             self._session.close()
             self._session = None
     

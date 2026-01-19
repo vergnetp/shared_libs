@@ -35,7 +35,9 @@ Note: Requires httpx package: pip install httpx
 from __future__ import annotations
 import time
 import asyncio
-from typing import Dict, Any, Optional, Union, TYPE_CHECKING
+import json
+from typing import Dict, Any, Optional, Union, AsyncIterator, TYPE_CHECKING
+from dataclasses import dataclass
 
 # Lazy import for httpx
 httpx = None
@@ -61,6 +63,20 @@ from ..errors import (
     ConnectionError as HttpConnectionError,
     TimeoutError as HttpTimeoutError,
 )
+
+
+@dataclass
+class SSEEvent:
+    """Server-Sent Event."""
+    event: str = "message"
+    data: str = ""
+    id: Optional[str] = None
+    retry: Optional[int] = None
+    
+    @property
+    def json(self) -> Any:
+        """Parse data as JSON."""
+        return json.loads(self.data) if self.data else None
 
 
 class AsyncHttpClient(BaseHttpClient):
@@ -89,8 +105,21 @@ class AsyncHttpClient(BaseHttpClient):
         super().__init__(config, base_url, circuit_breaker_name)
         self._client = None
         self._auth_header: Optional[str] = None
-        self._owns_client: bool = False
+        self._owns_client: bool = True  # True = we created it, will close it
         self._http2 = http2
+    
+    def _inject_client(self, httpx_client) -> None:
+        """
+        Inject a pre-existing httpx.AsyncClient (for connection pooling).
+        
+        When a client is injected, we do NOT own it - the pool manages lifecycle.
+        This allows multiple AsyncHttpClient instances to share a single connection.
+        
+        Args:
+            httpx_client: An httpx.AsyncClient instance from the pool
+        """
+        self._client = httpx_client
+        self._owns_client = False  # Pool manages lifecycle
     
     async def _get_client(self):
         """Get or create httpx async client."""
@@ -374,6 +403,338 @@ class AsyncHttpClient(BaseHttpClient):
     ) -> HttpResponse:
         """HEAD request."""
         return await self.request("HEAD", url, **kwargs)
+    
+    # =========================================================================
+    # Streaming Methods
+    # =========================================================================
+    
+    async def stream_sse(
+        self,
+        method: str,
+        url: str,
+        params: Dict[str, Any] = None,
+        data: Any = None,
+        json_body: Any = None,
+        headers: Dict[str, str] = None,
+        timeout: float = None,
+    ) -> AsyncIterator[SSEEvent]:
+        """
+        Stream Server-Sent Events from an endpoint.
+        
+        Yields parsed SSE events. Does NOT retry mid-stream (would duplicate events).
+        Circuit breaker still applies for the initial connection.
+        
+        Args:
+            method: HTTP method (usually POST for LLM APIs)
+            url: URL or path
+            params: Query parameters
+            data: Form data
+            json_body: JSON body (named json_body to avoid shadowing)
+            headers: Additional headers
+            timeout: Connection timeout (stream can continue indefinitely)
+            
+        Yields:
+            SSEEvent objects with event type and data
+            
+        Example:
+            async for event in client.stream_sse("POST", "/chat", json_body={"messages": [...]}):
+                if event.event == "message":
+                    print(event.data)
+                elif event.event == "done":
+                    break
+        """
+        # Check circuit breaker
+        self._check_circuit_breaker()
+        
+        # Build URL and headers
+        full_url = self._build_url(url)
+        merged_headers = self._merge_headers(headers)
+        merged_headers["Accept"] = "text/event-stream"
+        
+        if self._auth_header:
+            merged_headers["Authorization"] = self._auth_header
+        
+        # Create span for tracing (covers entire stream)
+        span_ctx = self._create_span(method, full_url, merged_headers)
+        if span_ctx is None:
+            span_ctx = DummySpanContext()
+        
+        client = await self._get_client()
+        
+        with span_ctx as span:
+            try:
+                async with client.stream(
+                    method=method,
+                    url=full_url,
+                    params=params,
+                    data=data,
+                    json=json_body,
+                    headers=merged_headers,
+                    timeout=timeout,
+                ) as response:
+                    # Check status before streaming
+                    if response.status_code >= 400:
+                        body = await response.aread()
+                        self._record_failure()
+                        error = HttpError(
+                            status_code=response.status_code,
+                            message=f"HTTP {response.status_code}",
+                            response_body=body.decode("utf-8", errors="replace"),
+                            url=full_url,
+                            method=method,
+                        )
+                        self._update_span(span, error=error)
+                        raise error
+                    
+                    # Parse SSE events
+                    event = SSEEvent()
+                    async for line in response.aiter_lines():
+                        if not line:
+                            # Empty line = end of event
+                            if event.data:
+                                yield event
+                                event = SSEEvent()
+                            continue
+                        
+                        if line.startswith(":"):
+                            # Comment, ignore
+                            continue
+                        
+                        if ":" in line:
+                            field, _, value = line.partition(":")
+                            value = value.lstrip()  # Remove leading space
+                            
+                            if field == "event":
+                                event.event = value
+                            elif field == "data":
+                                if event.data:
+                                    event.data += "\n" + value
+                                else:
+                                    event.data = value
+                            elif field == "id":
+                                event.id = value
+                            elif field == "retry":
+                                try:
+                                    event.retry = int(value)
+                                except ValueError:
+                                    pass
+                    
+                    # Yield final event if any
+                    if event.data:
+                        yield event
+                    
+                    self._record_success()
+                    self._update_span(span, response=HttpResponse(
+                        status_code=response.status_code,
+                        headers=dict(response.headers),
+                        body=b"<streaming>",
+                        url=full_url,
+                        method=method,
+                        elapsed_ms=0,
+                    ))
+                    
+            except asyncio.TimeoutError:
+                self._record_failure()
+                error = HttpTimeoutError(
+                    timeout=timeout or self.config.timeout,
+                    url=full_url,
+                    method=method,
+                )
+                self._update_span(span, error=error)
+                raise error
+            except Exception as e:
+                self._record_failure()
+                self._update_span(span, error=e)
+                raise
+    
+    async def stream_ndjson(
+        self,
+        method: str,
+        url: str,
+        params: Dict[str, Any] = None,
+        data: Any = None,
+        json_body: Any = None,
+        headers: Dict[str, str] = None,
+        timeout: float = None,
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """
+        Stream Newline-Delimited JSON (NDJSON) from an endpoint.
+        
+        Each line in the response is parsed as a separate JSON object.
+        Used by Ollama and other APIs that stream JSON objects line-by-line.
+        Does NOT retry mid-stream.
+        
+        Args:
+            method: HTTP method
+            url: URL or path
+            params: Query parameters
+            data: Form data
+            json_body: JSON body
+            headers: Additional headers
+            timeout: Connection timeout (stream can continue indefinitely)
+            
+        Yields:
+            Parsed JSON objects (dict)
+            
+        Example:
+            async for obj in client.stream_ndjson("POST", "/api/chat", json_body=payload):
+                print(obj.get("message", {}).get("content", ""))
+        """
+        # Check circuit breaker
+        self._check_circuit_breaker()
+        
+        # Build URL and headers
+        full_url = self._build_url(url)
+        merged_headers = self._merge_headers(headers)
+        
+        if self._auth_header:
+            merged_headers["Authorization"] = self._auth_header
+        
+        # Create span for tracing
+        span_ctx = self._create_span(method, full_url, merged_headers)
+        if span_ctx is None:
+            span_ctx = DummySpanContext()
+        
+        client = await self._get_client()
+        
+        with span_ctx as span:
+            try:
+                async with client.stream(
+                    method=method,
+                    url=full_url,
+                    params=params,
+                    data=data,
+                    json=json_body,
+                    headers=merged_headers,
+                    timeout=timeout,
+                ) as response:
+                    # Check status before streaming
+                    if response.status_code >= 400:
+                        body = await response.aread()
+                        self._record_failure()
+                        error = HttpError(
+                            status_code=response.status_code,
+                            message=f"HTTP {response.status_code}",
+                            response_body=body.decode("utf-8", errors="replace"),
+                            url=full_url,
+                            method=method,
+                        )
+                        self._update_span(span, error=error)
+                        raise error
+                    
+                    # Parse NDJSON lines
+                    async for line in response.aiter_lines():
+                        if not line:
+                            continue
+                        try:
+                            yield json.loads(line)
+                        except json.JSONDecodeError:
+                            # Skip malformed lines
+                            continue
+                    
+                    self._record_success()
+                    self._update_span(span, response=HttpResponse(
+                        status_code=response.status_code,
+                        headers=dict(response.headers),
+                        body=b"<streaming>",
+                        url=full_url,
+                        method=method,
+                        elapsed_ms=0,
+                    ))
+                    
+            except asyncio.TimeoutError:
+                self._record_failure()
+                error = HttpTimeoutError(
+                    timeout=timeout or self.config.timeout,
+                    url=full_url,
+                    method=method,
+                )
+                self._update_span(span, error=error)
+                raise error
+            except Exception as e:
+                self._record_failure()
+                self._update_span(span, error=e)
+                raise
+    
+    async def stream_raw(
+        self,
+        method: str,
+        url: str,
+        params: Dict[str, Any] = None,
+        data: Any = None,
+        json_body: Any = None,
+        headers: Dict[str, str] = None,
+        timeout: float = None,
+        chunk_size: int = 8192,
+    ) -> AsyncIterator[bytes]:
+        """
+        Stream raw bytes from an endpoint.
+        
+        Useful for downloading large files or binary data.
+        Does NOT retry mid-stream.
+        
+        Args:
+            method: HTTP method
+            url: URL or path
+            params: Query parameters
+            data: Form data
+            json_body: JSON body
+            headers: Additional headers
+            timeout: Connection timeout
+            chunk_size: Size of each yielded chunk
+            
+        Yields:
+            bytes chunks
+            
+        Example:
+            async for chunk in client.stream_raw("GET", "/large-file"):
+                file.write(chunk)
+        """
+        # Check circuit breaker
+        self._check_circuit_breaker()
+        
+        # Build URL and headers
+        full_url = self._build_url(url)
+        merged_headers = self._merge_headers(headers)
+        
+        if self._auth_header:
+            merged_headers["Authorization"] = self._auth_header
+        
+        client = await self._get_client()
+        
+        try:
+            async with client.stream(
+                method=method,
+                url=full_url,
+                params=params,
+                data=data,
+                json=json_body,
+                headers=merged_headers,
+                timeout=timeout,
+            ) as response:
+                if response.status_code >= 400:
+                    body = await response.aread()
+                    self._record_failure()
+                    raise HttpError(
+                        status_code=response.status_code,
+                        message=f"HTTP {response.status_code}",
+                        response_body=body.decode("utf-8", errors="replace"),
+                        url=full_url,
+                        method=method,
+                    )
+                
+                async for chunk in response.aiter_bytes(chunk_size):
+                    yield chunk
+                
+                self._record_success()
+                
+        except asyncio.TimeoutError:
+            self._record_failure()
+            raise HttpTimeoutError(
+                timeout=timeout or self.config.timeout,
+                url=full_url,
+                method=method,
+            )
     
     async def close(self) -> None:
         """Close the underlying client."""
