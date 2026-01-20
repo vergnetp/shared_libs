@@ -16,6 +16,7 @@
   const dispatch = createEventDispatcher()
   
   function close() {
+    open = false
     dispatch('close')
   }
   
