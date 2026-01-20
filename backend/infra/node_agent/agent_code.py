@@ -18,7 +18,7 @@ Multi-tenancy:
 """
 
 # Module-level version constant (importable)
-AGENT_VERSION = "1.9.8"
+AGENT_VERSION = "1.9.9"
 
 # The node agent Flask app code - embedded as a string for cloud-init
 NODE_AGENT_CODE = '''#!/usr/bin/env python3
@@ -27,7 +27,7 @@ Node Agent - SSH-Free Deployments for SaaS
 Runs on port 9999, protected by API key.
 """
 
-AGENT_VERSION = "1.9.8"  # Image tagging, cleanup for rollback
+AGENT_VERSION = "1.9.9"  # Image tagging, cleanup for rollback
 
 from flask import Flask, request, jsonify
 from functools import wraps
@@ -734,7 +734,7 @@ def get_logs(name):
                 diagnostics.append(f"Image: {state_info['image']}")
             
             if diagnostics:
-                header = "=== CONTAINER DIAGNOSTICS ===\n" + "\n".join(diagnostics) + "\n" + "=" * 30 + "\n\n"
+                header = "=== CONTAINER DIAGNOSTICS ===\\n" + "\\n".join(diagnostics) + "\\n" + "=" * 30 + "\\n\\n"
                 response['logs'] = header + logs
         
         response['state'] = state_info
