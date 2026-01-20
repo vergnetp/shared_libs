@@ -1,9 +1,5 @@
-"""
-Provider registry.
-
-Manages registration and instantiation of LLM providers.
-"""
 from __future__ import annotations
+"""Provider registry."""
 
 from typing import Type
 from .base import LLMProvider
@@ -22,7 +18,7 @@ def get_provider(name: str, **kwargs) -> LLMProvider:
     Get a provider instance.
     
     Args:
-        name: Provider name (anthropic, openai, openai_assistant, ollama, groq)
+        name: Provider name (anthropic, openai, openai_assistant, ollama)
         **kwargs: Provider-specific args (api_key, model, etc.)
     
     Returns:
@@ -42,23 +38,17 @@ def list_providers() -> list[str]:
 # Register built-in providers
 def _register_builtins():
     from .anthropic import AnthropicProvider
-    from .openai import OpenAIProvider
+    from .openai import OpenAIProvider, OpenAIAssistantProvider
     from .ollama import OllamaProvider
     from .groq import GroqProvider
     from .tinyroberta import TinyRobertaProvider
     
     register_provider("anthropic", AnthropicProvider)
     register_provider("openai", OpenAIProvider)
+    register_provider("openai_assistant", OpenAIAssistantProvider)
     register_provider("ollama", OllamaProvider)
     register_provider("groq", GroqProvider)
     register_provider("tinyroberta", TinyRobertaProvider)
-    
-    # OpenAI Assistant requires the openai SDK
-    try:
-        from ._openai_assistant import OpenAIAssistantProvider
-        register_provider("openai_assistant", OpenAIAssistantProvider)
-    except ImportError:
-        pass  # SDK not installed
 
 
 _register_builtins()

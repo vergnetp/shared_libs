@@ -1,67 +1,118 @@
 from __future__ import annotations
-"""
-Ollama provider for local models.
+"""Ollama provider for local models.
 
-Uses cloud.llm.AsyncOllamaClient for HTTP operations with proper connection
-pooling, tracing, and error handling.
+Uses cloud.llm.AsyncOllamaClient for HTTP operations.
+No SDK required - Ollama has a simple HTTP API.
 """
 
 from typing import AsyncIterator
+
+# Backend imports (absolute - backend must be in sys.path)
+try:
+    from resilience import circuit_breaker, with_timeout
+except ImportError:
+    def circuit_breaker(*args, **kwargs):
+        def decorator(fn): return fn
+        return decorator
+    def with_timeout(*args, **kwargs):
+        def decorator(fn): return fn
+        return decorator
+
+try:
+    from log import info, error
+except ImportError:
+    def info(msg, **kwargs): pass
+    def error(msg, **kwargs): print(f"[ERROR] {msg}")
 
 # Local imports
 from ..core import ProviderResponse, ProviderError
 from .base import LLMProvider
 from .utils import build_response
 
-# Cloud LLM client (relative import from ai/ai_agents/providers -> cloud/llm)
-from ....cloud.llm import AsyncOllamaClient, LLMError
+
+# =============================================================================
+# Lazy imports for cloud.llm
+# =============================================================================
+
+_ollama_client_class = None
+_llm_errors = None
+
+
+def _get_ollama_client():
+    """Lazy import for AsyncOllamaClient."""
+    global _ollama_client_class
+    if _ollama_client_class is None:
+        from ....cloud.llm import AsyncOllamaClient
+        _ollama_client_class = AsyncOllamaClient
+    return _ollama_client_class
+
+
+def _get_llm_errors():
+    """Lazy import for LLM error classes."""
+    global _llm_errors
+    if _llm_errors is None:
+        from ....cloud.llm import LLMError, LLMConnectionError, LLMTimeoutError
+        _llm_errors = {
+            "LLMError": LLMError,
+            "LLMConnectionError": LLMConnectionError,
+            "LLMTimeoutError": LLMTimeoutError,
+        }
+    return _llm_errors
 
 
 class OllamaProvider(LLMProvider):
-    """
-    Ollama provider for local models.
+    """Ollama provider for local models.
     
-    Connects to a local Ollama server (default: http://localhost:11434).
-    No authentication required.
-    
-    Uses cloud.llm.AsyncOllamaClient for:
-    - Connection pooling
-    - Request tracing
-    - Proper error handling
-    - NDJSON streaming
+    Uses cloud.llm.AsyncOllamaClient for all HTTP operations.
+    Inherits resilience (retry, circuit breaker) from the client.
     """
     
     name = "ollama"
     
-    def __init__(
-        self,
-        model: str = "llama3.2",
-        base_url: str = "http://localhost:11434",
-        api_key: str = None,  # Ignored - Ollama doesn't need auth
-        timeout: float = 300.0,
-        **kwargs,
-    ):
-        """
-        Initialize Ollama provider.
+    def __init__(self, model: str = "llama3.1", base_url: str = "http://localhost:11434", api_key: str = None, **kwargs):
+        """Initialize Ollama provider.
         
         Args:
-            model: Model name (e.g., "llama3.2", "mistral", "codellama")
+            model: Model name (e.g., "llama3.2", "mistral", "qwen2.5:3b")
             base_url: Ollama server URL (default: localhost:11434)
             api_key: Ignored - Ollama doesn't need authentication
-            timeout: Request timeout in seconds (default: 300s for slow models)
             **kwargs: Ignored extra arguments for compatibility
         """
         self.model = model
         self.base_url = base_url.rstrip("/")
-        self.timeout = timeout
-        
-        # Create the async client (uses pooled connections)
-        self._client = AsyncOllamaClient(
-            model=model,
-            base_url=base_url,
-            timeout=timeout,
-        )
+        self._client = None
     
+    def _get_client(self):
+        """Get or create AsyncOllamaClient."""
+        if self._client is None:
+            AsyncOllamaClient = _get_ollama_client()
+            self._client = AsyncOllamaClient(
+                model=self.model,
+                base_url=self.base_url,
+                timeout=300.0,  # Local models can be slow
+            )
+        return self._client
+    
+    def _parse_tool_calls(self, response) -> list[dict] | None:
+        """Extract tool calls from ChatResponse format."""
+        if not response.tool_calls:
+            return None
+        
+        # Convert cloud.llm ToolCall objects to ai_agents format
+        tool_calls = []
+        for tc in response.tool_calls:
+            tool_calls.append({
+                "id": tc.id,
+                "type": "function",
+                "function": {
+                    "name": tc.name,
+                    "arguments": tc.arguments if isinstance(tc.arguments, str) else __import__("json").dumps(tc.arguments),
+                }
+            })
+        return tool_calls if tool_calls else None
+    
+    @circuit_breaker(name="ollama")
+    @with_timeout(seconds=300)
     async def run(
         self,
         messages: list[dict],
@@ -70,55 +121,63 @@ class OllamaProvider(LLMProvider):
         tools: list[dict] = None,
         **kwargs,
     ) -> ProviderResponse:
-        """
-        Run chat completion.
+        """Run completion using AsyncOllamaClient."""
+        info("Calling Ollama", model=self.model, message_count=len(messages))
         
-        Args:
-            messages: List of message dicts
-            temperature: Sampling temperature
-            max_tokens: Max tokens to generate
-            tools: Tool definitions (supported by some Ollama models)
-            **kwargs: Additional parameters
-            
-        Returns:
-            ProviderResponse with content and usage
-        """
         try:
-            # Use the cloud.llm client
-            response = await self._client.chat(
+            client = self._get_client()
+            
+            # Call cloud.llm client
+            response = await client.chat(
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 tools=tools,
-                **kwargs,
             )
             
-            # Convert tool calls from cloud.llm format to provider format
-            tool_calls = None
-            if response.tool_calls:
-                tool_calls = [
-                    {
-                        "id": tc.id,
-                        "name": tc.name,
-                        "arguments": tc.arguments,
-                    }
-                    for tc in response.tool_calls
-                ]
+            # Extract token usage
+            input_tokens = response.input_tokens or 0
+            output_tokens = response.output_tokens or 0
+            
+            info("Ollama response", input_tokens=input_tokens, output_tokens=output_tokens)
+            
+            # Extract tool calls if present
+            tool_calls = self._parse_tool_calls(response)
+            
+            # Check for XML-style tool calls in content (Llama sometimes does this)
+            content = response.content or ""
+            if content and not tool_calls and "<function=" in content:
+                from .groq import _parse_xml_tool_calls
+                content, xml_tool_calls = _parse_xml_tool_calls(content)
+                if xml_tool_calls:
+                    tool_calls = xml_tool_calls
             
             return build_response(
-                content=response.content,
+                content=content,
                 model=self.model,
                 provider=self.name,
-                usage={"input": response.input_tokens, "output": response.output_tokens},
+                usage={"input": input_tokens, "output": output_tokens},
                 tool_calls=tool_calls,
-                finish_reason=response.finish_reason,
+                finish_reason=response.finish_reason or "stop",
                 raw=response.raw,
             )
             
-        except LLMError as e:
-            raise ProviderError(self.name, str(e))
         except Exception as e:
-            raise ProviderError(self.name, str(e))
+            # Map cloud.llm errors to provider errors
+            errors = _get_llm_errors()
+            
+            if isinstance(e, errors["LLMConnectionError"]):
+                error("Ollama connection error", error=str(e))
+                raise ProviderError(self.name, f"Connection error: {e}")
+            elif isinstance(e, errors["LLMTimeoutError"]):
+                error("Ollama timeout", error=str(e))
+                raise ProviderError(self.name, f"Timeout: {e}")
+            elif isinstance(e, errors["LLMError"]):
+                error("Ollama error", error=str(e))
+                raise ProviderError(self.name, str(e))
+            else:
+                # Re-raise unexpected errors
+                raise
     
     async def stream(
         self,
@@ -128,34 +187,39 @@ class OllamaProvider(LLMProvider):
         tools: list[dict] = None,
         **kwargs,
     ) -> AsyncIterator[str]:
-        """
-        Stream chat completion.
+        """Stream completion using AsyncOllamaClient."""
+        client = self._get_client()
         
-        Yields:
-            Text chunks as they arrive
-        """
-        try:
-            async for chunk in self._client.chat_stream(
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                **kwargs,
-            ):
-                yield chunk
-        except LLMError as e:
-            raise ProviderError(self.name, str(e))
-        except Exception as e:
-            raise ProviderError(self.name, str(e))
+        # Note: tools are ignored for streaming (Ollama doesn't support tool streaming)
+        async for chunk in client.chat_stream(
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        ):
+            yield chunk
     
     def count_tokens(self, messages: list[dict]) -> int:
-        """Rough token estimate (Ollama doesn't expose tokenizer)."""
-        return self._client.count_tokens(messages)
+        """Rough estimate (Ollama doesn't expose tokenizer)."""
+        total_chars = sum(len(m.get("content", "")) for m in messages)
+        return total_chars // 4
     
     @property
     def max_context_tokens(self) -> int:
-        """Max context window for this model."""
-        return self._client.max_context_tokens
+        """Varies by model, default to reasonable limit."""
+        MODEL_LIMITS = {
+            "llama3.2": 128000,
+            "llama3.1": 128000,
+            "mistral": 32768,
+            "mixtral": 32768,
+            "codellama": 16384,
+            "phi3": 128000,
+            "qwen2.5": 32768,
+        }
+        base_name = self.model.split(":")[0]
+        return MODEL_LIMITS.get(base_name, 8192)
     
     async def close(self):
-        """No-op. Connection pool managed globally by cloud.llm."""
-        await self._client.close()
+        """Close the underlying client."""
+        if self._client is not None:
+            await self._client.close()
+            self._client = None
