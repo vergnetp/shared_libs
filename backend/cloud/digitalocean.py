@@ -435,6 +435,23 @@ systemctl restart node_agent 2>/dev/null || true
         except DOError as e:
             return Result.fail(f"Failed to tag droplet: {e}")
     
+    def power_off_droplet(self, droplet_id: int, wait: bool = False, timeout: int = 120) -> None:
+        """
+        Power off a droplet.
+        
+        Required before creating a snapshot for a clean disk state.
+        
+        Args:
+            droplet_id: Droplet ID to power off
+            wait: If True, wait for power off to complete
+            timeout: Max seconds to wait (only if wait=True)
+        """
+        result = self._post(f"/droplets/{droplet_id}/actions", {"type": "power_off"})
+        
+        if wait and result.get("action", {}).get("id"):
+            action_id = result["action"]["id"]
+            self._wait_for_action(action_id, timeout)
+    
     def delete_droplet(self, droplet_id: int, force: bool = False) -> Result:
         """
         Delete a droplet.
@@ -1096,6 +1113,23 @@ systemctl restart node_agent 2>/dev/null || true
         droplets = [d for d in droplets if "snapshot-builder" not in (d.tags or [])]
         
         return droplets
+    
+    async def power_off_droplet(self, droplet_id: int, wait: bool = False, timeout: int = 120) -> None:
+        """
+        Power off a droplet.
+        
+        Required before creating a snapshot for a clean disk state.
+        
+        Args:
+            droplet_id: Droplet ID to power off
+            wait: If True, wait for power off to complete
+            timeout: Max seconds to wait (only if wait=True)
+        """
+        result = await self._post(f"/droplets/{droplet_id}/actions", {"type": "power_off"})
+        
+        if wait and result.get("action", {}).get("id"):
+            action_id = result["action"]["id"]
+            await self._wait_for_action(action_id, timeout)
     
     async def delete_droplet(self, droplet_id: int, force: bool = False) -> Result:
         """Delete a droplet."""
