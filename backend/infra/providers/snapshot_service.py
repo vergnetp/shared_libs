@@ -394,45 +394,133 @@ class SnapshotService:
                         time.sleep(5)
                 
                 if not agent_healthy:
-                    # Agent failed - get logs for diagnosis
+                    # Agent failed - get detailed diagnostics via SSH
                     yield from log(f"❌ Node agent not responding: {agent_error}")
-                    yield from log("📋 Fetching agent logs for diagnosis...")
+                    yield from log("📋 Collecting diagnostics...")
+                    
+                    def ssh_cmd(cmd: str, timeout: int = 30) -> str:
+                        """Run SSH command and return output."""
+                        try:
+                            result = subprocess.run(
+                                [
+                                    "ssh",
+                                    "-i", str(self.DEPLOYER_KEY_PATH),
+                                    "-o", "StrictHostKeyChecking=no",
+                                    "-o", "UserKnownHostsFile=/dev/null",
+                                    "-o", "ConnectTimeout=10",
+                                    "-o", "BatchMode=yes",
+                                    f"root@{droplet_ip}",
+                                    cmd
+                                ],
+                                capture_output=True,
+                                text=True,
+                                timeout=timeout,
+                            )
+                            return result.stdout.strip()
+                        except Exception:
+                            return ""
                     
                     try:
-                        log_result = subprocess.run(
-                            [
-                                "ssh",
-                                "-i", str(self.DEPLOYER_KEY_PATH),
-                                "-o", "StrictHostKeyChecking=no",
-                                "-o", "UserKnownHostsFile=/dev/null",
-                                "-o", "ConnectTimeout=10",
-                                "-o", "BatchMode=yes",
-                                f"root@{droplet_ip}",
-                                "journalctl -u node-agent -n 20 --no-pager 2>/dev/null || echo 'No logs available'"
-                            ],
-                            capture_output=True,
-                            text=True,
-                            timeout=30,
-                        )
-                        if log_result.stdout.strip():
-                            # Parse for common errors
-                            logs = log_result.stdout
-                            if "AssertionError" in logs:
-                                # Extract the assertion error
-                                for line in logs.split('\n'):
-                                    if 'AssertionError' in line or 'Error' in line:
-                                        yield from log(f"   💥 {line.strip()[:100]}")
-                            elif "ModuleNotFoundError" in logs:
-                                yield from log("   💥 Missing Python module - Flask may not be installed")
-                            elif "SyntaxError" in logs:
-                                yield from log("   💥 Python syntax error in agent code")
-                            else:
-                                # Show last few relevant lines
-                                for line in logs.split('\n')[-5:]:
-                                    if line.strip() and 'systemd' not in line.lower():
-                                        yield from log(f"   📝 {line.strip()[:100]}")
+                        # Get systemctl status (shows if service is failing)
+                        status = ssh_cmd("systemctl status node-agent --no-pager 2>&1 | head -15")
+                        
+                        # Get recent journal logs with python errors
+                        journal = ssh_cmd("journalctl -u node-agent -n 30 --no-pager 2>&1")
+                        
+                        # Try running the agent directly to get clean error output
+                        direct_error = ssh_cmd("cd /usr/local/bin && python3 -c 'import node_agent' 2>&1 || python3 node_agent.py 2>&1 | head -20")
+                        
+                        # Parse and display errors
+                        error_found = False
+                        
+                        # Check for SyntaxError with details
+                        if "SyntaxError" in journal or "SyntaxError" in direct_error:
+                            error_found = True
+                            yield from log("   💥 Python Syntax Error detected:")
+                            # Extract the actual error from direct run (cleaner output)
+                            error_source = direct_error if "SyntaxError" in direct_error else journal
+                            lines = error_source.split('\n')
+                            for i, line in enumerate(lines):
+                                line = line.strip()
+                                if 'File "' in line or 'SyntaxError' in line or line.startswith('^'):
+                                    yield from log(f"      {line[:120]}")
+                                elif 'line ' in line.lower() and i < len(lines) - 1:
+                                    # Show the problematic line
+                                    yield from log(f"      {line[:120]}")
+                        
+                        # Check for ModuleNotFoundError
+                        elif "ModuleNotFoundError" in journal or "ModuleNotFoundError" in direct_error:
+                            error_found = True
+                            yield from log("   💥 Missing Python module:")
+                            for line in (direct_error or journal).split('\n'):
+                                if 'ModuleNotFoundError' in line or 'No module named' in line:
+                                    yield from log(f"      {line.strip()[:120]}")
+                        
+                        # Check for ImportError
+                        elif "ImportError" in journal or "ImportError" in direct_error:
+                            error_found = True
+                            yield from log("   💥 Import Error:")
+                            for line in (direct_error or journal).split('\n'):
+                                if 'ImportError' in line or 'cannot import' in line.lower():
+                                    yield from log(f"      {line.strip()[:120]}")
+                        
+                        # Check for permission/path errors
+                        elif "PermissionError" in journal or "FileNotFoundError" in journal:
+                            error_found = True
+                            yield from log("   💥 File/Permission Error:")
+                            for line in journal.split('\n'):
+                                if 'Error' in line:
+                                    yield from log(f"      {line.strip()[:120]}")
+                        
+                        # Generic error - show service status and last error lines
+                        if not error_found:
+                            yield from log("   ⚠️ Service status:")
+                            # Show relevant status lines
+                            for line in status.split('\n'):
+                                line = line.strip()
+                                if line and ('Active:' in line or 'Process:' in line or 'status=' in line):
+                                    yield from log(f"      {line[:120]}")
+                            
+                            # Show last few journal lines that look like errors
+                            yield from log("   📝 Recent logs:")
+                            shown = 0
+                            for line in journal.split('\n')[-15:]:
+                                line = line.strip()
+                                # Skip systemd noise, show actual errors
+                                if line and shown < 5:
+                                    if any(x in line.lower() for x in ['error', 'failed', 'exception', 'traceback']):
+                                        yield from log(f"      {line[:120]}")
+                                        shown += 1
+                                    elif 'python3' in line and 'systemd' not in line.lower():
+                                        yield from log(f"      {line[:120]}")
+                                        shown += 1
+                        
+                        # Check Flask installation
+                        flask_check = ssh_cmd("python3 -c 'import flask; print(flask.__version__)' 2>&1")
+                        if "ModuleNotFoundError" in flask_check or "No module" in flask_check:
+                            yield from log("   🔧 Flask not installed - cloud-init may have failed")
+                            
+                            # Check cloud-init status for more details
+                            cloud_init_status = ssh_cmd("cloud-init status 2>&1")
+                            if cloud_init_status:
+                                yield from log(f"   📋 Cloud-init status: {cloud_init_status[:100]}")
+                            
+                            # Check if cloud-init had errors
+                            cloud_init_errors = ssh_cmd("grep -i 'error\\|failed\\|traceback' /var/log/cloud-init-output.log 2>/dev/null | tail -5")
+                            if cloud_init_errors:
+                                yield from log("   📋 Cloud-init errors:")
+                                for line in cloud_init_errors.split('\n')[:3]:
+                                    if line.strip():
+                                        yield from log(f"      {line.strip()[:120]}")
+                        
+                        # Check if agent file exists
+                        agent_exists = ssh_cmd("ls -la /usr/local/bin/node_agent.py 2>&1")
+                        if "No such file" in agent_exists:
+                            yield from log("   🔧 Agent script not found at /usr/local/bin/node_agent.py")
+                            yield from log("   ℹ️  Cloud-init may not have completed - check base image compatibility")
+                        
                     except Exception as e:
-                        yield from log(f"   ⚠️ Could not fetch logs: {e}")
+                        yield from log(f"   ⚠️ Could not fetch diagnostics: {e}")
                     
                     # Fail the snapshot - agent is broken
                     if cleanup_on_failure:
