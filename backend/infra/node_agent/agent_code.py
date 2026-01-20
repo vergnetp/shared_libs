@@ -18,7 +18,7 @@ Multi-tenancy:
 """
 
 # Module-level version constant (importable)
-AGENT_VERSION = "1.9.5"
+AGENT_VERSION = "1.9.8"
 
 # The node agent Flask app code - embedded as a string for cloud-init
 NODE_AGENT_CODE = '''#!/usr/bin/env python3
@@ -27,7 +27,7 @@ Node Agent - SSH-Free Deployments for SaaS
 Runs on port 9999, protected by API key.
 """
 
-AGENT_VERSION = "1.9.5"  # Image tagging, cleanup for rollback
+AGENT_VERSION = "1.9.8"  # Image tagging, cleanup for rollback
 
 from flask import Flask, request, jsonify
 from functools import wraps
@@ -687,13 +687,58 @@ def schedule_docker_run():
 @app.route('/containers/<name>/logs', methods=['GET'])
 @require_api_key
 def get_logs(name):
-    """Get container logs"""
+    """Get container logs with diagnostic info for failed containers"""
     try:
         lines = request.args.get('lines', '100')
+        
+        # Get logs
         result = run_cmd(['docker', 'logs', '--tail', lines, name])
         if result.returncode != 0:
             return jsonify({'error': result.stderr.strip() or f'No such container: {name}'}), 404
-        return jsonify({'logs': result.stdout + result.stderr})
+        
+        logs = result.stdout + result.stderr
+        
+        # Get container state for diagnostics (especially useful for failed containers)
+        state_info = {}
+        inspect_result = run_cmd([
+            'docker', 'inspect', '--format',
+            '{{.State.Status}}|{{.State.ExitCode}}|{{.State.Error}}|{{.State.OOMKilled}}|{{.Config.Image}}|{{.State.StartedAt}}|{{.State.FinishedAt}}',
+            name
+        ])
+        if inspect_result.returncode == 0:
+            parts = inspect_result.stdout.strip().split('|')
+            state_info = {
+                'status': parts[0] if len(parts) > 0 else 'unknown',
+                'exit_code': int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None,
+                'error': parts[2] if len(parts) > 2 and parts[2] else None,
+                'oom_killed': parts[3].lower() == 'true' if len(parts) > 3 else False,
+                'image': parts[4] if len(parts) > 4 else None,
+                'started_at': parts[5] if len(parts) > 5 else None,
+                'finished_at': parts[6] if len(parts) > 6 else None,
+            }
+        
+        # Build response
+        response = {'logs': logs}
+        
+        # Add diagnostics header for non-running containers
+        if state_info.get('status') not in ('running', None):
+            diagnostics = []
+            diagnostics.append(f"Container Status: {state_info.get('status', 'unknown')}")
+            if state_info.get('exit_code') is not None and state_info['exit_code'] != 0:
+                diagnostics.append(f"Exit Code: {state_info['exit_code']}")
+            if state_info.get('oom_killed'):
+                diagnostics.append("⚠️ Container was killed due to Out Of Memory (OOM)")
+            if state_info.get('error'):
+                diagnostics.append(f"Error: {state_info['error']}")
+            if state_info.get('image'):
+                diagnostics.append(f"Image: {state_info['image']}")
+            
+            if diagnostics:
+                header = "=== CONTAINER DIAGNOSTICS ===\n" + "\n".join(diagnostics) + "\n" + "=" * 30 + "\n\n"
+                response['logs'] = header + logs
+        
+        response['state'] = state_info
+        return jsonify(response)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
