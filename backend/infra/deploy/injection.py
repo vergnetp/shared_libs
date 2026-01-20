@@ -17,11 +17,21 @@ Usage:
     apps_needing_redeploy = await discovery.get_services_needing_injection(
         project_id, env, new_service_type="redis"
     )
+
+Env Var Naming:
+    Services are named based on their service_name:
+    - redis → REDIS_URL
+    - redis-business → REDIS_BUSINESS_URL
+    - postgres → DATABASE_URL
+    - postgres-analytics → DATABASE_ANALYTICS_URL
+    
+    This allows multiple instances of the same service type in one project.
 """
 
 from typing import Dict, List, Optional, Protocol, Any
 from dataclasses import dataclass
 import logging
+import re
 
 from .env_builder import get_connection_info
 
@@ -34,11 +44,11 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class DiscoveredService:
-    """A stateful service discovered in a project/env."""
+    """A stateful service discovered in a project."""
     service_type: str  # redis, postgres, mysql, mongo
     host: str
     port: int
-    service_name: str = ""
+    service_name: str = ""  # Used for env var naming (redis-business → REDIS_BUSINESS_URL)
     service_id: str = ""
     
     def to_dict(self) -> Dict[str, Any]:
@@ -93,6 +103,58 @@ class ServiceDiscovery(Protocol):
 # Injection Logic
 # =============================================================================
 
+def get_env_var_prefix(service_type: str, service_name: str) -> str:
+    """
+    Get the env var prefix based on service name.
+    
+    Examples:
+        redis, redis → REDIS
+        redis, redis-business → REDIS_BUSINESS
+        postgres, postgres → DATABASE (special case for backward compat)
+        postgres, postgres-analytics → DATABASE_ANALYTICS
+        mysql, mysql → MYSQL
+        mysql, mysql-logs → MYSQL_LOGS
+    """
+    # Normalize
+    svc_type = service_type.lower()
+    svc_name = service_name.lower() if service_name else svc_type
+    
+    # Base mapping
+    base_mapping = {
+        "redis": "REDIS",
+        "postgres": "DATABASE",  # Backward compat
+        "postgresql": "DATABASE",
+        "mysql": "MYSQL",
+        "mariadb": "MYSQL",
+        "mongo": "MONGO",
+        "mongodb": "MONGO",
+        "opensearch": "OPENSEARCH",
+        "elasticsearch": "ELASTICSEARCH",
+    }
+    
+    base = base_mapping.get(svc_type, svc_type.upper())
+    
+    # If service_name == service_type (or close), use just the base
+    # e.g., redis/redis → REDIS, postgres/postgres → DATABASE
+    if svc_name == svc_type or svc_name.replace("-", "") == svc_type:
+        return base
+    
+    # Otherwise extract suffix: redis-business → BUSINESS
+    # Remove the service_type prefix if present
+    suffix = svc_name
+    for prefix in [svc_type + "-", svc_type + "_"]:
+        if suffix.startswith(prefix):
+            suffix = suffix[len(prefix):]
+            break
+    
+    # Clean up and uppercase
+    suffix = re.sub(r'[^a-zA-Z0-9]', '_', suffix).upper().strip('_')
+    
+    if suffix:
+        return f"{base}_{suffix}"
+    return base
+
+
 def build_injection_env_vars(
     user: str,
     project: str,
@@ -104,20 +166,24 @@ def build_injection_env_vars(
     
     Args:
         user: User/workspace ID
-        project: Project name  
+        project: Project name
         env: Environment (prod, staging, dev)
         discovered_services: List of stateful services to inject URLs for
         
     Returns:
-        Dict of env vars like:
-        {
-            "REDIS_URL": "redis://:xxx@10.0.0.5:8453/0",
-            "REDIS_HOST": "10.0.0.5",
-            "REDIS_PORT": "8453",
-            "REDIS_PASSWORD": "xxx",
-            "DATABASE_URL": "postgresql://user:xxx@10.0.0.5:5432/db",
-            ...
-        }
+        Dict of env vars. Names are based on service_name:
+        
+        redis (named "redis"):
+            REDIS_URL, REDIS_HOST, REDIS_PORT, REDIS_PASSWORD
+            
+        redis (named "redis-business"):
+            REDIS_BUSINESS_URL, REDIS_BUSINESS_HOST, REDIS_BUSINESS_PORT, REDIS_BUSINESS_PASSWORD
+            
+        postgres (named "postgres"):
+            DATABASE_URL, DATABASE_HOST, DATABASE_PORT, DATABASE_USER, DATABASE_PASSWORD
+            
+        postgres (named "postgres-analytics"):
+            DATABASE_ANALYTICS_URL, DATABASE_ANALYTICS_HOST, etc.
     """
     env_vars = {}
     
@@ -135,39 +201,37 @@ def build_injection_env_vars(
             port=svc.port,
         )
         
-        # Add connection URL with standard env var name
-        env_var_name = info.get("env_var_name")
-        connection_url = info.get("connection_url")
+        # Get env var prefix based on service name
+        prefix = get_env_var_prefix(svc.service_type, svc.service_name)
         
-        if env_var_name and connection_url:
-            env_vars[env_var_name] = connection_url
-            
-            # Also add individual components for flexibility
-            service_upper = svc.service_type.upper()
-            env_vars[f"{service_upper}_HOST"] = svc.host
-            env_vars[f"{service_upper}_PORT"] = str(svc.port)
-            if info.get("password"):
-                env_vars[f"{service_upper}_PASSWORD"] = info["password"]
-            if info.get("user"):
-                env_vars[f"{service_upper}_USER"] = info["user"]
-            if info.get("database"):
-                env_vars[f"{service_upper}_DB"] = info["database"]
+        # Add connection URL
+        connection_url = info.get("connection_url")
+        if connection_url:
+            env_vars[f"{prefix}_URL"] = connection_url
+        
+        # Add individual components for flexibility
+        env_vars[f"{prefix}_HOST"] = svc.host
+        env_vars[f"{prefix}_PORT"] = str(svc.port)
+        if info.get("password"):
+            env_vars[f"{prefix}_PASSWORD"] = info["password"]
+        if info.get("user"):
+            env_vars[f"{prefix}_USER"] = info["user"]
+        if info.get("database"):
+            env_vars[f"{prefix}_DB"] = info["database"]
     
     return env_vars
 
 
-def get_env_var_name_for_service(service_type: str) -> str:
-    """Get the primary env var name for a service type."""
-    service_lower = service_type.lower()
-    if "redis" in service_lower:
-        return "REDIS_URL"
-    elif "postgres" in service_lower:
-        return "DATABASE_URL"
-    elif "mysql" in service_lower or "mariadb" in service_lower:
-        return "MYSQL_URL"
-    elif "mongo" in service_lower:
-        return "MONGO_URL"
-    return f"{service_type.upper()}_URL"
+def get_env_var_name_for_service(service_type: str, service_name: str = None) -> str:
+    """
+    Get the primary env var name for a service.
+    
+    Args:
+        service_type: Type like redis, postgres
+        service_name: Optional name like redis-business
+    """
+    prefix = get_env_var_prefix(service_type, service_name or service_type)
+    return f"{prefix}_URL"
 
 
 async def find_services_needing_redeploy(
@@ -175,6 +239,7 @@ async def find_services_needing_redeploy(
     project_id: str,
     env: str,
     new_service_type: str,
+    new_service_name: str = None,
 ) -> List[ServiceNeedingRedeploy]:
     """
     Find non-stateful services that need redeploy after a new stateful service is added.
@@ -187,11 +252,12 @@ async def find_services_needing_redeploy(
         project_id: Project ID
         env: Environment
         new_service_type: Type of newly deployed service (redis, postgres, etc.)
+        new_service_name: Name of the service (e.g., redis-business)
         
     Returns:
         List of services that should be redeployed
     """
-    env_var_name = get_env_var_name_for_service(new_service_type)
+    env_var_name = get_env_var_name_for_service(new_service_type, new_service_name)
     
     # Get all non-stateful services in project/env
     try:
