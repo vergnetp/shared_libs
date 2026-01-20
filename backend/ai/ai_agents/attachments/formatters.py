@@ -4,16 +4,7 @@ from __future__ import annotations
 import base64
 from typing import Any
 
-# Backend imports (absolute - backend must be in sys.path)
-try:
-    from attachments import AttachmentStore
-except ImportError:
-    class AttachmentStore:
-        """Stub - implement with your storage backend."""
-        async def get(self, path: str) -> bytes:
-            raise NotImplementedError("AttachmentStore not available")
-        async def get_metadata(self, path: str) -> dict:
-            raise NotImplementedError("AttachmentStore not available")
+from ....attachments import AttachmentStore
 
 
 class AttachmentFormatter:

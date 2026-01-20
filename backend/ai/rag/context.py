@@ -50,7 +50,7 @@ def create_token_counter(llm_model: str = None) -> Callable[[str], int]:
         return estimate_tokens
     
     try:
-        from embeddings import count_tokens
+        from ..embeddings import count_tokens
         return lambda text: count_tokens(text, model=llm_model)
     except ImportError:
         return estimate_tokens

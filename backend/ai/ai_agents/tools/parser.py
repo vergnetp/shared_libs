@@ -3,15 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
-# Backend imports (absolute - backend must be in sys.path)
-try:
-    from log import info, error
-except ImportError:
-    def info(msg, **kwargs): pass
-    def error(msg, **kwargs): 
-        print(f"[ERROR] {msg}")
-        if 'traceback' in kwargs:
-            print(kwargs['traceback'])
+from ....log import info, error
 
 # Local imports
 from ..core import ToolResult, ToolError

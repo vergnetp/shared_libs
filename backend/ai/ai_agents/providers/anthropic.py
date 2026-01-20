@@ -14,12 +14,11 @@ def _get_llm_errors():
     from ....cloud.llm import LLMError, LLMRateLimitError, LLMAuthError
     return LLMError, LLMRateLimitError, LLMAuthError
 
-# Backend imports (absolute - backend must be in sys.path)
-try:
-    from log import info, error
-except ImportError:
-    def info(msg, **kwargs): pass
-    def error(msg, **kwargs): print(f"[ERROR] {msg}")
+# Resilience decorators
+from ....resilience import circuit_breaker, with_timeout
+
+# Logging
+from ....log import info, error
 
 # Local imports
 from ..core import (
@@ -168,6 +167,8 @@ class AnthropicProvider(LLMProvider):
             for tc in response.tool_calls
         ]
     
+    @circuit_breaker(name="anthropic")
+    @with_timeout(120)
     async def run(
         self,
         messages: list[dict],

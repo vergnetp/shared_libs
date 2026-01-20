@@ -42,6 +42,79 @@ MAX_DUPLICATE_TOOL_CALLS = 2      # Max times same tool+args can be called
 
 
 # =============================================================================
+# JSON TOOL CALL PARSING
+# =============================================================================
+# When told not to use XML, some models output raw JSON tool calls in content.
+
+def _parse_json_tool_calls(content: str) -> tuple[str, list[dict]]:
+    """
+    Parse JSON-style tool calls that models output when told not to use XML.
+    
+    Patterns handled:
+    - {"type": "function", "name": "...", "parameters": {...}}
+    - {"name": "...", "arguments": {...}}
+    - {"tool": "...", "arguments": {...}}
+    
+    Returns: (cleaned_content, tool_calls)
+    """
+    if not content or '{' not in content:
+        return content, []
+    
+    tool_calls = []
+    cleaned = content
+    
+    # Try to find JSON objects that look like tool calls
+    # Look for balanced {} starting with {"type" or {"name" or {"tool"
+    import re
+    
+    # Find potential JSON tool calls
+    patterns = [
+        r'\{\s*"type"\s*:\s*"function"[^}]+\}',  # {"type": "function", ...}
+        r'\{\s*"name"\s*:\s*"[^"]+"\s*,\s*"(?:arguments|parameters)"[^}]+\}',  # {"name": "...", "arguments/parameters": ...}
+        r'\{\s*"tool"\s*:\s*"[^"]+"\s*,\s*"arguments"[^}]+\}',  # {"tool": "...", "arguments": ...}
+    ]
+    
+    for pattern in patterns:
+        for match in re.finditer(pattern, content, re.DOTALL):
+            json_str = match.group(0)
+            
+            # Find balanced braces (the regex might not capture nested objects)
+            start = match.start()
+            depth = 0
+            end = start
+            for i, c in enumerate(content[start:], start):
+                if c == '{':
+                    depth += 1
+                elif c == '}':
+                    depth -= 1
+                    if depth == 0:
+                        end = i + 1
+                        break
+            
+            if end > start:
+                json_str = content[start:end]
+                try:
+                    data = json.loads(json_str)
+                    
+                    # Extract tool name and arguments
+                    name = data.get("name") or data.get("tool")
+                    args = data.get("arguments") or data.get("parameters") or {}
+                    
+                    if name:
+                        tool_calls.append({
+                            "id": f"json_{name}_{len(tool_calls)}",
+                            "name": name,
+                            "arguments": args if isinstance(args, dict) else {},
+                        })
+                        # Remove from content
+                        cleaned = cleaned.replace(json_str, '', 1)
+                except (json.JSONDecodeError, KeyError):
+                    pass
+    
+    return cleaned.strip(), tool_calls
+
+
+# =============================================================================
 # XML TOOL CALL PARSING (Shared across all providers)
 # =============================================================================
 # Some LLMs (Llama, Groq, Ollama) emit tool calls as XML in content instead of
@@ -74,6 +147,21 @@ def _parse_xml_tool_calls(content: str) -> tuple[str, list[dict]]:
     patterns = [
         # Greedy match for JSON with possible nesting
         (r'<function=(\w+)\s+(\{.*\})\s*</function>', "flex_greedy"),
+        # NEW: <function(name)\n({json})\n</function> - JSON wrapped in parens (Llama 3.3 variant)
+        (r'<function\((\w+)\)\s*\((\{.+?\})\)\s*</function>', "paren_wrapped_json"),
+        # NEW: <function(name)>\n{({json})}\n</function> - JSON wrapped in {(...)} (Llama 3.3 variant)
+        (r'<function\((\w+)\)>\s*\{\((\{.+?\})\)\}\s*</function>', "paren_gt_brace_wrapped"),
+        # NEW: <function$name>{json}</function> - $ separator (Llama 3.3 variant)
+        (r'<function\$(\w+)>\s*(\{.+?\})\s*</function>', "dollar_gt"),
+        (r'<function\$(\w+)\s*(\{.+?\})\s*</function>', "dollar"),
+        # NEW: <function:name{json}</function> - colon separator (Groq variant)
+        (r'<function:(\w+)>\s*(\{.+?\})\s*</function>', "colon_gt"),
+        (r'<function:(\w+)(\{.*\})</function>', "colon_no_space"),  # Greedy for nested JSON
+        (r'<function:(\w+)\s+(\{.+?\})\s*</function>', "colon_space"),
+        # NEW: <function/name{json}</function> - forward slash separator (Groq variant)
+        (r'<function/(\w+)>\s*(\{.+?\})\s*</function>', "slash_gt"),
+        (r'<function/(\w+)(\{.*\})</function>', "slash_no_space"),  # Greedy for nested JSON
+        (r'<function/(\w+)\s+(\{.+?\})\s*</function>', "slash_space"),
         # Parentheses around args: <function=name({json})</function>
         (r'<function=(\w+)\((\{.+?\})\)</function>', "eq_paren_args"),
         # Parentheses around NAME with =: <function(name)={json}</function>
@@ -88,6 +176,16 @@ def _parse_xml_tool_calls(content: str) -> tuple[str, list[dict]]:
         # Quoted escaped format
         (r'<function\((\w+)\)\s*"(.+?)"\s*</function>', "paren_quoted"),
         # Unclosed tags (truncated responses)
+        (r'<function:(\w+)>\s*(\{.+?\})\s*$', "unclosed_colon_gt"),
+        (r'<function:(\w+)(\{.*\})\s*$', "unclosed_colon_no_space"),
+        (r'<function:(\w+)\s+(\{.+?\})\s*$', "unclosed_colon_space"),
+        (r'<function/(\w+)>\s*(\{.+?\})\s*$', "unclosed_slash_gt"),
+        (r'<function/(\w+)(\{.*\})\s*$', "unclosed_slash_no_space"),
+        (r'<function/(\w+)\s+(\{.+?\})\s*$', "unclosed_slash_space"),
+        (r'<function\((\w+)\)>\s*\{\((\{.+?\})\)\}\s*$', "unclosed_paren_gt_brace_wrapped"),
+        (r'<function\$(\w+)>\s*(\{.+?\})\s*$', "unclosed_dollar_gt"),
+        (r'<function\$(\w+)\s*(\{.+?\})\s*$', "unclosed_dollar"),
+        (r'<function\((\w+)\)\s*\((\{.+?\})\)\s*$', "unclosed_paren_wrapped"),
         (r'<function=(\w+)>(\{.+?\})\s*$', "unclosed_gt"),
         (r'<function=(\w+)(\{.+\})\s*$', "unclosed_no_gt"),
         (r'<function=(\w+)\s+(\{.+\})\s*$', "unclosed_space"),
@@ -141,12 +239,14 @@ def _parse_xml_tool_calls(content: str) -> tuple[str, list[dict]]:
     
     # FALLBACK: If any <function...>...</function> tags remain (malformed),
     # strip them so user never sees raw XML
-    # This handles edge cases like extra parentheses: <function(x)>{...})</function>
-    fallback_pattern = r'<function[^>]*>.*?</function>'
+    # This handles edge cases the specific patterns miss
+    # Match <function followed by anything until </function>
+    fallback_pattern = r'<function[^<]*</function>'
     remaining_matches = list(re.finditer(fallback_pattern, cleaned, re.DOTALL))
     for match in remaining_matches:
         # Try to extract function name and args for best-effort parsing
-        fallback_name_match = re.search(r'<function[=(](\w+)', match.group(0))
+        # Handle various separators: = ( $ ) > or just whitespace
+        fallback_name_match = re.search(r'<function[=($:>/\s)\[]?(\w+)', match.group(0))
         fallback_json_match = re.search(r'(\{.+\})', match.group(0), re.DOTALL)
         
         if fallback_name_match and fallback_json_match:
@@ -815,7 +915,7 @@ class Agent:
         if not base_prompt:
             base_prompt = f"You are {name}, a helpful AI assistant."
         
-        context_schema = parse_json(agent_data.get("context_schema"), None)
+        context_schema = parse_json(agent_data.get("context_schema"), {})  # Default to {} to enable context
         tools = parse_json(agent_data.get("tools"), [])
         metadata = parse_json(agent_data.get("metadata"), {})
         
@@ -1158,7 +1258,7 @@ class Agent:
         """Lazy-load embedder (optional dependency)."""
         if self._embedder is None:
             try:
-                from backend.ai.embeddings import Embedder
+                from ..embeddings import Embedder
                 self._embedder = Embedder("bge-m3")
             except ImportError:
                 # Embedder not available - embedding-based guard disabled
@@ -1488,7 +1588,7 @@ Respond with ONLY one word: SAFE or INJECTION"""
     ) -> str:
         """Verify response claims to prevent hallucinations."""
         try:
-            from backend.ai.rag import Verifier
+            from ..rag import Verifier
             
             async def llm_fn(messages):
                 result = await self._provider.complete(messages)
@@ -1848,6 +1948,15 @@ Tool call format: update_context(updates={{"key": value}}, reason="why")"""
                 existing = response.tool_calls or []
                 response.tool_calls = existing + xml_tool_calls
                 print(f"[DEBUG _completion_loop] Parsed {len(xml_tool_calls)} XML tool calls from content")
+            
+            # Parse JSON tool calls from content (when model outputs raw JSON instead of XML)
+            if response.content:  # May have been cleaned
+                cleaned_content, json_tool_calls = _parse_json_tool_calls(response.content)
+                if json_tool_calls:
+                    response.content = cleaned_content
+                    existing = response.tool_calls or []
+                    response.tool_calls = existing + json_tool_calls
+                    print(f"[DEBUG _completion_loop] Parsed {len(json_tool_calls)} JSON tool calls from content")
         
         # Track costs
         if response.usage:

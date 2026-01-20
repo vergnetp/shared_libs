@@ -1,16 +1,7 @@
 """Thread title generation worker."""
 
-# Backend imports (absolute - backend must be in sys.path)
-try:
-    from job_queue import process
-except ImportError:
-    async def process(**kwargs):
-        raise NotImplementedError("job_queue module not available")
-
-try:
-    from log import info
-except ImportError:
-    def info(msg, **kwargs): pass
+from ....job_queue import process
+from ....log import info
 
 
 async def queue_title_generation(thread_id: str):

@@ -296,6 +296,135 @@ class DockerfileGenerator:
         return "\n".join(lines)
     
     @staticmethod
+    def generate_from_structure(
+        files: List[str],
+        main_folder: str,
+        dep_folders: Optional[List[str]] = None,
+        port: int = 8000,
+        env_vars: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Generate Dockerfile from file structure (for API usage).
+        
+        Args:
+            files: List of file paths like ["deploy_api/main.py", "shared_libs/backend/..."]
+            main_folder: Main service folder name (e.g., "deploy_api")
+            dep_folders: Dependency folder names (e.g., ["shared_libs"])
+            port: Port to expose
+            env_vars: Environment variables to set
+            
+        Returns:
+            Dict with {"dockerfile": str, "type": str, "source": str}
+        """
+        dep_folders = dep_folders or []
+        env_vars = env_vars or {}
+        
+        # Detect service type from file list
+        main_files = [f for f in files if f.startswith(f"{main_folder}/")]
+        has_main_py = any(f == f"{main_folder}/main.py" for f in main_files)
+        has_requirements = any(f == f"{main_folder}/requirements.txt" for f in main_files)
+        has_package_json = any(f == f"{main_folder}/package.json" for f in main_files)
+        
+        # Determine service type
+        if has_main_py:
+            service_type = "python-fastapi"
+        elif has_requirements:
+            service_type = "python-generic"
+        elif has_package_json:
+            service_type = "node"
+        else:
+            service_type = "unknown"
+        
+        # Generate Dockerfile
+        lines = []
+        
+        if service_type.startswith("python"):
+            lines.append("FROM python:3.11-slim")
+            lines.append("")
+            lines.append("WORKDIR /app")
+            lines.append("")
+            
+            # Environment variables
+            for key, value in env_vars.items():
+                lines.append(f"ENV {key}={value}")
+            if env_vars:
+                lines.append("")
+            
+            # Copy dependencies first (for better caching)
+            for dep in dep_folders:
+                lines.append(f"COPY {dep}/ ./{dep}/")
+            if dep_folders:
+                lines.append("")
+            
+            # Copy main folder
+            lines.append(f"COPY {main_folder}/ ./{main_folder}/")
+            lines.append("")
+            
+            # Install requirements
+            if has_requirements:
+                lines.append(f"RUN pip install --no-cache-dir -r {main_folder}/requirements.txt")
+                lines.append("")
+            
+            # Expose port
+            lines.append(f"EXPOSE {port}")
+            lines.append("")
+            
+            # CMD for FastAPI
+            if service_type == "python-fastapi":
+                lines.append(f'CMD ["uvicorn", "{main_folder}.main:app", "--host", "0.0.0.0", "--port", "{port}"]')
+            else:
+                lines.append(f'CMD ["python", "-m", "{main_folder}.main"]')
+                
+        elif service_type == "node":
+            lines.append("FROM node:20-slim")
+            lines.append("")
+            lines.append("WORKDIR /app")
+            lines.append("")
+            
+            # Copy dependencies
+            for dep in dep_folders:
+                lines.append(f"COPY {dep}/ ./{dep}/")
+            if dep_folders:
+                lines.append("")
+            
+            # Copy main folder
+            lines.append(f"COPY {main_folder}/ ./{main_folder}/")
+            lines.append("")
+            
+            lines.append(f"WORKDIR /app/{main_folder}")
+            lines.append("RUN npm install")
+            lines.append("")
+            lines.append(f"EXPOSE {port}")
+            lines.append("")
+            lines.append('CMD ["npm", "start"]')
+            
+        else:
+            # Unknown - provide basic template
+            lines.append("FROM python:3.11-slim")
+            lines.append("")
+            lines.append("WORKDIR /app")
+            lines.append("")
+            
+            for dep in dep_folders:
+                lines.append(f"COPY {dep}/ ./{dep}/")
+            if dep_folders:
+                lines.append("")
+            
+            lines.append(f"COPY {main_folder}/ ./{main_folder}/")
+            lines.append("")
+            lines.append(f"EXPOSE {port}")
+            lines.append("")
+            lines.append(f'CMD ["python", "-m", "{main_folder}.main"]')
+        
+        dockerfile = "\n".join(lines)
+        
+        return {
+            "dockerfile": dockerfile,
+            "type": service_type,
+            "source": "generated",
+        }
+    
+    @staticmethod
     def generate_for_app_kernel_service(
         service_path: str,
         shared_libs_path: str,
@@ -376,161 +505,6 @@ class DockerfileGenerator:
         ])
         
         return "\n".join(lines)
-    
-    @staticmethod
-    def generate_from_structure(
-        files: List[str],
-        main_folder: str,
-        dep_folders: Optional[List[str]] = None,
-        port: int = 8000,
-        env_vars: Optional[Dict[str, str]] = None,
-    ) -> Dict[str, str]:
-        """
-        Generate Dockerfile from file structure (for API endpoint).
-        
-        Args:
-            files: List of file paths (e.g., ["deploy_api/main.py", "deploy_api/requirements.txt"])
-            main_folder: Main service folder name
-            dep_folders: Dependency folder names
-            port: Port to expose
-            env_vars: Environment variables
-            
-        Returns:
-            Dict with "dockerfile", "type", and "source" keys
-        """
-        dep_folders = dep_folders or []
-        
-        # Normalize file paths and filter to main folder
-        main_files = [f for f in files if f.startswith(f"{main_folder}/") or f == main_folder]
-        
-        # Detect project type from file structure
-        has_requirements = any("requirements.txt" in f for f in main_files)
-        has_package_json = any("package.json" in f for f in main_files)
-        has_main_py = any("main.py" in f for f in main_files)
-        has_app_py = any("app.py" in f for f in main_files)
-        has_index_html = any("index.html" in f for f in main_files)
-        has_dockerfile = any(f.endswith("Dockerfile") or f.endswith("/Dockerfile") for f in main_files)
-        
-        # Check for shared_libs dependency
-        has_shared_libs = "shared_libs" in dep_folders or any("shared_libs" in f for f in files)
-        
-        # Determine type
-        if has_dockerfile:
-            return {
-                "dockerfile": "",  # Frontend should use existing
-                "type": "existing",
-                "source": "from folder",
-            }
-        
-        if has_requirements and (has_main_py or has_app_py):
-            # Python FastAPI/Flask style
-            project_type = "python-fastapi"
-        elif has_package_json:
-            project_type = "node"
-        elif has_index_html:
-            project_type = "static"
-        else:
-            project_type = "python-generic"
-        
-        # Generate Dockerfile based on type
-        lines = []
-        
-        if project_type in ("python-fastapi", "python-generic"):
-            lines = [
-                "FROM python:3.11-slim",
-                "",
-                "WORKDIR /app",
-                "",
-            ]
-            
-            # Add shared_libs if present
-            if has_shared_libs:
-                lines.extend([
-                    "# Copy shared libraries first",
-                    "COPY shared_libs/ ./shared_libs/",
-                    "",
-                ])
-            
-            # Dependencies
-            if has_requirements:
-                lines.extend([
-                    "# Install dependencies",
-                    f"COPY {main_folder}/requirements.txt ./requirements.txt",
-                    "RUN pip install --no-cache-dir -r requirements.txt",
-                    "",
-                ])
-            
-            # Copy main service
-            lines.extend([
-                "# Copy application",
-                f"COPY {main_folder}/ ./{main_folder}/",
-                "",
-            ])
-            
-            # Copy additional dep folders
-            for dep in dep_folders:
-                if dep != "shared_libs":
-                    lines.append(f"COPY {dep}/ ./{dep}/")
-            if dep_folders and any(d != "shared_libs" for d in dep_folders):
-                lines.append("")
-            
-            # Env vars
-            if env_vars:
-                lines.append("# Environment variables")
-                for key, value in env_vars.items():
-                    lines.append(f"ENV {key}={value}")
-                lines.append("")
-            
-            # Set PYTHONPATH and expose
-            lines.extend([
-                "ENV PYTHONPATH=/app",
-                "",
-                f"EXPOSE {port}",
-                "",
-            ])
-            
-            # CMD - detect entry point
-            if has_main_py:
-                lines.append(f'CMD ["uvicorn", "{main_folder}.main:app", "--host", "0.0.0.0", "--port", "{port}"]')
-            elif has_app_py:
-                lines.append(f'CMD ["uvicorn", "{main_folder}.app:app", "--host", "0.0.0.0", "--port", "{port}"]')
-            else:
-                lines.append(f'CMD ["python", "-m", "{main_folder}"]')
-        
-        elif project_type == "node":
-            lines = [
-                "FROM node:20-slim",
-                "",
-                "WORKDIR /app",
-                "",
-                "# Install dependencies",
-                f"COPY {main_folder}/package*.json ./",
-                "RUN npm ci --only=production",
-                "",
-                "# Copy application",
-                f"COPY {main_folder}/ ./",
-                "",
-                f"EXPOSE {port}",
-                "",
-                'CMD ["npm", "start"]',
-            ]
-        
-        elif project_type == "static":
-            lines = [
-                "FROM nginx:alpine",
-                "",
-                f"COPY {main_folder}/ /usr/share/nginx/html/",
-                "",
-                "EXPOSE 80",
-                "",
-                'CMD ["nginx", "-g", "daemon off;"]',
-            ]
-        
-        return {
-            "dockerfile": "\n".join(lines),
-            "type": project_type,
-            "source": "generated",
-        }
 
 
 # Convenience function

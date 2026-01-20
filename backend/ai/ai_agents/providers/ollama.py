@@ -7,22 +7,9 @@ No SDK required - Ollama has a simple HTTP API.
 
 from typing import AsyncIterator
 
-# Backend imports (absolute - backend must be in sys.path)
-try:
-    from resilience import circuit_breaker, with_timeout
-except ImportError:
-    def circuit_breaker(*args, **kwargs):
-        def decorator(fn): return fn
-        return decorator
-    def with_timeout(*args, **kwargs):
-        def decorator(fn): return fn
-        return decorator
-
-try:
-    from log import info, error
-except ImportError:
-    def info(msg, **kwargs): pass
-    def error(msg, **kwargs): print(f"[ERROR] {msg}")
+# Backend imports
+from ....resilience import circuit_breaker, with_timeout
+from ....log import info, error
 
 # Local imports
 from ..core import ProviderResponse, ProviderError
@@ -112,7 +99,7 @@ class OllamaProvider(LLMProvider):
         return tool_calls if tool_calls else None
     
     @circuit_breaker(name="ollama")
-    @with_timeout(seconds=300)
+    @with_timeout(300)
     async def run(
         self,
         messages: list[dict],
@@ -123,6 +110,36 @@ class OllamaProvider(LLMProvider):
     ) -> ProviderResponse:
         """Run completion using AsyncOllamaClient."""
         info("Calling Ollama", model=self.model, message_count=len(messages))
+        
+        # Add tool format instructions when tools are provided
+        if tools:
+            tool_instructions = """## Tool Calling Format
+
+You have access to tools. When you need to call a tool, use this EXACT format:
+
+<function=TOOL_NAME>{"arg1": "value1", "arg2": "value2"}</function>
+
+Example - to remember the user's name:
+<function=update_context>{"updates": {"name": "Phil"}, "reason": "User shared their name"}</function>
+
+IMPORTANT:
+- Use <function=NAME> with equals sign, not colon, slash, or parentheses
+- Put valid JSON immediately after the >
+- Close with </function>
+- You can include normal text before or after the function call
+
+---
+
+"""
+            # Find and modify system message - prepend instructions
+            messages = list(messages)  # Copy
+            for i, msg in enumerate(messages):
+                if msg.get("role") == "system":
+                    messages[i] = {**msg, "content": tool_instructions + msg["content"]}
+                    break
+            else:
+                # No system message - prepend one
+                messages = [{"role": "system", "content": tool_instructions.strip()}] + messages
         
         try:
             client = self._get_client()
@@ -144,13 +161,8 @@ class OllamaProvider(LLMProvider):
             # Extract tool calls if present
             tool_calls = self._parse_tool_calls(response)
             
-            # Check for XML-style tool calls in content (Llama sometimes does this)
+            # XML-style tool calls are now handled at Agent level
             content = response.content or ""
-            if content and not tool_calls and "<function=" in content:
-                from .groq import _parse_xml_tool_calls
-                content, xml_tool_calls = _parse_xml_tool_calls(content)
-                if xml_tool_calls:
-                    tool_calls = xml_tool_calls
             
             return build_response(
                 content=content,

@@ -8,18 +8,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Optional
 
-# Backend imports
-try:
-    from job_queue import process
-except ImportError:
-    async def process(**kwargs):
-        raise NotImplementedError("job_queue module not available")
-
-try:
-    from log import info, error
-except ImportError:
-    def info(msg, **kwargs): pass
-    def error(msg, **kwargs): pass
+from ....job_queue import process
+from ....log import info, error
 
 from ..memory.summarize import SummarizationHelper
 from ..model_config import get_model_info

@@ -121,7 +121,7 @@ class DefaultContextProvider(ContextProvider):
         print(f"[DEBUG DefaultContextProvider.load] Found {len(results) if results else 0} records")
         
         if results:
-            context = results[0].get("context", {})
+            context = results[0].get("content", {})
             # Parse if stored as string
             if isinstance(context, str):
                 context = json.loads(context) if context else {}
@@ -170,7 +170,7 @@ class DefaultContextProvider(ContextProvider):
         )
         current = {}
         if results:
-            context = results[0].get("context", {})
+            context = results[0].get("content", {})
             if isinstance(context, str):
                 current = json.loads(context) if context else {}
             else:
@@ -188,9 +188,16 @@ class DefaultContextProvider(ContextProvider):
             if results:
                 # Update existing by saving with same id
                 existing = results[0]
-                existing["context"] = json.dumps(merged)
+                existing["content"] = json.dumps(merged)
                 existing["updated_at"] = now.isoformat()
-                existing["last_reason"] = reason
+                # Store extras in metadata
+                metadata = json.loads(existing.get("metadata") or "{}")
+                metadata["last_reason"] = reason
+                if self.schema:
+                    metadata["schema"] = self.schema
+                existing["metadata"] = json.dumps(metadata)
+                if "context_type" not in existing:
+                    existing["context_type"] = "default"
                 print(f"[DEBUG DefaultContextProvider.update] Updating existing record {existing['id']}")
                 await conn.save_entity("user_context", existing)
             else:
@@ -198,16 +205,19 @@ class DefaultContextProvider(ContextProvider):
                 import uuid
                 new_id = str(uuid.uuid4())
                 print(f"[DEBUG DefaultContextProvider.update] Creating new record {new_id}")
+                metadata = {"last_reason": reason}
+                if self.schema:
+                    metadata["schema"] = self.schema
                 await conn.save_entity(
                     "user_context",
                     {
                         "id": new_id,
                         "user_id": user_id,
-                        "context": json.dumps(merged),
-                        "schema": json.dumps(self.schema) if self.schema else None,
+                        "context_type": "default",
+                        "content": json.dumps(merged),
+                        "metadata": json.dumps(metadata),
                         "created_at": now.isoformat(),
                         "updated_at": now.isoformat(),
-                        "last_reason": reason,
                     }
                 )
             

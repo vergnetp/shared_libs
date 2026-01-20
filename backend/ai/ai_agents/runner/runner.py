@@ -3,12 +3,7 @@ from __future__ import annotations
 
 from typing import Any, AsyncIterator
 
-# Backend imports (absolute - backend must be in sys.path)
-try:
-    from log import info, error
-except ImportError:
-    def info(msg, **kwargs): pass
-    def error(msg, **kwargs): print(f"[ERROR] {msg}")
+from ....log import info, error
 
 # Local imports
 from ..core import ProviderResponse, AgentError, GuardrailError

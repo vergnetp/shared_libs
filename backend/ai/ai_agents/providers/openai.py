@@ -15,12 +15,11 @@ def _get_llm_errors():
     from ....cloud.llm import LLMError, LLMRateLimitError, LLMAuthError
     return LLMError, LLMRateLimitError, LLMAuthError
 
-# Backend imports (absolute - backend must be in sys.path)
-try:
-    from log import info, error
-except ImportError:
-    def info(msg, **kwargs): pass
-    def error(msg, **kwargs): print(f"[ERROR] {msg}")
+# Resilience decorators
+from ....resilience import circuit_breaker, with_timeout
+
+# Logging
+from ....log import info, error
 
 # Local imports
 from ..core import (
@@ -87,6 +86,8 @@ class OpenAIProvider(LLMProvider):
             for tc in response.tool_calls
         ]
     
+    @circuit_breaker(name="openai")
+    @with_timeout(120)
     async def run(
         self,
         messages: list[dict],
@@ -243,6 +244,8 @@ class OpenAIAssistantProvider(LLMProvider):
         """Load existing mapping (from DB)."""
         self._thread_cache[thread_id] = openai_thread_id
     
+    @circuit_breaker(name="openai_assistant")
+    @with_timeout(120)
     async def run(
         self,
         messages: list[dict],

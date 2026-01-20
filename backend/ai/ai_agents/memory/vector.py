@@ -68,7 +68,7 @@ class VectorMemory(MemoryStrategy):
         }
         
         if self.vector_store:
-            from backend.ai.vectordb import Document
+            from ...vectordb import Document
             doc = Document(
                 id=f"{thread_id}_{len(self._memory)}",
                 content=content,

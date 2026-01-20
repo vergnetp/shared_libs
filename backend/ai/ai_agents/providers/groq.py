@@ -32,21 +32,8 @@ def _get_llm_errors():
         }
     return _llm_errors
 
-try:
-    from ....resilience import circuit_breaker, with_timeout
-except ImportError:
-    def circuit_breaker(*args, **kwargs):
-        def decorator(fn): return fn
-        return decorator
-    def with_timeout(*args, **kwargs):
-        def decorator(fn): return fn
-        return decorator
-
-try:
-    from ....log import info, error
-except ImportError:
-    def info(msg, **kwargs): pass
-    def error(msg, **kwargs): print(f"[ERROR] {msg}")
+from ....resilience import circuit_breaker, with_timeout
+from ....log import info, error
 
 from ..core import (
     ProviderResponse,
@@ -64,121 +51,6 @@ MODEL_LIMITS = {
     "mixtral-8x7b-32768": 32768,
     "gemma2-9b-it": 8192,
 }
-
-
-def _parse_xml_tool_calls(content: str) -> tuple[str, list[dict]]:
-    """
-    Parse XML-style tool calls that Llama sometimes outputs.
-    
-    Patterns:
-    - <function(name)>{json}</function>
-    - <function(name) "{escaped_json}"</function>  (with space and quoted)
-    - <function=name>{json}</function>
-    - <function=name{json}</function>  (no separator - Groq's format)
-    
-    Returns: (cleaned_content, tool_calls)
-    """
-    tool_calls = []
-    cleaned = content
-    matched_spans = set()  # Track (start, end) of already matched regions
-    
-    print(f"[DEBUG _parse_xml_tool_calls] Input: {content[:200]}")
-    
-    # Try multiple patterns - ORDER MATTERS (most specific first, unclosed last)
-    patterns = [
-        # MOST FLEXIBLE: <function=name SPACE {json with possible nesting} SPACE </function>
-        # Uses greedy match for JSON content, then trims
-        (r'<function=(\w+)\s+(\{.*\})\s*</function>', "flex_greedy"),
-        # NEW: <function=name({json})</function> - parentheses around args (Llama variant)
-        (r'<function=(\w+)\((\{.+?\})\)</function>', "eq_paren_args"),
-        # NEW: <function(name)={json}</function> - parentheses around NAME with = (Groq/Llama variant)
-        (r'<function\((\w+)\)=\s*(\{.+?\})\s*</function>', "paren_eq"),
-        # Standard formats with separator
-        (r'<function\((\w+)\)>\s*(\{.+?\})\s*</function>', "paren_gt"),
-        (r'<function\((\w+)\)\s*(\{.+?\})\s*</function>', "paren"),
-        (r'<function=(\w+)>\s*(\{.+?\})\s*</function>', "eq_gt"),
-        # NO separator between name and JSON (Groq's format): <function=name{json}</function>
-        (r'<function=(\w+)(\{.+?\})</function>', "eq_no_space"),
-        # SPACE separator between name and JSON: <function=name {json}</function>
-        (r'<function=(\w+)\s+(\{.+?\})\s*</function>', "eq_space"),
-        # SPACE separator with stray > before closing: <function=name {json}></function>
-        (r'<function=(\w+)\s+(\{.+?\})\s*>\s*</function>', "eq_space_gt"),
-        # Quoted escaped format: <function(name) "escaped_json"</function>
-        (r'<function\((\w+)\)\s*"(.+?)"\s*</function>', "paren_quoted"),
-        
-        # UNCLOSED TAGS (common in Groq error recovery - failed_generation often truncated)
-        # <function=name>{json} (no closing tag, with >)
-        (r'<function=(\w+)>(\{.+?\})\s*$', "unclosed_gt"),
-        # <function=name>{json} (no closing tag, no >, end of string)
-        (r'<function=(\w+)(\{.+\})\s*$', "unclosed_no_gt"),
-        # <function=name {json} (space separator, no closing tag)
-        (r'<function=(\w+)\s+(\{.+\})\s*$', "unclosed_space"),
-        # <function(name)={json} (no closing tag - paren_eq variant)
-        (r'<function\((\w+)\)=\s*(\{.+\})\s*$', "unclosed_paren_eq"),
-    ]
-    
-    for pattern, pattern_name in patterns:
-        for match in re.finditer(pattern, content, re.DOTALL):
-            # Check if this span overlaps with any already-matched span
-            span = (match.start(), match.end())
-            overlaps = any(
-                not (span[1] <= existing[0] or span[0] >= existing[1])
-                for existing in matched_spans
-            )
-            if overlaps:
-                continue  # Skip - already matched by a previous pattern
-            
-            print(f"[DEBUG _parse_xml_tool_calls] Pattern '{pattern_name}' matched!")
-            name = match.group(1)
-            json_part = match.group(2).strip()
-            
-            try:
-                # If it looks like escaped JSON (has \"), unescape it
-                if '\\"' in json_part or '\\n' in json_part:
-                    # Unescape the JSON string
-                    json_part = json_part.replace('\\"', '"').replace('\\n', '\n').replace('\\\\', '\\')
-                
-                # Find balanced JSON
-                json_start = json_part.find('{')
-                if json_start == -1:
-                    continue
-                
-                # Balance braces to find end
-                depth = 0
-                json_end = json_start
-                for i, c in enumerate(json_part[json_start:], json_start):
-                    if c == '{':
-                        depth += 1
-                    elif c == '}':
-                        depth -= 1
-                        if depth == 0:
-                            json_end = i + 1
-                            break
-                
-                args_str = json_part[json_start:json_end]
-                args = json.loads(args_str)
-                
-                tool_calls.append({
-                    "id": f"xml_{name}_{len(tool_calls)}",
-                    "name": name,
-                    "arguments": args,
-                })
-                
-                # Mark this span as matched
-                matched_spans.add(span)
-                
-                # Remove this match from content
-                cleaned = cleaned.replace(match.group(0), '', 1)
-                print(f"[DEBUG Groq] Parsed XML tool call: {name}, args={args}")
-                
-            except (json.JSONDecodeError, IndexError) as e:
-                print(f"[WARN Groq] Failed to parse XML tool call: {e}, json_part: {json_part[:100]}")
-    
-    if tool_calls:
-        cleaned = cleaned.strip()
-        print(f"[DEBUG Groq] Parsed {len(tool_calls)} XML tool calls from content")
-    
-    return cleaned, tool_calls
 
 
 class GroqProvider(LLMProvider):
@@ -212,7 +84,7 @@ class GroqProvider(LLMProvider):
             self._client = None
     
     @circuit_breaker(name="groq")
-    @with_timeout(seconds=60)
+    @with_timeout(60)
     async def run(
         self,
         messages: list[dict],
@@ -263,6 +135,28 @@ class GroqProvider(LLMProvider):
                 chat_messages.append(msg)
         
         # Prepend system message if present
+        # Add tool format instructions for Llama models when tools are provided
+        if system and tools:
+            tool_instructions = """## Tool Calling Format
+
+You have access to tools. When you need to call a tool, use this EXACT format:
+
+<function=TOOL_NAME>{"arg1": "value1", "arg2": "value2"}</function>
+
+Example - to remember the user's name:
+<function=update_context>{"updates": {"name": "Phil"}, "reason": "User shared their name"}</function>
+
+IMPORTANT:
+- Use <function=NAME> with equals sign, not colon, slash, or parentheses
+- Put valid JSON immediately after the >
+- Close with </function>
+- You can include normal text before or after the function call
+
+---
+
+"""
+            system = tool_instructions + system
+        
         if system:
             chat_messages = [{"role": "system", "content": system}] + chat_messages
         
@@ -327,72 +221,44 @@ class GroqProvider(LLMProvider):
             
             # Check if this is a tool validation error with failed_generation
             # Groq validates tool calls and rejects malformed ones, but gives us the text
+            # Return it as content - agent.py will parse XML tool calls
             if "tool_use_failed" in error_str and "failed_generation" in error_str:
-                # Extract the failed generation from error
                 try:
-                    # The error contains the raw XML tool call - extract it
-                    # Format: 'failed_generation': '<function=name{json}</function>'
+                    # Extract failed_generation from error
                     import ast
                     
-                    # Try to find the dict in the error string
                     dict_start = error_str.find("{'error':")
                     if dict_start == -1:
                         dict_start = error_str.find('{"error":')
                     
+                    failed_text = ""
                     if dict_start != -1:
-                        # Extract the dict portion
-                        dict_str = error_str[dict_start:]
-                        # Parse it
                         try:
-                            error_dict = ast.literal_eval(dict_str)
+                            error_dict = ast.literal_eval(error_str[dict_start:])
                             failed_text = error_dict.get('error', {}).get('failed_generation', '')
                         except:
-                            # Fallback: regex extract
                             match = re.search(r"'failed_generation':\s*'([^']+)'", error_str)
                             if match:
                                 failed_text = match.group(1)
-                            else:
-                                failed_text = ""
                     else:
-                        # Fallback: regex extract
                         match = re.search(r"'failed_generation':\s*'([^']+)'", error_str)
                         if match:
                             failed_text = match.group(1)
-                        else:
-                            failed_text = ""
                     
                     if failed_text:
-                        print(f"[DEBUG Groq] Recovering from failed tool call, text: {failed_text[:200]}", flush=True)
-                        
-                        # Try to parse XML tool calls from the failed text
-                        cleaned, xml_tool_calls = _parse_xml_tool_calls(failed_text)
-                        
-                        # If we found tool calls, try to fix common issues
-                        fixed_tool_calls = []
-                        for tc in xml_tool_calls:
-                            args = tc.get("arguments", {})
-                            # If 'updates' is missing, wrap the non-reason args in 'updates'
-                            if "updates" not in args and tc.get("name") == "update_context":
-                                reason = args.pop("reason", "Auto-saved")
-                                fixed_args = {"updates": args, "reason": reason}
-                                tc["arguments"] = fixed_args
-                                print(f"[DEBUG Groq] Fixed update_context args: {fixed_args}", flush=True)
-                            fixed_tool_calls.append(tc)
-                        
-                        if fixed_tool_calls:
-                            print(f"[DEBUG Groq] Recovered {len(fixed_tool_calls)} tool calls from error", flush=True)
-                            # Return the recovered response
-                            return ProviderResponse(
-                                content=cleaned,
-                                usage={"input": 0, "output": 0},  # Unknown
-                                model=self.model,
-                                provider=self.name,
-                                tool_calls=fixed_tool_calls,
-                                finish_reason="tool_calls",
-                                raw=None,
-                            )
+                        print(f"[DEBUG Groq] Returning failed_generation as content for agent to parse", flush=True)
+                        # Return as content - agent.py's _parse_xml_tool_calls will handle it
+                        return build_response(
+                            content=failed_text,
+                            model=self.model,
+                            provider=self.name,
+                            usage={"input": 0, "output": 0},
+                            tool_calls=[],
+                            finish_reason="stop",
+                            raw=None,
+                        )
                 except Exception as parse_err:
-                    print(f"[WARN Groq] Failed to recover tool call: {parse_err}", flush=True)
+                    print(f"[WARN Groq] Failed to extract failed_generation: {parse_err}", flush=True)
             
             raise ProviderError(self.name, f"LLM error: {e}")
     
