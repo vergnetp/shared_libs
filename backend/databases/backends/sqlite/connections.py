@@ -11,6 +11,18 @@ from ...config import DatabaseConfig
 
 from ...entity.mixins import EntitySyncMixin, EntityAsyncMixin
 
+# SQLite-specific retry config:
+# - busy_timeout is 30s (SQLite waits for locks)  
+# - total_timeout is 90s (allows 2-3 retries after busy_timeout expires)
+# - max_retries=3 with base_delay=1s gives time between retries
+SQLITE_RETRY_CONFIG = dict(
+    max_retries=3,
+    base_delay=1.0,
+    max_delay=10.0,
+    total_timeout=90.0,  # Must be > busy_timeout (30s) to allow retries
+)
+
+
 class SqliteSyncConnection(SyncConnection, EntitySyncMixin):
     """
     SQLite implementation of the SyncConnection interface.
@@ -33,20 +45,24 @@ class SqliteSyncConnection(SyncConnection, EntitySyncMixin):
             self._sql_generator = SqliteSqlGenerator()
         return self._sql_generator
 
-    @retry_with_backoff()
+    @retry_with_backoff(**SQLITE_RETRY_CONFIG)
     def _prepare_statement_sync(self, native_sql: str) -> Any:
         """
         SQLite with sqlite3 doesn't have a separate prepare API,
-        so we just return the SQL for later execution
+        so we just return the SQL for later execution.
         """
         return native_sql  # Just return the SQL string
     
-    @retry_with_backoff()
+    @retry_with_backoff(**SQLITE_RETRY_CONFIG)
     def _execute_statement_sync(self, statement: Any, params=None) -> Any:
-        """Execute a statement using sqlite3"""
-        # statement is the SQL string
+        """
+        Execute a statement using sqlite3.
+        
+        Note: busy_timeout (30s) handles lock waiting at the database level.
+        This retry decorator (90s total) allows additional retries if needed.
+        """
         self._cursor.execute(statement, params or ())
-        return self._cursor.fetchall()  # Return raw results
+        return self._cursor.fetchall()
         
     def in_transaction(self) -> bool:
         """Return True if connection is in an active transaction.""" 
@@ -122,16 +138,21 @@ class SqliteAsyncConnection(AsyncConnection, EntityAsyncMixin):
             self._sql_generator = SqliteSqlGenerator()
         return self._sql_generator
   
-    @retry_with_backoff()
+    @retry_with_backoff(**SQLITE_RETRY_CONFIG)
     async def _prepare_statement_async(self, native_sql: str) -> Any:
         """
-        SQLite with aiosqlite doesn't have a separate prepare API, so returning the sql        
+        SQLite with aiosqlite doesn't have a separate prepare API.
         """       
         return native_sql
     
-    @retry_with_backoff()
+    @retry_with_backoff(**SQLITE_RETRY_CONFIG)
     async def _execute_statement_async(self, statement: Any, params=None) -> Any:
-        """Execute a prepared statement using aiosqlite"""
+        """
+        Execute a prepared statement using aiosqlite.
+        
+        Note: busy_timeout (30s) handles lock waiting at the database level.
+        This retry decorator (90s total) allows additional retries if needed.
+        """
         async with self._conn.execute(statement, params or ()) as cursor:
             return await cursor.fetchall()
 
