@@ -18,7 +18,7 @@ Multi-tenancy:
 """
 
 # Module-level version constant (importable)
-AGENT_VERSION = "2.2.0"
+AGENT_VERSION = "2.3.0"
 
 # The node agent Flask app code - embedded as a string for cloud-init
 NODE_AGENT_CODE = '''#!/usr/bin/env python3
@@ -27,7 +27,7 @@ Node Agent - SSH-Free Deployments for SaaS
 Runs on port 9999, protected by API key.
 """
 
-AGENT_VERSION = "2.2.0"  # REQUIRE_AUTH_ALWAYS=true by default
+AGENT_VERSION = "2.3.0"  # REQUIRE_AUTH_ALWAYS=true by default
 
 from flask import Flask, request, jsonify
 from functools import wraps
@@ -412,38 +412,225 @@ def health_check_containers():
         return jsonify({'error': str(e)}), 500
 
 
-@app.route('/containers/<n>/health', methods=['GET'])
+@app.route('/containers/<n>/health', methods=['GET', 'POST'])
 @require_api_key
 def container_health(name):
-    """Health check a specific container with full state info"""
+    """
+    Comprehensive health check for a container.
+    
+    GET: Basic container state (backward compatible)
+    POST: Full health check with optional port check and log analysis
+    
+    POST body (all optional):
+        {
+            "port": 6379,                      // TCP port to check
+            "since": "2026-01-21T15:00:00Z"    // Check logs since this time
+        }
+    
+    Response:
+        {
+            "status": "healthy|degraded|unhealthy",
+            "container": { ... },              // Docker state info
+            "port_check": { ... },             // Only if port provided
+            "logs": { ... },                   // Log analysis
+            "details": { "reason": "..." }     // Explains status
+        }
+    """
     try:
+        # Get request data for POST
+        data = {}
+        if request.method == 'POST':
+            data = request.get_json() or {}
+        
+        port = data.get('port')
+        since = data.get('since')
+        
+        # =================================================================
+        # Step 1: Docker inspect - get container state
+        # =================================================================
         result = run_cmd(['docker', 'inspect', '--format', 
-            '{{.State.Running}}|{{.State.Health.Status}}|{{.State.StartedAt}}|{{.State.FinishedAt}}|{{.State.ExitCode}}|{{.State.Status}}|{{.State.OOMKilled}}|{{.RestartCount}}', name])
+            '{{.State.Running}}|{{.State.Health.Status}}|{{.State.StartedAt}}|{{.State.FinishedAt}}|{{.State.ExitCode}}|{{.State.Status}}|{{.State.OOMKilled}}|{{.RestartCount}}|{{.State.Error}}', name])
         
         if result.returncode != 0:
             return jsonify({'error': f'Container not found: {name}'}), 404
         
         parts = result.stdout.strip().split('|')
         running = parts[0].lower() == 'true' if parts else False
-        health_status = parts[1] if len(parts) > 1 else 'none'
+        docker_health = parts[1] if len(parts) > 1 else 'none'
         started_at = parts[2] if len(parts) > 2 else ''
         finished_at = parts[3] if len(parts) > 3 else ''
         exit_code = int(parts[4]) if len(parts) > 4 and parts[4].lstrip('-').isdigit() else None
-        status = parts[5] if len(parts) > 5 else 'unknown'
+        docker_status = parts[5] if len(parts) > 5 else 'unknown'
         oom_killed = parts[6].lower() == 'true' if len(parts) > 6 else False
         restart_count = int(parts[7]) if len(parts) > 7 and parts[7].isdigit() else 0
+        docker_error = parts[8] if len(parts) > 8 and parts[8] else None
         
-        return jsonify({
+        container_info = {
             'name': name,
             'running': running,
-            'health': health_status if health_status != 'none' else ('running' if running else 'stopped'),
-            'status': status,
+            'docker_health': docker_health if docker_health != 'none' else None,
+            'status': docker_status,
             'started_at': started_at,
             'finished_at': finished_at,
             'exit_code': exit_code,
             'oom_killed': oom_killed,
             'restart_count': restart_count,
-        })
+            'error': docker_error,
+        }
+        
+        # For GET requests, return basic info (backward compatible)
+        if request.method == 'GET':
+            return jsonify({
+                'name': name,
+                'running': running,
+                'health': docker_health if docker_health != 'none' else ('running' if running else 'stopped'),
+                'status': docker_status,
+                'started_at': started_at,
+                'finished_at': finished_at,
+                'exit_code': exit_code,
+                'oom_killed': oom_killed,
+                'restart_count': restart_count,
+            })
+        
+        # =================================================================
+        # Step 2: Determine health status (POST request)
+        # =================================================================
+        status = 'healthy'
+        details = {}
+        port_check_result = None
+        logs_result = None
+        
+        # Check 1: Container not running = unhealthy
+        if not running:
+            status = 'unhealthy'
+            if oom_killed:
+                details['reason'] = f'Container was killed due to Out Of Memory (OOM). Exit code: {exit_code}'
+            elif exit_code is not None and exit_code != 0:
+                details['reason'] = f'Container exited with code {exit_code}'
+                # Common exit codes
+                exit_meanings = {
+                    1: 'General error',
+                    137: 'SIGKILL (likely OOM or manual kill)',
+                    139: 'SIGSEGV (segmentation fault)',
+                    143: 'SIGTERM (graceful shutdown)',
+                    255: 'Exit status out of range',
+                }
+                if exit_code in exit_meanings:
+                    details['reason'] += f' - {exit_meanings[exit_code]}'
+            elif docker_error:
+                details['reason'] = f'Container error: {docker_error}'
+            else:
+                details['reason'] = f'Container is not running (status: {docker_status})'
+        
+        # Check 2: TCP port check (if port provided and container running)
+        if port and running:
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(2)
+                start_time = time.time()
+                conn_result = sock.connect_ex(('localhost', int(port)))
+                elapsed_ms = (time.time() - start_time) * 1000
+                sock.close()
+                
+                port_check_result = {
+                    'port': port,
+                    'reachable': conn_result == 0,
+                    'response_time_ms': round(elapsed_ms, 2),
+                }
+                
+                if conn_result != 0:
+                    status = 'unhealthy'
+                    details['reason'] = f'Port {port} is not responding (container running but service not accepting connections)'
+                    port_check_result['error'] = f'Connection refused (errno: {conn_result})'
+                    
+            except socket.timeout:
+                port_check_result = {
+                    'port': port,
+                    'reachable': False,
+                    'error': 'Connection timed out',
+                }
+                status = 'unhealthy'
+                details['reason'] = f'Port {port} timed out'
+            except Exception as e:
+                port_check_result = {
+                    'port': port,
+                    'reachable': False,
+                    'error': str(e),
+                }
+                status = 'unhealthy'
+                details['reason'] = f'Port check failed: {e}'
+        
+        # Check 3: Log analysis (if container running and not already unhealthy)
+        if running and status != 'unhealthy':
+            error_patterns = [
+                'error', 'Error', 'ERROR',
+                'exception', 'Exception', 'EXCEPTION',
+                'fatal', 'Fatal', 'FATAL',
+                'panic', 'Panic', 'PANIC',
+                'Traceback',
+                'CRITICAL',
+                'failed', 'Failed', 'FAILED',
+            ]
+            
+            # Get logs
+            log_cmd = ['docker', 'logs', '--tail', '100']
+            if since:
+                log_cmd.extend(['--since', since])
+            log_cmd.append(name)
+            
+            log_result = run_cmd(log_cmd)
+            logs = (log_result.stdout + log_result.stderr) if log_result.returncode == 0 else ''
+            
+            # If no logs with since filter, get last 20 lines
+            if not logs.strip() and since:
+                log_cmd = ['docker', 'logs', '--tail', '20', name]
+                log_result = run_cmd(log_cmd)
+                logs = (log_result.stdout + log_result.stderr) if log_result.returncode == 0 else ''
+            
+            # Analyze logs for errors
+            error_lines = []
+            for line in logs.split('\n'):
+                line_stripped = line.strip()
+                if line_stripped and any(pattern in line_stripped for pattern in error_patterns):
+                    # Avoid false positives
+                    lower_line = line_stripped.lower()
+                    if 'no error' in lower_line or 'without error' in lower_line or 'error=nil' in lower_line:
+                        continue
+                    if 'error_count=0' in lower_line or 'errors=0' in lower_line:
+                        continue
+                    error_lines.append(line_stripped)
+            
+            logs_result = {
+                'has_errors': len(error_lines) > 0,
+                'error_count': len(error_lines),
+                'sample_errors': error_lines[:5],  # First 5 errors
+                'lines_checked': len(logs.split('\n')),
+            }
+            
+            if error_lines:
+                status = 'degraded'
+                details['reason'] = f'Found {len(error_lines)} error(s) in logs'
+                details['sample_error'] = error_lines[0][:200]  # First error, truncated
+        
+        # =================================================================
+        # Build response
+        # =================================================================
+        response = {
+            'status': status,
+            'container': container_info,
+        }
+        
+        if port_check_result:
+            response['port_check'] = port_check_result
+        
+        if logs_result:
+            response['logs'] = logs_result
+        
+        if details:
+            response['details'] = details
+        
+        return jsonify(response)
+        
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

@@ -1500,19 +1500,36 @@ class DeploymentService:
                 
                 self.log(f"   [{name}] ⏳ Waiting for health check...")
                 
-                # For stateful services (redis, postgres, etc.), use TCP check instead of HTTP
+                # For stateful services (redis, postgres, etc.), use agent health check with TCP
                 # These services don't speak HTTP - they have their own protocols
-                # Use node agent to check from inside the droplet (external ports blocked by firewall)
+                # Agent checks from inside the droplet (external ports blocked by firewall)
                 if config.is_stateful:
                     for attempt in range(max_attempts):
                         try:
-                            tcp_result = await agent.health_tcp(port=container_port, timeout=2)
-                            if tcp_result.success and tcp_result.data.get('status') == 'healthy':
-                                healthy = True
-                                self.log(f"   [{name}] ✅ TCP port {container_port} responding (via agent)")
-                                break
-                        except Exception:
-                            pass
+                            # Use comprehensive health check: TCP + container state + logs
+                            health_result = await agent.check_container_health(
+                                new_container_name, 
+                                port=container_port
+                            )
+                            if health_result.success:
+                                status = health_result.data.get('status')
+                                if status == 'healthy':
+                                    healthy = True
+                                    self.log(f"   [{name}] ✅ Healthy (TCP port {container_port} responding)")
+                                    break
+                                elif status == 'degraded':
+                                    # Container running but has errors in logs - still consider it "ready"
+                                    healthy = True
+                                    details = health_result.data.get('details', {})
+                                    self.log(f"   [{name}] ⚠️ Degraded: {details.get('reason', 'errors in logs')}")
+                                    break
+                                elif status == 'unhealthy':
+                                    details = health_result.data.get('details', {})
+                                    if attempt == max_attempts - 1:
+                                        self.log(f"   [{name}] ❌ Unhealthy: {details.get('reason', 'unknown')}")
+                        except Exception as e:
+                            if attempt == max_attempts - 1:
+                                self.log(f"   [{name}] ❌ Health check error: {e}")
                         if attempt < max_attempts - 1:
                             await asyncio.sleep(1)
                 else:

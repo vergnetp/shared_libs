@@ -154,9 +154,44 @@ class NodeAgentClient:
         """Health check all running containers on the server."""
         return await self._request("GET", "/health/containers")
     
-    async def check_container_health(self, name: str) -> AgentResponse:
-        """Health check a specific container."""
-        return await self._request("GET", f"/containers/{name}/health")
+    async def check_container_health(
+        self, 
+        name: str,
+        port: int = None,
+        since: str = None,
+    ) -> AgentResponse:
+        """
+        Comprehensive health check for a container.
+        
+        Args:
+            name: Container name
+            port: Optional TCP port to check (e.g., 6379 for Redis)
+            since: Optional ISO timestamp to check logs since (e.g., "2026-01-21T15:00:00Z")
+        
+        Returns:
+            AgentResponse with:
+                - data['status']: 'healthy', 'degraded', or 'unhealthy'
+                - data['container']: Docker state info
+                - data['port_check']: Port check result (if port provided)
+                - data['logs']: Log analysis result
+                - data['details']: Explanation of status
+        
+        Status meanings:
+            - healthy: Container running, port responding (if checked), no errors in logs
+            - degraded: Container running but errors found in logs
+            - unhealthy: Container not running OR port not responding
+        """
+        if port is not None or since is not None:
+            # Use POST for full health check
+            payload = {}
+            if port is not None:
+                payload['port'] = port
+            if since is not None:
+                payload['since'] = since
+            return await self._request("POST", f"/containers/{name}/health", payload)
+        else:
+            # Use GET for backward-compatible basic check
+            return await self._request("GET", f"/containers/{name}/health")
     
     async def health_tcp(
         self, 
