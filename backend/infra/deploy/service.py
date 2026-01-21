@@ -1502,17 +1502,14 @@ class DeploymentService:
                 
                 # For stateful services (redis, postgres, etc.), use TCP check instead of HTTP
                 # These services don't speak HTTP - they have their own protocols
+                # Use node agent to check from inside the droplet (external ports blocked by firewall)
                 if config.is_stateful:
-                    import socket
                     for attempt in range(max_attempts):
                         try:
-                            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                            sock.settimeout(1)
-                            result = sock.connect_ex((ip, expose_port))
-                            sock.close()
-                            if result == 0:
+                            tcp_result = await agent.health_tcp(port=container_port, timeout=2)
+                            if tcp_result.success and tcp_result.data.get('status') == 'healthy':
                                 healthy = True
-                                self.log(f"   [{name}] ✅ TCP port {expose_port} responding")
+                                self.log(f"   [{name}] ✅ TCP port {container_port} responding (via agent)")
                                 break
                         except Exception:
                             pass
