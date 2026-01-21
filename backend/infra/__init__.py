@@ -113,7 +113,6 @@ from .utils import (
 # Deploy (MVP)
 from .deploy import (
     LocalDeployer,
-    RemoteDeployer,
     DeployConfig,
     DeployResult as LocalDeployResult,
     DockerfileGenerator,
@@ -258,7 +257,6 @@ __all__ = [
     
     # Deploy (MVP)
     "LocalDeployer",
-    "RemoteDeployer",
     "DeployConfig",
     "LocalDeployResult",
     "DockerfileGenerator",
