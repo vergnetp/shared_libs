@@ -570,7 +570,7 @@ def container_health(name):
             
             # Analyze logs for errors
             error_lines = []
-            for line in logs.split('\n'):
+            for line in logs.split('\\n'):
                 line_stripped = line.strip()
                 if line_stripped and any(pattern in line_stripped for pattern in error_patterns):
                     # Avoid false positives
@@ -585,7 +585,7 @@ def container_health(name):
                 'has_errors': len(error_lines) > 0,
                 'error_count': len(error_lines),
                 'sample_errors': error_lines[:5],  # First 5 errors
-                'lines_checked': len(logs.split('\n')),
+                'lines_checked': len(logs.split('\\n')),
             }
             
             if error_lines:

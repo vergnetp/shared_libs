@@ -59,9 +59,9 @@ class SqliteDatabase(ConnectionManager):
         # Enable WAL mode for better concurrent read/write performance
         conn.execute("PRAGMA journal_mode=WAL")
         
-        # Wait up to 30 seconds for locks instead of failing immediately
+        # Wait up to 60 seconds for locks instead of failing immediately
         # This is critical for FastAPI with concurrent requests
-        conn.execute("PRAGMA busy_timeout=30000")
+        conn.execute("PRAGMA busy_timeout=60000")
         
         # NORMAL synchronous is a good balance of safety and speed
         conn.execute("PRAGMA synchronous=NORMAL")

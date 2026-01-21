@@ -54,9 +54,9 @@ class SqliteConnectionPool(ConnectionPool):
         # WAL mode for concurrent access (readers don't block writers)
         await conn.execute("PRAGMA journal_mode=WAL")
         
-        # Wait up to 30 seconds for locks instead of failing immediately
+        # Wait up to 60 seconds for locks instead of failing immediately
         # This is critical for FastAPI with concurrent requests
-        await conn.execute("PRAGMA busy_timeout=30000")
+        await conn.execute("PRAGMA busy_timeout=60000")
         
         # NORMAL sync is good balance of safety and speed
         await conn.execute("PRAGMA synchronous=NORMAL")

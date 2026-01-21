@@ -12,14 +12,19 @@ from ...config import DatabaseConfig
 from ...entity.mixins import EntitySyncMixin, EntityAsyncMixin
 
 # SQLite-specific retry config:
-# - busy_timeout is 30s (SQLite waits for locks)  
-# - total_timeout is 90s (allows 2-3 retries after busy_timeout expires)
-# - max_retries=3 with base_delay=1s gives time between retries
+# - busy_timeout is 60s (SQLite waits for locks at DB level) 
+# - max_retries=5 with longer delays to outlast lock contention
+# - total_timeout=300s allows multiple busy_timeout cycles
+# 
+# IMPORTANT: SQLite allows only ONE writer at a time even with WAL mode.
+# Concurrent writes will queue up. Be patient!
+import sqlite3
 SQLITE_RETRY_CONFIG = dict(
-    max_retries=3,
-    base_delay=1.0,
-    max_delay=10.0,
-    total_timeout=90.0,  # Must be > busy_timeout (30s) to allow retries
+    max_retries=5,
+    base_delay=2.0,        # Start with 2s between retries
+    max_delay=30.0,        # Cap at 30s between retries  
+    total_timeout=300.0,   # 5 minutes total - allows for heavy contention
+    retry_on=(sqlite3.OperationalError, Exception),  # Catch "database is locked"
 )
 
 
@@ -58,7 +63,7 @@ class SqliteSyncConnection(SyncConnection, EntitySyncMixin):
         """
         Execute a statement using sqlite3.
         
-        Note: busy_timeout (30s) handles lock waiting at the database level.
+        Note: busy_timeout (60s) handles lock waiting at the database level.
         This retry decorator (90s total) allows additional retries if needed.
         """
         self._cursor.execute(statement, params or ())
@@ -150,7 +155,7 @@ class SqliteAsyncConnection(AsyncConnection, EntityAsyncMixin):
         """
         Execute a prepared statement using aiosqlite.
         
-        Note: busy_timeout (30s) handles lock waiting at the database level.
+        Note: busy_timeout (60s) handles lock waiting at the database level.
         This retry decorator (90s total) allows additional retries if needed.
         """
         async with self._conn.execute(statement, params or ()) as cursor:
