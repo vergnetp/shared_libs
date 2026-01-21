@@ -79,6 +79,12 @@ from .orchestrator import (
     DEPLOY_TASKS,
 )
 
+from .undeploy import (
+    UndeployService,
+    AsyncUndeployService,
+    UndeployResult,
+)
+
 
 __all__ = [
     # Generator
@@ -135,4 +141,8 @@ __all__ = [
     "rollback_task",
     "stateful_deploy_task",
     "DEPLOY_TASKS",
+    # Undeploy (container/service removal)
+    "UndeployService",
+    "AsyncUndeployService",
+    "UndeployResult",
 ]
