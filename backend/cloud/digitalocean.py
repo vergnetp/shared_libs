@@ -452,6 +452,28 @@ systemctl restart node_agent 2>/dev/null || true
             action_id = result["action"]["id"]
             self._wait_for_action(action_id, timeout)
     
+    def reboot_droplet(self, droplet_id: int, wait: bool = True, timeout: int = 180) -> Dict[str, Any]:
+        """
+        Reboot a droplet.
+        
+        Used for auto-healing when a droplet becomes unreachable.
+        
+        Args:
+            droplet_id: Droplet ID to reboot
+            wait: If True, wait for reboot to complete
+            timeout: Max seconds to wait (only if wait=True)
+            
+        Returns:
+            Action dict with id, status, type, etc.
+        """
+        result = self._post(f"/droplets/{droplet_id}/actions", {"type": "reboot"})
+        action = result.get("action", {})
+        
+        if wait and action.get("id"):
+            action = self._wait_for_action(action["id"], timeout)
+        
+        return action
+    
     def delete_droplet(self, droplet_id: int, force: bool = False) -> Result:
         """
         Delete a droplet.
@@ -1130,6 +1152,28 @@ systemctl restart node_agent 2>/dev/null || true
         if wait and result.get("action", {}).get("id"):
             action_id = result["action"]["id"]
             await self._wait_for_action(action_id, timeout)
+    
+    async def reboot_droplet(self, droplet_id: int, wait: bool = True, timeout: int = 180) -> Dict[str, Any]:
+        """
+        Reboot a droplet.
+        
+        Used for auto-healing when a droplet becomes unreachable.
+        
+        Args:
+            droplet_id: Droplet ID to reboot
+            wait: If True, wait for reboot to complete
+            timeout: Max seconds to wait (only if wait=True)
+            
+        Returns:
+            Action dict with id, status, type, etc.
+        """
+        result = await self._post(f"/droplets/{droplet_id}/actions", {"type": "reboot"})
+        action = result.get("action", {})
+        
+        if wait and action.get("id"):
+            action = await self._wait_for_action(action["id"], timeout)
+        
+        return action
     
     async def delete_droplet(self, droplet_id: int, force: bool = False) -> Result:
         """Delete a droplet."""
