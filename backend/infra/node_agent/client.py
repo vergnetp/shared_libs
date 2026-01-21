@@ -97,6 +97,7 @@ class NodeAgentClient:
         method: str,
         endpoint: str,
         json_data: Dict = None,
+        params: Dict = None,
         timeout: int = None,
     ) -> AgentResponse:
         """Make authenticated request to node agent."""
@@ -106,6 +107,7 @@ class NodeAgentClient:
                 method,
                 endpoint,
                 json=json_data,
+                params=params,
                 raise_on_error=False,
             )
             
@@ -181,17 +183,12 @@ class NodeAgentClient:
             - degraded: Container running but errors found in logs
             - unhealthy: Container not running OR port not responding
         """
-        if port is not None or since is not None:
-            # Use POST for full health check
-            payload = {}
-            if port is not None:
-                payload['port'] = port
-            if since is not None:
-                payload['since'] = since
-            return await self._request("POST", f"/containers/{name}/health", payload)
-        else:
-            # Use GET for backward-compatible basic check
-            return await self._request("GET", f"/containers/{name}/health")
+        params = {}
+        if port is not None:
+            params['port'] = port
+        if since is not None:
+            params['since'] = since
+        return await self._request("GET", f"/containers/{name}/health", params=params or None)
     
     async def health_tcp(
         self, 

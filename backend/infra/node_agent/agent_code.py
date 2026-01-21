@@ -18,7 +18,7 @@ Multi-tenancy:
 """
 
 # Module-level version constant (importable)
-AGENT_VERSION = "2.3.0"
+AGENT_VERSION = "2.4.0"
 
 # The node agent Flask app code - embedded as a string for cloud-init
 NODE_AGENT_CODE = '''#!/usr/bin/env python3
@@ -27,7 +27,7 @@ Node Agent - SSH-Free Deployments for SaaS
 Runs on port 9999, protected by API key.
 """
 
-AGENT_VERSION = "2.3.0"  # REQUIRE_AUTH_ALWAYS=true by default
+AGENT_VERSION = "2.4.0"  # Unified container health endpoint (GET/POST same response)
 
 from flask import Flask, request, jsonify
 from functools import wraps
@@ -418,14 +418,8 @@ def container_health(name):
     """
     Comprehensive health check for a container.
     
-    GET: Basic container state (backward compatible)
-    POST: Full health check with optional port check and log analysis
-    
-    POST body (all optional):
-        {
-            "port": 6379,                      // TCP port to check
-            "since": "2026-01-21T15:00:00Z"    // Check logs since this time
-        }
+    GET: Query params ?port=6379&since=2026-01-21T15:00:00Z (all optional)
+    POST: JSON body {"port": 6379, "since": "..."} (all optional)
     
     Response:
         {
@@ -437,13 +431,14 @@ def container_health(name):
         }
     """
     try:
-        # Get request data for POST
-        data = {}
+        # Get params from query string (GET) or JSON body (POST)
         if request.method == 'POST':
             data = request.get_json() or {}
-        
-        port = data.get('port')
-        since = data.get('since')
+            port = data.get('port')
+            since = data.get('since')
+        else:
+            port = request.args.get('port', type=int)
+            since = request.args.get('since')
         
         # =================================================================
         # Step 1: Docker inspect - get container state
@@ -478,22 +473,8 @@ def container_health(name):
             'error': docker_error,
         }
         
-        # For GET requests, return basic info (backward compatible)
-        if request.method == 'GET':
-            return jsonify({
-                'name': name,
-                'running': running,
-                'health': docker_health if docker_health != 'none' else ('running' if running else 'stopped'),
-                'status': docker_status,
-                'started_at': started_at,
-                'finished_at': finished_at,
-                'exit_code': exit_code,
-                'oom_killed': oom_killed,
-                'restart_count': restart_count,
-            })
-        
         # =================================================================
-        # Step 2: Determine health status (POST request)
+        # Step 2: Determine health status
         # =================================================================
         status = 'healthy'
         details = {}
