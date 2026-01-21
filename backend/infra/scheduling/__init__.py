@@ -1,21 +1,12 @@
-"""Scheduling - Cron jobs, backups, scheduled tasks."""
+"""Scheduling - Task scheduling for infrastructure operations.
 
-from .scheduler import (
-    Scheduler,
-    CronJob,
-    ScheduledTask,
-    ScheduleFrequency,
-)
-from .backup import (
-    BackupManager,
-    BackupConfig,
-    BackupResult,
-    BackupType,
-    StorageType,
-)
+Note: Legacy Scheduler and BackupManager classes have been removed.
+Use TaskScheduler with handlers for scheduling tasks.
+"""
+
 from .task_scheduler import (
     TaskScheduler,
-    ScheduledTask as CentralizedTask,
+    ScheduledTask,
     TaskType,
     TaskStatus,
     get_scheduler,
@@ -29,23 +20,13 @@ from .handlers import (
 )
 
 __all__ = [
-    # Server-side cron
-    "Scheduler",
-    "CronJob",
-    "ScheduledTask",
-    "ScheduleFrequency",
-    # Backup
-    "BackupManager",
-    "BackupConfig",
-    "BackupResult",
-    "BackupType",
-    "StorageType",
     # Centralized task scheduler
     "TaskScheduler",
-    "CentralizedTask",
+    "ScheduledTask",
     "TaskType",
     "TaskStatus",
     "get_scheduler",
+    # Handlers
     "register_all_handlers",
     "TASK_HANDLERS",
     "health_check_handler",

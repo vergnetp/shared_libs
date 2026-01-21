@@ -28,7 +28,9 @@ import urllib.error
 if TYPE_CHECKING:
     from ..context import DeploymentContext
     from ..core.service import Service, ServiceHealthCheck
-    from ..docker.client import DockerClient
+
+# Import NodeAgentClient for remote health checks (avoids direct TCP/SSH)
+from ..node_agent.client import NodeAgentClient
 
 
 class HealthStatus(Enum):
@@ -110,10 +112,31 @@ class HealthChecker:
     def __init__(
         self, 
         ctx: 'DeploymentContext' = None,
-        docker: Optional['DockerClient'] = None,
+        do_token: Optional[str] = None,
     ):
         self.ctx = ctx
-        self.docker = docker
+        self.do_token = do_token
+        self._agent_clients: Dict[str, NodeAgentClient] = {}
+    
+    def _get_agent_client(self, server_ip: str) -> Optional[NodeAgentClient]:
+        """
+        Get or create NodeAgentClient for a server.
+        
+        Returns None if no do_token configured.
+        """
+        if not self.do_token:
+            return None
+        
+        if server_ip not in self._agent_clients:
+            self._agent_clients[server_ip] = NodeAgentClient(
+                server_ip=server_ip,
+                do_token=self.do_token,
+            )
+        return self._agent_clients[server_ip]
+    
+    def _is_remote(self, host: str) -> bool:
+        """Check if host is remote (not localhost)."""
+        return host not in ("localhost", "127.0.0.1", "::1")
     
     # =========================================================================
     # Individual Checks
@@ -254,41 +277,189 @@ class HealthChecker:
                 details={"host": host, "port": port, "error": str(e)},
             )
     
-    async def check_docker_health(
+    # =========================================================================
+    # Remote Checks via Node Agent (no direct TCP/SSH needed)
+    # =========================================================================
+    
+    async def check_tcp_via_agent(
         self,
-        container_name: str,
-        server: Optional[str] = None,
+        server_ip: str,
+        port: int,
+        timeout: int = 5,
     ) -> HealthCheckResult:
         """
-        Check Docker container health status.
+        TCP health check via node agent API.
+        
+        Routes the check through the node agent running on the target server,
+        avoiding the need for direct TCP connections to internal ports.
         
         Args:
-            container_name: Container name
-            server: Server IP (None = local)
+            server_ip: Server IP address
+            port: Port to check (on localhost from agent's perspective)
+            timeout: Timeout in seconds
             
         Returns:
             HealthCheckResult
         """
-        if not self.docker:
+        client = self._get_agent_client(server_ip)
+        if not client:
             return HealthCheckResult(
                 status=HealthStatus.UNKNOWN,
-                message="Docker client not available",
+                message="No DO token configured for remote health checks",
+                details={"server": server_ip, "port": port},
             )
         
         start = time.time()
-        
         try:
-            info = self.docker.inspect(container_name, server)
+            result = await client.health_tcp(port=port, timeout=timeout)
             elapsed = (time.time() - start) * 1000
             
-            if not info:
+            if result.success and result.data.get("status") == "healthy":
+                return HealthCheckResult(
+                    status=HealthStatus.HEALTHY,
+                    message=f"Port {port} is open",
+                    response_time_ms=result.data.get("response_time_ms", elapsed),
+                    details={"server": server_ip, "port": port, "via": "node_agent"},
+                )
+            else:
+                error = result.data.get("error", result.error or "Unknown error")
                 return HealthCheckResult(
                     status=HealthStatus.UNHEALTHY,
-                    message="Container not found",
+                    message=f"Port {port} check failed: {error}",
                     response_time_ms=elapsed,
-                    details={"container": container_name},
+                    details={"server": server_ip, "port": port, "via": "node_agent", "error": error},
+                )
+                
+        except Exception as e:
+            elapsed = (time.time() - start) * 1000
+            return HealthCheckResult(
+                status=HealthStatus.UNHEALTHY,
+                message=f"Agent health check failed: {e}",
+                response_time_ms=elapsed,
+                details={"server": server_ip, "port": port, "error": str(e)},
+            )
+    
+    async def check_http_via_agent(
+        self,
+        server_ip: str,
+        port: int,
+        path: str = "/",
+        timeout: int = 10,
+        method: str = "GET",
+    ) -> HealthCheckResult:
+        """
+        HTTP health check via node agent API.
+        
+        Routes the check through the node agent, which makes the HTTP request
+        to localhost. This avoids direct connections to internal ports.
+        
+        Args:
+            server_ip: Server IP address
+            port: Port to check
+            path: HTTP path (default "/")
+            timeout: Timeout in seconds
+            method: HTTP method (default "GET")
+            
+        Returns:
+            HealthCheckResult
+        """
+        client = self._get_agent_client(server_ip)
+        if not client:
+            return HealthCheckResult(
+                status=HealthStatus.UNKNOWN,
+                message="No DO token configured for remote health checks",
+                details={"server": server_ip, "port": port, "path": path},
+            )
+        
+        start = time.time()
+        try:
+            result = await client.health_http(
+                port=port,
+                path=path,
+                timeout=timeout,
+                method=method,
+            )
+            elapsed = (time.time() - start) * 1000
+            
+            if result.success and result.data.get("status") == "healthy":
+                return HealthCheckResult(
+                    status=HealthStatus.HEALTHY,
+                    message=f"HTTP {method} {path} returned {result.data.get('status_code', 200)}",
+                    response_time_ms=result.data.get("response_time_ms", elapsed),
+                    details={
+                        "server": server_ip,
+                        "port": port,
+                        "path": path,
+                        "status_code": result.data.get("status_code"),
+                        "via": "node_agent",
+                    },
+                )
+            else:
+                error = result.data.get("error", result.error or "Unknown error")
+                status_code = result.data.get("status_code")
+                return HealthCheckResult(
+                    status=HealthStatus.UNHEALTHY,
+                    message=f"HTTP check failed: {error}" + (f" (status {status_code})" if status_code else ""),
+                    response_time_ms=elapsed,
+                    details={
+                        "server": server_ip,
+                        "port": port,
+                        "path": path,
+                        "status_code": status_code,
+                        "via": "node_agent",
+                        "error": error,
+                    },
+                )
+                
+        except Exception as e:
+            elapsed = (time.time() - start) * 1000
+            return HealthCheckResult(
+                status=HealthStatus.UNHEALTHY,
+                message=f"Agent health check failed: {e}",
+                response_time_ms=elapsed,
+                details={"server": server_ip, "port": port, "path": path, "error": str(e)},
+            )
+    
+    async def check_docker_via_agent(
+        self,
+        server_ip: str,
+        container_name: str,
+    ) -> HealthCheckResult:
+        """
+        Docker container health check via node agent API.
+        
+        Uses the node agent's inspect endpoint to check container status,
+        avoiding direct Docker API or SSH connections.
+        
+        Args:
+            server_ip: Server IP address
+            container_name: Container name
+            
+        Returns:
+            HealthCheckResult
+        """
+        client = self._get_agent_client(server_ip)
+        if not client:
+            return HealthCheckResult(
+                status=HealthStatus.UNKNOWN,
+                message="No DO token configured for remote health checks",
+                details={"server": server_ip, "container": container_name},
+            )
+        
+        start = time.time()
+        try:
+            result = await client.inspect(container_name)
+            elapsed = (time.time() - start) * 1000
+            
+            if not result.success:
+                return HealthCheckResult(
+                    status=HealthStatus.UNHEALTHY,
+                    message=f"Container not found or error: {result.error}",
+                    response_time_ms=elapsed,
+                    details={"server": server_ip, "container": container_name, "via": "node_agent"},
                 )
             
+            info = result.data
             state = info.get("State", {})
             running = state.get("Running", False)
             health = state.get("Health", {})
@@ -300,9 +471,11 @@ class HealthChecker:
                     message="Container not running",
                     response_time_ms=elapsed,
                     details={
+                        "server": server_ip,
                         "container": container_name,
                         "state": state.get("Status"),
                         "exit_code": state.get("ExitCode"),
+                        "via": "node_agent",
                     },
                 )
             
@@ -311,7 +484,12 @@ class HealthChecker:
                     status=HealthStatus.HEALTHY,
                     message="Container healthy",
                     response_time_ms=elapsed,
-                    details={"container": container_name, "health_status": health_status},
+                    details={
+                        "server": server_ip,
+                        "container": container_name,
+                        "health_status": health_status,
+                        "via": "node_agent",
+                    },
                 )
             elif health_status == "unhealthy":
                 return HealthCheckResult(
@@ -319,9 +497,11 @@ class HealthChecker:
                     message="Container unhealthy",
                     response_time_ms=elapsed,
                     details={
+                        "server": server_ip,
                         "container": container_name,
                         "health_status": health_status,
                         "failing_streak": health.get("FailingStreak"),
+                        "via": "node_agent",
                     },
                 )
             elif health_status == "starting":
@@ -329,25 +509,36 @@ class HealthChecker:
                     status=HealthStatus.DEGRADED,
                     message="Container starting",
                     response_time_ms=elapsed,
-                    details={"container": container_name, "health_status": health_status},
+                    details={
+                        "server": server_ip,
+                        "container": container_name,
+                        "health_status": health_status,
+                        "via": "node_agent",
+                    },
                 )
             else:
-                # No health check configured, but container is running
+                # No health check configured, but running
                 return HealthCheckResult(
                     status=HealthStatus.HEALTHY,
                     message="Container running (no health check)",
                     response_time_ms=elapsed,
-                    details={"container": container_name, "running": True},
+                    details={
+                        "server": server_ip,
+                        "container": container_name,
+                        "running": True,
+                        "via": "node_agent",
+                    },
                 )
                 
         except Exception as e:
             elapsed = (time.time() - start) * 1000
             return HealthCheckResult(
                 status=HealthStatus.UNKNOWN,
-                message=f"Check failed: {e}",
+                message=f"Agent check failed: {e}",
                 response_time_ms=elapsed,
-                details={"container": container_name, "error": str(e)},
+                details={"server": server_ip, "container": container_name, "error": str(e)},
             )
+    
     
     # =========================================================================
     # Service-Level Checks
@@ -385,8 +576,23 @@ class HealthChecker:
                     container_name,
                 )
             else:
-                # Default: check docker health
-                result = await self.check_docker_health(container_name, server)
+                # Default: check docker health via agent
+                is_remote = self._is_remote(server)
+                if is_remote and self.do_token:
+                    result = await self.check_docker_via_agent(server, container_name)
+                elif not is_remote:
+                    # Local check - try via agent on localhost
+                    result = await self.check_docker_via_agent("localhost", container_name) if self.do_token else HealthCheckResult(
+                        status=HealthStatus.UNKNOWN,
+                        message="No do_token configured for agent health checks",
+                        details={"container": container_name, "server": server},
+                    )
+                else:
+                    result = HealthCheckResult(
+                        status=HealthStatus.UNKNOWN,
+                        message="Remote health check requires do_token for agent authentication",
+                        details={"container": container_name, "server": server},
+                    )
             
             result.details["container"] = container_name
             result.details["server"] = server
@@ -420,22 +626,53 @@ class HealthChecker:
         port: Optional[int],
         container_name: str,
     ) -> HealthCheckResult:
-        """Run health check based on service config."""
+        """Run health check based on service config.
+        
+        For remote servers (not localhost), routes checks through node agent API
+        to avoid direct TCP connections to internal ports.
+        """
         check_type = config.type
         check_port = config.port or port
+        is_remote = self._is_remote(server)
         
         if check_type == "http":
-            host = server if server != "localhost" else "127.0.0.1"
-            url = f"http://{host}:{check_port}{config.path}"
-            return await self.check_http(url, timeout=config.timeout)
+            if is_remote and self.do_token:
+                # Route through node agent for remote servers
+                return await self.check_http_via_agent(
+                    server_ip=server,
+                    port=check_port,
+                    path=config.path,
+                    timeout=config.timeout,
+                )
+            else:
+                # Local check or no agent configured
+                host = server if server != "localhost" else "127.0.0.1"
+                url = f"http://{host}:{check_port}{config.path}"
+                return await self.check_http(url, timeout=config.timeout)
         
         elif check_type == "tcp":
-            host = server if server != "localhost" else "127.0.0.1"
-            return await self.check_tcp(host, check_port, timeout=config.timeout)
+            if is_remote and self.do_token:
+                # Route through node agent for remote servers
+                return await self.check_tcp_via_agent(
+                    server_ip=server,
+                    port=check_port,
+                    timeout=config.timeout,
+                )
+            else:
+                # Local check or no agent configured
+                host = server if server != "localhost" else "127.0.0.1"
+                return await self.check_tcp(host, check_port, timeout=config.timeout)
         
         elif check_type == "exec":
-            # Docker exec health check
-            return await self.check_docker_health(container_name, server)
+            # Docker exec/inspect health check - always via agent
+            if self.do_token:
+                return await self.check_docker_via_agent(server, container_name)
+            else:
+                return HealthCheckResult(
+                    status=HealthStatus.UNKNOWN,
+                    message="Docker exec check requires do_token for agent authentication",
+                    details={"container": container_name, "server": server},
+                )
         
         else:
             return HealthCheckResult(

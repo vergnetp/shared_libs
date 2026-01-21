@@ -12,7 +12,6 @@ from .generator import (
 
 from .local import (
     LocalDeployer,
-    RemoteDeployer,
     DeployConfig,
     DeployResult,
 )
@@ -88,7 +87,6 @@ __all__ = [
     "generate_dockerfile",
     # Deployers
     "LocalDeployer",
-    "RemoteDeployer",
     "DeployConfig",
     "DeployResult",
     # Multi-server deployment service

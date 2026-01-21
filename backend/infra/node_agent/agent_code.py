@@ -18,7 +18,7 @@ Multi-tenancy:
 """
 
 # Module-level version constant (importable)
-AGENT_VERSION = "1.9.9"
+AGENT_VERSION = "2.1.0"
 
 # The node agent Flask app code - embedded as a string for cloud-init
 NODE_AGENT_CODE = '''#!/usr/bin/env python3
@@ -27,7 +27,7 @@ Node Agent - SSH-Free Deployments for SaaS
 Runs on port 9999, protected by API key.
 """
 
-AGENT_VERSION = "1.9.9"  # Image tagging, cleanup for rollback
+AGENT_VERSION = "2.1.0"  # REQUIRE_AUTH_ALWAYS=true by default
 
 from flask import Flask, request, jsonify
 from functools import wraps
@@ -39,6 +39,10 @@ import base64
 import tarfile
 import io
 import shutil
+import socket
+import time
+import urllib.request
+import urllib.error
 
 app = Flask(__name__)
 
@@ -63,7 +67,7 @@ PRIVATE_NETWORKS = [
 
 # Security: Set to disable VPC auth bypass (require API key for ALL requests)
 # Use for high-security environments where even VPC traffic shouldn't be trusted
-REQUIRE_AUTH_ALWAYS = os.environ.get('NODE_AGENT_REQUIRE_AUTH_ALWAYS', '').lower() in ('1', 'true', 'yes')
+REQUIRE_AUTH_ALWAYS = os.environ.get('NODE_AGENT_REQUIRE_AUTH_ALWAYS', 'true').lower() in ('1', 'true', 'yes')
 
 # IP Allowlist: Only allow requests from these IPs (comma-separated)
 # If set, only these IPs can access the agent (even with valid API key)
@@ -433,6 +437,189 @@ def container_health(name):
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+
+# =============================================================================
+# Internal Health Checks (TCP/HTTP to localhost)
+# =============================================================================
+
+@app.route('/health/tcp', methods=['POST'])
+@require_api_key
+def health_check_tcp():
+    """
+    TCP health check to internal port.
+    
+    Request body:
+        {
+            "port": 6379,
+            "host": "localhost",  # optional, defaults to localhost
+            "timeout": 5          # optional, defaults to 5 seconds
+        }
+    
+    Response:
+        {
+            "status": "healthy" | "unhealthy",
+            "response_time_ms": 12.5,
+            "error": "..." (only if unhealthy)
+        }
+    """
+    try:
+        data = request.get_json() or {}
+        port = data.get('port')
+        host = data.get('host', 'localhost')
+        timeout = data.get('timeout', 5)
+        
+        if not port:
+            return jsonify({'error': 'port is required'}), 400
+        
+        if not isinstance(port, int) or port < 1 or port > 65535:
+            return jsonify({'error': 'port must be an integer between 1 and 65535'}), 400
+        
+        start_time = time.time()
+        
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(timeout)
+            result = sock.connect_ex((host, port))
+            sock.close()
+            
+            elapsed_ms = (time.time() - start_time) * 1000
+            
+            if result == 0:
+                return jsonify({
+                    'status': 'healthy',
+                    'response_time_ms': round(elapsed_ms, 2),
+                    'port': port,
+                    'host': host,
+                })
+            else:
+                return jsonify({
+                    'status': 'unhealthy',
+                    'response_time_ms': round(elapsed_ms, 2),
+                    'error': f'Connection refused (errno: {result})',
+                    'port': port,
+                    'host': host,
+                })
+                
+        except socket.timeout:
+            elapsed_ms = (time.time() - start_time) * 1000
+            return jsonify({
+                'status': 'unhealthy',
+                'response_time_ms': round(elapsed_ms, 2),
+                'error': f'Connection timed out after {timeout}s',
+                'port': port,
+                'host': host,
+            })
+        except socket.error as e:
+            elapsed_ms = (time.time() - start_time) * 1000
+            return jsonify({
+                'status': 'unhealthy',
+                'response_time_ms': round(elapsed_ms, 2),
+                'error': str(e),
+                'port': port,
+                'host': host,
+            })
+            
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/health/http', methods=['POST'])
+@require_api_key
+def health_check_http():
+    """
+    HTTP health check to internal port.
+    
+    Request body:
+        {
+            "port": 8000,
+            "path": "/health",    # optional, defaults to /
+            "host": "localhost",  # optional, defaults to localhost
+            "timeout": 5,         # optional, defaults to 5 seconds
+            "method": "GET"       # optional, defaults to GET
+        }
+    
+    Response:
+        {
+            "status": "healthy" | "unhealthy",
+            "status_code": 200,
+            "response_time_ms": 45.2,
+            "error": "..." (only if unhealthy)
+        }
+    """
+    try:
+        data = request.get_json() or {}
+        port = data.get('port')
+        path = data.get('path', '/')
+        host = data.get('host', 'localhost')
+        timeout = data.get('timeout', 5)
+        method = data.get('method', 'GET').upper()
+        
+        if not port:
+            return jsonify({'error': 'port is required'}), 400
+        
+        if not isinstance(port, int) or port < 1 or port > 65535:
+            return jsonify({'error': 'port must be an integer between 1 and 65535'}), 400
+        
+        # Ensure path starts with /
+        if not path.startswith('/'):
+            path = '/' + path
+        
+        url = f'http://{host}:{port}{path}'
+        start_time = time.time()
+        
+        try:
+            req = urllib.request.Request(url, method=method)
+            req.add_header('User-Agent', f'NodeAgent/{AGENT_VERSION}')
+            
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                status_code = resp.getcode()
+                elapsed_ms = (time.time() - start_time) * 1000
+                
+                # 2xx is healthy
+                if 200 <= status_code < 300:
+                    return jsonify({
+                        'status': 'healthy',
+                        'status_code': status_code,
+                        'response_time_ms': round(elapsed_ms, 2),
+                        'url': url,
+                    })
+                else:
+                    return jsonify({
+                        'status': 'unhealthy',
+                        'status_code': status_code,
+                        'response_time_ms': round(elapsed_ms, 2),
+                        'error': f'Non-2xx status code: {status_code}',
+                        'url': url,
+                    })
+                    
+        except urllib.error.HTTPError as e:
+            elapsed_ms = (time.time() - start_time) * 1000
+            return jsonify({
+                'status': 'unhealthy',
+                'status_code': e.code,
+                'response_time_ms': round(elapsed_ms, 2),
+                'error': f'HTTP {e.code}: {e.reason}',
+                'url': url,
+            })
+        except urllib.error.URLError as e:
+            elapsed_ms = (time.time() - start_time) * 1000
+            return jsonify({
+                'status': 'unhealthy',
+                'response_time_ms': round(elapsed_ms, 2),
+                'error': f'Connection failed: {e.reason}',
+                'url': url,
+            })
+        except socket.timeout:
+            elapsed_ms = (time.time() - start_time) * 1000
+            return jsonify({
+                'status': 'unhealthy',
+                'response_time_ms': round(elapsed_ms, 2),
+                'error': f'Request timed out after {timeout}s',
+                'url': url,
+            })
+            
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/containers/<n>/restart', methods=['POST'])

@@ -4,7 +4,7 @@ Infra - Multi-tenant Docker Deployment System
 A clean, context-driven deployment system for Docker containers.
 
 Quick Start:
-    from backend.infra import DeploymentContext, Deployer, Service
+    from backend.infra import DeploymentContext, DeployService
     
     ctx = DeploymentContext(
         user_id="workspace_123",
@@ -13,23 +13,23 @@ Quick Start:
         storage=storage_backend,
     )
     
-    deployer = Deployer(ctx)
-    result = deployer.deploy()
+    service = DeployService(do_token="...", cf_token="...")
+    result = await service.deploy(...)
 
 Components:
     - Context: DeploymentContext for all operations
     - Storage: FileStorageBackend, DatabaseStorageBackend
-    - Core: Deployer, Service, Result types
-    - Docker: DockerClient, ImageBuilder
-    - SSH: SSHClient for remote operations
-    - Cloud: DOClient, ServerManager (DigitalOcean)
-    - Networking: NginxConfigGenerator, SSLManager
+    - Core: Service definitions, Result types
+    - Cloud: DOClient, ServerManager (DigitalOcean), CloudflareClient
+    - Networking: NginxConfigGenerator (SSL via Cloudflare proxy)
     - Monitoring: HealthChecker, HealthAggregator
-    - Scheduling: Scheduler, BackupManager
+    - Scheduling: TaskScheduler with handlers
     - Node Agent: NodeAgentClient for SSH-free deployments (SaaS-ready)
+    
+All remote operations go through NodeAgentClient - no direct SSH/Docker connections.
 """
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 # Context
 from .context import DeploymentContext, Context
@@ -45,7 +45,6 @@ from .storage import (
 
 # Core
 from .core import (
-    Deployer,
     Service,
     ServiceType,
     ServicePort,
@@ -58,12 +57,6 @@ from .core import (
     BuildResult,
     Status,
 )
-
-# Docker
-from .docker import DockerClient, Container, ImageBuilder, BuildConfig
-
-# SSH
-from .ssh import SSHClient, SSHConfig
 
 # Cloud Providers (extended clients with infra-specific methods)
 from .providers import (
@@ -85,8 +78,6 @@ from .networking import (
     Upstream,
     Backend,
     LoadBalanceMethod,
-    SSLManager,
-    Certificate,
 )
 
 # Monitoring
@@ -100,15 +91,13 @@ from .monitoring import (
 
 # Scheduling
 from .scheduling import (
-    Scheduler,
-    CronJob,
+    TaskScheduler,
     ScheduledTask,
-    ScheduleFrequency,
-    BackupManager,
-    BackupConfig,
-    BackupResult,
-    BackupType,
-    StorageType,
+    TaskType,
+    TaskStatus,
+    get_scheduler,
+    register_all_handlers,
+    TASK_HANDLERS,
 )
 
 # Naming utilities
@@ -203,7 +192,6 @@ __all__ = [
     "DatabaseStorageBackend",
     
     # Core
-    "Deployer",
     "Service",
     "ServiceType",
     "ServicePort",
@@ -215,16 +203,6 @@ __all__ = [
     "ContainerResult",
     "BuildResult",
     "Status",
-    
-    # Docker
-    "DockerClient",
-    "Container",
-    "ImageBuilder",
-    "BuildConfig",
-    
-    # SSH
-    "SSHClient",
-    "SSHConfig",
     
     # Cloud Providers
     "DOClient",
@@ -253,8 +231,6 @@ __all__ = [
     "Upstream",
     "Backend",
     "LoadBalanceMethod",
-    "SSLManager",
-    "Certificate",
     
     # Monitoring
     "HealthChecker",
@@ -264,15 +240,13 @@ __all__ = [
     "HealthStatus",
     
     # Scheduling
-    "Scheduler",
-    "CronJob",
+    "TaskScheduler",
     "ScheduledTask",
-    "ScheduleFrequency",
-    "BackupManager",
-    "BackupConfig",
-    "BackupResult",
-    "BackupType",
-    "StorageType",
+    "TaskType",
+    "TaskStatus",
+    "get_scheduler",
+    "register_all_handlers",
+    "TASK_HANDLERS",
     
     # Naming
     "DONaming",

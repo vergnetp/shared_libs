@@ -1,11 +1,12 @@
-"""Docker operations."""
+"""Docker operations - placeholder module.
 
-from .client import DockerClient, Container
-from .builder import ImageBuilder, BuildConfig
+Docker operations are now handled through NodeAgentClient:
+- node_agent.client.NodeAgentClient.run_container()
+- node_agent.client.NodeAgentClient.stop_container()
+- node_agent.client.NodeAgentClient.container_logs()
+- etc.
 
-__all__ = [
-    "DockerClient",
-    "Container",
-    "ImageBuilder",
-    "BuildConfig",
-]
+This module is kept for potential future local docker utilities.
+"""
+
+__all__ = []

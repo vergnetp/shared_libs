@@ -32,7 +32,7 @@ class CloudInitConfig:
     node_agent_api_key: Optional[str] = None
     # Security options for node_agent
     node_agent_allowed_ips: Optional[List[str]] = None  # IP allowlist
-    node_agent_require_auth_always: bool = False  # Disable VPC auth bypass
+    node_agent_require_auth_always: bool = True  # Disable VPC auth bypass
 
 
 def build_cloudinit_script(
@@ -87,35 +87,42 @@ def build_cloudinit_script(
     ]
     
     # Firewall setup - restrict SSH to emergency admin IPs only
+    # Firewall setup - always configure for security
+    lines.extend([
+        "# Firewall setup - reset any existing rules",
+        "log '========================================='",
+        "log 'CONFIGURING FIREWALL'",
+        "log '========================================='",
+        "apt-get install -y ufw",
+        "# Reset firewall to clear any rules from snapshot",
+        "ufw --force reset",
+        "ufw default deny incoming",
+        "ufw default allow outgoing",
+        "# Allow node agent port from anywhere (API key protected)",
+        "ufw allow 9999/tcp comment 'Node Agent API'",
+        "# Allow HTTP/HTTPS for web traffic",
+        "ufw allow 80/tcp comment 'HTTP'",
+        "ufw allow 443/tcp comment 'HTTPS'",
+    ])
+    
+    # SSH access: only from admin IPs (NOT wide open)
     if EMERGENCY_ADMIN_IPS:
-        lines.extend([
-            "# Firewall setup - reset any existing rules from snapshot",
-            "log '========================================='",
-            "log 'CONFIGURING FIREWALL'",
-            "log '========================================='",
-            "apt-get install -y ufw",
-            "# Reset firewall to clear any rules from snapshot",
-            "ufw --force reset",
-            "ufw default deny incoming",
-            "ufw default allow outgoing",
-            "# Allow node agent port from anywhere",
-            "ufw allow 9999/tcp comment 'Node Agent API'",
-            "# Allow SSH from anywhere (password protected)",
-            "ufw allow 22/tcp comment 'SSH'",
-            "# Allow HTTP/HTTPS for web traffic",
-            "ufw allow 80/tcp comment 'HTTP'",
-            "ufw allow 443/tcp comment 'HTTPS'",
-        ])
-        # Add emergency admin IPs for extra logging/tracking (SSH already open)
+        lines.append("# SSH access restricted to admin IPs only")
         for ip in EMERGENCY_ADMIN_IPS:
-            lines.append(f"# Emergency admin IP noted: {ip}")
-            lines.append(f"log 'Admin IP registered: {ip}'")
-        lines.extend([
-            "ufw --force enable",
-            "log 'Firewall configured - SSH open, HTTP/HTTPS open'",
-            "",
-        ])
-        log(f"  🔒 Firewall: SSH open, HTTP/HTTPS open, Agent port 9999 open")
+            lines.append(f"ufw allow from {ip} to any port 22 comment 'Admin SSH: {ip}'")
+            lines.append(f"log 'SSH allowed from admin IP: {ip}'")
+        log(f"  🔒 Firewall: SSH restricted to {len(EMERGENCY_ADMIN_IPS)} admin IPs, HTTP/HTTPS open, Agent 9999 open")
+    else:
+        # No admin IPs = no SSH access at all (most secure)
+        lines.append("# SSH access disabled (no admin IPs configured)")
+        lines.append("log 'SSH access disabled - use node agent for all operations'")
+        log(f"  🔒 Firewall: SSH DISABLED, HTTP/HTTPS open, Agent 9999 open")
+    
+    lines.extend([
+        "ufw --force enable",
+        "log 'Firewall configured'",
+        "",
+    ])
     
     # Docker installation
     if config.install_docker:

@@ -53,11 +53,20 @@ class DeployJobConfig:
     Serializable deployment configuration for job queue.
     
     Flattened version of MultiDeployConfig for JSON serialization.
+    
+    deployment_type:
+        - "service": Standard deployment (HTTP service with domain)
+        - "worker": Background worker (no domain)
+        - "snapshot": Create snapshot from deploy (temp server, then snapshot)
     """
     # Required
     name: str
     workspace_id: str
     do_token: str
+    
+    # Deployment type
+    deployment_type: str = "service"  # service, worker, snapshot
+    snapshot_name: Optional[str] = None  # For snapshot type: name for the snapshot
     
     # Project context
     project: Optional[str] = None
@@ -714,6 +723,359 @@ async def stateful_deploy_with_streaming(config: DeployJobConfig):
 
 
 # =============================================================================
+# Snapshot Creation via Deploy
+# =============================================================================
+
+async def create_snapshot_with_streaming(config: DeployJobConfig):
+    """
+    Create a snapshot by deploying to a temp server, then snapshotting.
+    
+    Flow:
+    1. Provision temp droplet from base snapshot
+    2. Deploy using existing flow (image/git/code → local/base:latest)
+    3. Stop containers
+    4. Power off droplet
+    5. Create snapshot with config.snapshot_name
+    6. Delete temp droplet
+    7. Return snapshot info
+    
+    The resulting snapshot will have the deployed image pre-loaded as local/base:latest.
+    User's Dockerfiles can then use FROM local/base:latest for fast deploys.
+    
+    Usage:
+        config = DeployJobConfig(
+            name="mybase",
+            deployment_type="snapshot",
+            snapshot_name="python-ml-optimized",
+            source_type="image",
+            image="myregistry/ml-deps:latest",
+            ...
+        )
+        async for event in create_snapshot_with_streaming(config):
+            yield f"data: {json.dumps(event.to_dict())}\\n\\n"
+    """
+    from ..providers.digitalocean import DOClient
+    
+    start_time = time.time()
+    event_queue: asyncio.Queue = asyncio.Queue()
+    temp_droplet_id = None
+    
+    def emit(event_type: str, message: str = None, **data):
+        event = StreamEvent(type=event_type, message=message, data=data if data else None)
+        try:
+            event_queue.put_nowait(event)
+        except Exception:
+            pass
+    
+    def log_callback(msg: str):
+        emit("log", msg)
+    
+    snapshot_name = config.snapshot_name or f"{config.name}-snapshot"
+    
+    # Initial events
+    emit("log", f"🔨 Creating snapshot: {snapshot_name}")
+    emit("log", f"📦 Source: {config.source_type}")
+    emit("progress", percent=5)
+    
+    while not event_queue.empty():
+        yield await event_queue.get()
+    
+    try:
+        do_client = DOClient(config.do_token)
+        
+        # Step 1: Find base snapshot
+        emit("log", "🔍 Finding base snapshot...")
+        snapshots = do_client.list_snapshots()
+        base_snapshot = None
+        for snap in snapshots:
+            if snap.get("name", "").startswith("base-docker-"):
+                # Prefer same region
+                regions = snap.get("regions", [])
+                if config.region in regions:
+                    base_snapshot = snap
+                    break
+                elif base_snapshot is None:
+                    base_snapshot = snap
+        
+        if not base_snapshot:
+            raise ValueError("No base snapshot found. Create one first with 'Manage Snapshot' tab.")
+        
+        emit("log", f"✅ Using base snapshot: {base_snapshot['name']}")
+        emit("progress", percent=10)
+        while not event_queue.empty():
+            yield await event_queue.get()
+        
+        # Step 2: Provision temp droplet
+        emit("log", "🖥️ Provisioning temporary server...")
+        
+        # Ensure snapshot is in the target region
+        base_regions = base_snapshot.get("regions", [])
+        if config.region not in base_regions:
+            emit("log", f"📍 Transferring snapshot to {config.region}...")
+            from ..providers.snapshot_service import SnapshotService
+            snap_service = SnapshotService(config.do_token)
+            snap_service._transfer_snapshot(base_snapshot["id"], config.region)
+            emit("log", f"✅ Snapshot transferred to {config.region}")
+        
+        temp_name = f"snapshot-build-{int(time.time())}"
+        droplet = do_client.create_droplet(
+            name=temp_name,
+            region=config.region,
+            size=config.size or "s-2vcpu-4gb",  # Use larger size for builds
+            image=base_snapshot["id"],
+            tags=["snapshot-builder", "temporary"],
+            wait=True,
+            wait_timeout=300,
+        )
+        temp_droplet_id = droplet.id
+        server_ip = droplet.public_ip
+        
+        emit("log", f"✅ Server ready: {server_ip}")
+        emit("progress", percent=25)
+        while not event_queue.empty():
+            yield await event_queue.get()
+        
+        # Step 3: Wait for node agent
+        emit("log", "⏳ Waiting for node agent...")
+        from ..node_agent.client import NodeAgentClient
+        agent = NodeAgentClient(server_ip, config.do_token, droplet_id=temp_droplet_id)
+        
+        max_wait = 120
+        waited = 0
+        while waited < max_wait:
+            try:
+                status = await agent.ping()
+                if status.get("status") == "ok":
+                    break
+            except Exception:
+                pass
+            await asyncio.sleep(5)
+            waited += 5
+        
+        if waited >= max_wait:
+            raise TimeoutError("Node agent did not become ready in time")
+        
+        emit("log", "✅ Node agent ready")
+        emit("progress", percent=30)
+        while not event_queue.empty():
+            yield await event_queue.get()
+        
+        # Step 4: Deploy to temp server (reuse existing deploy logic)
+        emit("log", "🚀 Deploying to temporary server...")
+        
+        # Modify config for single server deploy
+        deploy_config = DeployJobConfig.from_dict(config.to_dict())
+        deploy_config.server_ips = [server_ip]
+        deploy_config.new_server_count = 0
+        deploy_config.setup_domain = False  # No domain for snapshot builds
+        deploy_config.setup_sidecar = False  # No sidecar needed
+        deploy_config.deployment_type = "service"  # Normal deploy
+        
+        service = DeploymentService(
+            do_token=config.do_token,
+            log=log_callback,
+        )
+        
+        # Create task and poll for events
+        deploy_task = asyncio.create_task(service.deploy(deploy_config.to_multi_config()))
+        
+        while not deploy_task.done():
+            while not event_queue.empty():
+                yield await event_queue.get()
+            await asyncio.sleep(0.1)
+        
+        result = await deploy_task
+        
+        while not event_queue.empty():
+            yield await event_queue.get()
+        
+        if not result.success:
+            raise RuntimeError(f"Deploy failed: {result.error}")
+        
+        emit("log", "✅ Deploy complete")
+        emit("progress", percent=60)
+        while not event_queue.empty():
+            yield await event_queue.get()
+        
+        # Step 5: Tag the deployed image as local/base:latest
+        emit("log", "🏷️ Tagging image as local/base:latest...")
+        
+        # Find the container that was deployed
+        containers = await agent.list_containers()
+        deployed_container = None
+        for c in containers:
+            if config.name in c.get("name", ""):
+                deployed_container = c
+                break
+        
+        if deployed_container:
+            image_name = deployed_container.get("image", "")
+            if image_name and image_name != "local/base:latest":
+                # Tag the image
+                await agent.tag_image(image_name, "local/base:latest")
+                emit("log", f"✅ Tagged {image_name} → local/base:latest")
+        
+        emit("progress", percent=65)
+        while not event_queue.empty():
+            yield await event_queue.get()
+        
+        # Step 6: Stop all containers
+        emit("log", "⏹️ Stopping containers...")
+        for c in containers:
+            container_id = c.get("id")
+            if container_id:
+                try:
+                    await agent.stop_container(container_id)
+                except Exception:
+                    pass  # Ignore errors stopping containers
+        
+        emit("log", "✅ Containers stopped")
+        emit("progress", percent=70)
+        while not event_queue.empty():
+            yield await event_queue.get()
+        
+        # Step 7: Power off droplet
+        emit("log", "🔌 Powering off server...")
+        do_client.power_off_droplet(temp_droplet_id)
+        
+        # Wait for power off
+        max_wait = 60
+        waited = 0
+        while waited < max_wait:
+            droplet_status = do_client.get_droplet(temp_droplet_id)
+            if droplet_status and droplet_status.status == "off":
+                break
+            await asyncio.sleep(5)
+            waited += 5
+        
+        emit("log", "✅ Server powered off")
+        emit("progress", percent=80)
+        while not event_queue.empty():
+            yield await event_queue.get()
+        
+        # Step 8: Create snapshot
+        emit("log", f"📸 Creating snapshot: {snapshot_name}...")
+        snapshot_result = do_client.create_snapshot_from_droplet(
+            droplet_id=temp_droplet_id,
+            name=snapshot_name,
+            wait=True,
+            wait_timeout=600,
+        )
+        
+        snapshot_id = snapshot_result.get("id")
+        emit("log", f"✅ Snapshot created: {snapshot_id}")
+        emit("progress", percent=95)
+        while not event_queue.empty():
+            yield await event_queue.get()
+        
+        # Step 9: Delete temp droplet
+        emit("log", "🗑️ Cleaning up temporary server...")
+        do_client.delete_droplet(temp_droplet_id, force=True)
+        temp_droplet_id = None  # Mark as deleted
+        
+        emit("log", "✅ Cleanup complete")
+        emit("progress", percent=100)
+        
+        duration = time.time() - start_time
+        
+        while not event_queue.empty():
+            yield await event_queue.get()
+        
+        yield StreamEvent(
+            type="done",
+            message="Snapshot created successfully",
+            data={
+                "success": True,
+                "snapshot_id": snapshot_id,
+                "snapshot_name": snapshot_name,
+                "duration_seconds": duration,
+                "base_image": "local/base:latest",
+            },
+        )
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        duration = time.time() - start_time
+        
+        # Cleanup on error
+        if temp_droplet_id:
+            try:
+                emit("log", "🗑️ Cleaning up after error...")
+                do_client = DOClient(config.do_token)
+                do_client.delete_droplet(temp_droplet_id, force=True)
+                emit("log", "✅ Temp server deleted")
+            except Exception:
+                emit("log", "⚠️ Failed to delete temp server - manual cleanup may be needed")
+        
+        while not event_queue.empty():
+            yield await event_queue.get()
+        
+        yield StreamEvent(
+            type="done",
+            message=f"Snapshot creation failed: {e}",
+            data={
+                "success": False,
+                "error": str(e),
+                "duration_seconds": duration,
+            },
+        )
+
+
+# Task for job queue
+def create_snapshot_task(entity: Dict[str, Any]) -> Dict[str, Any]:
+    """Create snapshot task for job_queue workers."""
+    from shared_libs.backend.streaming import StreamContext
+    
+    start_time = time.time()
+    ctx = StreamContext.from_dict(entity.get("stream_ctx", {}))
+    config = DeployJobConfig.from_dict(entity.get("config", {}))
+    
+    ctx.log(f"🔨 Starting snapshot creation: {config.snapshot_name or config.name}")
+    
+    try:
+        # Run the async generator synchronously
+        async def run():
+            result = {"success": False, "error": "No result"}
+            async for event in create_snapshot_with_streaming(config):
+                if event.message:
+                    ctx.log(event.message)
+                if event.type == "progress" and event.data:
+                    ctx.progress(event.data.get("percent", 0))
+                if event.type == "done":
+                    result = event.data or {}
+            return result
+        
+        result = _run_async(run())
+        duration = time.time() - start_time
+        
+        if result.get("success"):
+            ctx.complete(
+                success=True,
+                snapshot_id=result.get("snapshot_id"),
+                snapshot_name=result.get("snapshot_name"),
+                duration_seconds=duration,
+            )
+        else:
+            ctx.complete(
+                success=False,
+                error=result.get("error"),
+                duration_seconds=duration,
+            )
+        
+        return result
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        duration = time.time() - start_time
+        error_msg = str(e)
+        ctx.log(f"❌ Snapshot creation error: {error_msg}")
+        ctx.complete(success=False, error=error_msg, duration_seconds=duration)
+        return {"success": False, "error": error_msg}
+
+
+# =============================================================================
 # Task Registry (kept for backward compatibility with workers)
 # =============================================================================
 
@@ -721,4 +1083,5 @@ DEPLOY_TASKS = {
     "deploy": deploy_task,
     "rollback": rollback_task,
     "stateful_deploy": stateful_deploy_task,
+    "create_snapshot": create_snapshot_task,
 }

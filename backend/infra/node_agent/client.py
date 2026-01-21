@@ -158,6 +158,71 @@ class NodeAgentClient:
         """Health check a specific container."""
         return await self._request("GET", f"/containers/{name}/health")
     
+    async def health_tcp(
+        self, 
+        port: int, 
+        host: str = "localhost", 
+        timeout: int = 5
+    ) -> AgentResponse:
+        """
+        TCP health check to an internal port on the droplet.
+        
+        This is used to check if services like Redis, PostgreSQL, etc. are
+        accepting connections WITHOUT exposing their ports to the internet.
+        
+        Args:
+            port: Port to check (e.g., 6379 for Redis, 5432 for PostgreSQL)
+            host: Host to connect to (default: localhost)
+            timeout: Connection timeout in seconds (default: 5)
+        
+        Returns:
+            AgentResponse with:
+                - data['status']: 'healthy' or 'unhealthy'
+                - data['response_time_ms']: Connection time in ms
+                - data['error']: Error message if unhealthy
+        """
+        return await self._request("POST", "/health/tcp", {
+            "port": port,
+            "host": host,
+            "timeout": timeout,
+        })
+    
+    async def health_http(
+        self, 
+        port: int, 
+        path: str = "/",
+        host: str = "localhost", 
+        timeout: int = 5,
+        method: str = "GET",
+    ) -> AgentResponse:
+        """
+        HTTP health check to an internal port on the droplet.
+        
+        This is used to check application health endpoints WITHOUT exposing
+        their ports to the internet.
+        
+        Args:
+            port: Port to check (e.g., 8000 for Python apps)
+            path: HTTP path to check (default: /)
+            host: Host to connect to (default: localhost)
+            timeout: Request timeout in seconds (default: 5)
+            method: HTTP method (default: GET)
+        
+        Returns:
+            AgentResponse with:
+                - data['status']: 'healthy' or 'unhealthy'
+                - data['status_code']: HTTP status code
+                - data['response_time_ms']: Request time in ms
+                - data['error']: Error message if unhealthy
+        """
+        return await self._request("POST", "/health/http", {
+            "port": port,
+            "path": path,
+            "host": host,
+            "timeout": timeout,
+            "method": method,
+        })
+    
     async def restart_container(self, name: str) -> AgentResponse:
         """Restart a container."""
         return await self._request("POST", f"/containers/{name}/restart")
