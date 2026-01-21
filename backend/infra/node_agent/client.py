@@ -357,9 +357,25 @@ class NodeAgentClient:
         """Get full container inspection data (for recreating with same config)."""
         return await self._request("GET", f"/containers/{name}/inspect")
     
-    async def container_logs(self, name: str, lines: int = 100) -> AgentResponse:
-        """Get container logs."""
-        return await self._request("GET", f"/containers/{name}/logs?lines={lines}")
+    async def container_logs(
+        self, 
+        name: str, 
+        lines: int = 100,
+        since: Optional[str] = None,
+    ) -> AgentResponse:
+        """
+        Get container logs.
+        
+        Args:
+            name: Container name
+            lines: Number of lines to fetch (tail)
+            since: ISO timestamp or duration (e.g., "2024-01-01T00:00:00Z" or "5m")
+                   If provided, only logs since this time are returned.
+        """
+        url = f"/containers/{name}/logs?lines={lines}"
+        if since:
+            url += f"&since={since}"
+        return await self._request("GET", url)
     
     async def get_service_logs(
         self,

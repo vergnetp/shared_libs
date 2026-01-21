@@ -6,16 +6,19 @@ Supports:
 - TCP port checks  
 - Docker health status
 - Custom exec checks
+- Log-based error detection
+- Scheduled task validation
 """
 
 from __future__ import annotations
 import asyncio
+import re
 import socket
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Dict, Any, List, Optional, Callable
+from typing import TYPE_CHECKING, Dict, Any, List, Optional, Callable, Tuple
 from enum import Enum
-from datetime import datetime
+from datetime import datetime, timezone
 
 # urllib is used directly for internal health checks (not http_client) because:
 # - Health checks should fail fast (no retry/backoff)
@@ -33,6 +36,35 @@ if TYPE_CHECKING:
 from ..node_agent.client import NodeAgentClient
 
 
+# =============================================================================
+# Error Detection Patterns
+# =============================================================================
+
+# Patterns that indicate errors in logs
+ERROR_PATTERNS = [
+    r"Traceback \(most recent call last\)",  # Python exceptions
+    r"^ERROR[:\s]",                           # ERROR: or ERROR 
+    r"\bERROR\b.*:",                          # ERROR in context
+    r"^FATAL[:\s]",                           # FATAL: or FATAL
+    r"\bFATAL\b.*:",                          # FATAL in context  
+    r"^CRITICAL[:\s]",                        # CRITICAL: or CRITICAL
+    r"\bCRITICAL\b.*:",                       # CRITICAL in context
+    r"panic:",                                # Go panics
+    r"SIGKILL",                               # Process killed
+    r"OOMKilled",                             # Out of memory
+    r"Killed",                                # Process terminated
+    r"Segmentation fault",                    # Segfault
+    r"core dumped",                           # Core dump
+    r"Exception:",                            # Generic exception
+    r"failed to start",                       # Startup failure
+    r"connection refused",                    # Network issue
+    r"permission denied",                     # Permission issue
+]
+
+# Compiled patterns for performance
+_ERROR_REGEX = re.compile("|".join(ERROR_PATTERNS), re.IGNORECASE | re.MULTILINE)
+
+
 class HealthStatus(Enum):
     """Health check status."""
     HEALTHY = "healthy"
@@ -47,12 +79,17 @@ class HealthCheckResult:
     status: HealthStatus
     message: str = ""
     response_time_ms: Optional[float] = None
-    checked_at: datetime = field(default_factory=datetime.utcnow)
+    checked_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     details: Dict[str, Any] = field(default_factory=dict)
+    error_lines: List[str] = field(default_factory=list)  # Log lines with errors
     
     @property
     def is_healthy(self) -> bool:
         return self.status == HealthStatus.HEALTHY
+    
+    @property 
+    def is_degraded(self) -> bool:
+        return self.status == HealthStatus.DEGRADED
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -61,6 +98,7 @@ class HealthCheckResult:
             "response_time_ms": self.response_time_ms,
             "checked_at": self.checked_at.isoformat(),
             "details": self.details,
+            "error_lines": self.error_lines[:10] if self.error_lines else [],  # Limit to 10
         }
 
 
@@ -539,47 +577,490 @@ class HealthChecker:
                 details={"server": server_ip, "container": container_name, "error": str(e)},
             )
     
+    # =========================================================================
+    # Log-Based Error Detection
+    # =========================================================================
+    
+    async def check_logs_for_errors(
+        self,
+        server_ip: str,
+        container_name: str,
+        since: Optional[str] = "5m",
+        lines: int = 200,
+    ) -> Tuple[bool, List[str]]:
+        """
+        Scan container logs for error patterns.
+        
+        Args:
+            server_ip: Server IP address
+            container_name: Container name
+            since: Time window ("5m", "1h", or ISO timestamp)
+            lines: Maximum lines to scan
+            
+        Returns:
+            Tuple of (has_errors: bool, error_lines: List[str])
+        """
+        client = self._get_agent_client(server_ip)
+        if not client:
+            return False, []  # Can't check without agent
+        
+        try:
+            result = await client.container_logs(container_name, lines=lines, since=since)
+            
+            if not result.success:
+                return False, []  # No logs or container not found
+            
+            logs = result.data.get("logs", "") if result.data else ""
+            if not logs:
+                return False, []
+            
+            # Find error lines
+            error_lines = []
+            for line in logs.split("\n"):
+                if _ERROR_REGEX.search(line):
+                    # Truncate long lines
+                    error_lines.append(line[:500] if len(line) > 500 else line)
+                    if len(error_lines) >= 20:  # Cap at 20 error lines
+                        break
+            
+            return len(error_lines) > 0, error_lines
+            
+        except Exception:
+            return False, []  # Don't fail health check on log errors
+    
+    async def check_scheduled_task(
+        self,
+        server_ip: str,
+        container_name: str,
+        schedule: str,
+    ) -> HealthCheckResult:
+        """
+        Check health of a scheduled (cron) task.
+        
+        For scheduled tasks, we check:
+        1. Container exists
+        2. Last run exit code was 0
+        3. Last run finished recently (within expected interval + buffer)
+        4. No errors in recent logs
+        
+        Args:
+            server_ip: Server IP address
+            container_name: Container name
+            schedule: Cron schedule string (e.g., "0 * * * *" for hourly)
+            
+        Returns:
+            HealthCheckResult
+        """
+        client = self._get_agent_client(server_ip)
+        if not client:
+            return HealthCheckResult(
+                status=HealthStatus.UNKNOWN,
+                message="No DO token configured for scheduled task checks",
+                details={"server": server_ip, "container": container_name},
+            )
+        
+        start = time.time()
+        try:
+            result = await client.check_container_health(container_name)
+            elapsed = (time.time() - start) * 1000
+            
+            if not result.success:
+                return HealthCheckResult(
+                    status=HealthStatus.UNHEALTHY,
+                    message=f"Container not found: {result.error}",
+                    response_time_ms=elapsed,
+                    details={"server": server_ip, "container": container_name},
+                )
+            
+            data = result.data or {}
+            running = data.get("running", False)
+            exit_code = data.get("exit_code")
+            finished_at = data.get("finished_at", "")
+            oom_killed = data.get("oom_killed", False)
+            status = data.get("status", "unknown")
+            
+            details = {
+                "server": server_ip,
+                "container": container_name,
+                "schedule": schedule,
+                "exit_code": exit_code,
+                "finished_at": finished_at,
+                "oom_killed": oom_killed,
+                "status": status,
+                "via": "node_agent",
+            }
+            
+            # Check for OOM kill
+            if oom_killed:
+                return HealthCheckResult(
+                    status=HealthStatus.UNHEALTHY,
+                    message="Task was killed due to out of memory",
+                    response_time_ms=elapsed,
+                    details=details,
+                )
+            
+            # If currently running, that's healthy
+            if running:
+                return HealthCheckResult(
+                    status=HealthStatus.HEALTHY,
+                    message="Scheduled task currently running",
+                    response_time_ms=elapsed,
+                    details=details,
+                )
+            
+            # Check exit code of last run
+            if exit_code is not None and exit_code != 0:
+                return HealthCheckResult(
+                    status=HealthStatus.UNHEALTHY,
+                    message=f"Last run failed with exit code {exit_code}",
+                    response_time_ms=elapsed,
+                    details=details,
+                )
+            
+            # Check if finished recently (parse cron to estimate expected interval)
+            expected_interval = self._parse_cron_interval(schedule)
+            if finished_at and expected_interval:
+                try:
+                    # Parse finished_at (Docker format: 2024-01-15T10:30:00.123456Z)
+                    finished_dt = datetime.fromisoformat(
+                        finished_at.replace("Z", "+00:00").split(".")[0] + "+00:00"
+                    )
+                    now = datetime.now(timezone.utc)
+                    age_seconds = (now - finished_dt).total_seconds()
+                    
+                    # Allow 2x interval + 5 min buffer
+                    max_age = (expected_interval * 2) + 300
+                    details["last_run_age_seconds"] = int(age_seconds)
+                    details["expected_interval_seconds"] = expected_interval
+                    
+                    if age_seconds > max_age:
+                        return HealthCheckResult(
+                            status=HealthStatus.UNHEALTHY,
+                            message=f"Scheduled task hasn't run in {int(age_seconds/60)} minutes",
+                            response_time_ms=elapsed,
+                            details=details,
+                        )
+                except (ValueError, TypeError):
+                    pass  # Can't parse timestamp, skip age check
+            
+            # Check for errors in recent logs
+            has_errors, error_lines = await self.check_logs_for_errors(
+                server_ip, container_name, since="1h"
+            )
+            
+            if has_errors:
+                return HealthCheckResult(
+                    status=HealthStatus.DEGRADED,
+                    message="Last run succeeded but errors found in logs",
+                    response_time_ms=elapsed,
+                    details=details,
+                    error_lines=error_lines,
+                )
+            
+            # All checks passed
+            return HealthCheckResult(
+                status=HealthStatus.HEALTHY,
+                message="Scheduled task healthy",
+                response_time_ms=elapsed,
+                details=details,
+            )
+            
+        except Exception as e:
+            elapsed = (time.time() - start) * 1000
+            return HealthCheckResult(
+                status=HealthStatus.UNKNOWN,
+                message=f"Failed to check scheduled task: {e}",
+                response_time_ms=elapsed,
+                details={"server": server_ip, "container": container_name, "error": str(e)},
+            )
+    
+    def _parse_cron_interval(self, schedule: str) -> Optional[int]:
+        """
+        Parse cron schedule and return expected interval in seconds.
+        
+        Supports standard cron format: minute hour day month weekday
+        Examples:
+            "* * * * *" -> 60 (every minute)
+            "0 * * * *" -> 3600 (every hour)
+            "0 0 * * *" -> 86400 (every day)
+            "*/5 * * * *" -> 300 (every 5 minutes)
+            
+        Returns None if can't parse.
+        """
+        try:
+            parts = schedule.strip().split()
+            if len(parts) != 5:
+                return None
+            
+            minute, hour, day, month, weekday = parts
+            
+            # Every minute
+            if minute == "*":
+                return 60
+            
+            # Every N minutes
+            if minute.startswith("*/"):
+                n = int(minute[2:])
+                return n * 60
+            
+            # Specific minute(s), check hour
+            if hour == "*":
+                return 3600  # Every hour
+            
+            if hour.startswith("*/"):
+                n = int(hour[2:])
+                return n * 3600
+            
+            # Specific hour, check day
+            if day == "*":
+                return 86400  # Every day
+            
+            # Weekly or monthly - just estimate as daily
+            return 86400
+            
+        except Exception:
+            return None
+    
+    async def check_worker_health(
+        self,
+        server_ip: str,
+        container_name: str,
+        check_logs: bool = True,
+    ) -> HealthCheckResult:
+        """
+        Check health of a worker service (no HTTP port).
+        
+        For workers, we check:
+        1. Container is running
+        2. No OOM kill
+        3. No errors in recent logs (if check_logs=True)
+        
+        Args:
+            server_ip: Server IP address
+            container_name: Container name
+            check_logs: Whether to scan logs for errors
+            
+        Returns:
+            HealthCheckResult
+        """
+        client = self._get_agent_client(server_ip)
+        if not client:
+            return HealthCheckResult(
+                status=HealthStatus.UNKNOWN,
+                message="No DO token configured for worker health checks",
+                details={"server": server_ip, "container": container_name},
+            )
+        
+        start = time.time()
+        try:
+            result = await client.check_container_health(container_name)
+            elapsed = (time.time() - start) * 1000
+            
+            if not result.success:
+                return HealthCheckResult(
+                    status=HealthStatus.UNHEALTHY,
+                    message=f"Container not found: {result.error}",
+                    response_time_ms=elapsed,
+                    details={"server": server_ip, "container": container_name},
+                )
+            
+            data = result.data or {}
+            running = data.get("running", False)
+            health_status = data.get("health", "none")
+            oom_killed = data.get("oom_killed", False)
+            restart_count = data.get("restart_count", 0)
+            
+            details = {
+                "server": server_ip,
+                "container": container_name,
+                "running": running,
+                "health": health_status,
+                "oom_killed": oom_killed,
+                "restart_count": restart_count,
+                "via": "node_agent",
+            }
+            
+            # Not running = unhealthy
+            if not running:
+                return HealthCheckResult(
+                    status=HealthStatus.UNHEALTHY,
+                    message="Worker not running",
+                    response_time_ms=elapsed,
+                    details=details,
+                )
+            
+            # OOM killed = unhealthy
+            if oom_killed:
+                return HealthCheckResult(
+                    status=HealthStatus.UNHEALTHY,
+                    message="Worker was killed due to out of memory",
+                    response_time_ms=elapsed,
+                    details=details,
+                )
+            
+            # Docker health check says unhealthy
+            if health_status == "unhealthy":
+                return HealthCheckResult(
+                    status=HealthStatus.UNHEALTHY,
+                    message="Docker health check reports unhealthy",
+                    response_time_ms=elapsed,
+                    details=details,
+                )
+            
+            # Check logs for errors (degrades to DEGRADED, not UNHEALTHY)
+            error_lines = []
+            if check_logs:
+                has_errors, error_lines = await self.check_logs_for_errors(
+                    server_ip, container_name, since="5m"
+                )
+                
+                if has_errors:
+                    return HealthCheckResult(
+                        status=HealthStatus.DEGRADED,
+                        message="Worker running but errors found in logs",
+                        response_time_ms=elapsed,
+                        details=details,
+                        error_lines=error_lines,
+                    )
+            
+            # High restart count = degraded
+            if restart_count > 5:
+                return HealthCheckResult(
+                    status=HealthStatus.DEGRADED,
+                    message=f"Worker has restarted {restart_count} times",
+                    response_time_ms=elapsed,
+                    details=details,
+                )
+            
+            # All good
+            return HealthCheckResult(
+                status=HealthStatus.HEALTHY,
+                message="Worker healthy",
+                response_time_ms=elapsed,
+                details=details,
+            )
+            
+        except Exception as e:
+            elapsed = (time.time() - start) * 1000
+            return HealthCheckResult(
+                status=HealthStatus.UNKNOWN,
+                message=f"Failed to check worker health: {e}",
+                response_time_ms=elapsed,
+                details={"server": server_ip, "container": container_name, "error": str(e)},
+            )
     
     # =========================================================================
     # Service-Level Checks
     # =========================================================================
     
+    def _detect_service_type(self, service: 'Service') -> str:
+        """
+        Detect service type for health check routing.
+        
+        Returns:
+            "scheduled" - Has cron schedule
+            "worker" - No ports exposed
+            "api" - Has ports (HTTP service)
+        """
+        if service.schedule:
+            return "scheduled"
+        elif not service.ports:
+            return "worker"
+        else:
+            return "api"
+    
     async def check_service(
         self,
         service: 'Service',
         containers: List[Dict[str, Any]],
+        check_logs: bool = True,
     ) -> ServiceHealth:
         """
         Check health of a service across all containers.
         
+        Automatically detects service type and routes to appropriate check:
+        - Scheduled tasks: Validate cron execution
+        - Workers (no port): Check running + logs
+        - APIs (with port): HTTP/TCP + log errors
+        
         Args:
             service: Service definition
             containers: List of container info dicts with 'name', 'server', 'port'
+            check_logs: Whether to scan logs for errors (default True)
             
         Returns:
             ServiceHealth
         """
         checks = []
         healthy_count = 0
+        degraded_count = 0
+        
+        service_type = self._detect_service_type(service)
         
         for container in containers:
             container_name = container.get("name")
             server = container.get("server", "localhost")
             port = container.get("port")
             
-            # Determine check type from service config
-            if service.health_check:
+            # Route to appropriate health check based on service type
+            if service_type == "scheduled":
+                # Scheduled task: check cron execution
+                result = await self.check_scheduled_task(
+                    server_ip=server,
+                    container_name=container_name,
+                    schedule=service.schedule,
+                )
+            elif service_type == "worker":
+                # Worker without port: check running + logs
+                result = await self.check_worker_health(
+                    server_ip=server,
+                    container_name=container_name,
+                    check_logs=check_logs,
+                )
+            elif service.health_check:
+                # API with custom health check config
                 result = await self._run_service_health_check(
                     service.health_check,
                     server,
                     port,
                     container_name,
                 )
+                # Add log checking for degraded detection
+                if result.is_healthy and check_logs and self.do_token:
+                    has_errors, error_lines = await self.check_logs_for_errors(
+                        server, container_name, since="5m"
+                    )
+                    if has_errors:
+                        result = HealthCheckResult(
+                            status=HealthStatus.DEGRADED,
+                            message=f"{result.message} (errors in logs)",
+                            response_time_ms=result.response_time_ms,
+                            details=result.details,
+                            error_lines=error_lines,
+                        )
             else:
-                # Default: check docker health via agent
+                # Default API check: TCP/Docker + logs
                 is_remote = self._is_remote(server)
                 if is_remote and self.do_token:
-                    result = await self.check_docker_via_agent(server, container_name)
+                    # Try TCP check on first port if available
+                    if port:
+                        result = await self.check_tcp_via_agent(server, port)
+                    else:
+                        result = await self.check_docker_via_agent(server, container_name)
+                    
+                    # Add log checking for degraded detection
+                    if result.is_healthy and check_logs:
+                        has_errors, error_lines = await self.check_logs_for_errors(
+                            server, container_name, since="5m"
+                        )
+                        if has_errors:
+                            result = HealthCheckResult(
+                                status=HealthStatus.DEGRADED,
+                                message=f"{result.message} (errors in logs)",
+                                response_time_ms=result.response_time_ms,
+                                details=result.details,
+                                error_lines=error_lines,
+                            )
                 elif not is_remote:
                     # Local check - try via agent on localhost
                     result = await self.check_docker_via_agent("localhost", container_name) if self.do_token else HealthCheckResult(
@@ -596,18 +1077,28 @@ class HealthChecker:
             
             result.details["container"] = container_name
             result.details["server"] = server
+            result.details["service_type"] = service_type
             checks.append(result)
             
             if result.is_healthy:
                 healthy_count += 1
+            elif result.is_degraded:
+                degraded_count += 1
         
         # Determine overall status
         total = len(containers)
         if healthy_count == total:
             status = HealthStatus.HEALTHY
+        elif healthy_count + degraded_count == total and healthy_count > 0:
+            # Some healthy, some degraded = overall degraded
+            status = HealthStatus.DEGRADED
+        elif healthy_count == 0 and degraded_count > 0:
+            # All degraded = degraded (not unhealthy)
+            status = HealthStatus.DEGRADED
         elif healthy_count == 0:
             status = HealthStatus.UNHEALTHY
         else:
+            # Mix of healthy/unhealthy = degraded
             status = HealthStatus.DEGRADED
         
         return ServiceHealth(
@@ -732,6 +1223,90 @@ class HealthChecker:
                     self.ctx.log_error(f"Health check failed for {name}: {e}")
             
             await asyncio.sleep(interval)
+    
+    # =========================================================================
+    # Sync Wrappers (for scripts/CLI)
+    # =========================================================================
+    
+    def check_logs_for_errors_sync(
+        self,
+        server_ip: str,
+        container_name: str,
+        since: str = "5m",
+        lines: int = 200,
+    ) -> Tuple[bool, List[str]]:
+        """
+        Sync version of check_logs_for_errors.
+        
+        Returns:
+            Tuple of (has_errors, error_lines)
+        """
+        return asyncio.run(
+            self.check_logs_for_errors(server_ip, container_name, since, lines)
+        )
+    
+    def check_scheduled_task_sync(
+        self,
+        server_ip: str,
+        container_name: str,
+        schedule: str,
+    ) -> HealthCheckResult:
+        """
+        Sync version of check_scheduled_task.
+        
+        Args:
+            server_ip: Server IP address
+            container_name: Container name
+            schedule: Cron schedule string (e.g., "0 * * * *")
+            
+        Returns:
+            HealthCheckResult
+        """
+        return asyncio.run(
+            self.check_scheduled_task(server_ip, container_name, schedule)
+        )
+    
+    def check_worker_health_sync(
+        self,
+        server_ip: str,
+        container_name: str,
+        check_logs: bool = True,
+    ) -> HealthCheckResult:
+        """
+        Sync version of check_worker_health.
+        
+        Args:
+            server_ip: Server IP address
+            container_name: Container name
+            check_logs: Whether to check logs for errors
+            
+        Returns:
+            HealthCheckResult
+        """
+        return asyncio.run(
+            self.check_worker_health(server_ip, container_name, check_logs)
+        )
+    
+    def check_service_sync(
+        self,
+        service: 'Service',
+        containers: List[Dict[str, Any]],
+        check_logs: bool = True,
+    ) -> 'ServiceHealth':
+        """
+        Sync version of check_service.
+        
+        Args:
+            service: Service configuration
+            containers: List of container info dicts with 'server_ip' and 'name'
+            check_logs: Whether to check logs for errors
+            
+        Returns:
+            ServiceHealth with aggregated status
+        """
+        return asyncio.run(
+            self.check_service(service, containers, check_logs)
+        )
 
 
 class HealthAggregator:

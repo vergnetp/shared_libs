@@ -18,7 +18,7 @@ Multi-tenancy:
 """
 
 # Module-level version constant (importable)
-AGENT_VERSION = "2.1.0"
+AGENT_VERSION = "2.2.0"
 
 # The node agent Flask app code - embedded as a string for cloud-init
 NODE_AGENT_CODE = '''#!/usr/bin/env python3
@@ -27,7 +27,7 @@ Node Agent - SSH-Free Deployments for SaaS
 Runs on port 9999, protected by API key.
 """
 
-AGENT_VERSION = "2.1.0"  # REQUIRE_AUTH_ALWAYS=true by default
+AGENT_VERSION = "2.2.0"  # REQUIRE_AUTH_ALWAYS=true by default
 
 from flask import Flask, request, jsonify
 from functools import wraps
@@ -415,24 +415,34 @@ def health_check_containers():
 @app.route('/containers/<n>/health', methods=['GET'])
 @require_api_key
 def container_health(name):
-    """Health check a specific container"""
+    """Health check a specific container with full state info"""
     try:
         result = run_cmd(['docker', 'inspect', '--format', 
-            '{{.State.Running}} {{.State.Health.Status}} {{.State.StartedAt}}', name])
+            '{{.State.Running}}|{{.State.Health.Status}}|{{.State.StartedAt}}|{{.State.FinishedAt}}|{{.State.ExitCode}}|{{.State.Status}}|{{.State.OOMKilled}}|{{.RestartCount}}', name])
         
         if result.returncode != 0:
             return jsonify({'error': f'Container not found: {name}'}), 404
         
-        parts = result.stdout.strip().split()
+        parts = result.stdout.strip().split('|')
         running = parts[0].lower() == 'true' if parts else False
         health_status = parts[1] if len(parts) > 1 else 'none'
         started_at = parts[2] if len(parts) > 2 else ''
+        finished_at = parts[3] if len(parts) > 3 else ''
+        exit_code = int(parts[4]) if len(parts) > 4 and parts[4].lstrip('-').isdigit() else None
+        status = parts[5] if len(parts) > 5 else 'unknown'
+        oom_killed = parts[6].lower() == 'true' if len(parts) > 6 else False
+        restart_count = int(parts[7]) if len(parts) > 7 and parts[7].isdigit() else 0
         
         return jsonify({
             'name': name,
             'running': running,
             'health': health_status if health_status != 'none' else ('running' if running else 'stopped'),
+            'status': status,
             'started_at': started_at,
+            'finished_at': finished_at,
+            'exit_code': exit_code,
+            'oom_killed': oom_killed,
+            'restart_count': restart_count,
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -871,18 +881,29 @@ def schedule_docker_run():
         return jsonify({'error': str(e)}), 500
 
 
-@app.route('/containers/<name>/logs', methods=['GET'])
+@app.route('/containers/<n>/logs', methods=['GET'])
 @require_api_key
 def get_logs(name):
-    """Get container logs with diagnostic info for failed containers"""
+    """Get container logs with diagnostic info for failed containers
+    
+    Query params:
+        lines: Number of lines (default: 100)
+        since: ISO timestamp or duration (e.g., "2024-01-01T00:00:00Z" or "5m")
+    """
     try:
         lines = request.args.get('lines', '100')
+        since = request.args.get('since')
+        
+        # Build docker logs command
+        cmd = ['docker', 'logs', '--tail', lines]
+        if since:
+            cmd.extend(['--since', since])
+        cmd.append(name)
         
         # Get logs
-        result = run_cmd(['docker', 'logs', '--tail', lines, name])
+        result = run_cmd(cmd)
         if result.returncode != 0:
             return jsonify({'error': result.stderr.strip() or f'No such container: {name}'}), 404
-        
         logs = result.stdout + result.stderr
         
         # Get container state for diagnostics (especially useful for failed containers)
