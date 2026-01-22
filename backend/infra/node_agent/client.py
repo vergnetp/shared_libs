@@ -148,6 +148,29 @@ class NodeAgentClient:
         """Get container and system metrics (CPU, memory, disk)."""
         return await self._request("GET", "/metrics")
     
+    async def get_agent_logs(self, lines: int = 100, since: str = None) -> AgentResponse:
+        """
+        Fetch node agent's own logs for debugging.
+        
+        Useful when agent returns errors but SSH is disabled.
+        
+        Args:
+            lines: Number of log lines to fetch (default: 100, max: 1000)
+            since: Only show logs since this time (e.g., "5 minutes ago")
+        
+        Returns:
+            AgentResponse with data['logs'] containing journalctl output
+        """
+        params = {'lines': min(lines, 1000)}
+        if since:
+            params['since'] = since
+        return await self._request("GET", "/agent/logs", params=params)
+    
+    def get_agent_logs_sync(self, lines: int = 100, since: str = None) -> AgentResponse:
+        """Synchronous wrapper for get_agent_logs()."""
+        import asyncio
+        return asyncio.run(self.get_agent_logs(lines, since))
+    
     async def check_containers_health(self, since: str = None) -> AgentResponse:
         """
         Health check all containers on the server.

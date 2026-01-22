@@ -18,7 +18,7 @@ Multi-tenancy:
 """
 
 # Module-level version constant (importable)
-AGENT_VERSION = "2.6.1"
+AGENT_VERSION = "2.6.3"  # /agent/logs endpoint + error surfacing
 
 # The node agent Flask app code - embedded as a string for cloud-init
 NODE_AGENT_CODE = '''#!/usr/bin/env python3
@@ -27,7 +27,7 @@ Node Agent - SSH-Free Deployments for SaaS
 Runs on port 9999, protected by API key.
 """
 
-AGENT_VERSION = "2.6.1"  # Fixed duplicate /ping route
+AGENT_VERSION = "2.6.3"  # Added /agent/logs endpoint + error surfacing
 
 from flask import Flask, request, jsonify
 from functools import wraps
@@ -337,9 +337,46 @@ def get_metrics():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/agent/logs', methods=['GET'])
+@require_api_key
+def get_agent_logs():
+    """
+    Fetch node agent's own logs (journalctl).
+    
+    This allows debugging agent errors remotely without SSH access.
+    
+    Query params:
+        lines: Number of log lines to fetch (default: 100, max: 1000)
+        since: Only show logs since this time (e.g., "5 minutes ago", "2026-01-22 10:00:00")
+    
+    Returns:
+        {"logs": "...", "lines": N, "service": "node-agent"}
+    """
+    lines = min(request.args.get('lines', 100, type=int), 1000)
+    since = request.args.get('since', None)
+    
+    try:
+        cmd = ['journalctl', '-u', 'node-agent', '-n', str(lines), '--no-pager']
+        if since:
+            cmd.extend(['--since', since])
+        
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        
+        return jsonify({
+            'logs': result.stdout,
+            'lines': lines,
+            'service': 'node-agent',
+            'stderr': result.stderr if result.returncode != 0 else None
+        })
+    except subprocess.TimeoutExpired:
+        return jsonify({'error': 'Timeout fetching logs'}), 504
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/containers/<n>/health', methods=['GET'])
 @require_api_key
-def container_health(name):
+def container_health(n):
     """
     Comprehensive health check for a container with automatic port discovery.
     
@@ -363,10 +400,10 @@ def container_health(name):
         # Step 1: Docker inspect - get container state AND port mappings
         # =================================================================
         result = run_cmd(['docker', 'inspect', '--format', 
-            '{{.State.Running}}|{{.State.Health.Status}}|{{.State.StartedAt}}|{{.State.FinishedAt}}|{{.State.ExitCode}}|{{.State.Status}}|{{.State.OOMKilled}}|{{.RestartCount}}|{{.State.Error}}|{{json .NetworkSettings.Ports}}', name])
+            '{{.State.Running}}|{{.State.Health.Status}}|{{.State.StartedAt}}|{{.State.FinishedAt}}|{{.State.ExitCode}}|{{.State.Status}}|{{.State.OOMKilled}}|{{.RestartCount}}|{{.State.Error}}|{{json .NetworkSettings.Ports}}', n])
         
         if result.returncode != 0:
-            return jsonify({'error': f'Container not found: {name}'}), 404
+            return jsonify({'error': f'Container not found: {n}'}), 404
         
         parts = result.stdout.strip().rsplit('|', 1)  # Split from right to preserve JSON
         state_parts = parts[0].split('|') if len(parts) > 0 else []
@@ -395,7 +432,7 @@ def container_health(name):
             pass
         
         container_info = {
-            'name': name,
+            'name': n,
             'running': running,
             'docker_health': docker_health if docker_health != 'none' else None,
             'status': docker_status,
@@ -492,14 +529,14 @@ def container_health(name):
             log_cmd = ['docker', 'logs', '--tail', '100']
             if since:
                 log_cmd.extend(['--since', since])
-            log_cmd.append(name)
+            log_cmd.append(n)
             
             log_result = run_cmd(log_cmd)
             logs = (log_result.stdout + log_result.stderr) if log_result.returncode == 0 else ''
             
             # If no logs with since filter, get last 20 lines
             if not logs.strip() and since:
-                log_cmd = ['docker', 'logs', '--tail', '20', name]
+                log_cmd = ['docker', 'logs', '--tail', '20', n]
                 log_result = run_cmd(log_cmd)
                 logs = (log_result.stdout + log_result.stderr) if log_result.returncode == 0 else ''
             
@@ -706,14 +743,14 @@ def all_containers_health():
 
 @app.route('/containers/<n>/restart', methods=['POST'])
 @require_api_key
-def restart_container(name):
+def restart_container(n):
     """Restart a container"""
     try:
-        result = run_cmd(['docker', 'restart', name])
+        result = run_cmd(['docker', 'restart', n])
         if result.returncode == 0:
-            return jsonify({'status': 'restarted', 'name': name})
+            return jsonify({'status': 'restarted', 'name': n})
         else:
-            return jsonify({'error': result.stderr.strip() or f'Failed to restart: {name}'}), 500
+            return jsonify({'error': result.stderr.strip() or f'Failed to restart: {n}'}), 500
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -955,7 +992,7 @@ def schedule_docker_run():
 
 @app.route('/containers/<n>/logs', methods=['GET'])
 @require_api_key
-def get_logs(name):
+def get_logs(n):
     """Get container logs with diagnostic info for failed containers
     
     Query params:
@@ -970,12 +1007,12 @@ def get_logs(name):
         cmd = ['docker', 'logs', '--tail', lines]
         if since:
             cmd.extend(['--since', since])
-        cmd.append(name)
+        cmd.append(n)
         
         # Get logs
         result = run_cmd(cmd)
         if result.returncode != 0:
-            return jsonify({'error': result.stderr.strip() or f'No such container: {name}'}), 404
+            return jsonify({'error': result.stderr.strip() or f'No such container: {n}'}), 404
         logs = result.stdout + result.stderr
         
         # Get container state for diagnostics (especially useful for failed containers)
@@ -983,7 +1020,7 @@ def get_logs(name):
         inspect_result = run_cmd([
             'docker', 'inspect', '--format',
             '{{.State.Status}}|{{.State.ExitCode}}|{{.State.Error}}|{{.State.OOMKilled}}|{{.Config.Image}}|{{.State.StartedAt}}|{{.State.FinishedAt}}',
-            name
+            n
         ])
         if inspect_result.returncode == 0:
             parts = inspect_result.stdout.strip().split('|')
@@ -1023,20 +1060,20 @@ def get_logs(name):
         return jsonify({'error': str(e)}), 500
 
 
-@app.route('/containers/<name>/status', methods=['GET'])
+@app.route('/containers/<n>/status', methods=['GET'])
 @require_api_key
-def container_status(name):
+def container_status(n):
     """Get container status"""
     try:
         result = run_cmd([
             'docker', 'inspect', '--format',
             '{{.State.Running}} {{.State.Status}} {{.RestartCount}}',
-            name
+            n
         ])
         if result.returncode == 0:
             parts = result.stdout.strip().split()
             return jsonify({
-                'name': name,
+                'name': n,
                 'running': parts[0].lower() == 'true',
                 'status': parts[1] if len(parts) > 1 else 'unknown',
                 'restart_count': int(parts[2]) if len(parts) > 2 else 0

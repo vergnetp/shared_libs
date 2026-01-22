@@ -1479,12 +1479,16 @@ class DeploymentService:
                     )
                     container_env = env_builder.build_stateful_service_env()
                     
-                    # Redis needs --requirepass command since it doesn't read env vars
+                    # Redis needs --bind 0.0.0.0 to accept connections via Docker port forwarding
+                    # (default is 127.0.0.1 which only works inside the container)
+                    # Also needs --requirepass command since it doesn't read env vars
                     service_lower = config.name.lower()
                     if "redis" in service_lower:
                         redis_password = container_env.get("REDIS_PASSWORD", "")
                         if redis_password:
-                            container_command = ["redis-server", "--requirepass", redis_password]
+                            container_command = ["redis-server", "--bind", "0.0.0.0", "--requirepass", redis_password]
+                        else:
+                            container_command = ["redis-server", "--bind", "0.0.0.0"]
                 
                 result = await agent.run_container(
                     name=new_container_name,
@@ -1531,6 +1535,13 @@ class DeploymentService:
                             elif status == 'unhealthy':
                                 if attempt == max_attempts - 1:
                                     self.log(f"   [{name}] ❌ Unhealthy: {details.get('reason', 'unknown')}")
+                        else:
+                            # Agent returned error (e.g., HTTP 500) - log it instead of silently retrying
+                            if attempt == max_attempts - 1:
+                                self.log(f"   [{name}] ❌ Agent error: {health_result.error}")
+                            elif attempt == 0:
+                                # Log first failure immediately so user knows something is wrong
+                                self.log(f"   [{name}] ⚠️ Health check failed: {health_result.error} (retrying...)")
                     except Exception as e:
                         if attempt == max_attempts - 1:
                             self.log(f"   [{name}] ❌ Health check error: {e}")
