@@ -140,7 +140,7 @@ def require_api_key(f):
 
 
 # ========================================
-# HEALTH ENDPOINTS (PUBLIC - no auth)
+# HEALTH ENDPOINTS (require API key)
 # ========================================
 
 @app.route('/ping', methods=['GET'])
