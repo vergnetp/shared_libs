@@ -18,7 +18,7 @@ Multi-tenancy:
 """
 
 # Module-level version constant (importable)
-AGENT_VERSION = "2.6.3"  # /agent/logs endpoint + error surfacing
+AGENT_VERSION = "2.6.7"  # Fixed health check for images without Docker HEALTHCHECK (redis, postgres, etc)
 
 # The node agent Flask app code - embedded as a string for cloud-init
 NODE_AGENT_CODE = '''#!/usr/bin/env python3
@@ -27,7 +27,7 @@ Node Agent - SSH-Free Deployments for SaaS
 Runs on port 9999, protected by API key.
 """
 
-AGENT_VERSION = "2.6.3"  # Added /agent/logs endpoint + error surfacing
+AGENT_VERSION = "2.6.7"  # Fixed health check for images without Docker HEALTHCHECK (redis, postgres, etc)
 
 from flask import Flask, request, jsonify
 from functools import wraps
@@ -43,6 +43,66 @@ import socket
 import time
 import urllib.request
 import urllib.error
+import logging
+from logging.handlers import RotatingFileHandler
+
+# =============================================================================
+# Logging Setup - Persistent file logging with rotation
+# =============================================================================
+def setup_logging():
+    """Configure logging to file with rotation."""
+    logger = logging.getLogger('node_agent')
+    logger.setLevel(logging.DEBUG)
+    
+    # File handler with rotation (10MB max, keep 3 backups)
+    log_file = '/var/log/node-agent.log'
+    try:
+        handler = RotatingFileHandler(
+            log_file, 
+            maxBytes=10*1024*1024,  # 10MB
+            backupCount=3
+        )
+        handler.setLevel(logging.DEBUG)
+        formatter = logging.Formatter(
+            '%(asctime)s [%(levelname)s] %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+    except PermissionError:
+        # Fall back to /tmp if /var/log not writable
+        handler = RotatingFileHandler(
+            '/tmp/node-agent.log',
+            maxBytes=10*1024*1024,
+            backupCount=3
+        )
+        handler.setLevel(logging.DEBUG)
+        formatter = logging.Formatter(
+            '%(asctime)s [%(levelname)s] %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+    
+    return logger
+
+logger = setup_logging()
+
+def log_request(endpoint, details=None):
+    """Log incoming request with optional details."""
+    client_ip = request.remote_addr if request else 'unknown'
+    msg = f"{request.method} {endpoint} from {client_ip}"
+    if details:
+        msg += f" | {details}"
+    logger.info(msg)
+
+def log_error(endpoint, error, details=None):
+    """Log error with context."""
+    client_ip = request.remote_addr if request else 'unknown'
+    msg = f"ERROR {endpoint} from {client_ip}: {error}"
+    if details:
+        msg += f" | {details}"
+    logger.error(msg)
 
 app = Flask(__name__)
 
@@ -183,11 +243,15 @@ def run_container():
     """Start a Docker container"""
     try:
         data = request.get_json()
+        container_name = data.get('name', 'unnamed')
+        image = data.get('image', 'unknown')
+        logger.info(f"Container run requested: name={container_name}, image={image}")
         
         # Security: Validate volume mounts
         volumes = data.get('volumes') or []
         valid, error = validate_volume_mounts(volumes)
         if not valid:
+            logger.warning(f"Volume mount rejected: {error}")
             return jsonify({'status': 'error', 'error': error}), 403
         
         cmd = ['docker', 'run', '-d']
@@ -215,63 +279,28 @@ def run_container():
         if data.get('command'):
             cmd.extend(data['command'] if isinstance(data['command'], list) else [data['command']])
         
+        logger.debug(f"Docker run command: {' '.join(cmd)}")
         result = run_cmd(cmd, timeout=120)
         
         if result.returncode == 0:
+            container_id = result.stdout.strip()
+            logger.info(f"Container started successfully: name={container_name}, id={container_id[:12]}")
             return jsonify({
                 'status': 'started',
-                'container_id': result.stdout.strip()
+                'container_id': container_id
             })
         else:
+            logger.error(f"Container start failed: name={container_name}, error={result.stderr}")
             return jsonify({
                 'status': 'error',
                 'error': result.stderr
             }), 500
             
     except Exception as e:
+        logger.exception(f"Container run exception: {e}")
         return jsonify({'status': 'error', 'error': str(e)}), 500
 
 
-@app.route('/containers/<name>/stop', methods=['POST'])
-@require_api_key
-def stop_container(name):
-    """Stop a container"""
-    try:
-        result = run_cmd(['docker', 'stop', name], timeout=30)
-        if result.returncode == 0:
-            return jsonify({'status': 'stopped'})
-        else:
-            return jsonify({'status': 'error', 'error': result.stderr}), 500
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/containers/<n>/start', methods=['POST'])
-@require_api_key
-def start_container(n):
-    """Start a stopped container"""
-    try:
-        result = run_cmd(['docker', 'start', n], timeout=30)
-        if result.returncode == 0:
-            return jsonify({'status': 'started'})
-        else:
-            return jsonify({'status': 'error', 'error': result.stderr}), 500
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/containers/<name>/remove', methods=['POST'])
-@require_api_key
-def remove_container(name):
-    """Remove a container"""
-    try:
-        result = run_cmd(['docker', 'rm', '-f', name])
-        if result.returncode == 0:
-            return jsonify({'status': 'removed'})
-        else:
-            return jsonify({'status': 'error', 'error': result.stderr}), 500
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
 
 
 
@@ -341,37 +370,74 @@ def get_metrics():
 @require_api_key
 def get_agent_logs():
     """
-    Fetch node agent's own logs (journalctl).
+    Fetch node agent's own logs from the log file.
     
-    This allows debugging agent errors remotely without SSH access.
+    Reads from /var/log/node-agent.log (or /tmp/node-agent.log fallback).
+    Falls back to journalctl if log file not found.
     
     Query params:
         lines: Number of log lines to fetch (default: 100, max: 1000)
-        since: Only show logs since this time (e.g., "5 minutes ago", "2026-01-22 10:00:00")
+        source: 'file' (default), 'journal', or 'both'
     
     Returns:
-        {"logs": "...", "lines": N, "service": "node-agent"}
+        {"logs": "...", "lines": N, "service": "node-agent", "source": "..."}
     """
     lines = min(request.args.get('lines', 100, type=int), 1000)
-    since = request.args.get('since', None)
+    source = request.args.get('source', 'file')
     
-    try:
-        cmd = ['journalctl', '-u', 'node-agent', '-n', str(lines), '--no-pager']
-        if since:
-            cmd.extend(['--since', since])
-        
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-        
+    file_logs = None
+    journal_logs = None
+    actual_source = None
+    
+    # Try to read from log file
+    log_files = ['/var/log/node-agent.log', '/tmp/node-agent.log']
+    for log_file in log_files:
+        if os.path.exists(log_file):
+            try:
+                # Read last N lines efficiently using tail
+                result = subprocess.run(
+                    ['tail', '-n', str(lines), log_file],
+                    capture_output=True, text=True, timeout=5
+                )
+                if result.returncode == 0:
+                    file_logs = result.stdout
+                    actual_source = log_file
+                    break
+            except Exception:
+                pass
+    
+    # Get journalctl logs if requested or file not found
+    if source in ('journal', 'both') or (source == 'file' and not file_logs):
+        try:
+            cmd = ['journalctl', '-u', 'node-agent', '-n', str(lines), '--no-pager']
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            if result.returncode == 0:
+                journal_logs = result.stdout
+                if not actual_source:
+                    actual_source = 'journalctl'
+        except Exception:
+            pass
+    
+    # Combine based on source request
+    if source == 'both' and file_logs and journal_logs:
+        # Build combined logs with actual newlines
+        combined = "=== FILE LOGS ({}) ===".format(actual_source)
+        combined = combined + chr(10) + file_logs + chr(10) + chr(10)
+        combined = combined + "=== JOURNAL LOGS ===" + chr(10) + journal_logs
         return jsonify({
-            'logs': result.stdout,
+            'logs': combined,
             'lines': lines,
             'service': 'node-agent',
-            'stderr': result.stderr if result.returncode != 0 else None
+            'source': 'both'
         })
-    except subprocess.TimeoutExpired:
-        return jsonify({'error': 'Timeout fetching logs'}), 504
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+    
+    logs = file_logs or journal_logs or 'No logs found in file or journalctl'
+    return jsonify({
+        'logs': logs,
+        'lines': lines,
+        'service': 'node-agent',
+        'source': actual_source or 'none'
+    })
 
 
 @app.route('/containers/<n>/health', methods=['GET'])
@@ -395,29 +461,41 @@ def container_health(n):
     """
     try:
         since = request.args.get('since')
+        logger.info(f"Health check requested for container: {n}")
+        
+        # Debug: List all containers first
+        ps_result = run_cmd(['docker', 'ps', '-a', '--format', '{{.Names}}'])
+        all_containers = ps_result.stdout.strip().split('\\n') if ps_result.stdout.strip() else []
+        logger.debug(f"All containers on system: {all_containers}")
         
         # =================================================================
         # Step 1: Docker inspect - get container state AND port mappings
         # =================================================================
-        result = run_cmd(['docker', 'inspect', '--format', 
-            '{{.State.Running}}|{{.State.Health.Status}}|{{.State.StartedAt}}|{{.State.FinishedAt}}|{{.State.ExitCode}}|{{.State.Status}}|{{.State.OOMKilled}}|{{.RestartCount}}|{{.State.Error}}|{{json .NetworkSettings.Ports}}', n])
+        # NOTE: We do NOT use Docker's HEALTHCHECK - we do our own TCP/log-based checks
+        # So we removed .State.Health.Status which fails for images without HEALTHCHECK defined
+        cmd = ['docker', 'inspect', '--format', 
+            '{{.State.Running}}|{{.State.StartedAt}}|{{.State.FinishedAt}}|{{.State.ExitCode}}|{{.State.Status}}|{{.State.OOMKilled}}|{{.RestartCount}}|{{.State.Error}}|{{json .NetworkSettings.Ports}}', n]
+        logger.debug(f"Running command: {' '.join(cmd)}")
+        result = run_cmd(cmd)
+        logger.debug(f"Docker inspect result: returncode={result.returncode}, stdout={result.stdout[:200] if result.stdout else 'empty'}, stderr={result.stderr[:200] if result.stderr else 'empty'}")
         
         if result.returncode != 0:
+            logger.error(f"Container not found: {n} | stderr: {result.stderr} | available: {all_containers}")
             return jsonify({'error': f'Container not found: {n}'}), 404
         
         parts = result.stdout.strip().rsplit('|', 1)  # Split from right to preserve JSON
         state_parts = parts[0].split('|') if len(parts) > 0 else []
         ports_json = parts[1] if len(parts) > 1 else '{}'
         
+        # Parse: Running|StartedAt|FinishedAt|ExitCode|Status|OOMKilled|RestartCount|Error
         running = state_parts[0].lower() == 'true' if state_parts else False
-        docker_health = state_parts[1] if len(state_parts) > 1 else 'none'
-        started_at = state_parts[2] if len(state_parts) > 2 else ''
-        finished_at = state_parts[3] if len(state_parts) > 3 else ''
-        exit_code = int(state_parts[4]) if len(state_parts) > 4 and state_parts[4].lstrip('-').isdigit() else None
-        docker_status = state_parts[5] if len(state_parts) > 5 else 'unknown'
-        oom_killed = state_parts[6].lower() == 'true' if len(state_parts) > 6 else False
-        restart_count = int(state_parts[7]) if len(state_parts) > 7 and state_parts[7].isdigit() else 0
-        docker_error = state_parts[8] if len(state_parts) > 8 and state_parts[8] else None
+        started_at = state_parts[1] if len(state_parts) > 1 else ''
+        finished_at = state_parts[2] if len(state_parts) > 2 else ''
+        exit_code = int(state_parts[3]) if len(state_parts) > 3 and state_parts[3].lstrip('-').isdigit() else None
+        docker_status = state_parts[4] if len(state_parts) > 4 else 'unknown'
+        oom_killed = state_parts[5].lower() == 'true' if len(state_parts) > 5 else False
+        restart_count = int(state_parts[6]) if len(state_parts) > 6 and state_parts[6].isdigit() else 0
+        docker_error = state_parts[7] if len(state_parts) > 7 and state_parts[7] else None
         
         # Parse port mappings to auto-discover the host port
         discovered_port = None
@@ -434,7 +512,6 @@ def container_health(n):
         container_info = {
             'name': n,
             'running': running,
-            'docker_health': docker_health if docker_health != 'none' else None,
             'status': docker_status,
             'started_at': started_at,
             'finished_at': finished_at,
@@ -637,8 +714,9 @@ def all_containers_health():
         for name in container_names:
             # Get health for this container (reuse same logic)
             try:
+                # NOTE: We do NOT use Docker's HEALTHCHECK - we do our own TCP/log-based checks
                 inspect_result = run_cmd(['docker', 'inspect', '--format', 
-                    '{{.State.Running}}|{{.State.Health.Status}}|{{.State.StartedAt}}|{{.State.FinishedAt}}|{{.State.ExitCode}}|{{.State.Status}}|{{.State.OOMKilled}}|{{.RestartCount}}|{{.State.Error}}|{{json .NetworkSettings.Ports}}', name])
+                    '{{.State.Running}}|{{.State.StartedAt}}|{{.State.FinishedAt}}|{{.State.ExitCode}}|{{.State.Status}}|{{.State.OOMKilled}}|{{.RestartCount}}|{{.State.Error}}|{{json .NetworkSettings.Ports}}', name])
                 
                 if inspect_result.returncode != 0:
                     containers_health[name] = {'status': 'unhealthy', 'error': 'Container not found'}
@@ -650,11 +728,11 @@ def all_containers_health():
                 state_parts = parts[0].split('|') if len(parts) > 0 else []
                 ports_json = parts[1] if len(parts) > 1 else '{}'
                 
+                # Parse: Running|StartedAt|FinishedAt|ExitCode|Status|OOMKilled|RestartCount|Error
                 running = state_parts[0].lower() == 'true' if state_parts else False
-                docker_health = state_parts[1] if len(state_parts) > 1 else 'none'
-                exit_code = int(state_parts[4]) if len(state_parts) > 4 and state_parts[4].lstrip('-').isdigit() else None
-                docker_status = state_parts[5] if len(state_parts) > 5 else 'unknown'
-                oom_killed = state_parts[6].lower() == 'true' if len(state_parts) > 6 else False
+                exit_code = int(state_parts[3]) if len(state_parts) > 3 and state_parts[3].lstrip('-').isdigit() else None
+                docker_status = state_parts[4] if len(state_parts) > 4 else 'unknown'
+                oom_killed = state_parts[5].lower() == 'true' if len(state_parts) > 5 else False
                 
                 # Parse port mappings
                 discovered_port = None
@@ -705,8 +783,6 @@ def all_containers_health():
                     'running': running,
                     'docker_status': docker_status,
                 }
-                if docker_health and docker_health != 'none':
-                    health_result['docker_health'] = docker_health
                 if discovered_port:
                     health_result['port'] = discovered_port
                 if port_check:
@@ -1051,7 +1127,11 @@ def get_logs(n):
                 diagnostics.append(f"Image: {state_info['image']}")
             
             if diagnostics:
-                header = "=== CONTAINER DIAGNOSTICS ===\\n" + "\\n".join(diagnostics) + "\\n" + "=" * 30 + "\\n\\n"
+                # Build header using chr(10) for newlines to avoid escape issues
+                newline = chr(10)
+                header = "=== CONTAINER DIAGNOSTICS ===" + newline
+                header = header + newline.join(diagnostics) + newline
+                header = header + "=" * 30 + newline + newline
                 response['logs'] = header + logs
         
         response['state'] = state_info
@@ -2320,6 +2400,23 @@ echo '{b64_agent}' | base64 -d | gunzip > /usr/local/bin/node_agent.py
 
 chmod +x /usr/local/bin/node_agent.py
 log 'Node agent script written'
+
+# Validate Python syntax before proceeding
+log 'Validating Python syntax...'
+python3 -m py_compile /usr/local/bin/node_agent.py
+if [ $? -ne 0 ]; then
+    log 'ERROR: Python syntax validation failed!'
+    log 'Dumping first 50 and last 50 lines of agent script:'
+    head -50 /usr/local/bin/node_agent.py > /var/log/agent_debug.txt
+    echo '... (middle of file) ...' >> /var/log/agent_debug.txt
+    tail -50 /usr/local/bin/node_agent.py >> /var/log/agent_debug.txt
+    log 'Debug info saved to /var/log/agent_debug.txt'
+    # Show lines around 400
+    log 'Lines 395-410 of agent script:'
+    sed -n '395,410p' /usr/local/bin/node_agent.py
+    exit 1
+fi
+log 'Python syntax validation passed'
 
 # Create API key
 log 'Creating API key file...'
