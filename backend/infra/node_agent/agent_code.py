@@ -18,7 +18,7 @@ Multi-tenancy:
 """
 
 # Module-level version constant (importable)
-AGENT_VERSION = "2.6.0"
+AGENT_VERSION = "2.6.1"
 
 # The node agent Flask app code - embedded as a string for cloud-init
 NODE_AGENT_CODE = '''#!/usr/bin/env python3
@@ -27,7 +27,7 @@ Node Agent - SSH-Free Deployments for SaaS
 Runs on port 9999, protected by API key.
 """
 
-AGENT_VERSION = "2.6.0"  # Simplified health API: /ping, /containers/{name}/health, /containers/all/health
+AGENT_VERSION = "2.6.1"  # Fixed duplicate /ping route
 
 from flask import Flask, request, jsonify
 from functools import wraps
@@ -142,12 +142,6 @@ def require_api_key(f):
 # ========================================
 # HEALTH ENDPOINTS (PUBLIC - no auth)
 # ========================================
-
-@app.route('/ping', methods=['GET'])
-def ping():
-    """Simple health check - public"""
-    return jsonify({'status': 'alive', 'version': AGENT_VERSION})
-
 
 @app.route('/ping', methods=['GET'])
 def ping():
