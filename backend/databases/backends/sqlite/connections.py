@@ -24,7 +24,7 @@ SQLITE_RETRY_CONFIG = dict(
     base_delay=2.0,        # Start with 2s between retries
     max_delay=30.0,        # Cap at 30s between retries  
     total_timeout=300.0,   # 5 minutes total - allows for heavy contention
-    retry_on=(sqlite3.OperationalError, Exception),  # Catch "database is locked"
+    exceptions=(sqlite3.OperationalError, Exception),  # Catch "database is locked"
 )
 
 
