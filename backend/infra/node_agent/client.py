@@ -141,119 +141,71 @@ class NodeAgentClient:
     # =========================================================================
     
     async def ping(self) -> AgentResponse:
-        """Check if agent is alive."""
+        """Check if agent is alive and get docker status."""
         return await self._request("GET", "/ping")
-    
-    async def health(self) -> AgentResponse:
-        """Get comprehensive health status."""
-        return await self._request("GET", "/health")
     
     async def get_metrics(self) -> AgentResponse:
         """Get container and system metrics (CPU, memory, disk)."""
         return await self._request("GET", "/metrics")
     
-    async def check_containers_health(self) -> AgentResponse:
-        """Health check all running containers on the server."""
-        return await self._request("GET", "/health/containers")
-    
-    async def check_container_health(
-        self, 
-        name: str,
-        port: int = None,
-        since: str = None,
-    ) -> AgentResponse:
+    async def check_containers_health(self, since: str = None) -> AgentResponse:
         """
-        Comprehensive health check for a container.
+        Health check all containers on the server.
+        
+        Args:
+            since: Optional ISO timestamp to check logs since (e.g., "2026-01-21T15:00:00Z")
+        
+        Returns:
+            AgentResponse with:
+                - data['status']: 'healthy', 'degraded', or 'unhealthy' (aggregate)
+                - data['containers']: Dict of container_name -> health info
+                - data['summary']: {total, healthy, degraded, unhealthy}
+        """
+        params = {'since': since} if since else None
+        return await self._request("GET", "/containers/all/health", params=params)
+    
+    async def check_container_health(self, name: str, since: str = None) -> AgentResponse:
+        """
+        Comprehensive health check for a container with auto port discovery.
         
         Args:
             name: Container name
-            port: Optional TCP port to check (e.g., 6379 for Redis)
             since: Optional ISO timestamp to check logs since (e.g., "2026-01-21T15:00:00Z")
         
         Returns:
             AgentResponse with:
                 - data['status']: 'healthy', 'degraded', or 'unhealthy'
-                - data['container']: Docker state info
-                - data['port_check']: Port check result (if port provided)
+                - data['container']: Docker state info (includes discovered_port)
+                - data['port_check']: Auto-discovered port check result
                 - data['logs']: Log analysis result
                 - data['details']: Explanation of status
         
         Status meanings:
-            - healthy: Container running, port responding (if checked), no errors in logs
+            - healthy: Container running, port responding, no errors in logs
             - degraded: Container running but errors found in logs
             - unhealthy: Container not running OR port not responding
         """
-        params = {}
-        if port is not None:
-            params['port'] = port
-        if since is not None:
-            params['since'] = since
-        return await self._request("GET", f"/containers/{name}/health", params=params or None)
+        params = {'since': since} if since else None
+        return await self._request("GET", f"/containers/{name}/health", params=params)
     
-    async def health_tcp(
-        self, 
-        port: int, 
-        host: str = "localhost", 
-        timeout: int = 5
-    ) -> AgentResponse:
-        """
-        TCP health check to an internal port on the droplet.
-        
-        This is used to check if services like Redis, PostgreSQL, etc. are
-        accepting connections WITHOUT exposing their ports to the internet.
-        
-        Args:
-            port: Port to check (e.g., 6379 for Redis, 5432 for PostgreSQL)
-            host: Host to connect to (default: localhost)
-            timeout: Connection timeout in seconds (default: 5)
-        
-        Returns:
-            AgentResponse with:
-                - data['status']: 'healthy' or 'unhealthy'
-                - data['response_time_ms']: Connection time in ms
-                - data['error']: Error message if unhealthy
-        """
-        return await self._request("POST", "/health/tcp", {
-            "port": port,
-            "host": host,
-            "timeout": timeout,
-        })
+    # =========================================================================
+    # Sync Wrappers (for non-async contexts like CLI tools, scripts)
+    # =========================================================================
     
-    async def health_http(
-        self, 
-        port: int, 
-        path: str = "/",
-        host: str = "localhost", 
-        timeout: int = 5,
-        method: str = "GET",
-    ) -> AgentResponse:
-        """
-        HTTP health check to an internal port on the droplet.
-        
-        This is used to check application health endpoints WITHOUT exposing
-        their ports to the internet.
-        
-        Args:
-            port: Port to check (e.g., 8000 for Python apps)
-            path: HTTP path to check (default: /)
-            host: Host to connect to (default: localhost)
-            timeout: Request timeout in seconds (default: 5)
-            method: HTTP method (default: GET)
-        
-        Returns:
-            AgentResponse with:
-                - data['status']: 'healthy' or 'unhealthy'
-                - data['status_code']: HTTP status code
-                - data['response_time_ms']: Request time in ms
-                - data['error']: Error message if unhealthy
-        """
-        return await self._request("POST", "/health/http", {
-            "port": port,
-            "path": path,
-            "host": host,
-            "timeout": timeout,
-            "method": method,
-        })
+    def ping_sync(self) -> AgentResponse:
+        """Synchronous wrapper for ping(). For use in sync contexts."""
+        import asyncio
+        return asyncio.run(self.ping())
+    
+    def check_containers_health_sync(self, since: str = None) -> AgentResponse:
+        """Synchronous wrapper for check_containers_health(). For use in sync contexts."""
+        import asyncio
+        return asyncio.run(self.check_containers_health(since=since))
+    
+    def check_container_health_sync(self, name: str, since: str = None) -> AgentResponse:
+        """Synchronous wrapper for check_container_health(). For use in sync contexts."""
+        import asyncio
+        return asyncio.run(self.check_container_health(name, since=since))
     
     async def restart_container(self, name: str) -> AgentResponse:
         """Restart a container."""

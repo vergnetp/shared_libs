@@ -190,13 +190,18 @@ class FleetService(_BaseFleetService):
     
     def check_servers_health(self, server_ips: List[str]) -> List[Dict[str, Any]]:
         """
-        Check health of specific servers by IP.
+        Check comprehensive health of specific servers by IP.
+        
+        Uses the refined health check system:
+        - Auto-discovers container ports
+        - TCP health checks on discovered ports
+        - Log analysis for errors/warnings
         
         Args:
             server_ips: List of server IPs to check
             
         Returns:
-            List of health check results
+            List of health check results with container-level details
         """
         from ..node_agent import NodeAgentClient
         
@@ -205,16 +210,18 @@ class FleetService(_BaseFleetService):
             ip = ip.strip()
             try:
                 client = NodeAgentClient(ip, self.do_token, timeout=10)
-                health = client.health_check_sync()
+                health = client.check_containers_health_sync()
                 results.append({
                     "ip": ip,
-                    "healthy": health.success,
+                    "healthy": health.success and health.data.get("status") == "healthy",
+                    "status": health.data.get("status") if health.success else "unreachable",
                     "data": health.data,
                 })
             except Exception as e:
                 results.append({
                     "ip": ip,
                     "healthy": False,
+                    "status": "unreachable",
                     "error": str(e),
                 })
         return results
@@ -471,13 +478,18 @@ class AsyncFleetService(_BaseFleetService):
     
     async def check_servers_health(self, server_ips: List[str]) -> List[Dict[str, Any]]:
         """
-        Check health of specific servers by IP (async, parallel).
+        Check comprehensive health of specific servers by IP (async, parallel).
+        
+        Uses the refined health check system:
+        - Auto-discovers container ports
+        - TCP health checks on discovered ports
+        - Log analysis for errors/warnings
         
         Args:
             server_ips: List of server IPs to check
             
         Returns:
-            List of health check results
+            List of health check results with container-level details
         """
         from ..node_agent import NodeAgentClient
         
@@ -485,16 +497,18 @@ class AsyncFleetService(_BaseFleetService):
             ip = ip.strip()
             try:
                 async with NodeAgentClient(ip, self.do_token, timeout=10) as client:
-                    health = await client.health_check()
+                    health = await client.check_containers_health()
                     return {
                         "ip": ip,
-                        "healthy": health.success,
+                        "healthy": health.success and health.data.get("status") == "healthy",
+                        "status": health.data.get("status") if health.success else "unreachable",
                         "data": health.data,
                     }
             except Exception as e:
                 return {
                     "ip": ip,
                     "healthy": False,
+                    "status": "unreachable",
                     "error": str(e),
                 }
         

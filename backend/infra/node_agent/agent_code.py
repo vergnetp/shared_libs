@@ -18,7 +18,7 @@ Multi-tenancy:
 """
 
 # Module-level version constant (importable)
-AGENT_VERSION = "2.4.0"
+AGENT_VERSION = "2.6.0"
 
 # The node agent Flask app code - embedded as a string for cloud-init
 NODE_AGENT_CODE = '''#!/usr/bin/env python3
@@ -27,7 +27,7 @@ Node Agent - SSH-Free Deployments for SaaS
 Runs on port 9999, protected by API key.
 """
 
-AGENT_VERSION = "2.4.0"  # Unified container health endpoint (GET/POST same response)
+AGENT_VERSION = "2.6.0"  # Simplified health API: /ping, /containers/{name}/health, /containers/all/health
 
 from flask import Flask, request, jsonify
 from functools import wraps
@@ -149,30 +149,19 @@ def ping():
     return jsonify({'status': 'alive', 'version': AGENT_VERSION})
 
 
-@app.route('/health', methods=['GET'])
-def health():
-    """Comprehensive health check - public"""
+@app.route('/ping', methods=['GET'])
+def ping():
+    """Simple alive check - public (no auth required)"""
     try:
         result = run_cmd(['docker', 'info'])
         docker_ok = result.returncode == 0
-        
-        ps_result = run_cmd(['docker', 'ps', '--format', '{{.Names}}'])
-        containers = ps_result.stdout.strip().split('\\n') if ps_result.stdout.strip() else []
-        
         return jsonify({
+            'status': 'ok' if docker_ok else 'degraded',
             'version': AGENT_VERSION,
-            'docker_running': docker_ok,
-            'containers': containers,
-            'status': 'healthy' if docker_ok else 'degraded',
-            'security': {
-                'ip_allowlist_enabled': ALLOWED_IPS is not None,
-                'ip_allowlist_count': len(ALLOWED_IPS) if ALLOWED_IPS else 0,
-                'vpc_auth_bypass': not REQUIRE_AUTH_ALWAYS,
-                'api_key_configured': Path('/etc/node-agent/api-key').exists(),
-            }
+            'docker': docker_ok,
         })
     except Exception as e:
-        return jsonify({'status': 'unhealthy', 'error': str(e), 'version': AGENT_VERSION}), 500
+        return jsonify({'status': 'error', 'error': str(e), 'version': AGENT_VERSION}), 500
 
 
 # ========================================
@@ -354,111 +343,62 @@ def get_metrics():
         return jsonify({'error': str(e)}), 500
 
 
-
-
-@app.route('/health/containers', methods=['GET'])
-@require_api_key
-def health_check_containers():
-    """Health check all running containers"""
-    try:
-        result = run_cmd(['docker', 'ps', '--format', 
-            '{"name":"{{.Names}}","status":"{{.Status}}","state":"{{.State}}","image":"{{.Image}}","ports":"{{.Ports}}"}'])
-        
-        containers = []
-        if result.returncode == 0 and result.stdout.strip():
-            for line in result.stdout.strip().split('\\n'):
-                try:
-                    c = json.loads(line)
-                    status = c.get('status', '')
-                    health = 'unknown'
-                    if '(healthy)' in status:
-                        health = 'healthy'
-                    elif '(unhealthy)' in status:
-                        health = 'unhealthy'
-                    elif '(starting)' in status:
-                        health = 'starting'
-                    elif c.get('state', '').lower() == 'running':
-                        health = 'running'
-                    
-                    uptime = ''
-                    if 'Up ' in status:
-                        uptime = status.split('Up ')[1].split(' (')[0] if ' (' in status else status.split('Up ')[1]
-                    
-                    containers.append({
-                        'name': c.get('name', ''),
-                        'image': c.get('image', ''),
-                        'state': c.get('state', ''),
-                        'health': health,
-                        'uptime': uptime,
-                        'ports': c.get('ports', ''),
-                    })
-                except:
-                    pass
-        
-        total = len(containers)
-        healthy = sum(1 for c in containers if c['health'] in ('healthy', 'running'))
-        unhealthy = sum(1 for c in containers if c['health'] == 'unhealthy')
-        
-        return jsonify({
-            'containers': containers,
-            'summary': {
-                'total': total,
-                'healthy': healthy,
-                'unhealthy': unhealthy,
-                'status': 'healthy' if unhealthy == 0 and total > 0 else 'unhealthy' if unhealthy > 0 else 'empty'
-            }
-        })
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/containers/<n>/health', methods=['GET', 'POST'])
+@app.route('/containers/<n>/health', methods=['GET'])
 @require_api_key
 def container_health(name):
     """
-    Comprehensive health check for a container.
+    Comprehensive health check for a container with automatic port discovery.
     
-    GET: Query params ?port=6379&since=2026-01-21T15:00:00Z (all optional)
-    POST: JSON body {"port": 6379, "since": "..."} (all optional)
+    GET: Query params ?since=2026-01-21T15:00:00Z (optional)
+    
+    Port is auto-discovered via docker inspect (NetworkSettings.Ports).
     
     Response:
         {
             "status": "healthy|degraded|unhealthy",
             "container": { ... },              // Docker state info
-            "port_check": { ... },             // Only if port provided
+            "port_check": { ... },             // Auto-discovered port check
             "logs": { ... },                   // Log analysis
             "details": { "reason": "..." }     // Explains status
         }
     """
     try:
-        # Get params from query string (GET) or JSON body (POST)
-        if request.method == 'POST':
-            data = request.get_json() or {}
-            port = data.get('port')
-            since = data.get('since')
-        else:
-            port = request.args.get('port', type=int)
-            since = request.args.get('since')
+        since = request.args.get('since')
         
         # =================================================================
-        # Step 1: Docker inspect - get container state
+        # Step 1: Docker inspect - get container state AND port mappings
         # =================================================================
         result = run_cmd(['docker', 'inspect', '--format', 
-            '{{.State.Running}}|{{.State.Health.Status}}|{{.State.StartedAt}}|{{.State.FinishedAt}}|{{.State.ExitCode}}|{{.State.Status}}|{{.State.OOMKilled}}|{{.RestartCount}}|{{.State.Error}}', name])
+            '{{.State.Running}}|{{.State.Health.Status}}|{{.State.StartedAt}}|{{.State.FinishedAt}}|{{.State.ExitCode}}|{{.State.Status}}|{{.State.OOMKilled}}|{{.RestartCount}}|{{.State.Error}}|{{json .NetworkSettings.Ports}}', name])
         
         if result.returncode != 0:
             return jsonify({'error': f'Container not found: {name}'}), 404
         
-        parts = result.stdout.strip().split('|')
-        running = parts[0].lower() == 'true' if parts else False
-        docker_health = parts[1] if len(parts) > 1 else 'none'
-        started_at = parts[2] if len(parts) > 2 else ''
-        finished_at = parts[3] if len(parts) > 3 else ''
-        exit_code = int(parts[4]) if len(parts) > 4 and parts[4].lstrip('-').isdigit() else None
-        docker_status = parts[5] if len(parts) > 5 else 'unknown'
-        oom_killed = parts[6].lower() == 'true' if len(parts) > 6 else False
-        restart_count = int(parts[7]) if len(parts) > 7 and parts[7].isdigit() else 0
-        docker_error = parts[8] if len(parts) > 8 and parts[8] else None
+        parts = result.stdout.strip().rsplit('|', 1)  # Split from right to preserve JSON
+        state_parts = parts[0].split('|') if len(parts) > 0 else []
+        ports_json = parts[1] if len(parts) > 1 else '{}'
+        
+        running = state_parts[0].lower() == 'true' if state_parts else False
+        docker_health = state_parts[1] if len(state_parts) > 1 else 'none'
+        started_at = state_parts[2] if len(state_parts) > 2 else ''
+        finished_at = state_parts[3] if len(state_parts) > 3 else ''
+        exit_code = int(state_parts[4]) if len(state_parts) > 4 and state_parts[4].lstrip('-').isdigit() else None
+        docker_status = state_parts[5] if len(state_parts) > 5 else 'unknown'
+        oom_killed = state_parts[6].lower() == 'true' if len(state_parts) > 6 else False
+        restart_count = int(state_parts[7]) if len(state_parts) > 7 and state_parts[7].isdigit() else 0
+        docker_error = state_parts[8] if len(state_parts) > 8 and state_parts[8] else None
+        
+        # Parse port mappings to auto-discover the host port
+        discovered_port = None
+        try:
+            port_mappings = json.loads(ports_json) if ports_json and ports_json != 'null' else {}
+            for container_port, bindings in port_mappings.items():
+                if bindings:  # Has host port binding
+                    discovered_port = int(bindings[0].get('HostPort', 0))
+                    if discovered_port > 0:
+                        break
+        except (json.JSONDecodeError, KeyError, TypeError):
+            pass
         
         container_info = {
             'name': name,
@@ -471,6 +411,7 @@ def container_health(name):
             'oom_killed': oom_killed,
             'restart_count': restart_count,
             'error': docker_error,
+            'discovered_port': discovered_port,
         }
         
         # =================================================================
@@ -503,38 +444,38 @@ def container_health(name):
             else:
                 details['reason'] = f'Container is not running (status: {docker_status})'
         
-        # Check 2: TCP port check (if port provided and container running)
-        if port and running:
+        # Check 2: TCP port check (auto-discovered, container must be running)
+        if discovered_port and running:
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.settimeout(2)
                 start_time = time.time()
-                conn_result = sock.connect_ex(('localhost', int(port)))
+                conn_result = sock.connect_ex(('localhost', discovered_port))
                 elapsed_ms = (time.time() - start_time) * 1000
                 sock.close()
                 
                 port_check_result = {
-                    'port': port,
+                    'port': discovered_port,
                     'reachable': conn_result == 0,
                     'response_time_ms': round(elapsed_ms, 2),
                 }
                 
                 if conn_result != 0:
                     status = 'unhealthy'
-                    details['reason'] = f'Port {port} is not responding (container running but service not accepting connections)'
+                    details['reason'] = f'Port {discovered_port} is not responding (container running but service not accepting connections)'
                     port_check_result['error'] = f'Connection refused (errno: {conn_result})'
                     
             except socket.timeout:
                 port_check_result = {
-                    'port': port,
+                    'port': discovered_port,
                     'reachable': False,
                     'error': 'Connection timed out',
                 }
                 status = 'unhealthy'
-                details['reason'] = f'Port {port} timed out'
+                details['reason'] = f'Port {discovered_port} timed out'
             except Exception as e:
                 port_check_result = {
-                    'port': port,
+                    'port': discovered_port,
                     'reachable': False,
                     'error': str(e),
                 }
@@ -616,186 +557,155 @@ def container_health(name):
         return jsonify({'error': str(e)}), 500
 
 
-# =============================================================================
-# Internal Health Checks (TCP/HTTP to localhost)
-# =============================================================================
-
-@app.route('/health/tcp', methods=['POST'])
+@app.route('/containers/all/health', methods=['GET'])
 @require_api_key
-def health_check_tcp():
+def all_containers_health():
     """
-    TCP health check to internal port.
+    Health check for all containers.
     
-    Request body:
-        {
-            "port": 6379,
-            "host": "localhost",  # optional, defaults to localhost
-            "timeout": 5          # optional, defaults to 5 seconds
-        }
+    GET: Query params ?since=2026-01-21T15:00:00Z (optional)
+    
+    Returns aggregated health for all containers on the server.
     
     Response:
         {
-            "status": "healthy" | "unhealthy",
-            "response_time_ms": 12.5,
-            "error": "..." (only if unhealthy)
+            "status": "healthy|degraded|unhealthy",
+            "containers": {
+                "container_name": { <individual health response> },
+                ...
+            },
+            "summary": {
+                "total": 5,
+                "healthy": 3,
+                "degraded": 1,
+                "unhealthy": 1
+            }
         }
     """
     try:
-        data = request.get_json() or {}
-        port = data.get('port')
-        host = data.get('host', 'localhost')
-        timeout = data.get('timeout', 5)
+        since = request.args.get('since')
         
-        if not port:
-            return jsonify({'error': 'port is required'}), 400
+        # List all containers
+        result = run_cmd(['docker', 'ps', '-a', '--format', '{{.Names}}'])
+        if result.returncode != 0:
+            return jsonify({'error': 'Failed to list containers'}), 500
         
-        if not isinstance(port, int) or port < 1 or port > 65535:
-            return jsonify({'error': 'port must be an integer between 1 and 65535'}), 400
+        container_names = [n.strip() for n in result.stdout.strip().split('\\n') if n.strip()]
         
-        start_time = time.time()
+        if not container_names:
+            return jsonify({
+                'status': 'healthy',
+                'containers': {},
+                'summary': {'total': 0, 'healthy': 0, 'degraded': 0, 'unhealthy': 0}
+            })
         
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(timeout)
-            result = sock.connect_ex((host, port))
-            sock.close()
-            
-            elapsed_ms = (time.time() - start_time) * 1000
-            
-            if result == 0:
-                return jsonify({
-                    'status': 'healthy',
-                    'response_time_ms': round(elapsed_ms, 2),
-                    'port': port,
-                    'host': host,
-                })
-            else:
-                return jsonify({
-                    'status': 'unhealthy',
-                    'response_time_ms': round(elapsed_ms, 2),
-                    'error': f'Connection refused (errno: {result})',
-                    'port': port,
-                    'host': host,
-                })
+        # Check each container
+        containers_health = {}
+        summary = {'total': 0, 'healthy': 0, 'degraded': 0, 'unhealthy': 0}
+        
+        for name in container_names:
+            # Get health for this container (reuse same logic)
+            try:
+                inspect_result = run_cmd(['docker', 'inspect', '--format', 
+                    '{{.State.Running}}|{{.State.Health.Status}}|{{.State.StartedAt}}|{{.State.FinishedAt}}|{{.State.ExitCode}}|{{.State.Status}}|{{.State.OOMKilled}}|{{.RestartCount}}|{{.State.Error}}|{{json .NetworkSettings.Ports}}', name])
                 
-        except socket.timeout:
-            elapsed_ms = (time.time() - start_time) * 1000
-            return jsonify({
-                'status': 'unhealthy',
-                'response_time_ms': round(elapsed_ms, 2),
-                'error': f'Connection timed out after {timeout}s',
-                'port': port,
-                'host': host,
-            })
-        except socket.error as e:
-            elapsed_ms = (time.time() - start_time) * 1000
-            return jsonify({
-                'status': 'unhealthy',
-                'response_time_ms': round(elapsed_ms, 2),
-                'error': str(e),
-                'port': port,
-                'host': host,
-            })
-            
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/health/http', methods=['POST'])
-@require_api_key
-def health_check_http():
-    """
-    HTTP health check to internal port.
-    
-    Request body:
-        {
-            "port": 8000,
-            "path": "/health",    # optional, defaults to /
-            "host": "localhost",  # optional, defaults to localhost
-            "timeout": 5,         # optional, defaults to 5 seconds
-            "method": "GET"       # optional, defaults to GET
-        }
-    
-    Response:
-        {
-            "status": "healthy" | "unhealthy",
-            "status_code": 200,
-            "response_time_ms": 45.2,
-            "error": "..." (only if unhealthy)
-        }
-    """
-    try:
-        data = request.get_json() or {}
-        port = data.get('port')
-        path = data.get('path', '/')
-        host = data.get('host', 'localhost')
-        timeout = data.get('timeout', 5)
-        method = data.get('method', 'GET').upper()
-        
-        if not port:
-            return jsonify({'error': 'port is required'}), 400
-        
-        if not isinstance(port, int) or port < 1 or port > 65535:
-            return jsonify({'error': 'port must be an integer between 1 and 65535'}), 400
-        
-        # Ensure path starts with /
-        if not path.startswith('/'):
-            path = '/' + path
-        
-        url = f'http://{host}:{port}{path}'
-        start_time = time.time()
-        
-        try:
-            req = urllib.request.Request(url, method=method)
-            req.add_header('User-Agent', f'NodeAgent/{AGENT_VERSION}')
-            
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                status_code = resp.getcode()
-                elapsed_ms = (time.time() - start_time) * 1000
+                if inspect_result.returncode != 0:
+                    containers_health[name] = {'status': 'unhealthy', 'error': 'Container not found'}
+                    summary['unhealthy'] += 1
+                    summary['total'] += 1
+                    continue
                 
-                # 2xx is healthy
-                if 200 <= status_code < 300:
-                    return jsonify({
-                        'status': 'healthy',
-                        'status_code': status_code,
-                        'response_time_ms': round(elapsed_ms, 2),
-                        'url': url,
-                    })
-                else:
-                    return jsonify({
-                        'status': 'unhealthy',
-                        'status_code': status_code,
-                        'response_time_ms': round(elapsed_ms, 2),
-                        'error': f'Non-2xx status code: {status_code}',
-                        'url': url,
-                    })
-                    
-        except urllib.error.HTTPError as e:
-            elapsed_ms = (time.time() - start_time) * 1000
-            return jsonify({
-                'status': 'unhealthy',
-                'status_code': e.code,
-                'response_time_ms': round(elapsed_ms, 2),
-                'error': f'HTTP {e.code}: {e.reason}',
-                'url': url,
-            })
-        except urllib.error.URLError as e:
-            elapsed_ms = (time.time() - start_time) * 1000
-            return jsonify({
-                'status': 'unhealthy',
-                'response_time_ms': round(elapsed_ms, 2),
-                'error': f'Connection failed: {e.reason}',
-                'url': url,
-            })
-        except socket.timeout:
-            elapsed_ms = (time.time() - start_time) * 1000
-            return jsonify({
-                'status': 'unhealthy',
-                'response_time_ms': round(elapsed_ms, 2),
-                'error': f'Request timed out after {timeout}s',
-                'url': url,
-            })
-            
+                parts = inspect_result.stdout.strip().rsplit('|', 1)
+                state_parts = parts[0].split('|') if len(parts) > 0 else []
+                ports_json = parts[1] if len(parts) > 1 else '{}'
+                
+                running = state_parts[0].lower() == 'true' if state_parts else False
+                docker_health = state_parts[1] if len(state_parts) > 1 else 'none'
+                exit_code = int(state_parts[4]) if len(state_parts) > 4 and state_parts[4].lstrip('-').isdigit() else None
+                docker_status = state_parts[5] if len(state_parts) > 5 else 'unknown'
+                oom_killed = state_parts[6].lower() == 'true' if len(state_parts) > 6 else False
+                
+                # Parse port mappings
+                discovered_port = None
+                try:
+                    port_mappings = json.loads(ports_json) if ports_json and ports_json != 'null' else {}
+                    for container_port, bindings in port_mappings.items():
+                        if bindings:
+                            discovered_port = int(bindings[0].get('HostPort', 0))
+                            if discovered_port > 0:
+                                break
+                except (json.JSONDecodeError, KeyError, TypeError):
+                    pass
+                
+                container_status = 'healthy'
+                details = {}
+                port_check = None
+                
+                # Check 1: Not running
+                if not running:
+                    container_status = 'unhealthy'
+                    if oom_killed:
+                        details['reason'] = f'OOM killed. Exit code: {exit_code}'
+                    elif exit_code is not None and exit_code != 0:
+                        details['reason'] = f'Exited with code {exit_code}'
+                    else:
+                        details['reason'] = f'Not running ({docker_status})'
+                
+                # Check 2: Port check (if running and has port)
+                elif discovered_port:
+                    try:
+                        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        sock.settimeout(2)
+                        conn_result = sock.connect_ex(('localhost', discovered_port))
+                        sock.close()
+                        
+                        port_check = {'port': discovered_port, 'reachable': conn_result == 0}
+                        
+                        if conn_result != 0:
+                            container_status = 'unhealthy'
+                            details['reason'] = f'Port {discovered_port} not responding'
+                    except Exception as e:
+                        port_check = {'port': discovered_port, 'reachable': False, 'error': str(e)}
+                        container_status = 'unhealthy'
+                        details['reason'] = f'Port check failed'
+                
+                health_result = {
+                    'status': container_status,
+                    'running': running,
+                    'docker_status': docker_status,
+                }
+                if docker_health and docker_health != 'none':
+                    health_result['docker_health'] = docker_health
+                if discovered_port:
+                    health_result['port'] = discovered_port
+                if port_check:
+                    health_result['port_check'] = port_check
+                if details:
+                    health_result['details'] = details
+                
+                containers_health[name] = health_result
+                summary[container_status] += 1
+                summary['total'] += 1
+                
+            except Exception as e:
+                containers_health[name] = {'status': 'unhealthy', 'error': str(e)}
+                summary['unhealthy'] += 1
+                summary['total'] += 1
+        
+        # Overall status
+        if summary['unhealthy'] > 0:
+            overall_status = 'unhealthy'
+        elif summary['degraded'] > 0:
+            overall_status = 'degraded'
+        else:
+            overall_status = 'healthy'
+        
+        return jsonify({
+            'status': overall_status,
+            'containers': containers_health,
+            'summary': summary,
+        })
+        
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

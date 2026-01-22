@@ -1440,18 +1440,25 @@ class DeploymentService:
                     image = config.image
                 
                 # Step 3: Determine port mapping
+                # For stateful services, use known port from KNOWN_SERVICE_DEPS (redis=6379, postgres=5432, etc.)
+                service_lower = config.name.lower()
+                if config.is_stateful and service_lower in KNOWN_SERVICE_DEPS:
+                    container_port = KNOWN_SERVICE_DEPS[service_lower].container_port
+                elif config.source_type == DeploySource.IMAGE_FILE and config.container_port:
+                    container_port = config.container_port
+                else:
+                    container_port = config.port
+                
                 if config.source_type == DeploySource.IMAGE_FILE and config.container_port and config.host_port:
                     # For IMAGE_FILE, use configured ports but apply toggle offset if secondary
                     if DeploymentNaming.is_secondary_container(new_container_name):
                         expose_port = config.host_port + PortResolver.SECONDARY_PORT_OFFSET
                     else:
                         expose_port = config.host_port
-                    container_port = config.container_port
                     port_mapping = {str(expose_port): str(container_port)}
                 else:
                     # Use toggle port
                     expose_port = new_host_port
-                    container_port = config.port
                     port_mapping = {str(expose_port): str(container_port)}
                 
                 # Step 4: Run NEW container (old one still running for zero-downtime)
@@ -1500,68 +1507,35 @@ class DeploymentService:
                 
                 self.log(f"   [{name}] ⏳ Waiting for health check...")
                 
-                # For stateful services (redis, postgres, etc.), use agent health check with TCP
-                # These services don't speak HTTP - they have their own protocols
+                # Unified health check for all services (stateful and HTTP)
+                # Uses auto-discovered port from docker inspect - no manual port needed
                 # Agent checks from inside the droplet (external ports blocked by firewall)
-                if config.is_stateful:
-                    for attempt in range(max_attempts):
-                        try:
-                            # Use comprehensive health check: TCP + container state + logs
-                            health_result = await agent.check_container_health(
-                                new_container_name, 
-                                port=container_port
-                            )
-                            if health_result.success:
-                                status = health_result.data.get('status')
-                                if status == 'healthy':
-                                    healthy = True
-                                    self.log(f"   [{name}] ✅ Healthy (TCP port {container_port} responding)")
-                                    break
-                                elif status == 'degraded':
-                                    # Container running but has errors in logs - still consider it "ready"
-                                    healthy = True
-                                    details = health_result.data.get('details', {})
-                                    self.log(f"   [{name}] ⚠️ Degraded: {details.get('reason', 'errors in logs')}")
-                                    break
-                                elif status == 'unhealthy':
-                                    details = health_result.data.get('details', {})
-                                    if attempt == max_attempts - 1:
-                                        self.log(f"   [{name}] ❌ Unhealthy: {details.get('reason', 'unknown')}")
-                        except Exception as e:
-                            if attempt == max_attempts - 1:
-                                self.log(f"   [{name}] ❌ Health check error: {e}")
-                        if attempt < max_attempts - 1:
-                            await asyncio.sleep(1)
-                else:
-                    # For regular services, use HTTP health check
-                    # Create a quick health check client (no retries, very short timeout)
-                    from ...http_client import AsyncHttpClient, HttpConfig, RetryConfig
-                    health_config = HttpConfig(
-                        timeout=1,  # 1s total timeout
-                        retry=RetryConfig(max_retries=0),  # No retries - we do manual loop
-                    )
-                    health_client = AsyncHttpClient(config=health_config)
-                    
+                for attempt in range(max_attempts):
                     try:
-                        for attempt in range(max_attempts):
-                            # Try common health endpoints - just root and /health
-                            for endpoint in ['/', '/health']:
-                                try:
-                                    check_url = f"http://{ip}:{expose_port}{endpoint}"
-                                    resp = await health_client.request("GET", check_url, raise_on_error=False)
-                                    if resp.status_code < 500:  # 2xx, 3xx, 4xx all mean "app is responding"
-                                        healthy = True
-                                        self.log(f"   [{name}] ✅ Health check passed ({endpoint})")
-                                        break
-                                except Exception:
-                                    continue
-                            if healthy:
-                                break
+                        # Comprehensive health check: container state + TCP port check + log analysis
+                        health_result = await agent.check_container_health(new_container_name)
+                        if health_result.success:
+                            status = health_result.data.get('status')
+                            details = health_result.data.get('details', {})
+                            port_info = health_result.data.get('container', {}).get('discovered_port', 'auto')
                             
-                            if attempt < max_attempts - 1:
-                                await asyncio.sleep(1)
-                    finally:
-                        await health_client.close()
+                            if status == 'healthy':
+                                healthy = True
+                                self.log(f"   [{name}] ✅ Healthy (port {port_info} responding)")
+                                break
+                            elif status == 'degraded':
+                                # Container running but has errors in logs - still consider it "ready"
+                                healthy = True
+                                self.log(f"   [{name}] ⚠️ Degraded: {details.get('reason', 'errors in logs')}")
+                                break
+                            elif status == 'unhealthy':
+                                if attempt == max_attempts - 1:
+                                    self.log(f"   [{name}] ❌ Unhealthy: {details.get('reason', 'unknown')}")
+                    except Exception as e:
+                        if attempt == max_attempts - 1:
+                            self.log(f"   [{name}] ❌ Health check error: {e}")
+                    if attempt < max_attempts - 1:
+                        await asyncio.sleep(1)
                 
                 if not healthy:
                     # Container not healthy - abort and keep old container running

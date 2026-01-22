@@ -256,7 +256,8 @@ class ProvisioningService(_BaseProvisioningService):
                 max_checks = self.AGENT_WAIT_TIMEOUT // self.AGENT_CHECK_INTERVAL
                 for i in range(max_checks):
                     try:
-                        health = client.health_check_sync()
+                        # Just check if agent is responding (ping)
+                        health = client.ping_sync()
                         if health.success:
                             yield emit("progress", "✅ Agent responding!")
                             break
@@ -459,7 +460,8 @@ class AsyncProvisioningService(_BaseProvisioningService):
                 max_checks = self.AGENT_WAIT_TIMEOUT // self.AGENT_CHECK_INTERVAL
                 for i in range(max_checks):
                     try:
-                        health = await client.health_check()
+                        # Just check if agent is responding (ping)
+                        health = await client.ping()
                         if health.success:
                             yield emit("progress", "✅ Agent responding!")
                             break
