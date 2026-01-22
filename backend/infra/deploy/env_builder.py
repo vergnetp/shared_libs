@@ -105,6 +105,92 @@ KNOWN_SERVICES = {
 DEFAULT_HTTP_PORT = 8000
 
 
+# Image patterns for detecting stateful service types
+# Maps service_type -> list of image name patterns to match
+STATEFUL_IMAGE_PATTERNS = {
+    "redis": ["redis:", "/redis:", "bitnami/redis"],
+    "postgres": ["postgres:", "/postgres:", "postgis:", "bitnami/postgresql"],
+    "mysql": ["mysql:", "/mysql:", "bitnami/mysql"],
+    "mariadb": ["mariadb:", "/mariadb:", "bitnami/mariadb"],
+    "mongo": ["mongo:", "/mongo:", "bitnami/mongodb"],
+    "opensearch": ["opensearch:", "/opensearch:"],
+    "elasticsearch": ["elasticsearch:", "/elasticsearch:"],
+    "qdrant": ["qdrant:", "/qdrant:"],
+    "rabbitmq": ["rabbitmq:", "/rabbitmq:"],
+    "kafka": ["kafka:", "/kafka:", "bitnami/kafka"],
+}
+
+
+def detect_stateful_service_type(
+    name: str, 
+    image: str = None, 
+    is_stateful: bool = False
+) -> Optional[str]:
+    """
+    Detect stateful service type from name and/or image.
+    
+    Uses multiple signals for robust detection:
+    1. Docker image patterns (most reliable)
+    2. Exact service name match in KNOWN_SERVICES
+    3. Service name prefix match (e.g., "redis-business" → "redis")
+    4. Partial name match (only if is_stateful=True as fallback)
+    
+    Args:
+        name: Service name (e.g., "redis", "redis-business", "my-postgres-db")
+        image: Docker image (e.g., "redis:7-alpine", "bitnami/redis:7")
+        is_stateful: Whether the service is marked as stateful
+        
+    Returns:
+        Service type ("redis", "postgres", etc.) or None if not detected
+        
+    Examples:
+        >>> detect_stateful_service_type("redis", "redis:7-alpine")
+        "redis"
+        >>> detect_stateful_service_type("redis-business", "redis:7-alpine")
+        "redis"
+        >>> detect_stateful_service_type("my-cache", "bitnami/redis:7", is_stateful=True)
+        "redis"
+        >>> detect_stateful_service_type("credentials")  # No false positive
+        None
+    """
+    name_lower = name.lower()
+    image_lower = (image or "").lower()
+    
+    # 1. Check image patterns (most reliable signal)
+    for service_type, patterns in STATEFUL_IMAGE_PATTERNS.items():
+        for pattern in patterns:
+            if pattern.lower() in image_lower:
+                return service_type
+    
+    # 2. Check exact service name match in KNOWN_SERVICES
+    if name_lower in KNOWN_SERVICES:
+        return name_lower
+    
+    # 3. Check if name starts with known service type (e.g., "redis-business" → "redis")
+    for service_type in KNOWN_SERVICES:
+        if name_lower.startswith(f"{service_type}-"):
+            return service_type
+    
+    # 4. Only if is_stateful is explicitly True, try partial match (fallback)
+    # This is a weak signal, so only use when we know it's a stateful service
+    if is_stateful:
+        for service_type in KNOWN_SERVICES:
+            if service_type in name_lower:
+                return service_type
+    
+    return None
+
+
+def is_redis_service(name: str, image: str = None, is_stateful: bool = False) -> bool:
+    """Check if service is Redis. Convenience wrapper around detect_stateful_service_type."""
+    return detect_stateful_service_type(name, image, is_stateful) == "redis"
+
+
+def is_postgres_service(name: str, image: str = None, is_stateful: bool = False) -> bool:
+    """Check if service is PostgreSQL. Convenience wrapper around detect_stateful_service_type."""
+    return detect_stateful_service_type(name, image, is_stateful) == "postgres"
+
+
 class DeployEnvBuilder:
     """
     Build environment variables and volumes for deployment.
@@ -564,6 +650,7 @@ def get_connection_info(
     service: str,
     host: str,
     port: int,
+    image: str = None,
 ) -> Dict[str, str]:
     """
     Generate connection info for a stateful service.
@@ -571,34 +658,43 @@ def get_connection_info(
     Returns deterministic credentials based on user/project/env/service.
     Can be called anytime to regenerate the same connection URL.
     
+    Uses robust service type detection via detect_stateful_service_type() to handle:
+    - Clean types: "redis", "postgres"
+    - Named services: "redis-business", "postgres-analytics"
+    - Image-based detection: bitnami/redis:7, postgres:16-alpine
+    
     Args:
         user: User/workspace ID
         project: Project name
         env: Environment (prod, staging, dev)
-        service: Service name (redis, postgres, etc.)
+        service: Service name or type (redis, redis-business, postgres, etc.)
         host: Server IP or hostname
         port: Port the service is exposed on
+        image: Optional Docker image for more reliable detection
         
     Returns:
         Dict with keys: connection_url, env_var_name, host, port, password, user (if applicable), database (if applicable)
     """
     builder = DeployEnvBuilder(user, project, env, service)
-    service_lower = service.lower()
+    
+    # Use robust detection - handles "redis-business" → "redis", image patterns, etc.
+    detected_type = detect_stateful_service_type(service, image, is_stateful=True)
     
     result = {
         "host": host,
         "port": port,
         "service": service,
+        "detected_type": detected_type,  # Include for debugging
     }
     
-    if "redis" in service_lower:
+    if detected_type == "redis":
         password = builder._get_service_password("redis")
         result.update({
             "connection_url": f"redis://:{password}@{host}:{port}/0",
             "env_var_name": "REDIS_URL",
             "password": password,
         })
-    elif "postgres" in service_lower:
+    elif detected_type in ("postgres", "postgresql"):
         db_user = builder._get_db_user("postgres")
         db_password = builder._get_service_password("postgres")
         db_name = builder._get_db_name("postgres")
@@ -609,7 +705,7 @@ def get_connection_info(
             "password": db_password,
             "database": db_name,
         })
-    elif "mysql" in service_lower or "mariadb" in service_lower:
+    elif detected_type in ("mysql", "mariadb"):
         db_user = builder._get_db_user("mysql")
         db_password = builder._get_service_password("mysql")
         db_name = builder._get_db_name("mysql")
@@ -620,7 +716,7 @@ def get_connection_info(
             "password": db_password,
             "database": db_name,
         })
-    elif "mongo" in service_lower:
+    elif detected_type in ("mongo", "mongodb"):
         db_user = builder._get_db_user("mongo")
         db_password = builder._get_service_password("mongo")
         db_name = builder._get_db_name("mongo")

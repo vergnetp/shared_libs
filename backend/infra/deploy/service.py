@@ -32,7 +32,12 @@ class DeploySource(Enum):
 
 
 # Import stateful service detection from env_builder
-from .env_builder import is_stateful_service, KNOWN_SERVICES as KNOWN_SERVICE_DEPS
+from .env_builder import (
+    is_stateful_service, 
+    KNOWN_SERVICES as KNOWN_SERVICE_DEPS,
+    detect_stateful_service_type,
+    is_redis_service,
+)
 
 
 @dataclass
@@ -1482,8 +1487,7 @@ class DeploymentService:
                     # Redis needs --bind 0.0.0.0 to accept connections via Docker port forwarding
                     # (default is 127.0.0.1 which only works inside the container)
                     # Also needs --requirepass command since it doesn't read env vars
-                    service_lower = config.name.lower()
-                    if "redis" in service_lower:
+                    if is_redis_service(config.name, config.image, is_stateful=True):
                         redis_password = container_env.get("REDIS_PASSWORD", "")
                         if redis_password:
                             container_command = ["redis-server", "--bind", "0.0.0.0", "--requirepass", redis_password]

@@ -627,7 +627,7 @@ async def stateful_deploy_with_streaming(config: DeployJobConfig):
         
         if result.success:
             # Build connection URL using DeployEnvBuilder (same logic as service mesh)
-            from .env_builder import DeployEnvBuilder
+            from .env_builder import DeployEnvBuilder, detect_stateful_service_type
             
             server_ip = config.server_ips[0] if config.server_ips else "localhost"
             port = result.internal_port or config.port
@@ -640,24 +640,30 @@ async def stateful_deploy_with_streaming(config: DeployJobConfig):
                 service=config.name,
             )
             
-            service_lower = config.name.lower()
-            if "redis" in service_lower:
+            # Use robust detection based on name and image
+            service_type = detect_stateful_service_type(
+                config.name, 
+                config.image, 
+                is_stateful=True
+            )
+            
+            if service_type == "redis":
                 password = env_builder._get_service_password("redis")
                 connection_url = f"redis://:{password}@{server_ip}:{port}/0"
                 env_var_name = "REDIS_URL"
-            elif "postgres" in service_lower:
+            elif service_type in ("postgres", "postgresql"):
                 db_user = env_builder._get_db_user("postgres")
                 db_password = env_builder._get_service_password("postgres")
                 db_name = env_builder._get_db_name("postgres")
                 connection_url = f"postgresql://{db_user}:{db_password}@{server_ip}:{port}/{db_name}"
                 env_var_name = "DATABASE_URL"
-            elif "mysql" in service_lower or "mariadb" in service_lower:
+            elif service_type in ("mysql", "mariadb"):
                 db_user = env_builder._get_db_user("mysql")
                 db_password = env_builder._get_service_password("mysql")
                 db_name = env_builder._get_db_name("mysql")
                 connection_url = f"mysql://{db_user}:{db_password}@{server_ip}:{port}/{db_name}"
                 env_var_name = "MYSQL_URL"
-            elif "mongo" in service_lower:
+            elif service_type in ("mongo", "mongodb"):
                 db_user = env_builder._get_db_user("mongo")
                 db_password = env_builder._get_service_password("mongo")
                 db_name = env_builder._get_db_name("mongo")
