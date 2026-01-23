@@ -1473,6 +1473,10 @@ class DeploymentService:
                 container_env = dict(config.env_vars) if config.env_vars else {}
                 container_command = None
                 
+                # DEBUG: Log initial env_vars
+                self.log(f"   [{name}] DEBUG: config.env_vars = {list(config.env_vars.keys()) if config.env_vars else 'None'}")
+                self.log(f"   [{name}] DEBUG: container_env after copy = {list(container_env.keys())}")
+                
                 if config.is_stateful:
                     from .env_builder import DeployEnvBuilder
                     env_builder = DeployEnvBuilder(
@@ -1493,6 +1497,14 @@ class DeploymentService:
                             container_command = ["redis-server", "--bind", "0.0.0.0", "--requirepass", redis_password]
                         else:
                             container_command = ["redis-server", "--bind", "0.0.0.0"]
+                
+                # DEBUG: Log final env_vars before calling agent
+                self.log(f"   [{name}] DEBUG: Final container_env keys = {list(container_env.keys())}")
+                self.log(f"   [{name}] DEBUG: Final container_env count = {len(container_env)}")
+                if container_env:
+                    # Show first 3 vars for verification
+                    sample_vars = list(container_env.items())[:3]
+                    self.log(f"   [{name}] DEBUG: Sample env vars = {sample_vars}")
                 
                 result = await agent.run_container(
                     name=new_container_name,
