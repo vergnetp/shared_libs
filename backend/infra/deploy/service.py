@@ -14,7 +14,6 @@ from ..node_agent.client import NodeAgentClient
 from ..providers.digitalocean import DOClient
 from ..networking.nginx_manager import NginxManager, BackendMode
 from ..networking.ports import DeploymentPortResolver
-from ..storage.volumes import VolumeManager
 
 
 class DeploySource(Enum):
@@ -62,7 +61,6 @@ class MultiDeployConfig:
     depends_on: List[str] = field(default_factory=list)  # Services this depends on
     setup_sidecar: bool = True  # Set up nginx sidecar after deploy
     is_stateful: bool = False   # Is this a stateful service (postgres, redis, etc.)
-    enable_persistent_data: bool = True  # Mount /data volume for persistent storage
     
     # Domain config
     setup_domain: bool = False  # Auto-provision domain
@@ -1508,43 +1506,12 @@ class DeploymentService:
                     sample_vars = list(container_env.items())[:3]
                     self.log(f"   [{name}] DEBUG: Sample env vars = {sample_vars}")
                 
-                # Step 4b: Setup persistent volumes
-                container_volumes = []
-                if config.enable_persistent_data:
-                    volume_manager = VolumeManager()
-                    if config.is_stateful:
-                        # Stateful services get service-specific paths (postgres, redis, etc.)
-                        volumes = volume_manager.get_standard_service_volumes(
-                            user=workspace_id,
-                            project=project_name,
-                            env=config.environment,
-                            service=config.name,
-                        )
-                    else:
-                        # Custom services just get /data
-                        volumes = [volume_manager.get_volume_mount(
-                            user=workspace_id,
-                            project=project_name,
-                            env=config.environment,
-                            service=config.name,
-                            volume_type="data",
-                        )]
-                    
-                    # Create host directories and build volume list
-                    for vol in volumes:
-                        self.log(f"   [{name}] 📁 Creating volume: {vol.host_path} -> {vol.container_path}")
-                        mkdir_result = await agent.create_directory(vol.host_path)
-                        if not mkdir_result.success:
-                            self.log(f"   [{name}] ⚠️ Warning: Could not create {vol.host_path}: {mkdir_result.error}")
-                        container_volumes.append(vol.to_docker())
-                
                 result = await agent.run_container(
                     name=new_container_name,
                     image=image,
                     ports=port_mapping,
                     env_vars=container_env,
                     command=container_command,
-                    volumes=container_volumes if container_volumes else None,
                 )
                 if not result.success:
                     raise Exception(f"Run failed: {result.error}")
