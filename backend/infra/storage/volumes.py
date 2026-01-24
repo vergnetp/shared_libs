@@ -38,11 +38,11 @@ class VolumeManager:
         /data/{user}/{project}/{env}/{service}/logs/     - log files
         /data/{user}/{project}/{env}/{service}/backups/  - backup files
     
-    Standard container paths:
-        /app/data      - application data
-        /app/config    - configuration
-        /app/secrets   - secrets (read-only)
-        /app/logs      - logs
+    Standard container paths (custom services):
+        /data      - application data
+        /config    - configuration
+        /secrets   - secrets (read-only)
+        /logs      - logs
     
     Service-specific container paths:
         postgres: /var/lib/postgresql/data
@@ -79,11 +79,11 @@ class VolumeManager:
     
     # Standard container paths by volume type (for custom services)
     VOLUME_TYPE_PATHS = {
-        "data": "/app/data",
-        "config": "/app/config",
-        "secrets": "/app/secrets",
-        "logs": "/app/logs",
-        "backups": "/app/backups",
+        "data": "/data",
+        "config": "/config",
+        "secrets": "/secrets",
+        "logs": "/logs",
+        "backups": "/backups",
     }
     
     def __init__(self, base_path: str = None):
