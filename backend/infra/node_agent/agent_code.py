@@ -18,7 +18,7 @@ Multi-tenancy:
 """
 
 # Module-level version constant (importable)
-AGENT_VERSION = "2.6.7"  # Fixed health check for images without Docker HEALTHCHECK (redis, postgres, etc)
+AGENT_VERSION = "2.6.9"  # Added /data/ to allowed paths for persistent volumes
 
 # The node agent Flask app code - embedded as a string for cloud-init
 NODE_AGENT_CODE = '''#!/usr/bin/env python3
@@ -27,7 +27,7 @@ Node Agent - SSH-Free Deployments for SaaS
 Runs on port 9999, protected by API key.
 """
 
-AGENT_VERSION = "2.6.7"  # Fixed health check for images without Docker HEALTHCHECK (redis, postgres, etc)
+AGENT_VERSION = "2.6.9"  # Added /data/ to allowed paths for persistent volumes
 
 from flask import Flask, request, jsonify
 from functools import wraps
@@ -107,7 +107,7 @@ def log_error(endpoint, error, details=None):
 app = Flask(__name__)
 
 # Security: Allowed paths for file operations
-ALLOWED_WRITE_PATHS = ['/local/', '/app/', '/etc/nginx/', '/tmp/']
+ALLOWED_WRITE_PATHS = ['/local/', '/app/', '/etc/nginx/', '/tmp/', '/data/']
 ALLOWED_SERVICES = ['nginx', 'docker', 'node-agent']
 
 def is_path_allowed(path: str) -> bool:
