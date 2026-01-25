@@ -328,6 +328,7 @@ async def _deploy_async(ctx, config: DeployJobConfig) -> MultiDeployResult:
     service = DeploymentService(
         do_token=config.do_token,
         log=log_callback,
+        user_id=config.deployed_by,
     )
     
     return await service.deploy(config.to_multi_config())
@@ -414,6 +415,7 @@ async def deploy_with_streaming(config: DeployJobConfig):
         service = DeploymentService(
             do_token=config.do_token,
             log=log_callback,
+            user_id=config.deployed_by,
             emit_event=emit_event_callback,
         )
         
@@ -529,6 +531,7 @@ async def rollback_with_streaming(config: DeployJobConfig):
         service = DeploymentService(
             do_token=config.do_token,
             log=log_callback,
+            user_id=config.deployed_by,
         )
         
         deploy_task = asyncio.create_task(service.deploy(config.to_multi_config()))
@@ -612,9 +615,15 @@ async def stateful_deploy_with_streaming(config: DeployJobConfig):
         yield await event_queue.get()
     
     try:
+        def emit_event_callback(event_type: str, message: str, data: Dict):
+            """Callback for DeployService to emit events (e.g., server_provisioned)."""
+            emit(event_type, message, **data)
+        
         service = DeploymentService(
             do_token=config.do_token,
             log=log_callback,
+            user_id=config.deployed_by,
+            emit_event=emit_event_callback,
         )
         
         deploy_task = asyncio.create_task(service.deploy(config.to_multi_config()))
@@ -885,6 +894,7 @@ async def create_snapshot_with_streaming(config: DeployJobConfig):
         service = DeploymentService(
             do_token=config.do_token,
             log=log_callback,
+            user_id=config.deployed_by,
         )
         
         # Create task and poll for events

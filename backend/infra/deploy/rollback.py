@@ -20,7 +20,7 @@ Usage:
     )
     
     # Deploy using the service
-    service = DeploymentService(do_token, agent_key)
+    service = DeploymentService(do_token, user_id="user123")
     result = await service.deploy(config)
 """
 

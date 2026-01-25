@@ -179,6 +179,7 @@ class DeploymentService:
         self,
         do_token: str,
         log: LogCallback = None,
+        user_id: str = None,
         # Service mesh callbacks (optional - for nginx stream proxy updates)
         on_service_deployed: Callable[..., Awaitable[None]] = None,
         get_project_servers: Callable[[str, str, str], Awaitable[List[str]]] = None,
@@ -191,6 +192,7 @@ class DeploymentService:
         Args:
             do_token: DigitalOcean API token (also used to derive agent auth key)
             log: Callback for logging messages
+            user_id: ID of user triggering operations (for audit trail)
             on_service_deployed: Callback when a service is deployed.
                 Args: (workspace_id, project, env, service, server_ip, 
                        host_port, container_port, container_name, internal_port, private_ip)
@@ -201,6 +203,7 @@ class DeploymentService:
         """
         self.do_token = do_token
         self.log = log or (lambda msg: None)
+        self.user_id = user_id or "system"
         self._do_client: Optional[DOClient] = None
         self._on_service_deployed = on_service_deployed
         self._get_project_servers = get_project_servers
@@ -1158,7 +1161,7 @@ class DeploymentService:
         """
         from ..provisioning import AsyncProvisioningService
         
-        provisioning_service = AsyncProvisioningService(self.do_token)
+        provisioning_service = AsyncProvisioningService(self.do_token, self.user_id)
         
         results = await provisioning_service.provision_multiple_parallel(
             count=config.new_server_count,
@@ -1182,6 +1185,7 @@ class DeploymentService:
                 servers.append(server_info)
                 
                 # Emit event for DB persistence (handled by deploy_routes)
+                self.log(f"🔧 Emitting server_provisioned event for {result.server['name']}")
                 self._emit_event("server_provisioned", f"Server {result.server['name']} ready", {
                     "droplet_id": result.server["id"],
                     "ip": result.server["ip"],
@@ -1817,7 +1821,8 @@ async def deploy(
     config: MultiDeployConfig,
     do_token: str,
     log: LogCallback = None,
+    user_id: str = None,
 ) -> MultiDeployResult:
     """Deploy with a single function call."""
-    service = DeploymentService(do_token, log)
+    service = DeploymentService(do_token, log, user_id=user_id)
     return await service.deploy(config)
