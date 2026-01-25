@@ -182,6 +182,8 @@ class DeploymentService:
         # Service mesh callbacks (optional - for nginx stream proxy updates)
         on_service_deployed: Callable[..., Awaitable[None]] = None,
         get_project_servers: Callable[[str, str, str], Awaitable[List[str]]] = None,
+        # Event emission callback (optional - for DB persistence of provisioned servers)
+        emit_event: Callable[[str, str, Dict[str, Any]], None] = None,
     ):
         """
         Initialize deployment service.
@@ -194,12 +196,15 @@ class DeploymentService:
                        host_port, container_port, container_name, internal_port, private_ip)
             get_project_servers: Callback to get all server IPs in a project.
                 Args: (workspace_id, project, env) -> List[str]
+            emit_event: Callback to emit events (e.g., "server_provisioned").
+                Args: (event_type, message, data_dict)
         """
         self.do_token = do_token
         self.log = log or (lambda msg: None)
         self._do_client: Optional[DOClient] = None
         self._on_service_deployed = on_service_deployed
         self._get_project_servers = get_project_servers
+        self._emit_event = emit_event or (lambda t, m, d: None)
     
     @property
     def do_client(self) -> DOClient:
@@ -1146,54 +1151,45 @@ class DeploymentService:
         return servers
     
     async def _provision_servers(self, config: MultiDeployConfig) -> List[Dict[str, str]]:
-        """Provision new servers from snapshot (truly parallel)."""
-        from ..utils.naming import generate_friendly_name
+        """
+        Provision new servers from snapshot using AsyncProvisioningService.
+        
+        Emits "server_provisioned" event for each server (for DB persistence).
+        """
+        from ..provisioning import AsyncProvisioningService
+        
+        provisioning_service = AsyncProvisioningService(self.do_token)
+        
+        results = await provisioning_service.provision_multiple_parallel(
+            count=config.new_server_count,
+            region=config.region,
+            size=config.size,
+            snapshot_id=config.snapshot_id,
+            tags=["deployed-via-api"],
+            project=config.project,
+            environment=config.environment,
+            log_fn=self.log,
+        )
         
         servers = []
-        names = [generate_friendly_name() for _ in range(config.new_server_count)]
-        
-        # Step 1: Start all droplets at once (don't wait)
-        droplet_ids = []
-        for name in names:
-            try:
-                droplet = self.do_client.create_droplet(
-                    name=name,
-                    region=config.region,
-                    size=config.size,
-                    image=config.snapshot_id,
-                    tags=["deployed-via-api"],
-                    wait=False,  # Don't block - just start creation
-                )
-                droplet_ids.append((droplet.id, name))
-                self.log(f"   🔄 {name} creating...")
-            except Exception as e:
-                self.log(f"   ❌ {name}: {e}")
-        
-        if not droplet_ids:
-            return servers
-        
-        # Step 2: Poll all in parallel until ready
-        self.log(f"   ⏳ Waiting for {len(droplet_ids)} droplet{'s' if len(droplet_ids) > 1 else ''}...")
-        
-        async def wait_for_droplet(droplet_id: int, name: str):
-            for _ in range(120):  # 4 min timeout
-                try:
-                    droplet = self.do_client.get_droplet(droplet_id)
-                    if droplet and droplet.status == "active" and droplet.ip:
-                        self.log(f"   ✅ {name} ({droplet.ip})")
-                        return {"ip": droplet.ip, "name": name, "droplet_id": droplet_id}
-                except:
-                    pass
-                await asyncio.sleep(2)
-            self.log(f"   ❌ {name}: timeout")
-            return None
-        
-        tasks = [wait_for_droplet(did, name) for did, name in droplet_ids]
-        results = await asyncio.gather(*tasks)
-        
-        for r in results:
-            if r:
-                servers.append(r)
+        for result in results:
+            if result.success and result.server:
+                server_info = {
+                    "ip": result.server["ip"],
+                    "name": result.server["name"],
+                    "droplet_id": result.server["id"],
+                }
+                servers.append(server_info)
+                
+                # Emit event for DB persistence (handled by deploy_routes)
+                self._emit_event("server_provisioned", f"Server {result.server['name']} ready", {
+                    "droplet_id": result.server["id"],
+                    "ip": result.server["ip"],
+                    "name": result.server["name"],
+                    "region": config.region,
+                    "size": config.size,
+                    "snapshot_id": config.snapshot_id,
+                })
         
         return servers
     

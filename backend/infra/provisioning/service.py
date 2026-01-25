@@ -378,6 +378,121 @@ class AsyncProvisioningService(_BaseProvisioningService):
         finally:
             await client.close()
     
+    async def provision_multiple_parallel(
+        self,
+        count: int,
+        region: str,
+        size: str = "s-1vcpu-1gb",
+        snapshot_id: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        project: Optional[str] = None,
+        environment: str = "prod",
+        log_fn: Optional[callable] = None,
+    ) -> List[ProvisionResult]:
+        """
+        Provision multiple servers in parallel (async).
+        
+        Starts all droplets at once (non-blocking), then polls in parallel.
+        
+        Args:
+            count: Number of servers to provision
+            region: DO region (e.g., "lon1")
+            size: Droplet size (e.g., "s-1vcpu-1gb")
+            snapshot_id: Snapshot to create from (required)
+            tags: Additional tags (MANAGED_TAG always added)
+            project: Project name for tagging
+            environment: Environment (prod/staging/dev)
+            log_fn: Optional callback for progress logging
+            
+        Returns:
+            List of ProvisionResult for each server (success or failure)
+        """
+        from ..providers import AsyncDOClient
+        from ..utils import generate_friendly_name
+        
+        def log(msg: str):
+            if log_fn:
+                log_fn(msg)
+        
+        if count <= 0:
+            return []
+        
+        if not snapshot_id:
+            return [ProvisionResult(success=False, error="snapshot_id required")]
+        
+        client = AsyncDOClient(self.do_token)
+        results = []
+        
+        try:
+            # Generate names
+            names = [generate_friendly_name() for _ in range(count)]
+            final_tags = self._validate_tags(tags)
+            
+            # Step 1: Start all droplets (don't wait for completion)
+            droplet_ids = []
+            for name in names:
+                try:
+                    droplet = await client.create_droplet(
+                        name=name,
+                        region=region,
+                        size=size,
+                        image=snapshot_id,
+                        tags=final_tags,
+                        project=project,
+                        environment=environment,
+                        node_agent_api_key=self.api_key,
+                        wait=False,  # Don't block - just start creation
+                    )
+                    droplet_ids.append((droplet.id, name))
+                    log(f"   🔄 {name} creating...")
+                except Exception as e:
+                    log(f"   ❌ {name}: {e}")
+                    results.append(ProvisionResult(success=False, error=str(e)))
+            
+            if not droplet_ids:
+                return results
+            
+            # Step 2: Poll all in parallel until ready
+            log(f"   ⏳ Waiting for {len(droplet_ids)} droplet{'s' if len(droplet_ids) > 1 else ''}...")
+            
+            async def wait_for_droplet(droplet_id: int, name: str) -> ProvisionResult:
+                for _ in range(120):  # 4 min timeout
+                    try:
+                        droplet = await client.get_droplet(droplet_id)
+                        if droplet and droplet.status == "active" and droplet.ip:
+                            log(f"   ✅ {name} ({droplet.ip})")
+                            return ProvisionResult(
+                                success=True,
+                                server={
+                                    "id": droplet.id,
+                                    "name": droplet.name,
+                                    "ip": droplet.ip,
+                                    "region": region,
+                                    "size": size,
+                                    "status": droplet.status,
+                                    "vpc_uuid": droplet.vpc_uuid,
+                                },
+                                vpc_uuid=droplet.vpc_uuid,
+                            )
+                    except Exception:
+                        pass
+                    await asyncio.sleep(2)
+                
+                log(f"   ❌ {name}: timeout")
+                return ProvisionResult(success=False, error=f"Timeout waiting for {name}")
+            
+            # Run all waits in parallel
+            tasks = [wait_for_droplet(did, name) for did, name in droplet_ids]
+            wait_results = await asyncio.gather(*tasks)
+            results.extend(wait_results)
+            
+            return results
+            
+        except Exception as e:
+            return [ProvisionResult(success=False, error=str(e))]
+        finally:
+            await client.close()
+    
     async def provision_with_progress(
         self,
         region: str,

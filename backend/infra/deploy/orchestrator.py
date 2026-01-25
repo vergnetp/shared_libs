@@ -407,9 +407,14 @@ async def deploy_with_streaming(config: DeployJobConfig):
     
     # Run deployment
     try:
+        def emit_event_callback(event_type: str, message: str, data: Dict):
+            """Callback for DeployService to emit events (e.g., server_provisioned)."""
+            emit(event_type, message, **data)
+        
         service = DeploymentService(
             do_token=config.do_token,
             log=log_callback,
+            emit_event=emit_event_callback,
         )
         
         # Start deploy as task so we can yield events during execution
