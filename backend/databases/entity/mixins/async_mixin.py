@@ -25,6 +25,16 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
     _meta_cache = {}
     
     @async_method
+    async def _table_exists(self, table_name: str) -> bool:
+        """Check if a table exists in the database."""
+        try:
+            sql, params = self.sql_generator.get_check_table_exists_sql(table_name)
+            result = await self.execute(sql, params)
+            return bool(result)
+        except Exception:
+            return False
+    
+    @async_method
     async def _get_field_names(self, entity_name: str, is_history: bool = False) -> List[str]:
         """
         Get field names for an entity table.
@@ -106,6 +116,9 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
         Returns:
             Entity dictionary or None if not found
         """
+        if not await self._table_exists(entity_name):
+            return None  # No table = no entity
+    
         # If soft-delete filtering requested, check if column exists first
         if not include_deleted:
             has_deleted_at = await self._check_column_exists(entity_name, "deleted_at")
@@ -422,7 +435,9 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
         Returns:
             List of entity dictionaries
         """
-
+        if not await self._table_exists(entity_name):
+            return []  # No table = empty list
+    
         # If soft-delete filtering requested, check if column exists first
         if not include_deleted:
             has_deleted_at = await self._check_column_exists(entity_name, "deleted_at")
