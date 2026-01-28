@@ -294,14 +294,52 @@ class EntityUtilsMixin:
         
         return result
     
-    def _prepare_entity(self, entity_name: str, entity: Dict[str, Any], 
+    def _to_dict(self, entity: Any) -> Dict[str, Any]:
+        """
+        Convert any object to dict.
+        
+        Supports:
+        - Plain dicts (returned as-is)
+        - Dataclasses (via asdict)
+        - Objects with to_dict() method
+        - Any object with __dict__ attribute
+        
+        Args:
+            entity: Object to convert
+            
+        Returns:
+            Dictionary representation of the entity
+            
+        Raises:
+            TypeError: If the entity cannot be converted to dict
+        """
+        # Already a dict
+        if isinstance(entity, dict):
+            return entity
+        
+        # Dataclass - use asdict for proper nested conversion
+        if hasattr(entity, '__dataclass_fields__'):
+            from dataclasses import asdict
+            return asdict(entity)
+        
+        # Has explicit to_dict method
+        if hasattr(entity, 'to_dict') and callable(entity.to_dict):
+            return entity.to_dict()
+        
+        # Regular object with __dict__
+        if hasattr(entity, '__dict__'):
+            return {k: v for k, v in entity.__dict__.items() if not k.startswith('_')}
+        
+        raise TypeError(f"Cannot convert {type(entity).__name__} to dict")
+    
+    def _prepare_entity(self, entity_name: str, entity: Any, 
                        user_id: Optional[str] = None, comment: Optional[str] = None) -> Dict[str, Any]:
         """
         Prepare an entity for storage by adding required fields.
         
         Args:
             entity_name: Name of the entity type
-            entity: Entity data
+            entity: Entity data (dict, dataclass, or any object)
             user_id: Optional ID of the user making the change
             comment: Optional comment about the change
             
@@ -309,7 +347,7 @@ class EntityUtilsMixin:
             Entity with added/updated system fields
         """
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        result = entity.copy()
+        result = self._to_dict(entity).copy()
         
         # Add ID if missing
         if 'id' not in result or not result['id']:

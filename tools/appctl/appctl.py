@@ -51,6 +51,17 @@ PYDANTIC_TYPES = {
     "json": "Dict[str, Any]",
 }
 
+# For dataclass entities (internal typed objects)
+DATACLASS_TYPES = {
+    "string": ("str", '""'),
+    "text": ("str", '""'),
+    "int": ("int", "0"),
+    "float": ("float", "0.0"),
+    "bool": ("bool", "False"),
+    "datetime": ("Optional[str]", "None"),  # ISO string
+    "json": ("Optional[Dict[str, Any]]", "None"),
+}
+
 
 # =============================================================================
 # Manifest Loading
@@ -247,6 +258,96 @@ def generate_schemas(entities: list[Entity]) -> str:
         lines.append(f'        from_attributes = True')
         lines.append('')
         lines.append('')
+    
+    return '\n'.join(lines)
+
+
+def generate_entities(entities: list[Entity]) -> str:
+    """Generate _gen/entities.py with typed dataclasses."""
+    lines = [
+        '"""',
+        'Typed entity dataclasses - AUTO-GENERATED from manifest.yaml',
+        'DO NOT EDIT - changes will be overwritten on regenerate',
+        '',
+        'These provide type-safe entity access for internal code.',
+        'Use Pydantic schemas (schemas.py) for API validation.',
+        '"""',
+        '',
+        'from dataclasses import dataclass, fields, asdict',
+        'from typing import Any, Dict, List, Optional',
+        '',
+        '',
+    ]
+    
+    for entity in entities:
+        cls = entity.class_name
+        
+        lines.append('@dataclass')
+        lines.append(f'class {cls}:')
+        lines.append(f'    """Typed entity for {entity.name}."""')
+        lines.append('')
+        
+        # System fields
+        lines.append('    # System fields')
+        lines.append('    id: Optional[str] = None')
+        if entity.workspace_scoped:
+            lines.append('    workspace_id: Optional[str] = None')
+        lines.append('    created_at: Optional[str] = None')
+        lines.append('    updated_at: Optional[str] = None')
+        lines.append('    created_by: Optional[str] = None')
+        lines.append('    updated_by: Optional[str] = None')
+        if entity.soft_delete:
+            lines.append('    deleted_at: Optional[str] = None')
+        
+        # Required fields
+        required_fields = [f for f in entity.fields if f.required]
+        if required_fields:
+            lines.append('')
+            lines.append('    # Required fields')
+            for field in required_fields:
+                py_type, _ = DATACLASS_TYPES.get(field.type, ("str", '""'))
+                lines.append(f'    {field.name}: {py_type} = None  # required')
+        
+        # Optional fields
+        optional_fields = [f for f in entity.fields if not f.required]
+        if optional_fields:
+            lines.append('')
+            lines.append('    # Optional fields')
+            for field in optional_fields:
+                py_type, py_default = DATACLASS_TYPES.get(field.type, ("str", '""'))
+                if field.default is not None:
+                    if isinstance(field.default, str):
+                        default_val = f'"{field.default}"'
+                    elif isinstance(field.default, bool):
+                        default_val = str(field.default)
+                    else:
+                        default_val = str(field.default)
+                else:
+                    default_val = py_default
+                if not py_type.startswith("Optional"):
+                    py_type = f"Optional[{py_type}]"
+                lines.append(f'    {field.name}: {py_type} = {default_val}')
+        
+        # from_dict method
+        lines.append('')
+        lines.append('    @classmethod')
+        lines.append(f"    def from_dict(cls, data: Dict[str, Any]) -> '{cls}':")
+        lines.append('        """Create from dict, filtering to known fields."""')
+        lines.append('        if data is None:')
+        lines.append('            return None')
+        lines.append('        field_names = {f.name for f in fields(cls)}')
+        lines.append('        filtered = {k: v for k, v in data.items() if k in field_names}')
+        lines.append('        return cls(**filtered)')
+        
+        lines.append('')
+        lines.append('')
+    
+    # __all__ export
+    class_names = [e.class_name for e in entities]
+    lines.append('__all__ = [')
+    for name in class_names:
+        lines.append(f'    "{name}",')
+    lines.append(']')
     
     return '\n'.join(lines)
 
@@ -534,6 +635,7 @@ For custom logic, put code in src/
 
 from .db_schema import init_schema
 from .schemas import *
+from .entities import *
 from .crud import EntityCRUD
 from .routes import router as gen_router
 
@@ -898,6 +1000,7 @@ def cmd_new(args):
     write_file(project_dir / "_gen" / "db_schema.py", generate_db_schema(entities, manifest))
     write_file(project_dir / "_gen" / "schemas.py", generate_schemas(entities))
     write_file(project_dir / "_gen" / "crud.py", generate_crud(entities))
+    write_file(project_dir / "_gen" / "entities.py", generate_entities(entities))
     write_file(project_dir / "_gen" / "routes" / "__init__.py", generate_routes_init(entities))
     for entity in entities:
         write_file(
@@ -945,6 +1048,7 @@ def cmd_generate(args):
     write_file(gen_dir / "db_schema.py", generate_db_schema(entities, manifest))
     write_file(gen_dir / "schemas.py", generate_schemas(entities))
     write_file(gen_dir / "crud.py", generate_crud(entities))
+    write_file(gen_dir / "entities.py", generate_entities(entities))
     write_file(gen_dir / "routes" / "__init__.py", generate_routes_init(entities))
     for entity in entities:
         write_file(gen_dir / "routes" / f"{entity.name}.py", generate_entity_router(entity))

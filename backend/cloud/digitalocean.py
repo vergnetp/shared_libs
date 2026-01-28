@@ -26,12 +26,12 @@ from __future__ import annotations
 import time
 import asyncio
 from pathlib import Path
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from typing import Dict, Any, List, Optional
 from enum import Enum
 
 from .base import BaseCloudClient, AsyncBaseCloudClient, CloudClientConfig
-from .errors import DOError, NotFoundError
+from .errors import DOError
 
 
 # Tag applied to ALL droplets created through this system
@@ -59,16 +59,20 @@ class Region(Enum):
     FRA1 = "fra1"  # Frankfurt
 
 
+# =============================================================================
+# Entity Dataclasses - All return typed objects, not dicts
+# =============================================================================
+
 @dataclass
 class Droplet:
     """Droplet (server) info."""
     id: int
     name: str
-    ip: Optional[str]
-    private_ip: Optional[str]
-    region: str
-    size: str
-    status: str
+    ip: Optional[str] = None
+    private_ip: Optional[str] = None
+    region: str = ""
+    size: str = ""
+    status: str = ""
     tags: List[str] = field(default_factory=list)
     created_at: Optional[str] = None
     vpc_uuid: Optional[str] = None
@@ -86,7 +90,7 @@ class Droplet:
     @property
     def project(self) -> Optional[str]:
         """Extract project name from tags (project:xxx)."""
-        for tag in self.tags:
+        for tag in self.tags or []:
             if tag.startswith("project:"):
                 return tag[8:]
         return None
@@ -94,7 +98,7 @@ class Droplet:
     @property
     def environment(self) -> Optional[str]:
         """Extract environment from tags (env:xxx)."""
-        for tag in self.tags:
+        for tag in self.tags or []:
             if tag.startswith("env:"):
                 return tag[4:]
         return None
@@ -102,29 +106,21 @@ class Droplet:
     @property
     def service(self) -> Optional[str]:
         """Extract service name from tags (service:xxx)."""
-        for tag in self.tags:
+        for tag in self.tags or []:
             if tag.startswith("service:"):
                 return tag[8:]
         return None
     
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "id": self.id,
-            "name": self.name,
-            "ip": self.ip,
-            "private_ip": self.private_ip,
-            "region": self.region,
-            "size": self.size,
-            "status": self.status,
-            "tags": self.tags,
-            "created_at": self.created_at,
-            "vpc_uuid": self.vpc_uuid,
-            "project": self.project,
-            "environment": self.environment,
-            "service": self.service,
-            "image": self.image,
-            "is_managed": self.is_managed,
-        }
+        """Convert to dict for serialization."""
+        result = asdict(self)
+        # Add computed properties
+        result["is_active"] = self.is_active
+        result["is_managed"] = self.is_managed
+        result["project"] = self.project
+        result["environment"] = self.environment
+        result["service"] = self.service
+        return result
     
     @classmethod
     def from_api(cls, data: Dict[str, Any]) -> 'Droplet':
@@ -142,13 +138,191 @@ class Droplet:
             name=data["name"],
             ip=ip,
             private_ip=private_ip,
-            region=data.get("region", {}).get("slug", ""),
-            size=data.get("size", {}).get("slug", ""),
+            region=data.get("region", {}).get("slug", "") if isinstance(data.get("region"), dict) else data.get("region", ""),
+            size=data.get("size", {}).get("slug", "") if isinstance(data.get("size"), dict) else data.get("size", ""),
             status=data.get("status", ""),
             tags=data.get("tags", []),
             created_at=data.get("created_at"),
             vpc_uuid=data.get("vpc_uuid"),
             image=data.get("image"),
+        )
+
+
+@dataclass
+class Snapshot:
+    """DO Snapshot info."""
+    id: str
+    name: str
+    regions: List[str] = field(default_factory=list)
+    created_at: Optional[str] = None
+    size_gigabytes: float = 0.0
+    min_disk_size: int = 0
+    resource_type: str = "droplet"
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+    
+    @classmethod
+    def from_api(cls, data: Dict[str, Any]) -> 'Snapshot':
+        """Create from DO API response."""
+        return cls(
+            id=str(data["id"]),
+            name=data["name"],
+            regions=data.get("regions", []),
+            created_at=data.get("created_at"),
+            size_gigabytes=data.get("size_gigabytes", 0.0),
+            min_disk_size=data.get("min_disk_size", 0),
+            resource_type=data.get("resource_type", "droplet"),
+        )
+
+
+@dataclass
+class VPC:
+    """DO VPC info."""
+    id: str
+    name: str
+    region: str
+    ip_range: str
+    description: str = ""
+    created_at: Optional[str] = None
+    default: bool = False
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+    
+    @classmethod
+    def from_api(cls, data: Dict[str, Any]) -> 'VPC':
+        """Create from DO API response."""
+        return cls(
+            id=data["id"],
+            name=data["name"],
+            region=data["region"],
+            ip_range=data["ip_range"],
+            description=data.get("description", ""),
+            created_at=data.get("created_at"),
+            default=data.get("default", False),
+        )
+
+
+@dataclass
+class SSHKey:
+    """DO SSH Key info."""
+    id: int
+    name: str
+    fingerprint: str
+    public_key: str
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+    
+    @classmethod
+    def from_api(cls, data: Dict[str, Any]) -> 'SSHKey':
+        """Create from DO API response."""
+        return cls(
+            id=data["id"],
+            name=data["name"],
+            fingerprint=data["fingerprint"],
+            public_key=data["public_key"],
+        )
+
+
+@dataclass
+class Action:
+    """DO Action info."""
+    id: int
+    status: str
+    type: str
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    resource_id: Optional[int] = None
+    resource_type: str = ""
+    region_slug: str = ""
+    
+    @property
+    def is_completed(self) -> bool:
+        return self.status == "completed"
+    
+    @property
+    def is_errored(self) -> bool:
+        return self.status == "errored"
+    
+    @property
+    def is_in_progress(self) -> bool:
+        return self.status == "in-progress"
+    
+    def to_dict(self) -> Dict[str, Any]:
+        result = asdict(self)
+        result["is_completed"] = self.is_completed
+        result["is_errored"] = self.is_errored
+        result["is_in_progress"] = self.is_in_progress
+        return result
+    
+    @classmethod
+    def from_api(cls, data: Dict[str, Any]) -> 'Action':
+        """Create from DO API response."""
+        return cls(
+            id=data["id"],
+            status=data.get("status", ""),
+            type=data.get("type", ""),
+            started_at=data.get("started_at"),
+            completed_at=data.get("completed_at"),
+            resource_id=data.get("resource_id"),
+            resource_type=data.get("resource_type", ""),
+            region_slug=data.get("region_slug", "") if data.get("region_slug") else (data.get("region", {}).get("slug", "") if isinstance(data.get("region"), dict) else ""),
+        )
+
+
+@dataclass
+class Firewall:
+    """DO Firewall info."""
+    id: str
+    name: str
+    status: str = ""
+    inbound_rules: List[Dict] = field(default_factory=list)
+    outbound_rules: List[Dict] = field(default_factory=list)
+    droplet_ids: List[int] = field(default_factory=list)
+    tags: List[str] = field(default_factory=list)
+    created_at: Optional[str] = None
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+    
+    @classmethod
+    def from_api(cls, data: Dict[str, Any]) -> 'Firewall':
+        """Create from DO API response."""
+        return cls(
+            id=data["id"],
+            name=data["name"],
+            status=data.get("status", ""),
+            inbound_rules=data.get("inbound_rules", []),
+            outbound_rules=data.get("outbound_rules", []),
+            droplet_ids=data.get("droplet_ids", []),
+            tags=data.get("tags", []),
+            created_at=data.get("created_at"),
+        )
+
+
+@dataclass 
+class Registry:
+    """DO Container Registry info."""
+    name: str
+    storage_usage_bytes: int = 0
+    storage_usage_bytes_updated_at: Optional[str] = None
+    created_at: Optional[str] = None
+    region: str = ""
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+    
+    @classmethod
+    def from_api(cls, data: Dict[str, Any]) -> 'Registry':
+        """Create from DO API response."""
+        return cls(
+            name=data["name"],
+            storage_usage_bytes=data.get("storage_usage_bytes", 0),
+            storage_usage_bytes_updated_at=data.get("storage_usage_bytes_updated_at"),
+            created_at=data.get("created_at"),
+            region=data.get("region", ""),
         )
 
 
@@ -436,41 +610,20 @@ systemctl restart node_agent 2>/dev/null || true
             return Result.fail(f"Failed to tag droplet: {e}")
     
     def power_off_droplet(self, droplet_id: int, wait: bool = False, timeout: int = 120) -> None:
-        """
-        Power off a droplet.
-        
-        Required before creating a snapshot for a clean disk state.
-        
-        Args:
-            droplet_id: Droplet ID to power off
-            wait: If True, wait for power off to complete
-            timeout: Max seconds to wait (only if wait=True)
-        """
+        """Power off a droplet."""
         result = self._post(f"/droplets/{droplet_id}/actions", {"type": "power_off"})
         
         if wait and result.get("action", {}).get("id"):
             action_id = result["action"]["id"]
             self._wait_for_action(action_id, timeout)
     
-    def reboot_droplet(self, droplet_id: int, wait: bool = True, timeout: int = 180) -> Dict[str, Any]:
-        """
-        Reboot a droplet.
-        
-        Used for auto-healing when a droplet becomes unreachable.
-        
-        Args:
-            droplet_id: Droplet ID to reboot
-            wait: If True, wait for reboot to complete
-            timeout: Max seconds to wait (only if wait=True)
-            
-        Returns:
-            Action dict with id, status, type, etc.
-        """
+    def reboot_droplet(self, droplet_id: int, wait: bool = True, timeout: int = 180) -> Action:
+        """Reboot a droplet."""
         result = self._post(f"/droplets/{droplet_id}/actions", {"type": "reboot"})
-        action = result.get("action", {})
+        action = Action.from_api(result.get("action", {}))
         
-        if wait and action.get("id"):
-            action = self._wait_for_action(action["id"], timeout)
+        if wait and action.id:
+            action = self._wait_for_action(action.id, timeout)
         
         return action
     
@@ -517,15 +670,15 @@ systemctl restart node_agent 2>/dev/null || true
     DEPLOYER_KEY_NAME = "deployer_key"
     DEPLOYER_KEY_PATH = Path.home() / ".ssh" / "id_ed25519"
     
-    def list_ssh_keys(self) -> List[Dict[str, Any]]:
+    def list_ssh_keys(self) -> List[SSHKey]:
         """List all SSH keys."""
         result = self._get("/account/keys")
-        return result.get("ssh_keys", [])
+        return [SSHKey.from_api(k) for k in result.get("ssh_keys", [])]
     
-    def add_ssh_key(self, name: str, public_key: str) -> Dict[str, Any]:
+    def add_ssh_key(self, name: str, public_key: str) -> SSHKey:
         """Add SSH key to account."""
         result = self._post("/account/keys", {"name": name, "public_key": public_key})
-        return result.get("ssh_key", {})
+        return SSHKey.from_api(result.get("ssh_key", {}))
     
     def ensure_deployer_key(self) -> str:
         """Ensure deployer SSH key exists locally and on DO."""
@@ -555,34 +708,34 @@ systemctl restart node_agent 2>/dev/null || true
         
         existing_keys = self.list_ssh_keys()
         for key in existing_keys:
-            if key.get("public_key", "").strip() == public_key:
-                return str(key["id"])
+            if key.public_key.strip() == public_key:
+                return str(key.id)
         
         try:
             new_key = self.add_ssh_key(self.DEPLOYER_KEY_NAME, public_key)
-            return str(new_key["id"])
+            return str(new_key.id)
         except Exception as e:
             if "422" in str(e) or "already" in str(e).lower():
                 existing_keys = self.list_ssh_keys()
                 for key in existing_keys:
-                    if key.get("public_key", "").strip() == public_key:
-                        return str(key["id"])
+                    if key.public_key.strip() == public_key:
+                        return str(key.id)
             raise
     
     # =========================================================================
     # VPC
     # =========================================================================
     
-    def list_vpcs(self) -> List[Dict[str, Any]]:
+    def list_vpcs(self) -> List[VPC]:
         """List all VPCs."""
         result = self._get("/vpcs")
-        return result.get("vpcs", [])
+        return [VPC.from_api(v) for v in result.get("vpcs", [])]
     
-    def get_vpc(self, vpc_id: str) -> Optional[Dict[str, Any]]:
+    def get_vpc(self, vpc_id: str) -> Optional[VPC]:
         """Get VPC by ID."""
         try:
             result = self._get(f"/vpcs/{vpc_id}")
-            return result.get("vpc")
+            return VPC.from_api(result.get("vpc", {}))
         except DOError as e:
             if e.status_code == 404:
                 return None
@@ -594,13 +747,13 @@ systemctl restart node_agent 2>/dev/null || true
         region: str,
         ip_range: str = "10.120.0.0/20",
         description: str = "",
-    ) -> Dict[str, Any]:
+    ) -> VPC:
         """Create a new VPC."""
         data = {"name": name, "region": region, "ip_range": ip_range}
         if description:
             data["description"] = description
         result = self._post("/vpcs", data)
-        return result.get("vpc", {})
+        return VPC.from_api(result.get("vpc", {}))
     
     def delete_vpc(self, vpc_id: str) -> bool:
         """Delete a VPC."""
@@ -621,8 +774,8 @@ systemctl restart node_agent 2>/dev/null || true
         
         vpcs = self.list_vpcs()
         for vpc in vpcs:
-            if vpc.get("name") == vpc_name and vpc.get("region") == region:
-                return vpc["id"]
+            if vpc.name == vpc_name and vpc.region == region:
+                return vpc.id
         
         if not ip_range:
             region_offsets = {
@@ -640,13 +793,13 @@ systemctl restart node_agent 2>/dev/null || true
                 ip_range=ip_range,
                 description=f"Private network for {name_prefix} deployments",
             )
-            return vpc["id"]
+            return vpc.id
         except DOError as e:
             if "overlaps" in str(e).lower():
                 vpcs = self.list_vpcs()
                 for vpc in vpcs:
-                    if vpc.get("region") == region:
-                        return vpc["id"]
+                    if vpc.region == region:
+                        return vpc.id
             raise
     
     # =========================================================================
@@ -674,7 +827,7 @@ systemctl restart node_agent 2>/dev/null || true
         tags: Optional[List[str]] = None,
         inbound_rules: Optional[List[Dict]] = None,
         outbound_rules: Optional[List[Dict]] = None,
-    ) -> Dict[str, Any]:
+    ) -> Firewall:
         """Create firewall with default SSH/HTTP/HTTPS rules."""
         if inbound_rules is None:
             inbound_rules = [
@@ -698,7 +851,7 @@ systemctl restart node_agent 2>/dev/null || true
             data["tags"] = tags
         
         result = self._post("/firewalls", data)
-        return result.get("firewall", {})
+        return Firewall.from_api(result.get("firewall", {}))
     
     # =========================================================================
     # Snapshots
@@ -709,27 +862,27 @@ systemctl restart node_agent 2>/dev/null || true
         resource_type: str = "droplet",
         page: int = 1,
         per_page: int = 100,
-    ) -> List[Dict[str, Any]]:
+    ) -> List[Snapshot]:
         """List snapshots."""
         params = {"resource_type": resource_type, "page": page, "per_page": per_page}
         result = self._get("/snapshots", params=params)
-        return result.get("snapshots", [])
+        return [Snapshot.from_api(s) for s in result.get("snapshots", [])]
     
-    def get_snapshot(self, snapshot_id: str) -> Optional[Dict[str, Any]]:
+    def get_snapshot(self, snapshot_id: str) -> Optional[Snapshot]:
         """Get snapshot by ID."""
         try:
             result = self._get(f"/snapshots/{snapshot_id}")
-            return result.get("snapshot")
+            return Snapshot.from_api(result.get("snapshot", {}))
         except DOError as e:
             if e.status_code == 404:
                 return None
             raise
     
-    def get_snapshot_by_name(self, name: str) -> Optional[Dict[str, Any]]:
+    def get_snapshot_by_name(self, name: str) -> Optional[Snapshot]:
         """Get snapshot by name."""
         snapshots = self.list_snapshots()
         for snap in snapshots:
-            if snap.get("name") == name:
+            if snap.name == name:
                 return snap
         return None
     
@@ -739,17 +892,17 @@ systemctl restart node_agent 2>/dev/null || true
         name: str,
         wait: bool = True,
         wait_timeout: int = 600,
-    ) -> Dict[str, Any]:
+    ) -> Action:
         """Create snapshot from a droplet."""
         result = self._post(f"/droplets/{droplet_id}/actions", {
             "type": "snapshot",
             "name": name,
         })
         
-        action = result.get("action", {})
+        action = Action.from_api(result.get("action", {}))
         
-        if wait and action.get("id"):
-            action = self._wait_for_action(action["id"], wait_timeout)
+        if wait and action.id:
+            action = self._wait_for_action(action.id, wait_timeout)
         
         return action
     
@@ -767,17 +920,17 @@ systemctl restart node_agent 2>/dev/null || true
         region: str,
         wait: bool = True,
         wait_timeout: int = 600,
-    ) -> Dict[str, Any]:
+    ) -> Action:
         """Transfer snapshot to another region."""
         result = self._post(f"/images/{snapshot_id}/actions", {
             "type": "transfer",
             "region": region,
         })
         
-        action = result.get("action", {})
+        action = Action.from_api(result.get("action", {}))
         
-        if wait and action.get("id"):
-            action = self._wait_for_action(action["id"], wait_timeout)
+        if wait and action.id:
+            action = self._wait_for_action(action.id, wait_timeout)
         
         return action
     
@@ -787,24 +940,12 @@ systemctl restart node_agent 2>/dev/null || true
         exclude_regions: List[str] = None,
         wait: bool = False,
     ) -> Dict[str, Any]:
-        """
-        Transfer snapshot to all available regions.
-        
-        Args:
-            snapshot_id: Snapshot to transfer
-            exclude_regions: Regions to skip
-            wait: If True, wait for each transfer to complete (slow!)
-            
-        Returns:
-            Dict with snapshot_id, snapshot_name, already_in, transferring_to, actions
-        """
+        """Transfer snapshot to all available regions."""
         exclude_regions = exclude_regions or []
         
-        # Get all regions
         regions = self.list_regions()
         available = [r["slug"] for r in regions if r.get("available", True)]
         
-        # Get snapshot info
         snapshot = self.get_snapshot(snapshot_id)
         if not snapshot:
             return {
@@ -816,7 +957,7 @@ systemctl restart node_agent 2>/dev/null || true
                 "error": "Snapshot not found",
             }
         
-        current_regions = snapshot.get("regions", [])
+        current_regions = snapshot.regions
         target_regions = [
             r for r in available 
             if r not in current_regions and r not in exclude_regions
@@ -825,21 +966,20 @@ systemctl restart node_agent 2>/dev/null || true
         if not target_regions:
             return {
                 "snapshot_id": snapshot_id,
-                "snapshot_name": snapshot.get("name"),
+                "snapshot_name": snapshot.name,
                 "already_in": current_regions,
                 "transferring_to": [],
                 "actions": [],
             }
         
-        # Start transfers
         actions = []
         for region in target_regions:
             try:
                 action = self.transfer_snapshot(snapshot_id, region, wait=wait)
                 actions.append({
                     "region": region,
-                    "action_id": action.get("id"),
-                    "status": action.get("status", "in-progress"),
+                    "action_id": action.id,
+                    "status": action.status,
                 })
             except Exception as e:
                 actions.append({
@@ -849,7 +989,7 @@ systemctl restart node_agent 2>/dev/null || true
         
         return {
             "snapshot_id": snapshot_id,
-            "snapshot_name": snapshot.get("name"),
+            "snapshot_name": snapshot.name,
             "already_in": current_regions,
             "transferring_to": target_regions,
             "actions": actions,
@@ -859,23 +999,21 @@ systemctl restart node_agent 2>/dev/null || true
     # Actions
     # =========================================================================
     
-    def get_action(self, action_id: int) -> Dict[str, Any]:
+    def get_action(self, action_id: int) -> Action:
         """Get action status."""
         result = self._get(f"/actions/{action_id}")
-        return result.get("action", {})
+        return Action.from_api(result.get("action", {}))
     
-    def _wait_for_action(self, action_id: int, timeout: int = 600) -> Dict[str, Any]:
+    def _wait_for_action(self, action_id: int, timeout: int = 600) -> Action:
         """Wait for an action to complete."""
         start = time.time()
         
         while time.time() - start < timeout:
-            result = self._get(f"/actions/{action_id}")
-            action = result.get("action", {})
+            action = self.get_action(action_id)
             
-            status = action.get("status", "")
-            if status == "completed":
+            if action.is_completed:
                 return action
-            elif status == "errored":
+            elif action.is_errored:
                 raise DOError(f"Action {action_id} failed")
             
             time.sleep(10)
@@ -886,11 +1024,11 @@ systemctl restart node_agent 2>/dev/null || true
     # Container Registry
     # =========================================================================
     
-    def get_registry(self) -> Optional[Dict[str, Any]]:
+    def get_registry(self) -> Optional[Registry]:
         """Get container registry info."""
         try:
             result = self._get("/registry")
-            return result.get("registry")
+            return Registry.from_api(result.get("registry", {}))
         except DOError as e:
             if e.status_code == 404:
                 return None
@@ -901,14 +1039,14 @@ systemctl restart node_agent 2>/dev/null || true
         name: str,
         region: str = "fra1",
         subscription_tier: str = "starter",
-    ) -> Dict[str, Any]:
+    ) -> Registry:
         """Create container registry."""
         result = self._post("/registry", {
             "name": name,
             "region": region,
             "subscription_tier_slug": subscription_tier,
         })
-        return result.get("registry", {})
+        return Registry.from_api(result.get("registry", {}))
     
     def get_registry_credentials(
         self,
@@ -927,7 +1065,7 @@ systemctl restart node_agent 2>/dev/null || true
         registry = self.get_registry()
         if not registry:
             return None
-        return f"registry.digitalocean.com/{registry.get('name')}"
+        return f"registry.digitalocean.com/{registry.name}"
 
 
 # =============================================================================
@@ -968,7 +1106,6 @@ class AsyncDOClient(AsyncBaseCloudClient):
         params: Optional[Dict] = None,
     ) -> Dict[str, Any]:
         """Make API request."""
-        # Ensure cached client is initialized (lazy init for async)
         client = await self._ensure_client()
         
         response = await client.request(
@@ -1137,41 +1274,20 @@ systemctl restart node_agent 2>/dev/null || true
         return droplets
     
     async def power_off_droplet(self, droplet_id: int, wait: bool = False, timeout: int = 120) -> None:
-        """
-        Power off a droplet.
-        
-        Required before creating a snapshot for a clean disk state.
-        
-        Args:
-            droplet_id: Droplet ID to power off
-            wait: If True, wait for power off to complete
-            timeout: Max seconds to wait (only if wait=True)
-        """
+        """Power off a droplet."""
         result = await self._post(f"/droplets/{droplet_id}/actions", {"type": "power_off"})
         
         if wait and result.get("action", {}).get("id"):
             action_id = result["action"]["id"]
             await self._wait_for_action(action_id, timeout)
     
-    async def reboot_droplet(self, droplet_id: int, wait: bool = True, timeout: int = 180) -> Dict[str, Any]:
-        """
-        Reboot a droplet.
-        
-        Used for auto-healing when a droplet becomes unreachable.
-        
-        Args:
-            droplet_id: Droplet ID to reboot
-            wait: If True, wait for reboot to complete
-            timeout: Max seconds to wait (only if wait=True)
-            
-        Returns:
-            Action dict with id, status, type, etc.
-        """
+    async def reboot_droplet(self, droplet_id: int, wait: bool = True, timeout: int = 180) -> Action:
+        """Reboot a droplet."""
         result = await self._post(f"/droplets/{droplet_id}/actions", {"type": "reboot"})
-        action = result.get("action", {})
+        action = Action.from_api(result.get("action", {}))
         
-        if wait and action.get("id"):
-            action = await self._wait_for_action(action["id"], timeout)
+        if wait and action.id:
+            action = await self._wait_for_action(action.id, timeout)
         
         return action
     
@@ -1211,24 +1327,24 @@ systemctl restart node_agent 2>/dev/null || true
     # SSH Keys
     # =========================================================================
     
-    async def list_ssh_keys(self) -> List[Dict[str, Any]]:
+    async def list_ssh_keys(self) -> List[SSHKey]:
         """List all SSH keys."""
         result = await self._get("/account/keys")
-        return result.get("ssh_keys", [])
+        return [SSHKey.from_api(k) for k in result.get("ssh_keys", [])]
     
-    async def add_ssh_key(self, name: str, public_key: str) -> Dict[str, Any]:
+    async def add_ssh_key(self, name: str, public_key: str) -> SSHKey:
         """Add SSH key to account."""
         result = await self._post("/account/keys", {"name": name, "public_key": public_key})
-        return result.get("ssh_key", {})
+        return SSHKey.from_api(result.get("ssh_key", {}))
     
     # =========================================================================
     # VPC
     # =========================================================================
     
-    async def list_vpcs(self) -> List[Dict[str, Any]]:
+    async def list_vpcs(self) -> List[VPC]:
         """List all VPCs."""
         result = await self._get("/vpcs")
-        return result.get("vpcs", [])
+        return [VPC.from_api(v) for v in result.get("vpcs", [])]
     
     async def create_vpc(
         self,
@@ -1236,13 +1352,13 @@ systemctl restart node_agent 2>/dev/null || true
         region: str,
         ip_range: str = "10.120.0.0/20",
         description: str = "",
-    ) -> Dict[str, Any]:
+    ) -> VPC:
         """Create a new VPC."""
         data = {"name": name, "region": region, "ip_range": ip_range}
         if description:
             data["description"] = description
         result = await self._post("/vpcs", data)
-        return result.get("vpc", {})
+        return VPC.from_api(result.get("vpc", {}))
     
     async def ensure_vpc(
         self,
@@ -1255,8 +1371,8 @@ systemctl restart node_agent 2>/dev/null || true
         
         vpcs = await self.list_vpcs()
         for vpc in vpcs:
-            if vpc.get("name") == vpc_name and vpc.get("region") == region:
-                return vpc["id"]
+            if vpc.name == vpc_name and vpc.region == region:
+                return vpc.id
         
         if not ip_range:
             region_offsets = {
@@ -1274,13 +1390,13 @@ systemctl restart node_agent 2>/dev/null || true
                 ip_range=ip_range,
                 description=f"Private network for {name_prefix} deployments",
             )
-            return vpc["id"]
+            return vpc.id
         except DOError as e:
             if "overlaps" in str(e).lower():
                 vpcs = await self.list_vpcs()
                 for vpc in vpcs:
-                    if vpc.get("region") == region:
-                        return vpc["id"]
+                    if vpc.region == region:
+                        return vpc.id
             raise
     
     # =========================================================================
@@ -1306,27 +1422,27 @@ systemctl restart node_agent 2>/dev/null || true
         resource_type: str = "droplet",
         page: int = 1,
         per_page: int = 100,
-    ) -> List[Dict[str, Any]]:
+    ) -> List[Snapshot]:
         """List snapshots."""
         params = {"resource_type": resource_type, "page": page, "per_page": per_page}
         result = await self._get("/snapshots", params=params)
-        return result.get("snapshots", [])
+        return [Snapshot.from_api(s) for s in result.get("snapshots", [])]
     
-    async def get_snapshot(self, snapshot_id: str) -> Optional[Dict[str, Any]]:
+    async def get_snapshot(self, snapshot_id: str) -> Optional[Snapshot]:
         """Get snapshot by ID."""
         try:
             result = await self._get(f"/snapshots/{snapshot_id}")
-            return result.get("snapshot")
+            return Snapshot.from_api(result.get("snapshot", {}))
         except DOError as e:
             if e.status_code == 404:
                 return None
             raise
     
-    async def get_snapshot_by_name(self, name: str) -> Optional[Dict[str, Any]]:
+    async def get_snapshot_by_name(self, name: str) -> Optional[Snapshot]:
         """Get snapshot by name."""
         snapshots = await self.list_snapshots()
         for snap in snapshots:
-            if snap.get("name") == name:
+            if snap.name == name:
                 return snap
         return None
     
@@ -1336,17 +1452,17 @@ systemctl restart node_agent 2>/dev/null || true
         name: str,
         wait: bool = True,
         wait_timeout: int = 600,
-    ) -> Dict[str, Any]:
+    ) -> Action:
         """Create snapshot from a droplet."""
         result = await self._post(f"/droplets/{droplet_id}/actions", {
             "type": "snapshot",
             "name": name,
         })
         
-        action = result.get("action", {})
+        action = Action.from_api(result.get("action", {}))
         
-        if wait and action.get("id"):
-            action = await self._wait_for_action(action["id"], wait_timeout)
+        if wait and action.id:
+            action = await self._wait_for_action(action.id, wait_timeout)
         
         return action
     
@@ -1364,17 +1480,17 @@ systemctl restart node_agent 2>/dev/null || true
         region: str,
         wait: bool = True,
         wait_timeout: int = 600,
-    ) -> Dict[str, Any]:
+    ) -> Action:
         """Transfer snapshot to another region."""
         result = await self._post(f"/images/{snapshot_id}/actions", {
             "type": "transfer",
             "region": region,
         })
         
-        action = result.get("action", {})
+        action = Action.from_api(result.get("action", {}))
         
-        if wait and action.get("id"):
-            action = await self._wait_for_action(action["id"], wait_timeout)
+        if wait and action.id:
+            action = await self._wait_for_action(action.id, wait_timeout)
         
         return action
     
@@ -1384,24 +1500,12 @@ systemctl restart node_agent 2>/dev/null || true
         exclude_regions: List[str] = None,
         wait: bool = False,
     ) -> Dict[str, Any]:
-        """
-        Transfer snapshot to all available regions.
-        
-        Args:
-            snapshot_id: Snapshot to transfer
-            exclude_regions: Regions to skip
-            wait: If True, wait for each transfer to complete (slow!)
-            
-        Returns:
-            Dict with snapshot_id, snapshot_name, already_in, transferring_to, actions
-        """
+        """Transfer snapshot to all available regions."""
         exclude_regions = exclude_regions or []
         
-        # Get all regions
         regions = await self.list_regions()
         available = [r["slug"] for r in regions if r.get("available", True)]
         
-        # Get snapshot info
         snapshot = await self.get_snapshot(snapshot_id)
         if not snapshot:
             return {
@@ -1413,7 +1517,7 @@ systemctl restart node_agent 2>/dev/null || true
                 "error": "Snapshot not found",
             }
         
-        current_regions = snapshot.get("regions", [])
+        current_regions = snapshot.regions
         target_regions = [
             r for r in available 
             if r not in current_regions and r not in exclude_regions
@@ -1422,21 +1526,20 @@ systemctl restart node_agent 2>/dev/null || true
         if not target_regions:
             return {
                 "snapshot_id": snapshot_id,
-                "snapshot_name": snapshot.get("name"),
+                "snapshot_name": snapshot.name,
                 "already_in": current_regions,
                 "transferring_to": [],
                 "actions": [],
             }
         
-        # Start transfers
         actions = []
         for region in target_regions:
             try:
                 action = await self.transfer_snapshot(snapshot_id, region, wait=wait)
                 actions.append({
                     "region": region,
-                    "action_id": action.get("id"),
-                    "status": action.get("status", "in-progress"),
+                    "action_id": action.id,
+                    "status": action.status,
                 })
             except Exception as e:
                 actions.append({
@@ -1446,7 +1549,7 @@ systemctl restart node_agent 2>/dev/null || true
         
         return {
             "snapshot_id": snapshot_id,
-            "snapshot_name": snapshot.get("name"),
+            "snapshot_name": snapshot.name,
             "already_in": current_regions,
             "transferring_to": target_regions,
             "actions": actions,
@@ -1456,23 +1559,21 @@ systemctl restart node_agent 2>/dev/null || true
     # Actions
     # =========================================================================
     
-    async def get_action(self, action_id: int) -> Dict[str, Any]:
+    async def get_action(self, action_id: int) -> Action:
         """Get action status."""
         result = await self._get(f"/actions/{action_id}")
-        return result.get("action", {})
+        return Action.from_api(result.get("action", {}))
     
-    async def _wait_for_action(self, action_id: int, timeout: int = 600) -> Dict[str, Any]:
+    async def _wait_for_action(self, action_id: int, timeout: int = 600) -> Action:
         """Wait for an action to complete."""
         start = time.time()
         
         while time.time() - start < timeout:
-            result = await self._get(f"/actions/{action_id}")
-            action = result.get("action", {})
+            action = await self.get_action(action_id)
             
-            status = action.get("status", "")
-            if status == "completed":
+            if action.is_completed:
                 return action
-            elif status == "errored":
+            elif action.is_errored:
                 raise DOError(f"Action {action_id} failed")
             
             await asyncio.sleep(10)
@@ -1483,11 +1584,11 @@ systemctl restart node_agent 2>/dev/null || true
     # Container Registry
     # =========================================================================
     
-    async def get_registry(self) -> Optional[Dict[str, Any]]:
+    async def get_registry(self) -> Optional[Registry]:
         """Get container registry info."""
         try:
             result = await self._get("/registry")
-            return result.get("registry")
+            return Registry.from_api(result.get("registry", {}))
         except DOError as e:
             if e.status_code == 404:
                 return None
@@ -1498,14 +1599,14 @@ systemctl restart node_agent 2>/dev/null || true
         name: str,
         region: str = "fra1",
         subscription_tier: str = "starter",
-    ) -> Dict[str, Any]:
+    ) -> Registry:
         """Create container registry."""
         result = await self._post("/registry", {
             "name": name,
             "region": region,
             "subscription_tier_slug": subscription_tier,
         })
-        return result.get("registry", {})
+        return Registry.from_api(result.get("registry", {}))
     
     async def get_registry_credentials(
         self,
@@ -1524,7 +1625,7 @@ systemctl restart node_agent 2>/dev/null || true
         registry = await self.get_registry()
         if not registry:
             return None
-        return f"registry.digitalocean.com/{registry.get('name')}"
+        return f"registry.digitalocean.com/{registry.name}"
 
 
 # Backwards compatibility alias
