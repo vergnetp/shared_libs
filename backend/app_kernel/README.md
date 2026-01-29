@@ -57,16 +57,16 @@ router = APIRouter(prefix="/widgets", tags=["widgets"])
 @router.post("")
 async def create_widget(data: WidgetCreate, user=Depends(get_current_user), db=Depends(db_connection)):
     # Auto-creates 'widgets' table, auto-generates id/timestamps
+    # created_by/updated_by auto-tracked via context
     return await db.save_entity("widgets", {
         "name": data.name,
         "color": data.color,
-        "owner_id": user.id,
     })
 
 
 @router.get("")
 async def list_widgets(user=Depends(get_current_user), db=Depends(db_connection)):
-    return await db.find_entities("widgets", where_clause="[owner_id] = ?", params=(user.id,))
+    return await db.find_entities("widgets", where_clause="[created_by] = ?", params=(user.id,))
 
 
 @router.get("/{id}")
@@ -117,7 +117,7 @@ The `databases` library is **schemaless**. It handles everything automatically:
 | **Auto-add columns** | New fields automatically added |
 | **Auto UUID** | `id` generated if not provided |
 | **Auto timestamps** | `created_at`, `updated_at` managed |
-| **Auto user tracking** | `created_by`, `updated_by` if user_id passed |
+| **Auto user tracking** | `created_by`, `updated_by` via context (set by kernel) |
 | **History tracking** | Every change versioned in `{entity}_history` |
 | **Soft delete** | `delete_entity(permanent=False)` |
 | **Graceful reads** | `get_entity` returns `None` if table doesn't exist |
@@ -143,8 +143,7 @@ entities = await db.find_entities(
 entity = await db.save_entity(
     "projects", 
     {"name": "foo", "workspace_id": ws_id},
-    user_id=user.id,  # Optional: tracks created_by/updated_by
-)  # dict with id, created_at, updated_at
+)  # dict with id, created_at, updated_at, created_by, updated_by
 
 # Delete entity
 await db.delete_entity("projects", id, permanent=False)  # Soft delete
@@ -229,7 +228,7 @@ from app_kernel import get_current_user, require_admin
 @router.get("/projects")
 async def list_projects(user=Depends(get_current_user)):
     # user.id, user.email, user.role available
-    return await db.find_entities("projects", where_clause="[owner_id] = ?", params=(user.id,))
+    return await db.find_entities("projects", where_clause="[created_by] = ?", params=(user.id,))
 
 @router.delete("/admin/users/{id}")
 async def delete_user(id: str, _=Depends(require_admin)):
@@ -403,7 +402,7 @@ async def list_projects(
 |--------|------|---------|-------------|
 | `get_entity` | `name`, `id`, `include_deleted=False` | `dict \| None` | Get by ID |
 | `find_entities` | `name`, `where_clause=`, `params=`, `order_by=`, `limit=`, `offset=` | `list[dict]` | Query |
-| `save_entity` | `name`, `entity`, `user_id=` | `dict` | Create or update |
+| `save_entity` | `name`, `entity` | `dict` | Create or update |
 | `delete_entity` | `name`, `id`, `permanent=False` | `bool` | Delete |
 | `count_entities` | `name`, `where_clause=`, `params=` | `int` | Count |
 
@@ -418,8 +417,8 @@ async def list_projects(
 | `id` | `str` (UUID) | Always, if not provided |
 | `created_at` | `str` (ISO datetime) | On create |
 | `updated_at` | `str` (ISO datetime) | On every save |
-| `created_by` | `str` | If `user_id` passed |
-| `updated_by` | `str` | If `user_id` passed |
+| `created_by` | `str` | Via context (set by kernel middleware) |
+| `updated_by` | `str` | Via context (set by kernel middleware) |
 | `deleted_at` | `str` (ISO datetime) | On soft delete |
 
 </div>
@@ -536,22 +535,26 @@ async def deploy(auth=Depends(get_auth)):
 
 Track API calls per user/workspace for billing and quotas.
 
+**Writes to admin_db via Redis (async, no runtime penalty).**
+
 ```python
 from app_kernel.metering import track_usage, get_usage, check_quota
 
-# Auto-tracked via middleware (every request)
+# Auto-tracked via middleware (pushed to Redis, worker persists to admin_db)
 # Manual tracking for custom metrics:
-await track_usage(db, user_id, workspace_id,
+await track_usage(redis, app="my_app",
+    user_id=user.id,
+    workspace_id=workspace_id,
     tokens=1500,      # AI tokens
     deployments=1,    # Custom counter
 )
 
-# Query usage
-usage = await get_usage(db, workspace_id, period="2025-01")
+# Query usage (from admin_db)
+usage = await get_usage(admin_db, app="my_app", workspace_id=ws_id, period="2025-01")
 # {"requests": 4521, "tokens": 125000, "deployments": 47}
 
 # Check quota
-if not await check_quota(db, workspace_id, "tokens", limit=100000):
+if not await check_quota(admin_db, app="my_app", workspace_id=ws_id, metric="tokens", limit=100000):
     raise HTTPException(402, "Token limit reached")
 ```
 
@@ -561,25 +564,29 @@ if not await check_quota(db, workspace_id, "tokens", limit=100000):
 
 Track who changed what, when.
 
+**Auto-captured on save_entity/delete_entity. Writes to admin_db via Redis (async, no runtime penalty).**
+
 ```python
-from app_kernel.audit import audit_log, get_audit_logs
+from app_kernel.audit import enable_audit, get_audit_logs
 
-# Log an action
-await audit_log(db,
-    user_id=user.id,
-    action="deployment.created",
-    entity="deployments",
-    entity_id=deployment_id,
-    changes={"status": ["pending", "running"]},
-    ip=request.client.host,
-)
+# Enable auto-audit (intercepts save_entity/delete_entity)
+enable_audit(db, redis_client, app="my_app")
 
-# Query logs
-logs = await get_audit_logs(db,
-    workspace_id=workspace_id,
+# Now every save_entity/delete_entity is automatically logged
+await db.save_entity("deployments", {...})  # → audit event pushed to Redis
+
+# Query logs (from admin_db)
+logs = await get_audit_logs(admin_db,
+    app="my_app",
     entity="deployments",
     since="2025-01-01",
 )
+# Returns: action, entity, entity_id, changes (field diffs), user_id, timestamp
+```
+
+**Run the admin worker to persist events:**
+```bash
+python -m app_kernel.admin_worker --redis redis://localhost:6379 --db sqlite:///admin.db
 ```
 
 ---
@@ -670,3 +677,38 @@ await cache.delete("projects:ws-123")
 async def get_projects(workspace_id: str):
     return await db.find_entities("projects", ...)
 ```
+
+---
+
+## Architecture: App DB vs Admin DB
+
+Kernel uses two databases to separate app data from observability data:
+
+| Database | What | Written By |
+|----------|------|------------|
+| **App DB** | Your entities, auth, api_keys, flags, webhooks, oauth | Sync (during request) |
+| **Admin DB** | Audit logs, usage metrics, traces | Async (via Redis worker) |
+
+**Why separate?**
+- Admin writes don't slow down requests
+- Admin DB can be shared across apps
+- App DB stays clean and fast
+
+**Config:**
+```python
+config = ServiceConfig(
+    name="my_app",                   # Used as "app" field in admin_db
+    database_name="app.db",          # App data
+    admin_db_url="sqlite:///admin.db",  # Shared observability
+    redis_url="redis://localhost:6379",  # Event queue
+)
+```
+
+**Admin Worker:**
+```bash
+python -m app_kernel.admin_worker --redis redis://localhost:6379 --db sqlite:///admin.db
+```
+
+Consumes from Redis queues and persists to admin_db:
+- `admin:audit_events` → `audit_logs` table
+- `admin:metering_events` → `usage_summary` table
