@@ -1,43 +1,44 @@
 """
 Usage Metering - Track API calls, quotas, billing.
 
+Writes to shared admin_db via Redis (async, no runtime penalty).
+
 Usage:
-    # Automatic tracking via middleware (every request)
-    app.add_middleware(UsageMeteringMiddleware, get_db_connection=get_db_connection)
+    # Auto-tracked via middleware (every request) - pushed to Redis
+    app.add_middleware(UsageMeteringMiddleware, ...)
     
-    # Manual tracking for custom metrics
-    await track_usage(db, user_id, workspace_id,
-        tokens=1500,        # AI tokens
-        deployments=1,      # Custom counter
+    # Manual tracking for custom metrics (AI tokens, etc)
+    await track_usage(redis, app="deploy_api",
+        user_id=user.id,
+        workspace_id=workspace_id,
+        tokens=1500,
     )
     
-    # Query usage
-    usage = await get_usage(db, workspace_id, period="2025-01")
+    # Query usage (from admin_db)
+    usage = await get_usage(admin_db, app="deploy_api", period="2025-01")
     # {"requests": 4521, "tokens": 125000, ...}
     
     # Check quota
-    if not await check_quota(db, workspace_id, "tokens", limit=100000, period="month"):
+    if not await check_quota(admin_db, app="deploy_api", workspace_id=ws, metric="tokens", limit=100000):
         raise HTTPException(402, "Token limit reached")
 """
 
-from .stores import (
-    track_request,
-    track_usage,
-    get_usage,
-    get_usage_by_endpoint,
-    check_quota,
-    init_metering_schema,
-)
+from .publisher import track_request, track_usage
+from .queries import get_usage, get_usage_by_endpoint, check_quota, get_quota_remaining
+from .schema import init_metering_schema
 from .middleware import UsageMeteringMiddleware
 from .router import create_metering_router
 
 __all__ = [
-    # Stores
+    # Publishers (write to Redis)
     "track_request",
     "track_usage",
+    # Queries (read from admin_db)
     "get_usage",
     "get_usage_by_endpoint",
     "check_quota",
+    "get_quota_remaining",
+    # Schema
     "init_metering_schema",
     # Middleware
     "UsageMeteringMiddleware",

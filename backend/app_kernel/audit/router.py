@@ -1,4 +1,4 @@
-"""Audit log API routes."""
+"""Audit log API routes - reads from admin_db."""
 
 from typing import Dict, List, Optional, Any, Callable
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -7,14 +7,13 @@ from pydantic import BaseModel
 
 class AuditLogEntry(BaseModel):
     id: str
-    workspace_id: Optional[str]
-    user_id: Optional[str]
+    app: str
+    entity: str
+    entity_id: str
     action: str
-    entity: Optional[str]
-    entity_id: Optional[str]
     changes: Optional[Dict[str, Any]]
-    metadata: Optional[Dict[str, Any]]
-    ip: Optional[str]
+    user_id: Optional[str]
+    request_id: Optional[str]
     timestamp: str
 
 
@@ -25,17 +24,18 @@ class AuditLogResponse(BaseModel):
 
 def create_audit_router(
     get_current_user: Callable,
-    get_db_connection: Callable,
+    get_admin_db_connection: Callable,
+    app_name: str,
     prefix: str = "/audit",
     tags: List[str] = None,
     require_admin: bool = True,
     is_admin: Optional[Callable] = None,
 ) -> APIRouter:
     """
-    Create audit log router.
+    Create audit log router (reads from admin_db).
     
     Endpoints:
-        GET /audit               - Query audit logs
+        GET /audit               - Query audit logs for this app
         GET /audit/entity/{type}/{id} - Get entity history
     """
     router = APIRouter(prefix=prefix, tags=tags or ["audit"])
@@ -48,35 +48,30 @@ def create_audit_router(
     
     @router.get("", response_model=AuditLogResponse)
     async def query_audit_logs(
-        workspace_id: Optional[str] = None,
-        user_id: Optional[str] = None,
         entity: Optional[str] = None,
         entity_id: Optional[str] = None,
-        action: Optional[str] = Query(None, description="Action filter (use * suffix for prefix match)"),
-        since: Optional[str] = Query(None, description="From date (ISO format)"),
-        until: Optional[str] = Query(None, description="To date (ISO format)"),
+        user_id: Optional[str] = None,
+        action: Optional[str] = None,
+        since: Optional[str] = Query(None, description="From timestamp (ISO format)"),
+        until: Optional[str] = Query(None, description="To timestamp (ISO format)"),
         limit: int = Query(100, le=1000),
         offset: int = Query(0, ge=0),
         include_count: bool = False,
         user = Depends(get_current_user),
     ):
-        """Query audit logs with filters."""
-        from .stores import get_audit_logs, count_audit_logs
+        """Query audit logs for this app."""
+        from .queries import get_audit_logs, count_audit_logs
         
-        # Check permissions
         if require_admin and not _check_admin(user):
-            # Non-admins can only see their workspace
-            workspace_id = getattr(user, "workspace_id", None)
-            if not workspace_id:
-                raise HTTPException(403, "Access denied")
+            raise HTTPException(403, "Admin access required")
         
-        async with get_db_connection() as db:
+        async with get_admin_db_connection() as admin_db:
             logs = await get_audit_logs(
-                db,
-                workspace_id=workspace_id,
-                user_id=user_id,
+                admin_db,
+                app=app_name,
                 entity=entity,
                 entity_id=entity_id,
+                user_id=user_id,
                 action=action,
                 since=since,
                 until=until,
@@ -86,7 +81,7 @@ def create_audit_router(
             
             total = None
             if include_count:
-                total = await count_audit_logs(db, workspace_id=workspace_id, since=since, until=until)
+                total = await count_audit_logs(admin_db, app=app_name, since=since, until=until)
         
         return AuditLogResponse(logs=logs, total=total)
     
@@ -98,14 +93,19 @@ def create_audit_router(
         user = Depends(get_current_user),
     ):
         """Get complete audit history for a specific entity."""
-        from .stores import get_entity_audit_history
+        from .queries import get_entity_audit_history
         
-        # Admins or allow if non-admin access is configured
         if require_admin and not _check_admin(user):
-            raise HTTPException(403, "Access denied")
+            raise HTTPException(403, "Admin access required")
         
-        async with get_db_connection() as db:
-            logs = await get_entity_audit_history(db, entity, entity_id, limit=limit)
+        async with get_admin_db_connection() as admin_db:
+            logs = await get_entity_audit_history(
+                admin_db, 
+                entity, 
+                entity_id, 
+                app=app_name,
+                limit=limit,
+            )
         
         return {"entity": entity, "entity_id": entity_id, "history": logs}
     

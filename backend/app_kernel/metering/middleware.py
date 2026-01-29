@@ -1,4 +1,4 @@
-"""Usage metering middleware - auto-tracks all requests."""
+"""Usage metering middleware - pushes events to Redis."""
 
 import time
 from typing import Callable, Optional, Set
@@ -9,31 +9,31 @@ from starlette.responses import Response
 
 class UsageMeteringMiddleware(BaseHTTPMiddleware):
     """
-    Middleware that automatically tracks API usage.
+    Middleware that tracks API usage via Redis.
     
     Usage:
         app.add_middleware(
             UsageMeteringMiddleware,
-            get_db_connection=get_db_connection,
+            redis_client=redis,
+            app_name="deploy_api",
             exclude_paths={"/healthz", "/metrics"},
-            log_individual=False,  # Set True for detailed logs
         )
     """
     
     def __init__(
         self,
         app,
-        get_db_connection: Callable,
+        redis_client,
+        app_name: str,
         exclude_paths: Optional[Set[str]] = None,
-        log_individual: bool = False,
         get_user_from_request: Optional[Callable] = None,
     ):
         super().__init__(app)
-        self.get_db_connection = get_db_connection
+        self.redis = redis_client
+        self.app_name = app_name
         self.exclude_paths = exclude_paths or {
             "/healthz", "/readyz", "/metrics", "/favicon.ico", "/docs", "/openapi.json"
         }
-        self.log_individual = log_individual
         self.get_user_from_request = get_user_from_request
     
     async def dispatch(self, request: Request, call_next) -> Response:
@@ -87,26 +87,23 @@ class UsageMeteringMiddleware(BaseHTTPMiddleware):
             except:
                 pass
         
-        # Track asynchronously (don't block response)
+        # Push to Redis (fire and forget)
         try:
-            from .stores import track_request
+            from .publisher import track_request
             
-            async with self.get_db_connection() as db:
-                await track_request(
-                    db,
-                    user_id=user_id,
-                    workspace_id=workspace_id,
-                    endpoint=path,
-                    method=request.method,
-                    status_code=response.status_code,
-                    latency_ms=latency_ms,
-                    bytes_in=bytes_in,
-                    bytes_out=bytes_out,
-                    log_individual=self.log_individual,
-                )
-        except Exception as e:
-            # Don't fail the request if metering fails
-            import logging
-            logging.warning(f"Usage metering failed: {e}")
+            await track_request(
+                self.redis,
+                app=self.app_name,
+                user_id=user_id,
+                workspace_id=workspace_id,
+                endpoint=path,
+                method=request.method,
+                status_code=response.status_code,
+                latency_ms=latency_ms,
+                bytes_in=bytes_in,
+                bytes_out=bytes_out,
+            )
+        except Exception:
+            pass  # Never fail the request
         
         return response
