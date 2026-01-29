@@ -178,8 +178,7 @@ class FeatureSettings:
     enable_auth_routes: bool = True
     # Mode: "local" (database auth), "apikey" (header key), "external" (skip kernel auth)
     auth_mode: Literal["local", "apikey", "external"] = "local"
-    # IMPORTANT: disabled by default for security
-    allow_self_signup: bool = False
+    allow_self_signup: bool = True  # Registration always available
     auth_prefix: str = "/auth"
     
     # Job routes (status, list, cancel)
@@ -191,7 +190,7 @@ class FeatureSettings:
     audit_path: str = "/audit"
     
     # SaaS routes (workspaces, members, invites)
-    enable_saas_routes: bool = False
+    enable_saas_routes: bool = True
     saas_prefix: str = "/workspaces"
     # Base URL for invite links (e.g., "https://app.example.com/invite")
     saas_invite_base_url: str = None
@@ -228,10 +227,10 @@ class FeatureSettings:
             protect_metrics=os.environ.get("KERNEL_PROTECT_METRICS", "admin"),  # type: ignore
             enable_auth_routes=env_bool("KERNEL_ENABLE_AUTH", True),
             auth_mode=os.environ.get("KERNEL_AUTH_MODE", "local"),  # type: ignore
-            allow_self_signup=env_bool("KERNEL_ALLOW_SIGNUP", False),
+            allow_self_signup=True,  # Always enabled
             enable_job_routes=env_bool("KERNEL_ENABLE_JOBS", True),
             enable_audit_routes=env_bool("KERNEL_ENABLE_AUDIT", False),
-            enable_saas_routes=env_bool("KERNEL_ENABLE_SAAS", False),
+            enable_saas_routes=env_bool("KERNEL_ENABLE_SAAS", True),
             saas_invite_base_url=os.environ.get("KERNEL_SAAS_INVITE_URL"),
         )
 

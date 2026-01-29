@@ -33,6 +33,7 @@ from .providers import (
     GitHubProvider,
     get_provider,
     register_provider,
+    configure_providers,
 )
 from .stores import (
     create_oauth_account,
@@ -51,6 +52,7 @@ __all__ = [
     "GitHubProvider",
     "get_provider",
     "register_provider",
+    "configure_providers",
     # Stores
     "create_oauth_account",
     "get_oauth_account",

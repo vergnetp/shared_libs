@@ -4,7 +4,7 @@ Generic auth router.
 Provides:
 - POST /login: Authenticate and get tokens
 - GET /me: Get current user info
-- POST /register: Register new user (if allow_self_signup=True)
+- POST /register: Register new user
 - POST /refresh: Refresh access token
 - POST /change-password: Change password
 - POST /logout: Logout (stateless - client discards tokens)
@@ -225,7 +225,7 @@ def create_auth_router(
     token_secret: str,
     access_token_expires_minutes: int = 15,
     refresh_token_expires_days: int = 30,
-    allow_self_signup: bool = False,
+    allow_self_signup: bool = True,  # Kept for backwards compat, always True
     prefix: str = "/auth",
     on_signup: Callable = None,  # async callback(user_id, user_email) called after signup
 ) -> APIRouter:
@@ -237,7 +237,7 @@ def create_auth_router(
         token_secret: Secret key for JWT tokens
         access_token_expires_minutes: Access token TTL
         refresh_token_expires_days: Refresh token TTL
-        allow_self_signup: If True, enable /register endpoint
+        allow_self_signup: Deprecated, registration always enabled
         prefix: URL prefix for routes
         on_signup: Optional async callback called after successful signup.
                    Signature: async (user_id: str, user_email: str) -> None
@@ -472,48 +472,42 @@ def create_auth_router(
         # TODO: If using token blacklist, add current token here
         return MessageResponse(message="Logged out successfully")
     
-    # Only add register endpoint if self-signup is enabled
-    if allow_self_signup:
-        @router.post(
-            "/register",
-            response_model=UserResponse,
-            status_code=status.HTTP_201_CREATED,
-            summary="Register",
-            description="Create new user account.",
-        )
-        async def register(request: RegisterRequest):
-            """
-            Register new user.
-            
-            Only available if allow_self_signup is enabled.
-            """
-            # Hash password
-            password_hash = hash_password(request.password)
-            
-            try:
-                user = await user_store.create(
-                    username=request.username,
-                    email=request.email or "",
-                    password_hash=password_hash,
-                )
-            except ValueError as e:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail=str(e),
-                )
-            
-            # Call on_signup callback if provided (e.g., to create personal workspace)
-            if on_signup:
-                try:
-                    await on_signup(user["id"], user.get("email", ""))
-                except Exception:
-                    pass  # Don't fail signup if callback fails
-            
-            return UserResponse(
-                id=user["id"],
-                username=user.get("username", ""),
-                email=user.get("email"),
-                role=user.get("role", "user"),
+    @router.post(
+        "/register",
+        response_model=UserResponse,
+        status_code=status.HTTP_201_CREATED,
+        summary="Register",
+        description="Create new user account.",
+    )
+    async def register(request: RegisterRequest):
+        """Register new user."""
+        # Hash password
+        password_hash = hash_password(request.password)
+        
+        try:
+            user = await user_store.create(
+                username=request.username,
+                email=request.email or "",
+                password_hash=password_hash,
             )
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(e),
+            )
+        
+        # Call on_signup callback if provided (e.g., to create personal workspace)
+        if on_signup:
+            try:
+                await on_signup(user["id"], user.get("email", ""))
+            except Exception:
+                pass  # Don't fail signup if callback fails
+        
+        return UserResponse(
+            id=user["id"],
+            username=user.get("username", ""),
+            email=user.get("email"),
+            role=user.get("role", "user"),
+        )
     
     return router

@@ -35,7 +35,7 @@ Usage:
         config=ServiceConfig(
             jwt_secret=os.environ["JWT_SECRET"],
             redis_url=os.environ.get("REDIS_URL"),
-            database_name=os.environ.get("database_name"),
+            database_url=os.environ.get("DATABASE_URL"),
             cors_origins=["http://localhost:3000"],
         ),
         
@@ -66,6 +66,7 @@ What you get for free:
 
 from __future__ import annotations
 
+import asyncio
 import os
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -104,6 +105,252 @@ from .settings import (
 # Configuration
 # =============================================================================
 
+def _load_oauth_providers_from_env(env_fn) -> Dict[str, Dict[str, str]]:
+    """Load OAuth providers from environment variables."""
+    providers = {}
+    
+    # Google
+    google_id = env_fn("GOOGLE_CLIENT_ID")
+    google_secret = env_fn("GOOGLE_CLIENT_SECRET")
+    if google_id and google_secret:
+        providers["google"] = {"client_id": google_id, "client_secret": google_secret}
+    
+    # GitHub
+    github_id = env_fn("GITHUB_CLIENT_ID")
+    github_secret = env_fn("GITHUB_CLIENT_SECRET")
+    if github_id and github_secret:
+        providers["github"] = {"client_id": github_id, "client_secret": github_secret}
+    
+    return providers
+
+
+def _parse_database_url(url: str) -> dict:
+    """
+    Parse database URL into components.
+    
+    Formats:
+        sqlite:///./data/app.db           (relative)
+        sqlite:////absolute/path/app.db   (Unix absolute)
+        sqlite:///C:/Users/.../app.db     (Windows absolute)
+        postgres://user:pass@host:5432/dbname
+        mysql://user:pass@host:3306/dbname
+    
+    Returns:
+        {"type": "sqlite"|"postgres"|"mysql", "name": str, "host": str, "port": int, "user": str, "password": str}
+    """
+    from urllib.parse import urlparse, unquote
+    import re
+    
+    parsed = urlparse(url)
+    scheme = parsed.scheme.lower()
+    
+    if scheme == "sqlite":
+        # Extract path after sqlite:///
+        # Handle: sqlite:///./rel, sqlite:////abs, sqlite:///C:/win
+        path = url.split("sqlite:///", 1)[1] if "sqlite:///" in url else parsed.path
+        
+        # Windows drive letter detection (C:/, D:/, etc.)
+        if re.match(r'^[A-Za-z]:/', path):
+            pass  # Already correct: C:/Users/...
+        elif path.startswith("/") and re.match(r'^/[A-Za-z]:/', path):
+            path = path[1:]  # Remove leading slash: /C:/... -> C:/...
+        # Unix absolute path
+        elif path.startswith("/"):
+            pass  # Keep as is: /home/user/...
+        # Relative path
+        # ./data/app.db stays as is
+        
+        return {
+            "type": "sqlite",
+            "name": path,
+            "host": None,
+            "port": None,
+            "user": None,
+            "password": None,
+        }
+    elif scheme in ("postgres", "postgresql"):
+        return {
+            "type": "postgres",
+            "name": parsed.path.lstrip("/"),
+            "host": parsed.hostname or "localhost",
+            "port": parsed.port or 5432,
+            "user": unquote(parsed.username) if parsed.username else None,
+            "password": unquote(parsed.password) if parsed.password else None,
+        }
+    elif scheme == "mysql":
+        return {
+            "type": "mysql",
+            "name": parsed.path.lstrip("/"),
+            "host": parsed.hostname or "localhost",
+            "port": parsed.port or 3306,
+            "user": unquote(parsed.username) if parsed.username else None,
+            "password": unquote(parsed.password) if parsed.password else None,
+        }
+    else:
+        raise ValueError(f"Unsupported database scheme: {scheme}")
+
+
+def _build_db_url_from_manifest(db: dict, interpolate) -> Optional[str]:
+    """Build database URL from manifest fields (backwards compat)."""
+    path_or_name = interpolate(db.get("path") or db.get("name"))
+    if not path_or_name:
+        return None
+    
+    db_type = interpolate(db.get("type")) or "sqlite"
+    
+    if db_type == "sqlite":
+        return f"sqlite:///{path_or_name}"
+    else:
+        host = interpolate(db.get("host")) or "localhost"
+        port = interpolate(db.get("port")) or (5432 if db_type == "postgres" else 3306)
+        user = interpolate(db.get("user")) or ""
+        password = interpolate(db.get("password")) or ""
+        
+        if user and password:
+            return f"{db_type}://{user}:{password}@{host}:{port}/{path_or_name}"
+        elif user:
+            return f"{db_type}://{user}@{host}:{port}/{path_or_name}"
+        else:
+            return f"{db_type}://{host}:{port}/{path_or_name}"
+
+
+async def _run_embedded_admin_worker(
+    redis_url: str,
+    admin_db_url: str,
+    app_name: str,
+    logger,
+    batch_size: int = 100,
+    poll_interval: float = 0.5,
+):
+    """
+    Run admin worker as background task (consumes audit/metering from Redis).
+    
+    With multiple uvicorn workers, Redis RPOP is atomic so events get
+    distributed across workers automatically - each event processed exactly once.
+    """
+    import json
+    import uuid
+    from datetime import datetime, timezone
+    
+    try:
+        import redis.asyncio as aioredis
+    except ImportError:
+        logger.warning("redis library not installed, admin worker disabled")
+        return
+    
+    redis_client = aioredis.from_url(redis_url)
+    
+    # Use databases library for admin_db (same as admin_worker.py)
+    try:
+        from databases import Database
+        admin_db = Database(admin_db_url)
+        await admin_db.connect()
+    except ImportError:
+        logger.warning("databases library not installed, admin worker disabled")
+        return
+    except Exception as e:
+        logger.warning(f"Could not connect to admin_db: {e}")
+        return
+    
+    # Initialize schemas
+    try:
+        from .audit.schema import init_audit_schema
+        from .metering.schema import init_metering_schema
+        await init_audit_schema(admin_db)
+        await init_metering_schema(admin_db)
+    except Exception as e:
+        logger.warning(f"Could not init admin schemas: {e}")
+    
+    def _now_iso():
+        return datetime.now(timezone.utc).isoformat()
+    
+    async def process_audit_event(event: dict):
+        await admin_db.execute(
+            """INSERT INTO audit_logs (id, app, entity, entity_id, action, changes, 
+               old_snapshot, new_snapshot, user_id, request_id, timestamp, created_at)
+               VALUES (:id, :app, :entity, :entity_id, :action, :changes,
+               :old_snapshot, :new_snapshot, :user_id, :request_id, :timestamp, :created_at)""",
+            {
+                "id": str(uuid.uuid4()),
+                "app": event.get("app"),
+                "entity": event.get("entity"),
+                "entity_id": event.get("entity_id"),
+                "action": event.get("action"),
+                "changes": json.dumps(event.get("changes")) if event.get("changes") else None,
+                "old_snapshot": json.dumps(event.get("old_snapshot")) if event.get("old_snapshot") else None,
+                "new_snapshot": json.dumps(event.get("new_snapshot")) if event.get("new_snapshot") else None,
+                "user_id": event.get("user_id"),
+                "request_id": event.get("request_id"),
+                "timestamp": event.get("timestamp", _now_iso()),
+                "created_at": _now_iso(),
+            }
+        )
+    
+    async def process_metering_event(event: dict):
+        # Simplified: just insert raw events, aggregation done at query time
+        await admin_db.execute(
+            """INSERT INTO usage_events (id, app, workspace_id, user_id, event_type,
+               endpoint, method, status_code, latency_ms, bytes_in, bytes_out, 
+               period, timestamp)
+               VALUES (:id, :app, :workspace_id, :user_id, :event_type,
+               :endpoint, :method, :status_code, :latency_ms, :bytes_in, :bytes_out,
+               :period, :timestamp)""",
+            {
+                "id": str(uuid.uuid4()),
+                "app": event.get("app"),
+                "workspace_id": event.get("workspace_id"),
+                "user_id": event.get("user_id"),
+                "event_type": event.get("type", "request"),
+                "endpoint": event.get("endpoint"),
+                "method": event.get("method"),
+                "status_code": event.get("status_code"),
+                "latency_ms": event.get("latency_ms"),
+                "bytes_in": event.get("bytes_in"),
+                "bytes_out": event.get("bytes_out"),
+                "period": event.get("period"),
+                "timestamp": event.get("timestamp", _now_iso()),
+            }
+        )
+    
+    try:
+        while True:
+            processed = 0
+            
+            # Process audit events
+            for _ in range(batch_size):
+                event_data = await redis_client.rpop("admin:audit_events")
+                if not event_data:
+                    break
+                try:
+                    event = json.loads(event_data)
+                    await process_audit_event(event)
+                    processed += 1
+                except Exception as e:
+                    logger.debug(f"Audit event error: {e}")
+            
+            # Process metering events
+            for _ in range(batch_size):
+                event_data = await redis_client.rpop("admin:metering_events")
+                if not event_data:
+                    break
+                try:
+                    event = json.loads(event_data)
+                    await process_metering_event(event)
+                    processed += 1
+                except Exception as e:
+                    logger.debug(f"Metering event error: {e}")
+            
+            # Sleep if no events
+            if processed == 0:
+                await asyncio.sleep(poll_interval)
+    
+    except asyncio.CancelledError:
+        pass
+    finally:
+        await admin_db.disconnect()
+        await redis_client.close()
+
+
 @dataclass
 class ServiceConfig:
     """
@@ -116,23 +363,28 @@ class ServiceConfig:
     jwt_secret: str = "dev-secret-change-me"
     jwt_expiry_hours: int = 24
     auth_enabled: bool = True
-    allow_self_signup: bool = False
     
     # SaaS (workspaces, members, invites)
-    saas_enabled: bool = False
+    saas_enabled: bool = True
     saas_invite_base_url: Optional[str] = None  # e.g., "https://app.example.com/invite"
+    
+    # OAuth (auto-mounts routes when providers configured)
+    oauth_providers: Dict[str, Dict[str, str]] = field(default_factory=dict)
+    # Example: {"google": {"client_id": "...", "client_secret": "..."}, "github": {...}}
     
     # Redis (optional - enables jobs, rate limiting, idempotency)
     redis_url: Optional[str] = None
     redis_key_prefix: str = "queue:"  # Match job_queue default
     
-    # Database (kernel manages connection pool, app provides schema)
-    database_name: Optional[str] = None  # DB name or file path for sqlite
-    database_type: str = "sqlite"        # sqlite, postgres, mysql
-    database_host: str = "localhost"
-    database_port: Optional[int] = None  # None = use default for type
-    database_user: Optional[str] = None
-    database_password: Optional[str] = None
+    # Database URL (kernel manages connection pool, app provides schema)
+    # Format: sqlite:///./data/app.db or postgres://user:pass@host:5432/dbname
+    database_url: Optional[str] = None
+    
+    # Admin worker (consumes audit/metering from Redis, writes to DB)
+    # When True: runs as background task in one of the uvicorn workers
+    # When False: you run `python -m app_kernel.admin_worker` separately
+    admin_worker_embedded: bool = True
+    admin_db_url: Optional[str] = None  # If None, uses DATABASE_URL
     
     # CORS
     cors_origins: List[str] = field(default_factory=lambda: ["*"])
@@ -245,17 +497,12 @@ class ServiceConfig:
             jwt_secret=env("JWT_SECRET", "dev-secret-change-me"),
             jwt_expiry_hours=env_int("JWT_EXPIRY_HOURS", 24),
             auth_enabled=env_bool("AUTH_ENABLED", True),
-            allow_self_signup=env_bool("ALLOW_SELF_SIGNUP", False),
-            saas_enabled=env_bool("SAAS_ENABLED", False),
+            saas_enabled=env_bool("SAAS_ENABLED", True),
             saas_invite_base_url=env("SAAS_INVITE_BASE_URL"),
+            oauth_providers=_load_oauth_providers_from_env(env),
             redis_url=env("REDIS_URL"),
             redis_key_prefix=env("REDIS_KEY_PREFIX", "queue:"),
-            database_name=env("DATABASE_NAME"),
-            database_type=env("DATABASE_TYPE", "sqlite"),
-            database_host=env("DATABASE_HOST", "localhost"),
-            database_port=env_int("DATABASE_PORT", 0) or None,
-            database_user=env("DATABASE_USER"),
-            database_password=env("DATABASE_PASSWORD"),
+            database_url=env("DATABASE_URL"),
             cors_origins=env_list("CORS_ORIGINS", ["*"]),
             cors_credentials=env_bool("CORS_CREDENTIALS", True),
             rate_limit_enabled=env_bool("RATE_LIMIT_ENABLED", True),
@@ -286,6 +533,9 @@ class ServiceConfig:
             # Tracing - enabled by default
             tracing_enabled=env_bool("TRACING_ENABLED", True),
             tracing_sample_rate=float(env("TRACING_SAMPLE_RATE", "1.0")),
+            # Admin worker
+            admin_worker_embedded=env_bool("ADMIN_WORKER_EMBEDDED", True),
+            admin_db_url=env("ADMIN_DB_URL"),
         )
     
     @classmethod
@@ -313,7 +563,6 @@ class ServiceConfig:
             
             auth:
               jwt_secret: ${JWT_SECRET}
-              allow_self_signup: false
             
             saas:
               enabled: true
@@ -396,23 +645,17 @@ class ServiceConfig:
             jwt_secret=interpolate(auth.get("jwt_secret")) or "dev-secret-change-me",
             jwt_expiry_hours=_default(interpolate(auth.get("jwt_expiry_hours")), 24),
             auth_enabled=_default(interpolate(auth.get("enabled")), True),
-            allow_self_signup=_default(interpolate(auth.get("allow_self_signup")), False),
             
             # SaaS
-            saas_enabled=_default(interpolate(saas.get("enabled")), False),
+            saas_enabled=_default(interpolate(saas.get("enabled")), True),
             saas_invite_base_url=interpolate(saas.get("invite_base_url")),
             
             # Redis
             redis_url=interpolate(redis.get("url")),
             redis_key_prefix=interpolate(redis.get("key_prefix")) or "queue:",
             
-            # Database
-            database_name=interpolate(db.get("path") or db.get("name")),
-            database_type=interpolate(db.get("type")) or "sqlite",
-            database_host=interpolate(db.get("host")) or "localhost",
-            database_port=interpolate(db.get("port")),
-            database_user=interpolate(db.get("user")),
-            database_password=interpolate(db.get("password")),
+            # Database - support both url and path/name for backwards compat
+            database_url=interpolate(db.get("url")) or _build_db_url_from_manifest(db, interpolate),
             
             # CORS
             cors_origins=interpolate(cors.get("origins")) or ["*"],
@@ -626,31 +869,51 @@ def create_service(
         logger = get_logger()
         metrics = get_metrics()
         
+        # Auto-start Redis/Postgres via Docker if localhost and not running
+        if cfg.redis_url or cfg.database_url:
+            try:
+                from .dev_deps import ensure_dev_deps
+                await ensure_dev_deps(
+                    database_url=cfg.database_url,
+                    redis_url=cfg.redis_url,
+                )
+            except Exception as e:
+                logger.debug(f"Dev deps: {e}")
+        
         # Initialize database if configured
-        if cfg.database_name:
+        if cfg.database_url:
             from .db import init_db_session, init_schema, get_db_connection
             
+            # Parse database URL
+            db_config = _parse_database_url(cfg.database_url)
+            
             # Ensure data directory exists for SQLite
-            if cfg.database_type == "sqlite":
+            if db_config["type"] == "sqlite":
                 from pathlib import Path
-                Path(cfg.database_name).parent.mkdir(parents=True, exist_ok=True)
+                Path(db_config["name"]).parent.mkdir(parents=True, exist_ok=True)
                 init_db_session(
-                    database_name=cfg.database_name,
+                    database_name=db_config["name"],
                     database_type="sqlite",
                 )
             else:
                 init_db_session(
-                    database_name=cfg.database_name,
-                    database_type=cfg.database_type,
-                    host=cfg.database_host,
-                    port=cfg.database_port or 5432,
-                    user=cfg.database_user,
-                    password=cfg.database_password,
+                    database_name=db_config["name"],
+                    database_type=db_config["type"],
+                    host=db_config["host"],
+                    port=db_config["port"] or 5432,
+                    user=db_config["user"],
+                    password=db_config["password"],
                 )
             logger.info(f"Database initialized", extra={
-                "type": cfg.database_type,
-                "database": cfg.database_name,
+                "type": db_config["type"],
+                "database": db_config["name"],
             })
+            
+            # Auto-enable audit logging if Redis is configured
+            if cfg.redis_url:
+                from .db.session import enable_auto_audit
+                enable_auto_audit(cfg.redis_url, name)
+                logger.info("Audit logging enabled (Redis → admin_worker)")
             
             # Initialize AUTH schema if auth enabled (before app schema)
             if cfg.auth_enabled:
@@ -825,11 +1088,30 @@ def create_service(
             "version": version,
             "debug": cfg.debug,
             "redis": bool(cfg.redis_url),
-            "database": bool(cfg.database_name),
+            "database": bool(cfg.database_url),
         })
         metrics.set_gauge("service_started", 1)
         
+        # Start embedded admin worker if enabled
+        admin_worker_task = None
+        if cfg.redis_url and cfg.admin_worker_embedded:
+            admin_db_url = cfg.admin_db_url or cfg.database_url
+            if admin_db_url:
+                admin_worker_task = asyncio.create_task(
+                    _run_embedded_admin_worker(cfg.redis_url, admin_db_url, name, logger)
+                )
+                logger.info("Embedded admin worker started")
+        
         yield
+        
+        # Stop embedded admin worker
+        if admin_worker_task:
+            admin_worker_task.cancel()
+            try:
+                await admin_worker_task
+            except asyncio.CancelledError:
+                pass
+            logger.info("Embedded admin worker stopped")
         
         # Run app shutdown hook
         if on_shutdown:
@@ -846,7 +1128,7 @@ def create_service(
             logger.warning(f"Error closing HTTP pools: {e}")
         
         # Close database
-        if cfg.database_name:
+        if cfg.database_url:
             from .db import close_db
             await close_db()
             logger.info("Database closed")
@@ -870,7 +1152,7 @@ def create_service(
         _user_store = AuthServiceAdapter(auth_service())
     
     # Auto-create user store if DB + auth enabled and no store provided
-    if _user_store is None and cfg.database_name and cfg.auth_enabled:
+    if _user_store is None and cfg.database_url and cfg.auth_enabled:
         from .db import get_db_connection
         from .auth.stores import create_kernel_user_store
         _user_store = create_kernel_user_store(get_db_connection)
@@ -898,6 +1180,24 @@ def create_service(
             exclude_paths=set(cfg.request_metrics_exclude_paths),
         )
     
+    # Add usage metering middleware when Redis is configured (auto-enabled)
+    if cfg.redis_url:
+        from .metering.middleware import UsageMeteringMiddleware
+        import redis.asyncio as aioredis
+        
+        try:
+            metering_redis = aioredis.from_url(cfg.redis_url)
+            app.add_middleware(
+                UsageMeteringMiddleware,
+                redis_client=metering_redis,
+                app_name=name,
+            )
+            # Note: metering data is NOT purged - it's usage data for billing
+        except Exception as e:
+            # Don't fail app startup if metering can't be set up
+            from .observability import get_logger
+            get_logger().warning(f"Could not enable usage metering: {e}")
+    
     # Mount request metrics API routes if enabled
     if request_metrics_enabled:
         from .observability.request_metrics import create_request_metrics_router
@@ -924,6 +1224,45 @@ def create_service(
             tags=["jobs"],
         )
         app.include_router(jobs_router, prefix=api_prefix)
+    
+    # Mount OAuth routes if providers configured
+    if cfg.oauth_providers:
+        from .oauth import create_oauth_router, configure_providers
+        from .auth.deps import get_current_user, get_current_user_optional
+        from .auth.utils import create_access_token
+        from .auth.stores import create_kernel_user_store
+        from .db import get_db_connection
+        
+        # Configure providers
+        configure_providers(cfg.oauth_providers)
+        
+        # Create user function for OAuth signup
+        async def oauth_create_user(email: str, name: str = None):
+            if _user_store:
+                return await _user_store.create_user(email=email, name=name, password=None)
+            return None
+        
+        # Create JWT function
+        def oauth_create_jwt(user):
+            return create_access_token(
+                user_id=user.get("id") or user.id,
+                email=user.get("email") or user.email,
+                role=user.get("role", "user"),
+                secret=cfg.jwt_secret,
+                expires_minutes=cfg.jwt_expiry_hours * 60,
+            )
+        
+        oauth_router = create_oauth_router(
+            get_db_connection=get_db_connection,
+            get_current_user=get_current_user,
+            get_current_user_optional=get_current_user_optional,
+            create_user=oauth_create_user,
+            create_jwt_token=oauth_create_jwt,
+            prefix="/auth/oauth",
+            allow_signup=True,  # Always allow registration via OAuth
+        )
+        app.include_router(oauth_router, prefix=api_prefix)
+        logger.info(f"OAuth enabled: {', '.join(cfg.oauth_providers.keys())}")
     
     # Mount app routers
     for router_def in routers:
@@ -1030,7 +1369,7 @@ def _build_kernel_settings(
             protect_metrics="admin",
             enable_auth_routes=True,
             auth_mode="local",
-            allow_self_signup=cfg.allow_self_signup,
+            allow_self_signup=True,  # Always allow registration
             auth_prefix="/api/v1/auth",
             enable_audit_routes=False,
             enable_saas_routes=cfg.saas_enabled,

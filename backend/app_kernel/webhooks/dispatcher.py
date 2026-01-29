@@ -129,7 +129,10 @@ async def trigger_webhook_event(
     log_deliveries: bool = True,
 ) -> List[WebhookDelivery]:
     """
-    Trigger an event for all subscribed webhooks.
+    Trigger an event for all webhooks in a workspace.
+    
+    Sends to ALL enabled webhooks. Receiver decides which events to handle
+    based on the event field in the payload.
     
     Args:
         db: Database connection
@@ -141,9 +144,9 @@ async def trigger_webhook_event(
     Returns:
         List of delivery results
     """
-    from .stores import get_webhooks_for_event, log_delivery
+    from .stores import get_webhooks_for_workspace, log_delivery
     
-    webhooks = await get_webhooks_for_event(db, workspace_id, event)
+    webhooks = await get_webhooks_for_workspace(db, workspace_id)
     
     if not webhooks:
         return []

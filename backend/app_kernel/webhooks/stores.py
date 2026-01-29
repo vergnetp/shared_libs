@@ -1,4 +1,4 @@
-"""Webhook storage."""
+"""Webhook storage - simplified without event filtering."""
 
 import json
 import secrets
@@ -17,13 +17,12 @@ def _generate_secret() -> str:
 
 async def init_webhooks_schema(db) -> None:
     """Create webhooks tables."""
-    # Webhook subscriptions
+    # Webhook subscriptions (simplified - no events column)
     await db.execute("""
         CREATE TABLE IF NOT EXISTS webhooks (
             id TEXT PRIMARY KEY,
             workspace_id TEXT NOT NULL,
             url TEXT NOT NULL,
-            events TEXT NOT NULL,
             secret TEXT,
             description TEXT,
             enabled INTEGER DEFAULT 1,
@@ -55,7 +54,6 @@ async def create_webhook(
     db,
     workspace_id: str,
     url: str,
-    events: List[str],
     secret: Optional[str] = None,
     description: Optional[str] = None,
     enabled: bool = True,
@@ -63,10 +61,12 @@ async def create_webhook(
     """
     Create a new webhook subscription.
     
+    All events for the workspace will be sent to this URL.
+    Receiver decides which events to handle based on payload.
+    
     Args:
         workspace_id: Workspace to receive events from
         url: URL to POST events to
-        events: List of event types to subscribe to (e.g., ["deployment.*", "service.created"])
         secret: Optional signing secret (auto-generated if not provided)
         description: Human-readable description
         enabled: Whether webhook is active
@@ -83,7 +83,6 @@ async def create_webhook(
         "id": webhook_id,
         "workspace_id": workspace_id,
         "url": url,
-        "events": json.dumps(events),
         "secret": secret,
         "description": description,
         "enabled": 1 if enabled else 0,
@@ -95,7 +94,6 @@ async def create_webhook(
         "id": webhook_id,
         "workspace_id": workspace_id,
         "url": url,
-        "events": events,
         "secret": secret,
         "description": description,
         "enabled": enabled,
@@ -156,7 +154,6 @@ async def update_webhook(
     webhook_id: str,
     workspace_id: str,
     url: Optional[str] = None,
-    events: Optional[List[str]] = None,
     description: Optional[str] = None,
     enabled: Optional[bool] = None,
 ) -> Optional[Dict[str, Any]]:
@@ -169,8 +166,6 @@ async def update_webhook(
     
     if url is not None:
         updates["url"] = url
-    if events is not None:
-        updates["events"] = json.dumps(events)
     if description is not None:
         updates["description"] = description
     if enabled is not None:
@@ -195,53 +190,26 @@ async def delete_webhook(
     return True
 
 
-async def get_webhooks_for_event(
+async def get_webhooks_for_workspace(
     db,
     workspace_id: str,
-    event: str,
 ) -> List[Dict[str, Any]]:
-    """Get all enabled webhooks subscribed to an event."""
-    webhooks = await list_webhooks(db, workspace_id, include_disabled=False)
+    """Get all enabled webhooks for a workspace (with secrets for dispatching)."""
+    results = await db.find_entities(
+        "webhooks",
+        where_clause="[workspace_id] = ? AND [enabled] = 1",
+        params=(workspace_id,),
+    )
     
-    matching = []
-    for webhook in webhooks:
-        if _event_matches(event, webhook["events"]):
-            # Get full webhook with secret for dispatching
-            full_webhook = await get_webhook(db, webhook["id"])
-            if full_webhook:
-                matching.append(full_webhook)
-    
-    return matching
-
-
-def _event_matches(event: str, subscribed_events: List[str]) -> bool:
-    """Check if event matches any subscribed pattern."""
-    for pattern in subscribed_events:
-        if pattern == "*":
-            return True
-        if pattern == event:
-            return True
-        if pattern.endswith(".*"):
-            prefix = pattern[:-2]
-            if event.startswith(prefix + "."):
-                return True
-    return False
+    return [_parse_webhook(row, include_secret=True) for row in results]
 
 
 def _parse_webhook(row: Dict[str, Any], include_secret: bool = True) -> Dict[str, Any]:
     """Parse webhook from database row."""
-    events = []
-    if row.get("events"):
-        try:
-            events = json.loads(row["events"])
-        except:
-            pass
-    
     webhook = {
         "id": row["id"],
         "workspace_id": row["workspace_id"],
         "url": row["url"],
-        "events": events,
         "description": row.get("description"),
         "enabled": bool(row.get("enabled")),
         "created_at": row.get("created_at"),

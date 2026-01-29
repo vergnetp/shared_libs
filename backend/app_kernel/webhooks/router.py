@@ -7,14 +7,12 @@ from pydantic import BaseModel, HttpUrl
 
 class WebhookCreate(BaseModel):
     url: str
-    events: List[str]
     description: Optional[str] = None
     secret: Optional[str] = None
 
 
 class WebhookUpdate(BaseModel):
     url: Optional[str] = None
-    events: Optional[List[str]] = None
     description: Optional[str] = None
     enabled: Optional[bool] = None
 
@@ -23,7 +21,6 @@ class WebhookResponse(BaseModel):
     id: str
     workspace_id: str
     url: str
-    events: List[str]
     description: Optional[str]
     enabled: bool
     created_at: Optional[str]
@@ -54,6 +51,9 @@ def create_webhooks_router(
 ) -> APIRouter:
     """
     Create webhooks management router.
+    
+    All events are sent to all registered webhooks. Receiver decides
+    which events to handle based on the 'event' field in payload.
     
     Endpoints:
         POST   /webhooks                  - Create webhook
@@ -88,7 +88,6 @@ def create_webhooks_router(
                 db,
                 workspace_id=workspace_id,
                 url=data.url,
-                events=data.events,
                 secret=data.secret,
                 description=data.description,
             )
@@ -141,7 +140,6 @@ def create_webhooks_router(
                 webhook_id=webhook_id,
                 workspace_id=workspace_id,
                 url=data.url,
-                events=data.events,
                 description=data.description,
                 enabled=data.enabled,
             )

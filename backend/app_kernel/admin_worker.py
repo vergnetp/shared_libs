@@ -5,13 +5,19 @@ Runs as a separate process. Handles:
 - audit_logs (entity changes)
 - usage_metrics (API call counts)
 
+Environment variables:
+    REDIS_URL       - Redis connection (required)
+    ADMIN_DB_URL    - Admin database connection (required)
+
 Usage:
-    python -m app_kernel.admin.worker --redis redis://localhost:6379 --db sqlite:///admin.db
+    REDIS_URL=redis://localhost:6379 ADMIN_DB_URL=sqlite:///admin.db python -m app_kernel.admin_worker
 """
 
 import asyncio
 import json
 import logging
+import os
+import signal
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -199,21 +205,55 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(description="Admin worker for audit and metering")
-    parser.add_argument("--redis", required=True, help="Redis URL")
-    parser.add_argument("--db", required=True, help="Admin database URL")
     parser.add_argument("--batch-size", type=int, default=100, help="Events per batch")
     parser.add_argument("--poll-interval", type=float, default=0.1, help="Poll interval in seconds")
     
     args = parser.parse_args()
     
-    logging.basicConfig(level=logging.INFO)
+    # Read from env vars (same as main app)
+    redis_url = os.environ.get("REDIS_URL")
+    admin_db_url = os.environ.get("ADMIN_DB_URL")
     
-    asyncio.run(run_worker(
-        redis_url=args.redis,
-        admin_db_url=args.db,
-        batch_size=args.batch_size,
-        poll_interval=args.poll_interval,
-    ))
+    if not redis_url:
+        print("Error: REDIS_URL environment variable required")
+        exit(1)
+    if not admin_db_url:
+        print("Error: ADMIN_DB_URL environment variable required")
+        exit(1)
+    
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+    )
+    
+    # Handle graceful shutdown
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, lambda: asyncio.create_task(_shutdown(loop)))
+    
+    try:
+        loop.run_until_complete(run_worker(
+            redis_url=redis_url,
+            admin_db_url=admin_db_url,
+            batch_size=args.batch_size,
+            poll_interval=args.poll_interval,
+        ))
+    except asyncio.CancelledError:
+        pass
+    finally:
+        loop.close()
+
+
+async def _shutdown(loop):
+    """Graceful shutdown handler."""
+    logger.info("Shutting down admin worker...")
+    tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+    loop.stop()
 
 
 if __name__ == "__main__":

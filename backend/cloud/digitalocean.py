@@ -680,6 +680,10 @@ systemctl restart node_agent 2>/dev/null || true
         result = self._post("/account/keys", {"name": name, "public_key": public_key})
         return SSHKey.from_api(result.get("ssh_key", {}))
     
+    def delete_ssh_key(self, key_id: int) -> None:
+        """Delete SSH key from account."""
+        self._delete(f"/account/keys/{key_id}")
+    
     def ensure_deployer_key(self) -> str:
         """Ensure deployer SSH key exists locally and on DO."""
         import subprocess
@@ -1336,6 +1340,10 @@ systemctl restart node_agent 2>/dev/null || true
         """Add SSH key to account."""
         result = await self._post("/account/keys", {"name": name, "public_key": public_key})
         return SSHKey.from_api(result.get("ssh_key", {}))
+    
+    async def delete_ssh_key(self, key_id: int) -> None:
+        """Delete SSH key from account."""
+        await self._delete(f"/account/keys/{key_id}")
     
     # =========================================================================
     # VPC

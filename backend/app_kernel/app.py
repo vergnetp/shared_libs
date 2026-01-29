@@ -399,13 +399,11 @@ def _mount_kernel_routers(
                 token_secret=settings.auth.token_secret,
                 access_token_expires_minutes=settings.auth.access_token_expires_minutes,
                 refresh_token_expires_days=settings.auth.refresh_token_expires_days,
-                allow_self_signup=features.allow_self_signup,
                 prefix=features.auth_prefix,
                 on_signup=on_signup,
             )
             app.include_router(auth_router, prefix=prefix)
-            signup_status = "enabled" if features.allow_self_signup else "disabled"
-            logger.info(f"Mounted auth routes: {features.auth_prefix} (signup: {signup_status})")
+            logger.info(f"Mounted auth routes: {features.auth_prefix}")
         else:
             logger.warning("Auth routes enabled but user_store not provided - skipping auth router")
     

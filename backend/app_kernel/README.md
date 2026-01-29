@@ -14,24 +14,211 @@ A stable, reusable application kernel for backend services.
 
 ## What You Get For Free
 
-| Feature | What It Does |
-|---------|-------------|
-| **JWT Auth** | Login, register, token refresh |
-| **API Keys** | Service-to-service authentication |
-| **Database** | Schemaless - auto-creates tables/columns |
-| **Background Jobs** | Async task queue with retries |
-| **Health Checks** | `/healthz`, `/readyz` endpoints |
-| **Metrics** | Prometheus `/metrics` endpoint |
-| **Rate Limiting** | Per-user request limits |
-| **Request Tracking** | Request IDs, structured logging |
-| **CORS** | Configurable origins |
-| **SaaS** | Multi-tenant workspaces (optional) |
-| **OAuth** | Google/GitHub login (optional) |
-| **Feature Flags** | Toggle features without deploy |
-| **Webhooks** | Notify external systems on events |
-| **Usage Metering** | Track API calls, quotas, billing |
-| **Audit Logging** | Who changed what, when |
-| **Caching** | Redis-backed with in-memory fallback |
+### Automatic (zero code)
+
+| Feature | Default | What It Does |
+|---------|---------|--------------|
+| **Health endpoints** | `/healthz`, `/readyz` | Kubernetes-ready health checks |
+| **Request ID** | Auto-generated UUID | Every request gets `X-Request-ID` header |
+| **Security headers** | Enabled | XSS, CSRF, clickjacking protection |
+| **Error handling** | Enabled | Consistent JSON error responses |
+| **Structured logging** | JSON to stdout | Request/response logging with context |
+| **CORS** | `["*"]` | All origins allowed (configure for prod) |
+| **Workspaces** | Always on | Personal workspace auto-created on signup |
+| **Registration** | `/auth/register` | Users can sign up |
+
+### Add Env Vars (auto-enabled)
+
+| Feature | Required Env | If Not Set | What It Does |
+|---------|--------------|------------|--------------|
+| **Database + Auth** | `DATABASE_URL` + `JWT_SECRET` | Auth routes don't mount | Login, register, tokens |
+| **Background jobs** | + `REDIS_URL` | `job_client.enqueue()` fails | Async task queue with retries |
+| **Rate limiting** | + `REDIS_URL` | No rate limiting | 100 req / 60 sec per user |
+| **Caching** | + `REDIS_URL` | Falls back to in-memory | Redis-backed key-value cache |
+
+**SQLite:**
+```bash
+DATABASE_URL=sqlite:///./data/app.db    # Relative to current working directory
+DATABASE_URL=sqlite:////var/data/app.db # Absolute path (4 slashes)
+```
+- `./data/app.db` → creates `data/` folder where you run `uvicorn`
+- Kernel auto-creates parent directories if they don't exist
+
+**Postgres:**
+```bash
+DATABASE_URL=postgres://user:pass@localhost:5432/myapp
+```
+
+**MySQL:**
+```bash
+DATABASE_URL=mysql://user:pass@localhost:3306/myapp
+```
+
+### OAuth (auto-enabled when credentials set)
+
+| Env Vars | If Not Set | What It Does |
+|----------|------------|--------------|
+| `GOOGLE_CLIENT_ID` + `GOOGLE_CLIENT_SECRET` | Google routes not mounted | Google login |
+| `GITHUB_CLIENT_ID` + `GITHUB_CLIENT_SECRET` | GitHub routes not mounted | GitHub login |
+
+Routes appear at `/auth/oauth/{provider}` - no code needed.
+
+### Use In Your Code (utilities you wire yourself)
+
+| Feature | What You Do | What It Does |
+|---------|-------------|--------------|
+| **API Keys** | `create_api_key()` + `create_combined_auth()` | Service-to-service auth |
+| **Feature Flags** | `flag_enabled()` / `set_flag()` | Toggle features without deploy |
+| **Webhooks** | `create_webhook()` + `trigger_webhook_event()` | Notify external systems |
+
+<details>
+<summary>API Keys Example</summary>
+
+```python
+from app_kernel.api_keys import create_api_key, create_combined_auth
+
+# Create an API key (admin endpoint)
+@router.post("/api-keys")
+async def create_key(
+    name: str,
+    user=Depends(get_current_user),
+    db=Depends(db_connection),
+):
+    key = await create_api_key(db, name=name, user_id=user.id)
+    return {"api_key": key["key"]}  # Show once, stored hashed
+
+# Protect endpoint with JWT OR API key
+@router.get("/internal/data")
+async def get_data(auth=Depends(create_combined_auth())):
+    # auth.user_id available from either JWT or API key
+    return {"user": auth.user_id}
+```
+
+</details>
+
+<details>
+<summary>Feature Flags Example</summary>
+
+```python
+from app_kernel.flags import flag_enabled, set_flag
+
+# Set a flag (admin)
+await set_flag(db, "new_dashboard", enabled=True, rollout_percent=50)
+
+# Check in your code
+@router.get("/dashboard")
+async def dashboard(db=Depends(db_connection)):
+    if await flag_enabled(db, "new_dashboard"):
+        return {"version": "v2"}
+    return {"version": "v1"}
+```
+
+</details>
+
+<details>
+<summary>Webhooks Example</summary>
+
+```python
+from app_kernel.webhooks import create_webhook, trigger_webhook_event
+
+# User registers a webhook (receives ALL events)
+@router.post("/webhooks")
+async def register_webhook(
+    url: str,
+    user=Depends(get_current_user),
+    db=Depends(db_connection),
+):
+    webhook = await create_webhook(db, url=url, workspace_id=user.workspace_id)
+    return webhook
+
+# Trigger when something happens - sent to ALL webhooks
+async def deploy_service(...):
+    deployment = await db.save_entity("deployments", {...})
+    
+    # All webhooks receive this event
+    await trigger_webhook_event(db, workspace_id, "deployment.created", {
+        "deployment_id": deployment["id"],
+        "status": "running",
+    })
+
+# Receiver handles events they care about:
+# POST payload: {"event": "deployment.created", "data": {...}, "timestamp": "..."}
+```
+
+</details>
+
+### Requires Extra Infrastructure
+
+| Feature | Requirements | If Not Set | What It Does |
+|---------|--------------|------------|--------------|
+| **Audit logging** | `REDIS_URL` | No audit trail | Auto-logs entity changes |
+| **Usage metering** | `REDIS_URL` | No usage data | Auto-tracks API calls |
+
+Both are **auto-enabled** when `REDIS_URL` is set. No code changes needed.
+
+**Embedded worker (default):** Runs as background task in uvicorn workers - zero setup.
+
+**Separate worker (production):** Set `ADMIN_WORKER_EMBEDDED=false` and run separately.
+
+<details>
+<summary>Separate Worker Setup (optional)</summary>
+
+For production, you may want the admin worker as a separate process:
+
+```bash
+# Disable embedded worker in your API
+ADMIN_WORKER_EMBEDDED=false
+
+# Run worker separately
+REDIS_URL=redis://localhost:6379
+ADMIN_DB_URL=sqlite:///admin.db
+python -m app_kernel.admin_worker
+```
+
+**Docker Compose:**
+```yaml
+services:
+  api:
+    environment:
+      - DATABASE_URL=sqlite:///./data/app.db
+      - REDIS_URL=redis://redis:6379
+      - ADMIN_WORKER_EMBEDDED=false
+    
+  admin-worker:
+    command: python -m app_kernel.admin_worker
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - ADMIN_DB_URL=sqlite:///./data/admin.db
+```
+
+**Why separate?** Better isolation, separate scaling, different DB for admin data.
+
+</details>
+
+**What gets logged:**
+- **Audit:** Every `save_entity()` / `delete_entity()` → old/new values, user_id
+- **Metering:** Every API request → endpoint, method, status, latency, bytes
+
+**Data retention:** Audit can be purged. Metering should NOT (billing data).
+
+### Dev Auto-Start (Docker)
+
+Kernel auto-starts Redis/Postgres via Docker when:
+- URL points to `localhost` 
+- Service isn't already running
+- Docker is available
+
+```bash
+# Just set your URLs
+DATABASE_URL=postgres://postgres:postgres@localhost:5432/myapp
+REDIS_URL=redis://localhost:6379
+
+# On startup:
+# ✓ PostgreSQL started at localhost:5432
+# ✓ Redis started at localhost:6379
+```
+
+Containers (`appkernel-redis`, `appkernel-postgres`) persist between runs. Remote URLs are ignored (production-safe).
 
 ---
 
@@ -57,16 +244,16 @@ router = APIRouter(prefix="/widgets", tags=["widgets"])
 @router.post("")
 async def create_widget(data: WidgetCreate, user=Depends(get_current_user), db=Depends(db_connection)):
     # Auto-creates 'widgets' table, auto-generates id/timestamps
-    # created_by/updated_by auto-tracked via context
     return await db.save_entity("widgets", {
         "name": data.name,
         "color": data.color,
+        "owner_id": user.id,  # Track ownership explicitly
     })
 
 
 @router.get("")
 async def list_widgets(user=Depends(get_current_user), db=Depends(db_connection)):
-    return await db.find_entities("widgets", where_clause="[created_by] = ?", params=(user.id,))
+    return await db.find_entities("widgets", where_clause="[owner_id] = ?", params=(user.id,))
 
 
 @router.get("/{id}")
@@ -84,9 +271,14 @@ app = create_service(
 )
 ```
 
-Run with:
+**Run (minimal):**
 ```bash
-JWT_SECRET=my-secret DATABASE_PATH=./data/app.db uvicorn main:app --reload
+DATABASE_URL=sqlite:///./data/app.db JWT_SECRET=dev-secret uvicorn main:app --reload
+```
+
+**Run (with jobs & rate limiting):**
+```bash
+DATABASE_URL=sqlite:///./data/app.db JWT_SECRET=dev-secret REDIS_URL=redis://localhost:6379 uvicorn main:app --reload
 ```
 
 ---
@@ -117,10 +309,10 @@ The `databases` library is **schemaless**. It handles everything automatically:
 | **Auto-add columns** | New fields automatically added |
 | **Auto UUID** | `id` generated if not provided |
 | **Auto timestamps** | `created_at`, `updated_at` managed |
-| **Auto user tracking** | `created_by`, `updated_by` via context (set by kernel) |
 | **History tracking** | Every change versioned in `{entity}_history` |
 | **Soft delete** | `delete_entity(permanent=False)` |
 | **Graceful reads** | `get_entity` returns `None` if table doesn't exist |
+| **Who did it** | Via audit_logs in admin_db (see Audit Logging) |
 
 ### Database API
 
@@ -143,7 +335,7 @@ entities = await db.find_entities(
 entity = await db.save_entity(
     "projects", 
     {"name": "foo", "workspace_id": ws_id},
-)  # dict with id, created_at, updated_at, created_by, updated_by
+)  # dict with id, created_at, updated_at
 
 # Delete entity
 await db.delete_entity("projects", id, permanent=False)  # Soft delete
@@ -228,7 +420,7 @@ from app_kernel import get_current_user, require_admin
 @router.get("/projects")
 async def list_projects(user=Depends(get_current_user)):
     # user.id, user.email, user.role available
-    return await db.find_entities("projects", where_clause="[created_by] = ?", params=(user.id,))
+    return await db.find_entities("projects", where_clause="[owner_id] = ?", params=(user.id,))
 
 @router.delete("/admin/users/{id}")
 async def delete_user(id: str, _=Depends(require_admin)):
@@ -301,57 +493,112 @@ python -m app_kernel.jobs.worker --tasks my_service.tasks
 
 ---
 
-## ServiceConfig Options
+## Configuration
+
+### Minimal (dev)
+
+```bash
+# Creates ./data/app.db relative to where you run uvicorn
+DATABASE_URL=sqlite:///./data/app.db JWT_SECRET=dev-secret uvicorn main:app --reload
+```
+
+### Production (SQLite)
+
+```bash
+DATABASE_URL=sqlite:///./data/app.db
+JWT_SECRET=your-production-secret
+REDIS_URL=redis://localhost:6379
+CORS_ORIGINS=https://myapp.com
+```
+
+### Production (Postgres)
+
+```bash
+DATABASE_URL=postgres://myapp:secret@db.example.com:5432/myapp
+JWT_SECRET=your-production-secret
+REDIS_URL=redis://localhost:6379
+CORS_ORIGINS=https://myapp.com
+```
+
+### Production (MySQL)
+
+```bash
+DATABASE_URL=mysql://myapp:secret@db.example.com:3306/myapp
+JWT_SECRET=your-production-secret
+REDIS_URL=redis://localhost:6379
+CORS_ORIGINS=https://myapp.com
+```
+
+### All Options
 
 ```python
 config = ServiceConfig(
     # Auth
-    jwt_secret="your-secret",
-    jwt_expiry_hours=24,
-    auth_enabled=True,
-    allow_self_signup=False,
+    jwt_secret="your-secret",       # Required in prod, default: "dev-secret-change-me"
+    jwt_expiry_hours=24,            # Default: 24
+    auth_enabled=True,              # Default: True
     
-    # Database
-    database_name="./data/app.db",
-    database_type="sqlite",  # or "postgres", "mysql"
+    # Workspaces (always on)
+    saas_enabled=True,              # Default: True
     
-    # Redis (enables jobs, rate limiting)
-    redis_url="redis://localhost:6379",
+    # OAuth (routes auto-mount when configured)
+    oauth_providers={               # Default: {} (none)
+        "google": {"client_id": "...", "client_secret": "..."},
+        "github": {"client_id": "...", "client_secret": "..."},
+    },
+    
+    # Database URL
+    database_url="sqlite:///./data/app.db",   # Or postgres://... or mysql://...
+    
+    # Redis (enables jobs, rate limiting, caching, audit/metering)
+    redis_url="redis://localhost:6379",  # Default: None (features disabled)
     
     # CORS
-    cors_origins=["http://localhost:3000"],
+    cors_origins=["https://myapp.com"],  # Default: ["*"]
+    cors_credentials=True,               # Default: True
     
-    # Rate limiting
-    rate_limit_requests=100,
-    rate_limit_window=60,
+    # Rate limiting (requires Redis)
+    rate_limit_enabled=True,        # Default: True (but no-op without Redis)
+    rate_limit_requests=100,        # Default: 100 per window
+    rate_limit_window=60,           # Default: 60 seconds
+    
+    # Debug
+    debug=False,                    # Default: False
 )
 
-# Or from environment variables
+# Or load from environment
 config = ServiceConfig.from_env()
 ```
 
-**Environment Variables:**
-- `JWT_SECRET` - Required for auth
-- `DATABASE_PATH` - SQLite database path
-- `DATABASE_TYPE` - sqlite, postgres, mysql
-- `REDIS_URL` - Enables jobs and rate limiting
-- `CORS_ORIGINS` - Comma-separated origins
-- `DEBUG` - Enable debug mode
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DATABASE_URL` | — | `sqlite:///./path`, `postgres://...`, `mysql://...` |
+| `JWT_SECRET` | `"dev-secret-change-me"` | JWT signing secret (change in prod!) |
+| `REDIS_URL` | — | Redis URL (enables jobs, rate limiting, cache, audit, metering) |
+| `ADMIN_WORKER_EMBEDDED` | `"true"` | Run admin worker in uvicorn workers (set `false` to run separately) |
+| `ADMIN_DB_URL` | `DATABASE_URL` | Admin worker database (if different from app) |
+| `CORS_ORIGINS` | `"*"` | Comma-separated origins |
+| `GOOGLE_CLIENT_ID` | — | Google OAuth client ID |
+| `GOOGLE_CLIENT_SECRET` | — | Google OAuth secret |
+| `GITHUB_CLIENT_ID` | — | GitHub OAuth client ID |
+| `GITHUB_CLIENT_SECRET` | — | GitHub OAuth secret |
+| `DEBUG` | `"false"` | Debug mode |
 
 ---
 
-## Multi-Tenant SaaS (Optional)
+## Workspaces (Multi-Tenant)
+
+Workspaces are **always enabled**. Every user gets a personal workspace on signup.
+
+| Scenario | How It Works |
+|----------|--------------|
+| **Single user** | Personal workspace auto-created, transparent |
+| **Team** | Create additional workspaces, invite members |
+| **Enterprise** | Same model scales - workspaces are companies |
 
 ```python
-from app_kernel import require_workspace_member, create_saas_router
-
-# Add SaaS routes (workspaces, members, invites)
-app = create_service(
-    name="my_saas",
-    routers=[router, create_saas_router()],
-    config=config,
-)
-
 # Protect routes by workspace membership
 @router.get("/projects")
 async def list_projects(
@@ -363,19 +610,48 @@ async def list_projects(
     return await db.find_entities("projects", where_clause="[workspace_id] = ?", params=(workspace_id,))
 ```
 
+**Auto-mounted routes:**
+- `POST /workspaces` - Create workspace
+- `GET /workspaces` - List user's workspaces
+- `POST /workspaces/{id}/invite` - Invite member
+- `POST /workspaces/join/{token}` - Accept invite
+- `DELETE /workspaces/{id}/members/{user_id}` - Remove member
+
 ---
 
 ## Summary
 
-| What | How |
-|------|-----|
-| **Define schema** | Dataclasses in `models.py` (optional) |
-| **Validate input** | Pydantic models |
-| **Store data** | `db.save_entity("table", dict)` |
-| **Read data** | `db.get_entity("table", id)` |
-| **Query data** | `db.find_entities("table", where_clause=...)` |
-| **Auth** | `Depends(get_current_user)` |
-| **Background jobs** | `await job_client.enqueue("task", payload)` |
+**Automatic (zero code):**
+- Health endpoints, security headers, structured logging
+- Workspaces (personal workspace created on signup)
+- Registration (`/auth/register`)
+- OAuth (when credentials set)
+
+**Needs env vars:**
+| Feature | Required |
+|---------|----------|
+| **Auth** | `DATABASE_URL` + `JWT_SECRET` |
+| **Jobs/rate limiting/cache** | + `REDIS_URL` |
+| **Audit + metering** | + `REDIS_URL` (auto-enabled) + run admin worker |
+| **OAuth** | + `GOOGLE_CLIENT_ID` or `GITHUB_CLIENT_ID` |
+
+**You wire yourself:**
+| Feature | How |
+|---------|-----|
+| **API Keys** | `create_api_key()` + `create_combined_auth()` |
+| **Feature flags** | `await flag_enabled(db, "flag_name")` |
+| **Webhooks** | `trigger_webhook_event()` in your code |
+
+**Common patterns:**
+| Pattern | Code |
+|---------|------|
+| **Protect route** | `user=Depends(get_current_user)` |
+| **Admin only** | `_=Depends(require_admin)` |
+| **Workspace member** | `_=Depends(require_workspace_member)` |
+| **Get entity** | `await db.get_entity("table", id)` |
+| **Save entity** | `await db.save_entity("table", {...})` |
+| **Query** | `await db.find_entities("table", where_clause=...)` |
+| **Background job** | `await job_client.enqueue("task", payload)` |
 
 **No manifest. No codegen. No ORM. Just Python.**
 
@@ -417,9 +693,9 @@ async def list_projects(
 | `id` | `str` (UUID) | Always, if not provided |
 | `created_at` | `str` (ISO datetime) | On create |
 | `updated_at` | `str` (ISO datetime) | On every save |
-| `created_by` | `str` | Via context (set by kernel middleware) |
-| `updated_by` | `str` | Via context (set by kernel middleware) |
 | `deleted_at` | `str` (ISO datetime) | On soft delete |
+
+**Note:** For "who did it", use audit_logs in admin_db (see Audit Logging section).
 
 </div>
 
@@ -586,7 +862,7 @@ logs = await get_audit_logs(admin_db,
 
 **Run the admin worker to persist events:**
 ```bash
-python -m app_kernel.admin_worker --redis redis://localhost:6379 --db sqlite:///admin.db
+REDIS_URL=redis://localhost:6379 ADMIN_DB_URL=sqlite:///admin.db python -m app_kernel.admin_worker
 ```
 
 ---
@@ -615,47 +891,51 @@ await set_flag(db, "new_dashboard",
 
 ## Webhooks
 
-Notify external systems on events.
+Notify external systems on events. All events sent to all webhooks - receiver decides what to handle.
 
 ```python
 from app_kernel.webhooks import create_webhook, trigger_webhook_event
 
-# Register webhook
+# Register webhook (receives ALL events)
 webhook = await create_webhook(db, workspace_id,
     url="https://slack.com/webhook/xxx",
-    events=["deployment.succeeded", "deployment.failed"],
 )
 
-# Trigger event (in your code)
+# Trigger event (in your code) - sent to ALL webhooks
 await trigger_webhook_event(db, workspace_id,
     event="deployment.succeeded",
     data={"service": "api", "version": 42},
 )
+# Payload: {"event": "deployment.succeeded", "data": {...}, "timestamp": "..."}
 ```
 
 ---
 
-## OAuth Providers
+## OAuth (Google/GitHub)
 
-Google/GitHub login.
+**Auto-enabled** when credentials are set:
 
-```python
-# Configure in ServiceConfig
-config = ServiceConfig(
-    oauth_providers={
-        "google": {
-            "client_id": os.environ["GOOGLE_CLIENT_ID"],
-            "client_secret": os.environ["GOOGLE_CLIENT_SECRET"],
-        },
-        "github": {...},
-    },
-)
+```bash
+# Add to environment - routes auto-mount
+GOOGLE_CLIENT_ID=...
+GOOGLE_CLIENT_SECRET=...
 
-# Auto-mounted routes:
-# GET /auth/oauth/google          → Start OAuth
-# GET /auth/oauth/google/callback → Handle callback
-# GET /auth/oauth/accounts        → List linked accounts
-# DELETE /auth/oauth/google       → Unlink account
+GITHUB_CLIENT_ID=...
+GITHUB_CLIENT_SECRET=...
+```
+
+**Auto-mounted routes:**
+- `GET /auth/oauth/google` - Start Google OAuth
+- `GET /auth/oauth/google/callback` - Handle callback
+- `GET /auth/oauth/github` - Start GitHub OAuth  
+- `GET /auth/oauth/github/callback` - Handle callback
+- `GET /auth/oauth/accounts` - List linked accounts
+- `DELETE /auth/oauth/{provider}` - Unlink account
+
+**Frontend usage:**
+```javascript
+// Redirect user to start OAuth
+window.location = '/api/v1/auth/oauth/google?redirect_uri=/dashboard';
 ```
 
 ---
@@ -682,33 +962,29 @@ async def get_projects(workspace_id: str):
 
 ## Architecture: App DB vs Admin DB
 
-Kernel uses two databases to separate app data from observability data:
+Kernel separates app data from observability data:
 
-| Database | What | Written By |
-|----------|------|------------|
-| **App DB** | Your entities, auth, api_keys, flags, webhooks, oauth | Sync (during request) |
-| **Admin DB** | Audit logs, usage metrics, traces | Async (via Redis worker) |
+| Database | Config | What | Written |
+|----------|--------|------|---------|
+| **App DB** | `DATABASE_URL` | Your entities, users, api_keys, flags, webhooks | Sync (during request) |
+| **Admin DB** | `ADMIN_DB_URL` (or same as App DB) | Audit logs, usage metrics | Async (via Redis) |
 
-**Why separate?**
-- Admin writes don't slow down requests
-- Admin DB can be shared across apps
-- App DB stays clean and fast
-
-**Config:**
-```python
-config = ServiceConfig(
-    name="my_app",                   # Used as "app" field in admin_db
-    database_name="app.db",          # App data
-    admin_db_url="sqlite:///admin.db",  # Shared observability
-    redis_url="redis://localhost:6379",  # Event queue
-)
-```
-
-**Admin Worker:**
+**Simple setup (everything in one DB):**
 ```bash
-python -m app_kernel.admin_worker --redis redis://localhost:6379 --db sqlite:///admin.db
+DATABASE_URL=sqlite:///./data/app.db
+REDIS_URL=redis://localhost:6379   # Enables audit + metering
+# Embedded worker handles it - no separate process needed
 ```
 
-Consumes from Redis queues and persists to admin_db:
-- `admin:audit_events` → `audit_logs` table
-- `admin:metering_events` → `usage_summary` table
+**Production setup (separate admin DB):**
+```bash
+DATABASE_URL=postgres://...        # App data
+REDIS_URL=redis://...
+ADMIN_DB_URL=postgres://...        # Audit/metering data
+ADMIN_WORKER_EMBEDDED=false        # Run worker separately for isolation
+```
+
+**Why separate admin DB?**
+- Audit/metrics don't bloat your app database
+- Can use different retention policies
+- Admin DB can be shared across multiple apps
