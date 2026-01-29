@@ -17,6 +17,7 @@ A stable, reusable application kernel for backend services.
 | Feature | What It Does |
 |---------|-------------|
 | **JWT Auth** | Login, register, token refresh |
+| **API Keys** | Service-to-service authentication |
 | **Database** | Schemaless - auto-creates tables/columns |
 | **Background Jobs** | Async task queue with retries |
 | **Health Checks** | `/healthz`, `/readyz` endpoints |
@@ -25,6 +26,12 @@ A stable, reusable application kernel for backend services.
 | **Request Tracking** | Request IDs, structured logging |
 | **CORS** | Configurable origins |
 | **SaaS** | Multi-tenant workspaces (optional) |
+| **OAuth** | Google/GitHub login (optional) |
+| **Feature Flags** | Toggle features without deploy |
+| **Webhooks** | Notify external systems on events |
+| **Usage Metering** | Track API calls, quotas, billing |
+| **Audit Logging** | Who changed what, when |
+| **Caching** | Redis-backed with in-memory fallback |
 
 ---
 
@@ -491,3 +498,175 @@ User identity from JWT token.
 </details>
 
 </div>
+
+---
+
+## API Keys
+
+For service-to-service authentication (CI/CD, scripts, agents).
+
+```python
+# Create key (returns plaintext only once)
+from app_kernel.api_keys import create_api_key
+
+key = await create_api_key(db, user_id, workspace_id,
+    name="CI/CD Pipeline",
+    scopes=["deployments:write"],
+    expires_in_days=90,
+)
+# key = {"id": "...", "key": "sk_live_a1b2c3...", ...}
+
+# In requests:
+# Authorization: Bearer sk_live_a1b2c3...
+
+# In routes - accept API key OR JWT
+from app_kernel.api_keys import create_combined_auth
+
+get_auth = create_combined_auth(get_db_connection, get_current_user)
+
+@router.post("/deployments")
+async def deploy(auth=Depends(get_auth)):
+    # auth.type = "api_key" or "user"
+    # auth.has_scope("deployments:write")
+```
+
+---
+
+## Usage Metering
+
+Track API calls per user/workspace for billing and quotas.
+
+```python
+from app_kernel.metering import track_usage, get_usage, check_quota
+
+# Auto-tracked via middleware (every request)
+# Manual tracking for custom metrics:
+await track_usage(db, user_id, workspace_id,
+    tokens=1500,      # AI tokens
+    deployments=1,    # Custom counter
+)
+
+# Query usage
+usage = await get_usage(db, workspace_id, period="2025-01")
+# {"requests": 4521, "tokens": 125000, "deployments": 47}
+
+# Check quota
+if not await check_quota(db, workspace_id, "tokens", limit=100000):
+    raise HTTPException(402, "Token limit reached")
+```
+
+---
+
+## Audit Logging
+
+Track who changed what, when.
+
+```python
+from app_kernel.audit import audit_log, get_audit_logs
+
+# Log an action
+await audit_log(db,
+    user_id=user.id,
+    action="deployment.created",
+    entity="deployments",
+    entity_id=deployment_id,
+    changes={"status": ["pending", "running"]},
+    ip=request.client.host,
+)
+
+# Query logs
+logs = await get_audit_logs(db,
+    workspace_id=workspace_id,
+    entity="deployments",
+    since="2025-01-01",
+)
+```
+
+---
+
+## Feature Flags
+
+Toggle features without deploy.
+
+```python
+from app_kernel.flags import flag_enabled, set_flag
+
+# Check flag
+if await flag_enabled(db, "new_dashboard", user_id=user.id):
+    return new_dashboard()
+
+# Admin: Set flag
+await set_flag(db, "new_dashboard",
+    enabled=True,
+    rollout_percent=10,           # 10% of users
+    workspaces=["ws-123"],        # Specific workspaces
+    users=["user-456"],           # Specific users
+)
+```
+
+---
+
+## Webhooks
+
+Notify external systems on events.
+
+```python
+from app_kernel.webhooks import create_webhook, trigger_webhook_event
+
+# Register webhook
+webhook = await create_webhook(db, workspace_id,
+    url="https://slack.com/webhook/xxx",
+    events=["deployment.succeeded", "deployment.failed"],
+)
+
+# Trigger event (in your code)
+await trigger_webhook_event(db, workspace_id,
+    event="deployment.succeeded",
+    data={"service": "api", "version": 42},
+)
+```
+
+---
+
+## OAuth Providers
+
+Google/GitHub login.
+
+```python
+# Configure in ServiceConfig
+config = ServiceConfig(
+    oauth_providers={
+        "google": {
+            "client_id": os.environ["GOOGLE_CLIENT_ID"],
+            "client_secret": os.environ["GOOGLE_CLIENT_SECRET"],
+        },
+        "github": {...},
+    },
+)
+
+# Auto-mounted routes:
+# GET /auth/oauth/google          → Start OAuth
+# GET /auth/oauth/google/callback → Handle callback
+# GET /auth/oauth/accounts        → List linked accounts
+# DELETE /auth/oauth/google       → Unlink account
+```
+
+---
+
+## Caching
+
+Redis-backed with in-memory fallback.
+
+```python
+from app_kernel.cache import cache, cached
+
+# Simple get/set
+await cache.set("projects:ws-123", projects, ttl=300)
+projects = await cache.get("projects:ws-123")
+await cache.delete("projects:ws-123")
+
+# Decorator
+@cached(ttl=300, key="projects:{workspace_id}")
+async def get_projects(workspace_id: str):
+    return await db.find_entities("projects", ...)
+```
