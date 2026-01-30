@@ -32,7 +32,6 @@ from .stores import (
     list_api_keys,
     get_api_key,
     revoke_api_key,
-    init_api_keys_schema,
 )
 from .deps import get_api_key_auth, get_auth, ApiKeyAuth
 from .router import create_api_keys_router
@@ -44,7 +43,6 @@ __all__ = [
     "list_api_keys",
     "get_api_key",
     "revoke_api_key",
-    "init_api_keys_schema",
     # Deps
     "get_api_key_auth",
     "get_auth",

@@ -9,8 +9,8 @@ A stable, reusable application kernel for backend services.
 **Philosophy:**
 - **Kernel provides:** mechanisms + invariants
 - **Apps provide:** meaning + business logic
-- **Database is schemaless:** Auto-creates tables and columns as needed
-- **Models are code:** Define dataclasses for validation and documentation (optional)
+- **Schema-first design:** Define entities once, migrations auto-applied
+- **Models are code:** Define dataclasses with @entity for schema and validation
 
 ## What You Get For Free
 
@@ -301,18 +301,61 @@ my_service/
 
 ## The Database
 
-The `databases` library is **schemaless**. It handles everything automatically:
+The `databases` library uses **schema-first design** with automated migrations and backups:
 
 | Feature | How It Works |
 |---------|--------------|
-| **Auto-create table** | First `save_entity()` creates the table |
-| **Auto-add columns** | New fields automatically added |
-| **Auto UUID** | `id` generated if not provided |
-| **Auto timestamps** | `created_at`, `updated_at` managed |
+| **Schema-first** | Define entities with `@entity` decorators (single source of truth) |
+| **Auto-migration** | Schema changes auto-detected and applied on startup |
+| **Auto-backup** | Database backed up before any schema changes |
 | **History tracking** | Every change versioned in `{entity}_history` |
 | **Soft delete** | `delete_entity(permanent=False)` |
-| **Graceful reads** | `get_entity` returns `None` if table doesn't exist |
-| **Who did it** | Via audit_logs in admin_db (see Audit Logging) |
+| **Auto timestamps** | `created_at`, `updated_at` managed automatically |
+| **Portable migrations** | Works on SQLite, PostgreSQL, MySQL |
+| **Audit trail** | All schema changes saved in `.data/migrations_audit/` |
+
+### Schema Definition
+
+Define your database schema once using dataclasses:
+
+```python
+# schemas.py
+from dataclasses import dataclass
+from databases import entity, entity_field
+
+@entity(table="projects")
+@dataclass
+class Project:
+    """A project groups related services."""
+    workspace_id: str = entity_field(index=True, nullable=False)
+    name: str = entity_field(nullable=False)
+    description: str = entity_field(nullable=True)
+    status: str = entity_field(
+        default="active",
+        check="[status] IN ('active', 'archived', 'deleted')"
+    )
+
+@entity(table="services")
+@dataclass
+class Service:
+    """A deployable service within a project."""
+    project_id: str = entity_field(index=True, nullable=False)
+    name: str = entity_field(nullable=False)
+    image: str
+    port: int = entity_field(default=8000)
+    replicas: int = entity_field(default=1)
+```
+
+**On startup, kernel will:**
+1. Create backup in `.data/backups/` (always, safe)
+2. Detect schema changes (compares `@entity` definitions to database)
+3. Apply migrations if needed (saved to `.data/migrations_audit/`)
+4. Start accepting requests
+
+**Schema changes are automatic:**
+- Add new field → `ALTER TABLE ... ADD COLUMN`
+- Add index → `CREATE INDEX`
+- Remove field → Requires explicit deletion flag (safe default)
 
 ### Database API
 
@@ -345,6 +388,35 @@ await db.delete_entity("projects", id, permanent=True)   # Hard delete
 count = await db.count_entities("projects", where_clause="[status] = ?", params=("active",))
 ```
 
+### Backup & Migration Configuration
+
+Control via environment variables:
+
+```bash
+# Directories (defaults shown)
+DATA_DIR=.data                           # Base directory
+BACKUP_DIR=.data/backups                 # Backup location
+MIGRATIONS_DIR=.data/migrations_audit    # Migration files
+
+# Features (defaults shown)
+BACKUP_ENABLED=true                      # Auto-backup on startup
+MIGRATION_ENABLED=true                   # Auto-migration on startup
+```
+
+**Files created:**
+```
+.data/
+├── app.db                                    # SQLite database
+├── backups/
+│   ├── native_20260130_120000_a1b2c3d4.backup  # Fast restore
+│   └── csv_20260130_120000_a1b2c3d4/           # Portable backup
+└── migrations_audit/
+    ├── 20260130_120000_a1b2c3d4.sql            # Migration SQL
+    └── 20260130_120000_a1b2c3d4.json           # Metadata
+```
+
+**Commit migrations to version control!** Other developers will auto-apply them.
+
 ### Database Access Patterns
 
 **In Routes (use Depends):**
@@ -366,11 +438,91 @@ async def process_task(ctx, task_id: str):
         # ... process
 ```
 
+### Advanced: Schema Evolution
+
+**Add a new field:**
+```python
+@entity(table="projects")
+@dataclass
+class Project:
+    workspace_id: str = entity_field(index=True)
+    name: str
+    budget: float = entity_field(default=0.0)  # NEW FIELD
+```
+
+Restart app → Migration auto-applied:
+```sql
+ALTER TABLE projects ADD COLUMN budget REAL DEFAULT 0.0;
+```
+
+**Remove a field (safe deletion):**
+```python
+# 1. Remove from schema
+@entity(table="projects")
+@dataclass
+class Project:
+    workspace_id: str
+    name: str
+    # old_field removed
+```
+
+```python
+# 2. Set ALLOW_COLUMN_DELETION=true in production (after backup)
+# 3. Restart app → Column dropped
+```
+
+**Rollback to previous state:**
+```python
+from databases.backup import rollback_to_date
+
+# Restore to yesterday
+await rollback_to_date(db, "2026-01-29", confirm=True)
+```
+
+### Automatic Backend Migration
+
+Switch database backends seamlessly - kernel auto-migrates your data:
+
+```bash
+# Development (SQLite)
+DATABASE_URL=sqlite:///.data/app.db
+
+# Switch to production (PostgreSQL)
+DATABASE_URL=postgres://user:pass@localhost:5432/myapp
+```
+
+**On startup after backend change:**
+
+```
+🔄 DATABASE BACKEND CHANGED: sqlite → postgres
+✓ Found backup from 2026-01-30T12:00:00
+  Auto-migrating data to new backend...
+✓ Data migrated successfully from sqlite to postgres
+✓ Automated backup completed
+✓ Schema migration completed
+```
+
+**How it works:**
+1. Detects backend change (compares current vs. last used)
+2. Finds latest CSV backup from old backend
+3. Imports CSV data into new backend (portable!)
+4. Creates new backup on new backend
+5. Applies schema migrations to match current definitions
+6. Ready to use!
+
+**No backups?** Starts with empty database on new backend (safe default).
+
+**Supported migrations:**
+- SQLite → PostgreSQL
+- SQLite → MySQL
+- PostgreSQL → MySQL
+- Any → Any (via CSV backups)
+
 ---
 
 ## Models as Code (Optional)
 
-Define dataclasses for **validation**, **defaults**, and **documentation**:
+You can still define separate dataclasses for **validation** if you want type checking at the API boundary:
 
 ```python
 # models.py

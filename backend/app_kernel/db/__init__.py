@@ -34,9 +34,7 @@ from .session import (
 )
 
 from .schema import (
-    init_kernel_schema,
-    init_saas_schema,
-    init_request_metrics_schema,
+    init_all_schemas,
     cleanup_expired_idempotency_keys,
     cleanup_old_rate_limits,
 )
@@ -53,10 +51,8 @@ __all__ = [
     "init_schema",
     "close_db",
     
-    # Kernel schema
-    "init_kernel_schema",
-    "init_saas_schema",
-    "init_request_metrics_schema",
+    # Schema init
+    "init_all_schemas",
     "cleanup_expired_idempotency_keys",
     "cleanup_old_rate_limits",
     

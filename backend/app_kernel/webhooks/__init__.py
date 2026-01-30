@@ -32,7 +32,6 @@ from .stores import (
     list_webhooks,
     update_webhook,
     delete_webhook,
-    init_webhooks_schema,
 )
 from .dispatcher import (
     trigger_webhook_event,
@@ -48,7 +47,6 @@ __all__ = [
     "list_webhooks",
     "update_webhook",
     "delete_webhook",
-    "init_webhooks_schema",
     # Dispatcher
     "trigger_webhook_event",
     "dispatch_webhook",

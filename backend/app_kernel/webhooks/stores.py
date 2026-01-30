@@ -15,41 +15,6 @@ def _generate_secret() -> str:
     return f"whsec_{secrets.token_urlsafe(32)}"
 
 
-async def init_webhooks_schema(db) -> None:
-    """Create webhooks tables."""
-    # Webhook subscriptions (simplified - no events column)
-    await db.execute("""
-        CREATE TABLE IF NOT EXISTS webhooks (
-            id TEXT PRIMARY KEY,
-            workspace_id TEXT NOT NULL,
-            url TEXT NOT NULL,
-            secret TEXT,
-            description TEXT,
-            enabled INTEGER DEFAULT 1,
-            created_at TEXT,
-            updated_at TEXT
-        )
-    """)
-    await db.execute("CREATE INDEX IF NOT EXISTS idx_webhooks_workspace ON webhooks(workspace_id)")
-    
-    # Webhook delivery logs
-    await db.execute("""
-        CREATE TABLE IF NOT EXISTS webhook_deliveries (
-            id TEXT PRIMARY KEY,
-            webhook_id TEXT NOT NULL,
-            event TEXT NOT NULL,
-            payload TEXT,
-            response_status INTEGER,
-            response_body TEXT,
-            duration_ms INTEGER,
-            success INTEGER,
-            error TEXT,
-            created_at TEXT
-        )
-    """)
-    await db.execute("CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_webhook ON webhook_deliveries(webhook_id, created_at)")
-
-
 async def create_webhook(
     db,
     workspace_id: str,

@@ -41,7 +41,6 @@ from .stores import (
     get_user_oauth_accounts,
     link_oauth_account,
     unlink_oauth_account,
-    init_oauth_schema,
 )
 from .router import create_oauth_router
 
@@ -59,7 +58,6 @@ __all__ = [
     "get_user_oauth_accounts",
     "link_oauth_account",
     "unlink_oauth_account",
-    "init_oauth_schema",
     # Router
     "create_oauth_router",
 ]

@@ -39,7 +39,8 @@ class DatabaseConfig(BaseConfig):
                  connection_acquisition_timeout: float=10.0, # Time to acquire connection from pool
                  pool_creation_timeout: float=30.0,          # Time to create/initialize pool
                  query_execution_timeout: float=60.0,        # Default timeout for SQL queries
-                 connection_creation_timeout: float=15.0     # Time to create individual connections                
+                 connection_creation_timeout: float=15.0,    # Time to create individual connections
+                 migrations_on: bool=True                    # If True, skip runtime DDL (use AutoMigrator at startup)
                 ):      
         self._host = host
         self._port = port
@@ -52,6 +53,7 @@ class DatabaseConfig(BaseConfig):
         self._pool_creation_timeout = pool_creation_timeout
         self._query_execution_timeout = query_execution_timeout
         self._connection_creation_timeout = connection_creation_timeout
+        self._migrations_on = migrations_on
         
         super().__init__()
         self._validate_config()
@@ -192,6 +194,16 @@ class DatabaseConfig(BaseConfig):
         """Returns connection creation timeout in seconds."""
         return self._connection_creation_timeout
 
+    @property
+    def migrations_on(self) -> bool:
+        """
+        Returns whether migrations mode is enabled.
+        
+        When True (default): Runtime DDL is skipped, use AutoMigrator at startup.
+        When False: Runtime schema modifications are allowed (legacy behavior).
+        """
+        return self._migrations_on
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert configuration to dictionary."""
         return self.config()
@@ -210,5 +222,6 @@ class DatabaseConfig(BaseConfig):
             connection_acquisition_timeout=data.get('connection_acquisition_timeout', 10.0),
             pool_creation_timeout=data.get('pool_creation_timeout', 30.0),
             query_execution_timeout=data.get('query_execution_timeout', 60.0),
-            connection_creation_timeout=data.get('connection_creation_timeout', 15.0)
+            connection_creation_timeout=data.get('connection_creation_timeout', 15.0),
+            migrations_on=data.get('migrations_on', True)
         )

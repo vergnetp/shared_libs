@@ -8,30 +8,6 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-async def init_oauth_schema(db) -> None:
-    """Create OAuth accounts table."""
-    await db.execute("""
-        CREATE TABLE IF NOT EXISTS oauth_accounts (
-            id TEXT PRIMARY KEY,
-            user_id TEXT NOT NULL,
-            provider TEXT NOT NULL,
-            provider_user_id TEXT NOT NULL,
-            email TEXT,
-            name TEXT,
-            picture TEXT,
-            access_token TEXT,
-            refresh_token TEXT,
-            token_expires_at TEXT,
-            raw_data TEXT,
-            created_at TEXT,
-            updated_at TEXT,
-            UNIQUE(provider, provider_user_id)
-        )
-    """)
-    await db.execute("CREATE INDEX IF NOT EXISTS idx_oauth_user ON oauth_accounts(user_id)")
-    await db.execute("CREATE INDEX IF NOT EXISTS idx_oauth_provider ON oauth_accounts(provider, provider_user_id)")
-
-
 async def create_oauth_account(
     db,
     user_id: str,

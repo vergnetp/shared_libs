@@ -34,44 +34,6 @@ def _get_period_start(period_key: str) -> datetime:
     return datetime.now(timezone.utc)
 
 
-async def init_metering_schema(db) -> None:
-    """Create metering tables."""
-    # Individual request log (optional, can be expensive)
-    await db.execute("""
-        CREATE TABLE IF NOT EXISTS usage_requests (
-            id TEXT PRIMARY KEY,
-            user_id TEXT,
-            workspace_id TEXT,
-            endpoint TEXT,
-            method TEXT,
-            status_code INTEGER,
-            latency_ms INTEGER,
-            bytes_in INTEGER,
-            bytes_out INTEGER,
-            timestamp TEXT,
-            created_at TEXT
-        )
-    """)
-    await db.execute("CREATE INDEX IF NOT EXISTS idx_usage_requests_workspace ON usage_requests(workspace_id, timestamp)")
-    await db.execute("CREATE INDEX IF NOT EXISTS idx_usage_requests_user ON usage_requests(user_id, timestamp)")
-    
-    # Aggregated usage (main table for billing)
-    await db.execute("""
-        CREATE TABLE IF NOT EXISTS usage_summary (
-            id TEXT PRIMARY KEY,
-            workspace_id TEXT,
-            user_id TEXT,
-            period TEXT,
-            metric TEXT,
-            value INTEGER DEFAULT 0,
-            created_at TEXT,
-            updated_at TEXT,
-            UNIQUE(workspace_id, user_id, period, metric)
-        )
-    """)
-    await db.execute("CREATE INDEX IF NOT EXISTS idx_usage_summary_lookup ON usage_summary(workspace_id, period)")
-
-
 async def track_request(
     db,
     user_id: Optional[str],

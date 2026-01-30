@@ -9,30 +9,6 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-async def init_audit_schema(db) -> None:
-    """Create audit log table."""
-    await db.execute("""
-        CREATE TABLE IF NOT EXISTS audit_logs (
-            id TEXT PRIMARY KEY,
-            workspace_id TEXT,
-            user_id TEXT,
-            action TEXT NOT NULL,
-            entity TEXT,
-            entity_id TEXT,
-            changes TEXT,
-            metadata TEXT,
-            ip TEXT,
-            user_agent TEXT,
-            timestamp TEXT,
-            created_at TEXT
-        )
-    """)
-    await db.execute("CREATE INDEX IF NOT EXISTS idx_audit_workspace ON audit_logs(workspace_id, timestamp)")
-    await db.execute("CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_logs(entity, entity_id)")
-    await db.execute("CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_logs(user_id, timestamp)")
-    await db.execute("CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_logs(action, timestamp)")
-
-
 async def audit_log(
     db,
     action: str,

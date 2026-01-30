@@ -1,281 +1,402 @@
 """
-Kernel infrastructure schema.
+Kernel infrastructure schema using @entity decorators.
 
-Creates tables owned by app_kernel:
-- jobs: Background job tracking
-- audit_log: Request audit trail
-- rate_limits: Rate limiting state
-- idempotency_keys: Request deduplication
-- users: Authentication users
+All kernel-owned tables defined here. AutoMigrator creates/updates at startup.
 
-Apps should NOT create these tables - kernel owns them.
+Usage:
+    from app_kernel.db.schema import init_all_schemas
+    
+    async with db as conn:
+        await init_all_schemas(conn, saas_enabled=True)
 """
 
-from typing import Any
+from dataclasses import dataclass
+from typing import Optional
+
+from ...databases import entity, entity_field
 
 
-async def init_kernel_schema(conn: Any) -> None:
+# =============================================================================
+# Core Infrastructure
+# =============================================================================
+
+@entity(table="jobs")
+@dataclass
+class Job:
+    """Background job tracking."""
+    task: str
+    payload: Optional[str] = None
+    context: Optional[str] = None
+    status: str = entity_field(default="queued", index=True)
+    result: Optional[str] = None
+    error: Optional[str] = None
+    attempts: int = entity_field(default=0)
+    max_attempts: int = entity_field(default=3)
+    priority: str = entity_field(default="normal")
+    user_id: Optional[str] = entity_field(default=None, index=True)
+    idempotency_key: Optional[str] = entity_field(default=None, index=True)
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+
+
+@entity(table="rate_limits", history=False)
+@dataclass
+class RateLimit:
+    """Sliding window rate limiting."""
+    user_id: Optional[str] = entity_field(default=None, index=True)
+    ip_address: Optional[str] = entity_field(default=None, index=True)
+    endpoint: Optional[str] = entity_field(default=None, index=True)
+    window_start: Optional[str] = None
+    request_count: int = entity_field(default=0)
+
+
+@entity(table="idempotency_keys", history=False)
+@dataclass
+class IdempotencyKey:
+    """Request deduplication."""
+    user_id: Optional[str] = None
+    endpoint: Optional[str] = None
+    request_hash: Optional[str] = None
+    response: Optional[str] = None
+    status_code: Optional[int] = None
+    expires_at: Optional[str] = entity_field(default=None, index=True)
+
+
+# =============================================================================
+# Authentication
+# =============================================================================
+
+@entity(table="users")
+@dataclass
+class User:
+    """Legacy users table."""
+    email: str = entity_field(unique=True)
+    password_hash: Optional[str] = None
+    name: Optional[str] = None
+    role: str = entity_field(default="user")
+    is_active: int = entity_field(default=1)
+    metadata: str = entity_field(default="{}")
+
+
+@entity(table="auth_users")
+@dataclass
+class AuthUser:
+    """Authentication users."""
+    email: str = entity_field(unique=True, index=True)
+    password_hash: Optional[str] = None
+    name: Optional[str] = None
+    role: str = entity_field(default="user", index=True)
+    is_active: int = entity_field(default=1)
+    metadata: str = entity_field(default="{}")
+
+
+@entity(table="auth_roles")
+@dataclass
+class AuthRole:
+    """Role definitions with permissions."""
+    name: str = entity_field(unique=True, index=True)
+    permissions: Optional[str] = None
+    description: Optional[str] = None
+
+
+@entity(table="auth_role_assignments")
+@dataclass
+class AuthRoleAssignment:
+    """User-role mappings."""
+    user_id: str = entity_field(index=True)
+    role_id: str = entity_field(index=True)
+    resource_type: str = entity_field(index=True)
+    resource_id: Optional[str] = entity_field(default=None, index=True)
+    granted_by: Optional[str] = None
+    expires_at: Optional[str] = None
+
+
+@entity(table="auth_sessions", history=False)
+@dataclass
+class AuthSession:
+    """Sessions for token revocation."""
+    user_id: str = entity_field(index=True)
+    token_hash: str = entity_field(index=True)
+    expires_at: str = ""
+    metadata: Optional[str] = None
+
+
+# =============================================================================
+# API Keys
+# =============================================================================
+
+@entity(table="api_keys")
+@dataclass
+class ApiKey:
+    """API key management."""
+    user_id: str = entity_field(index=True)
+    workspace_id: Optional[str] = entity_field(default=None, index=True)
+    name: str = ""
+    key_hash: str = entity_field(unique=True, index=True)
+    key_prefix: Optional[str] = None
+    scopes: Optional[str] = None
+    expires_at: Optional[str] = None
+    last_used_at: Optional[str] = None
+    revoked_at: Optional[str] = None
+
+
+# =============================================================================
+# Feature Flags
+# =============================================================================
+
+@entity(table="feature_flags")
+@dataclass
+class FeatureFlag:
+    """Feature flag management."""
+    name: str = entity_field(unique=True, index=True)
+    description: Optional[str] = None
+    enabled: int = entity_field(default=0)
+    rollout_percent: int = entity_field(default=100)
+    allowed_workspaces: Optional[str] = None
+    allowed_users: Optional[str] = None
+    metadata: Optional[str] = None
+
+
+# =============================================================================
+# Webhooks
+# =============================================================================
+
+@entity(table="webhooks")
+@dataclass
+class Webhook:
+    """Webhook subscriptions."""
+    workspace_id: str = entity_field(index=True)
+    url: str = ""
+    secret: Optional[str] = None
+    description: Optional[str] = None
+    enabled: int = entity_field(default=1)
+
+
+@entity(table="webhook_deliveries", history=False)
+@dataclass
+class WebhookDelivery:
+    """Webhook delivery logs."""
+    webhook_id: str = entity_field(index=True)
+    event: str = ""
+    payload: Optional[str] = None
+    response_status: Optional[int] = None
+    response_body: Optional[str] = None
+    duration_ms: Optional[int] = None
+    success: int = entity_field(default=0)
+    error: Optional[str] = None
+
+
+# =============================================================================
+# OAuth
+# =============================================================================
+
+@entity(table="oauth_accounts")
+@dataclass
+class OAuthAccount:
+    """OAuth account links."""
+    user_id: str = entity_field(index=True)
+    provider: str = entity_field(index=True)
+    provider_user_id: str = entity_field(index=True)
+    email: Optional[str] = None
+    name: Optional[str] = None
+    picture: Optional[str] = None
+    access_token: Optional[str] = None
+    refresh_token: Optional[str] = None
+    token_expires_at: Optional[str] = None
+    raw_data: Optional[str] = None
+
+
+# =============================================================================
+# Audit
+# =============================================================================
+
+@entity(table="audit_logs", history=False)
+@dataclass
+class AuditLog:
+    """Audit log entries."""
+    workspace_id: Optional[str] = entity_field(default=None, index=True)
+    user_id: Optional[str] = entity_field(default=None, index=True)
+    action: str = entity_field(index=True)
+    entity: Optional[str] = entity_field(default=None, index=True)
+    entity_id: Optional[str] = entity_field(default=None, index=True)
+    changes: Optional[str] = None
+    metadata: Optional[str] = None
+    ip: Optional[str] = None
+    user_agent: Optional[str] = None
+    timestamp: Optional[str] = entity_field(default=None, index=True)
+
+
+# =============================================================================
+# Metering
+# =============================================================================
+
+@entity(table="usage_requests", history=False)
+@dataclass
+class UsageRequest:
+    """Individual request logs."""
+    user_id: Optional[str] = entity_field(default=None, index=True)
+    workspace_id: Optional[str] = entity_field(default=None, index=True)
+    endpoint: Optional[str] = None
+    method: Optional[str] = None
+    status_code: Optional[int] = None
+    latency_ms: Optional[int] = None
+    bytes_in: Optional[int] = None
+    bytes_out: Optional[int] = None
+    timestamp: Optional[str] = entity_field(default=None, index=True)
+
+
+@entity(table="usage_summary", history=False)
+@dataclass
+class UsageSummary:
+    """Aggregated usage for billing."""
+    workspace_id: Optional[str] = entity_field(default=None, index=True)
+    user_id: Optional[str] = entity_field(default=None, index=True)
+    period: Optional[str] = entity_field(default=None, index=True)
+    metric: Optional[str] = entity_field(default=None, index=True)
+    value: int = entity_field(default=0)
+
+
+# =============================================================================
+# SaaS (Optional)
+# =============================================================================
+
+@entity(table="workspaces")
+@dataclass
+class Workspace:
+    """Teams/organizations."""
+    name: str = ""
+    slug: Optional[str] = entity_field(default=None, unique=True, index=True)
+    owner_id: str = entity_field(index=True)
+    is_personal: int = entity_field(default=0)
+    settings_json: Optional[str] = None
+
+
+@entity(table="workspace_members")
+@dataclass
+class WorkspaceMember:
+    """Workspace membership."""
+    workspace_id: str = entity_field(index=True)
+    user_id: str = entity_field(index=True)
+    role: str = entity_field(default="member")
+    invited_by: Optional[str] = None
+    joined_at: Optional[str] = None
+
+
+@entity(table="workspace_invites")
+@dataclass
+class WorkspaceInvite:
+    """Workspace invitations."""
+    workspace_id: str = entity_field(index=True)
+    email: str = entity_field(index=True)
+    role: str = entity_field(default="member")
+    token: str = entity_field(unique=True, index=True)
+    invited_by: str = ""
+    status: str = entity_field(default="pending")
+    expires_at: Optional[str] = None
+    accepted_at: Optional[str] = None
+
+
+@entity(table="projects")
+@dataclass
+class Project:
+    """Deployment groupings within workspaces."""
+    workspace_id: str = entity_field(index=True)
+    name: str = ""
+    slug: str = entity_field(index=True)
+    description: Optional[str] = None
+    settings_json: Optional[str] = None
+    created_by: str = ""
+
+
+# =============================================================================
+# Observability (Optional)
+# =============================================================================
+
+@entity(table="request_metrics", history=False)
+@dataclass
+class RequestMetric:
+    """Request metrics for observability."""
+    request_id: str = ""
+    method: str = ""
+    path: str = entity_field(index=True)
+    query_params: Optional[str] = None
+    status_code: int = entity_field(index=True)
+    error: Optional[str] = None
+    error_type: Optional[str] = None
+    server_latency_ms: float = 0.0
+    client_ip: Optional[str] = None
+    user_agent: Optional[str] = None
+    referer: Optional[str] = None
+    user_id: Optional[str] = entity_field(default=None, index=True)
+    workspace_id: Optional[str] = None
+    country: Optional[str] = None
+    city: Optional[str] = None
+    continent: Optional[str] = None
+    timestamp: str = entity_field(index=True)
+    year: int = entity_field(index=True)
+    month: int = entity_field(index=True)
+    day: int = entity_field(index=True)
+    hour: int = 0
+    metadata: Optional[str] = None
+
+
+# =============================================================================
+# Schema Initialization
+# =============================================================================
+
+async def init_all_schemas(conn, saas_enabled: bool = False, request_metrics_enabled: bool = False) -> None:
     """
-    Create kernel-owned infrastructure tables.
-    
-    Call this from kernel initialization, before app schema.
-    Safe to call multiple times (CREATE IF NOT EXISTS).
+    Initialize all kernel schemas using AutoMigrator.
     
     Args:
-        conn: Database connection with execute() method
+        conn: Database connection
+        saas_enabled: Include SaaS tables
+        request_metrics_enabled: Include request_metrics table
     """
-    # Jobs table - background job tracking
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS jobs (
-            id TEXT PRIMARY KEY,
-            task TEXT NOT NULL,
-            payload TEXT,
-            context TEXT,
-            status TEXT DEFAULT 'queued',
-            result TEXT,
-            error TEXT,
-            attempts INTEGER DEFAULT 0,
-            max_attempts INTEGER DEFAULT 3,
-            priority TEXT DEFAULT 'normal',
-            user_id TEXT,
-            idempotency_key TEXT,
-            created_at TEXT,
-            started_at TEXT,
-            completed_at TEXT
-        )
-    """)
-    await conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)")
-    await conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_user ON jobs(user_id)")
-    await conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_idempotency ON jobs(idempotency_key)")
+    from ...databases.migrations import AutoMigrator
     
-    # Audit log - request audit trail
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS audit_log (
-            id TEXT PRIMARY KEY,
-            timestamp TEXT NOT NULL,
-            request_id TEXT,
-            user_id TEXT,
-            action TEXT NOT NULL,
-            resource_type TEXT,
-            resource_id TEXT,
-            details TEXT DEFAULT '{}',
-            ip_address TEXT,
-            user_agent TEXT
-        )
-    """)
-    await conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp)")
-    await conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_log(user_id)")
-    await conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_request ON audit_log(request_id)")
-    
-    # Rate limits - sliding window rate limiting
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS rate_limits (
-            id TEXT PRIMARY KEY,
-            user_id TEXT,
-            ip_address TEXT,
-            endpoint TEXT,
-            window_start TEXT,
-            request_count INTEGER DEFAULT 0,
-            UNIQUE(user_id, ip_address, endpoint, window_start)
-        )
-    """)
-    await conn.execute("CREATE INDEX IF NOT EXISTS idx_rate_limits_lookup ON rate_limits(user_id, ip_address, endpoint)")
-    
-    # Idempotency keys - request deduplication
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS idempotency_keys (
-            key TEXT PRIMARY KEY,
-            user_id TEXT,
-            endpoint TEXT,
-            request_hash TEXT,
-            response TEXT,
-            status_code INTEGER,
-            created_at TEXT,
-            expires_at TEXT
-        )
-    """)
-    await conn.execute("CREATE INDEX IF NOT EXISTS idx_idempotency_expires ON idempotency_keys(expires_at)")
-    
-    # Users - authentication
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id TEXT PRIMARY KEY,
-            email TEXT UNIQUE NOT NULL,
-            password_hash TEXT,
-            name TEXT,
-            role TEXT DEFAULT 'user',
-            is_active INTEGER DEFAULT 1,
-            metadata TEXT DEFAULT '{}',
-            created_at TEXT,
-            updated_at TEXT
-        )
-    """)
-    await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)")
+    # AutoMigrator reads from ENTITY_SCHEMAS registry (populated by @entity decorators)
+    migrator = AutoMigrator(conn)
+    await migrator.auto_migrate()
 
 
-async def cleanup_expired_idempotency_keys(conn: Any) -> int:
-    """
-    Remove expired idempotency keys.
-    
-    Call periodically (e.g., hourly) to prevent table bloat.
-    
-    Returns:
-        Number of keys removed
-    """
+# =============================================================================
+# Cleanup Functions
+# =============================================================================
+
+async def cleanup_expired_idempotency_keys(conn) -> int:
+    """Remove expired idempotency keys. Returns count removed."""
     from datetime import datetime, timezone
     
     now = datetime.now(timezone.utc).isoformat()
     
-    # Count before delete
-    result = await conn.execute(
-        "SELECT COUNT(*) FROM idempotency_keys WHERE expires_at < ?",
-        (now,)
+    results = await conn.find_entities(
+        "idempotency_keys",
+        where_clause="[expires_at] < ?",
+        params=(now,)
     )
-    count = result[0][0] if result else 0
+    count = len(results)
     
-    # Delete expired
-    await conn.execute(
-        "DELETE FROM idempotency_keys WHERE expires_at < ?",
-        (now,)
-    )
+    for row in results:
+        await conn.delete_entity("idempotency_keys", row["id"], permanent=True)
     
     return count
 
 
-async def cleanup_old_rate_limits(conn: Any, older_than_hours: int = 24) -> int:
-    """
-    Remove old rate limit entries.
-    
-    Call periodically to prevent table bloat.
-    
-    Args:
-        older_than_hours: Remove entries older than this
-        
-    Returns:
-        Number of entries removed
-    """
+async def cleanup_old_rate_limits(conn, older_than_hours: int = 24) -> int:
+    """Remove old rate limit entries. Returns count removed."""
     from datetime import datetime, timezone, timedelta
     
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=older_than_hours)).isoformat()
     
-    result = await conn.execute(
-        "SELECT COUNT(*) FROM rate_limits WHERE window_start < ?",
-        (cutoff,)
+    results = await conn.find_entities(
+        "rate_limits",
+        where_clause="[window_start] < ?",
+        params=(cutoff,)
     )
-    count = result[0][0] if result else 0
+    count = len(results)
     
-    await conn.execute(
-        "DELETE FROM rate_limits WHERE window_start < ?",
-        (cutoff,)
-    )
+    for row in results:
+        await conn.delete_entity("rate_limits", row["id"], permanent=True)
     
     return count
-
-
-async def init_saas_schema(conn: Any) -> None:
-    """
-    Create SaaS-related tables (workspaces, members, invites).
-    
-    Call this when enable_saas_routes=True.
-    Safe to call multiple times (CREATE IF NOT EXISTS).
-    
-    Args:
-        conn: Database connection with execute() method
-    """
-    # Workspaces - teams/organizations
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS workspaces (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            slug TEXT UNIQUE,
-            owner_id TEXT NOT NULL,
-            is_personal INTEGER DEFAULT 0,
-            settings_json TEXT,
-            created_at TEXT,
-            updated_at TEXT
-        )
-    """)
-    await conn.execute("CREATE INDEX IF NOT EXISTS idx_workspaces_owner ON workspaces(owner_id)")
-    await conn.execute("CREATE INDEX IF NOT EXISTS idx_workspaces_slug ON workspaces(slug)")
-    
-    # Workspace members
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS workspace_members (
-            id TEXT PRIMARY KEY,
-            workspace_id TEXT NOT NULL,
-            user_id TEXT NOT NULL,
-            role TEXT DEFAULT 'member',
-            invited_by TEXT,
-            joined_at TEXT,
-            created_at TEXT,
-            updated_at TEXT,
-            UNIQUE(workspace_id, user_id)
-        )
-    """)
-    await conn.execute("CREATE INDEX IF NOT EXISTS idx_wm_workspace ON workspace_members(workspace_id)")
-    await conn.execute("CREATE INDEX IF NOT EXISTS idx_wm_user ON workspace_members(user_id)")
-    
-    # Workspace invites
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS workspace_invites (
-            id TEXT PRIMARY KEY,
-            workspace_id TEXT NOT NULL,
-            email TEXT NOT NULL,
-            role TEXT DEFAULT 'member',
-            token TEXT UNIQUE NOT NULL,
-            invited_by TEXT NOT NULL,
-            status TEXT DEFAULT 'pending',
-            expires_at TEXT,
-            accepted_at TEXT,
-            created_at TEXT,
-            updated_at TEXT
-        )
-    """)
-    await conn.execute("CREATE INDEX IF NOT EXISTS idx_wi_workspace ON workspace_invites(workspace_id)")
-    await conn.execute("CREATE INDEX IF NOT EXISTS idx_wi_email ON workspace_invites(email)")
-    await conn.execute("CREATE INDEX IF NOT EXISTS idx_wi_token ON workspace_invites(token)")
-
-
-async def init_request_metrics_schema(conn: Any) -> None:
-    """
-    Create request_metrics table for observability.
-    
-    Call this when request_metrics_enabled=True.
-    Safe to call multiple times (CREATE IF NOT EXISTS).
-    
-    Args:
-        conn: Database connection with execute() method
-    """
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS request_metrics (
-            id TEXT PRIMARY KEY,
-            request_id TEXT NOT NULL,
-            method TEXT NOT NULL,
-            path TEXT NOT NULL,
-            query_params TEXT,
-            status_code INTEGER NOT NULL,
-            error TEXT,
-            error_type TEXT,
-            server_latency_ms REAL NOT NULL,
-            client_ip TEXT,
-            user_agent TEXT,
-            referer TEXT,
-            user_id TEXT,
-            workspace_id TEXT,
-            country TEXT,
-            city TEXT,
-            continent TEXT,
-            timestamp TEXT NOT NULL,
-            year INTEGER NOT NULL,
-            month INTEGER NOT NULL,
-            day INTEGER NOT NULL,
-            hour INTEGER NOT NULL,
-            metadata TEXT,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    await conn.execute("CREATE INDEX IF NOT EXISTS idx_request_metrics_timestamp ON request_metrics(timestamp DESC)")
-    await conn.execute("CREATE INDEX IF NOT EXISTS idx_request_metrics_path ON request_metrics(path)")
-    await conn.execute("CREATE INDEX IF NOT EXISTS idx_request_metrics_status ON request_metrics(status_code)")
-    await conn.execute("CREATE INDEX IF NOT EXISTS idx_request_metrics_user ON request_metrics(user_id)")
-    await conn.execute("CREATE INDEX IF NOT EXISTS idx_request_metrics_date ON request_metrics(year, month, day)")

@@ -909,34 +909,52 @@ def create_service(
                 "database": db_config["name"],
             })
             
+            # Run automated backup and migration (schema-first)
+            try:
+                from .db.lifecycle import run_database_lifecycle, get_lifecycle_config
+                from .db import get_db_connection
+                
+                lifecycle_config = get_lifecycle_config()
+                db = await get_db_connection()
+                
+                lifecycle_result = await run_database_lifecycle(
+                    db,
+                    data_dir=lifecycle_config["data_dir"],
+                    backup_enabled=lifecycle_config["backup_enabled"],
+                    migration_enabled=lifecycle_config["migration_enabled"],
+                )
+                
+                if lifecycle_result["backup_created"]:
+                    logger.info("✓ Automated backup completed")
+                
+                if lifecycle_result["migration_applied"]:
+                    logger.info("✓ Schema migration completed", extra={
+                        "migration_id": lifecycle_result["migration_id"]
+                    })
+            except Exception as e:
+                logger.error(f"Database lifecycle failed: {e}")
+                # Fail startup if lifecycle fails (especially migrations)
+                raise
+            
             # Auto-enable audit logging if Redis is configured
             if cfg.redis_url:
                 from .db.session import enable_auto_audit
                 enable_auto_audit(cfg.redis_url, name)
                 logger.info("Audit logging enabled (Redis → admin_worker)")
             
-            # Initialize AUTH schema if auth enabled (before app schema)
-            if cfg.auth_enabled:
-                from .auth.schema import init_auth_schema
-                await init_schema(init_auth_schema)
-                logger.info("Auth schema initialized")
-            
-            # Initialize SAAS schema if saas enabled
-            if cfg.saas_enabled:
-                from .db.schema import init_saas_schema
-                await init_schema(init_saas_schema)
-                logger.info("SaaS schema initialized (workspaces, members, invites)")
-            
-            # Initialize request metrics schema if enabled
-            if request_metrics_enabled:
-                from .observability.request_metrics import RequestMetricsStore
-                await init_schema(RequestMetricsStore.init_schema)
-                logger.info("Request metrics schema initialized")
+            # Initialize ALL kernel schemas at once
+            from .db.schema import init_all_schemas
+            await init_schema(lambda db: init_all_schemas(
+                db, 
+                saas_enabled=cfg.saas_enabled,
+                request_metrics_enabled=request_metrics_enabled
+            ))
+            logger.info("Kernel schemas initialized")
             
             # Initialize app schema if provided
             if schema_init:
                 await init_schema(schema_init)
-                logger.info("Database schema initialized")
+                logger.info("App database schema initialized")
         
         # Setup email integration (if enabled)
         if cfg.email_enabled:

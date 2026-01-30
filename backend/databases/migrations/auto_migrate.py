@@ -1,0 +1,555 @@
+"""
+Enhanced auto-migration system with deletion support.
+
+Handles:
+- Column additions (as before)
+- Column deletions (new)
+- Table deletions (new)
+"""
+
+from dataclasses import fields
+from datetime import datetime
+import hashlib
+import json
+from pathlib import Path
+from typing import Dict, List, Tuple, Any, Optional
+
+from ..entity.decorators import ENTITY_SCHEMAS
+
+
+class AutoMigrator:
+    """
+    Automatic database migration system with deletion support.
+    
+    Detects schema changes including additions AND deletions.
+    """
+    
+    def __init__(
+        self,
+        db,
+        audit_dir: str = "./migrations_audit",
+        allow_column_deletion: bool = False,
+        allow_table_deletion: bool = False,
+    ):
+        """
+        Initialize the auto-migrator.
+        
+        Args:
+            db: Database connection with sql_generator
+            audit_dir: Directory to save migration files
+            allow_column_deletion: Whether to automatically drop removed columns
+            allow_table_deletion: Whether to automatically drop removed tables
+        """
+        self.db = db
+        self.sql_gen = db.sql_generator
+        self.audit_dir = Path(audit_dir)
+        self.audit_dir.mkdir(parents=True, exist_ok=True)
+        self.allow_column_deletion = allow_column_deletion
+        self.allow_table_deletion = allow_table_deletion
+    
+    async def auto_migrate(self, dry_run: bool = False):
+        """
+        Auto-detect and apply schema changes.
+        
+        Args:
+            dry_run: If True, only show what would be done without applying
+        """
+        await self._ensure_migrations_table()
+        
+        code_hash = self._compute_schema_hash()
+        
+        if await self._is_schema_applied(code_hash):
+            return
+        
+        changes = await self._detect_changes()
+        
+        if not changes:
+            await self._record_migration(code_hash, [])
+            return
+        
+        # Check for dangerous operations
+        has_deletions = any(
+            c["type"] in ["drop_column", "drop_table"]
+            for c in changes
+        )
+        
+        if has_deletions and not dry_run:
+            print("⚠️  WARNING: Migration includes deletions (data loss!)")
+            for change in changes:
+                if change["type"] == "drop_column":
+                    print(f"   - DROP COLUMN {change['table']}.{change['field']}")
+                elif change["type"] == "drop_table":
+                    print(f"   - DROP TABLE {change['table']}")
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        migration_id = f"{timestamp}_{code_hash[:8]}"
+        operations = self._generate_sql(changes)
+        
+        self._save_audit(migration_id, changes, operations)
+        
+        if dry_run:
+            print(f"[DRY RUN] Would apply migration {migration_id}")
+            for sql, params, description in operations:
+                print(f"  - {description}")
+            return
+        
+        await self._apply_migration(operations)
+        await self._record_migration(code_hash, operations)
+        
+        print(f"✓ Applied migration {migration_id}")
+    
+    async def _ensure_migrations_table(self):
+        """Create migrations tracking table if it doesn't exist"""
+        sql = """
+            CREATE TABLE IF NOT EXISTS [_schema_migrations] (
+                [id] INTEGER PRIMARY KEY AUTOINCREMENT,
+                [schema_hash] TEXT NOT NULL UNIQUE,
+                [applied_at] TEXT NOT NULL,
+                [operations] TEXT
+            )
+        """
+        native_sql, params = self.sql_gen.convert_query_to_native(sql, ())
+        await self.db.execute(native_sql, params)
+    
+    def _compute_schema_hash(self) -> str:
+        """Compute SHA256 hash of all entity schemas"""
+        schema_repr = {}
+        
+        for table_name, entity_class in sorted(ENTITY_SCHEMAS.items()):
+            schema_repr[table_name] = self._serialize_entity_schema(entity_class)
+        
+        schema_json = json.dumps(schema_repr, sort_keys=True)
+        return hashlib.sha256(schema_json.encode()).hexdigest()
+    
+    def _serialize_entity_schema(self, entity_class) -> dict:
+        """Convert entity class to a comparable dictionary"""
+        field_defs = {}
+        
+        for f in fields(entity_class):
+            field_defs[f.name] = {
+                "type": str(f.type),
+                "default": str(f.default) if f.default is not None else None,
+                "metadata": dict(f.metadata or {}),
+            }
+        
+        return field_defs
+    
+    async def _is_schema_applied(self, schema_hash: str) -> bool:
+        """Check if this schema hash has already been applied"""
+        sql = "SELECT 1 FROM [_schema_migrations] WHERE [schema_hash] = ?"
+        native_sql, params = self.sql_gen.convert_query_to_native(sql, (schema_hash,))
+        result = await self.db.execute(native_sql, params)
+        return bool(result)
+    
+    async def _detect_changes(self) -> List[Dict]:
+        """
+        Detect differences between code schemas and database.
+        
+        Returns list of change dictionaries including additions AND deletions.
+        """
+        changes = []
+        
+        # Get all tables in database
+        db_tables = await self._get_db_tables()
+        code_tables = set(ENTITY_SCHEMAS.keys())
+        
+        # Detect new tables
+        for table_name, entity_class in ENTITY_SCHEMAS.items():
+            if table_name not in db_tables:
+                changes.append({
+                    "type": "create_table",
+                    "table": table_name,
+                    "entity": entity_class,
+                })
+            else:
+                # Table exists - check for column changes
+                code_fields = self._get_entity_fields(entity_class)
+                db_fields = await self._get_db_columns(table_name)
+                
+                # Detect new columns
+                for field_name, field_info in code_fields.items():
+                    if field_name not in db_fields:
+                        changes.append({
+                            "type": "add_column",
+                            "table": table_name,
+                            "field": field_name,
+                            "field_info": field_info,
+                        })
+                
+                # Detect removed columns
+                if self.allow_column_deletion:
+                    for field_name in db_fields:
+                        # Skip system columns
+                        if field_name in ['id', 'created_at', 'updated_at', 'deleted_at', 
+                                         'created_by', 'updated_by']:
+                            continue
+                        
+                        if field_name not in code_fields:
+                            changes.append({
+                                "type": "drop_column",
+                                "table": table_name,
+                                "field": field_name,
+                            })
+        
+        # Detect removed tables
+        if self.allow_table_deletion:
+            for table_name in db_tables:
+                # Skip system tables
+                if table_name.startswith('_') or table_name.endswith('_meta') or \
+                   table_name.endswith('_history'):
+                    continue
+                
+                if table_name not in code_tables:
+                    changes.append({
+                        "type": "drop_table",
+                        "table": table_name,
+                    })
+        
+        return changes
+    
+    async def _get_db_tables(self) -> set:
+        """Get all entity tables from database (excluding meta/history/system)"""
+        tables_sql, params = self.sql_gen.get_list_tables_sql()
+        result = await self.db.execute(tables_sql, params)
+        
+        all_tables = {row[0] for row in result}
+        
+        # Filter to entity tables only
+        entity_tables = {
+            t for t in all_tables
+            if not t.endswith('_meta') 
+            and not t.endswith('_history')
+            and not t.startswith('_')
+        }
+        
+        return entity_tables
+    
+    def _get_entity_fields(self, entity_class) -> Dict[str, Dict]:
+        """Extract field definitions from entity dataclass"""
+        result = {}
+        
+        for f in fields(entity_class):
+            meta = f.metadata or {}
+            
+            result[f.name] = {
+                "type": self._python_to_sql_type(f.type),
+                "default": f.default if f.default is not None else None,
+                "nullable": meta.get("nullable", True),
+                "index": meta.get("index", False),
+                "unique": meta.get("unique", False),
+                "foreign_key": meta.get("foreign_key"),
+                "check": meta.get("check"),
+            }
+        
+        return result
+    
+    def _python_to_sql_type(self, py_type) -> str:
+        """Convert Python type hint to SQL type"""
+        type_str = str(py_type)
+        
+        # Handle Optional[X] -> X
+        if "Optional" in type_str or "Union" in type_str:
+            if hasattr(py_type, "__args__"):
+                py_type = py_type.__args__[0]
+        
+        type_map = {
+            str: "TEXT",
+            int: "INTEGER",
+            float: "REAL",
+            bool: "INTEGER",
+            "str": "TEXT",
+            "int": "INTEGER",
+            "float": "REAL",
+            "bool": "INTEGER",
+        }
+        
+        return type_map.get(py_type, "TEXT")
+    
+    async def _get_db_columns(self, table_name: str) -> set:
+        """Get existing column names from database table"""
+        sql, params = self.sql_gen.get_list_columns_sql(table_name)
+        result = await self.db.execute(sql, params)
+        
+        if not result:
+            return set()
+        
+        # SQLite returns (cid, name, type, ...) - name is at index 1
+        # Other DBs return just column name at index 0
+        if len(result[0]) > 1 and isinstance(result[0][0], int):
+            return {row[1] for row in result}
+        return {row[0] for row in result}
+    
+    def _generate_sql(self, changes: List[Dict]) -> List[Tuple[str, tuple, str]]:
+        """Generate SQL operations from detected changes"""
+        operations = []
+        
+        for change in changes:
+            if change["type"] == "create_table":
+                operations.extend(self._generate_create_table_sql(change))
+            elif change["type"] == "add_column":
+                operations.extend(self._generate_add_column_sql(change))
+            elif change["type"] == "drop_column":
+                operations.extend(self._generate_drop_column_sql(change))
+            elif change["type"] == "drop_table":
+                operations.extend(self._generate_drop_table_sql(change))
+        
+        return operations
+    
+    def _generate_create_table_sql(self, change: Dict) -> List[Tuple]:
+        """Generate CREATE TABLE and related SQL operations"""
+        entity_class = change["entity"]
+        table_name = change["table"]
+        field_dict = self._get_entity_fields(entity_class)
+        
+        operations = []
+        
+        # Build column definitions
+        columns = [("id", "TEXT PRIMARY KEY")]
+        indexes = []
+        
+        for field_name, field_info in field_dict.items():
+            col_type = field_info['type']
+            
+            if field_info.get("unique"):
+                col_type += " UNIQUE"
+            if not field_info.get("nullable", True):
+                col_type += " NOT NULL"
+            if field_info.get("default") is not None:
+                default = field_info["default"]
+                if isinstance(default, str):
+                    col_type += f" DEFAULT '{default}'"
+                elif isinstance(default, bool):
+                    col_type += f" DEFAULT {1 if default else 0}"
+                else:
+                    col_type += f" DEFAULT {default}"
+            if field_info.get("check"):
+                col_type += f" CHECK ({field_info['check']})"
+            
+            columns.append((field_name, col_type))
+            
+            if field_info.get("index"):
+                indexes.append(field_name)
+        
+        # Add base entity columns
+        columns.extend([
+            ("created_at", "TEXT"),
+            ("updated_at", "TEXT"),
+            ("deleted_at", "TEXT"),
+            ("created_by", "TEXT"),
+            ("updated_by", "TEXT"),
+        ])
+        
+        # 1. CREATE TABLE
+        create_sql = self.sql_gen.get_create_table_sql(table_name, columns)
+        operations.append((create_sql, (), f"Create table {table_name}"))
+        
+        # 2. CREATE INDEXES
+        for idx_field in indexes:
+            idx_sql = self._get_create_index_sql(table_name, idx_field)
+            operations.append((idx_sql, (), f"Create index on {table_name}.{idx_field}"))
+        
+        # 3. CREATE META TABLE
+        meta_sql = self.sql_gen.get_create_meta_table_sql(table_name)
+        operations.append((meta_sql, (), f"Create meta table for {table_name}"))
+        
+        # 4. POPULATE META TABLE
+        for field_name, field_info in field_dict.items():
+            meta_insert = self.sql_gen.get_meta_upsert_sql(table_name)
+            operations.append((
+                meta_insert,
+                (field_name, field_info['type']),
+                f"Add {field_name} to meta"
+            ))
+        
+        # 5. CREATE HISTORY TABLE
+        history_columns = columns + [
+            ("version", "INTEGER NOT NULL"),
+            ("history_timestamp", "TEXT NOT NULL"),
+            ("history_user_id", "TEXT"),
+            ("history_comment", "TEXT"),
+        ]
+        history_sql = self.sql_gen.get_create_history_table_sql(table_name, history_columns)
+        operations.append((history_sql, (), f"Create history table for {table_name}"))
+        
+        return operations
+    
+    def _generate_add_column_sql(self, change: Dict) -> List[Tuple]:
+        """Generate ALTER TABLE ADD COLUMN operations"""
+        table_name = change["table"]
+        field_name = change["field"]
+        field_info = change["field_info"]
+        
+        operations = []
+        
+        # Build column definition
+        col_sql = self.sql_gen.get_add_column_sql(table_name, field_name)
+        
+        if field_info.get("default") is not None:
+            default = field_info["default"]
+            if isinstance(default, str):
+                col_sql += f" DEFAULT '{default}'"
+            elif isinstance(default, bool):
+                col_sql += f" DEFAULT {1 if default else 0}"
+            else:
+                col_sql += f" DEFAULT {default}"
+        
+        operations.append((col_sql, (), f"Add column {field_name} to {table_name}"))
+        
+        # Add to history table
+        history_sql = self.sql_gen.get_add_column_sql(f"{table_name}_history", field_name)
+        if field_info.get("default") is not None:
+            default = field_info["default"]
+            if isinstance(default, str):
+                history_sql += f" DEFAULT '{default}'"
+            elif isinstance(default, bool):
+                history_sql += f" DEFAULT {1 if default else 0}"
+            else:
+                history_sql += f" DEFAULT {default}"
+        
+        operations.append((history_sql, (), f"Add column {field_name} to {table_name}_history"))
+        
+        # Update meta table
+        meta_sql = self.sql_gen.get_meta_upsert_sql(table_name)
+        operations.append((
+            meta_sql,
+            (field_name, field_info['type']),
+            f"Add {field_name} to meta"
+        ))
+        
+        # Create index if needed
+        if field_info.get("index"):
+            idx_sql = self._get_create_index_sql(table_name, field_name)
+            operations.append((idx_sql, (), f"Create index on {table_name}.{field_name}"))
+        
+        return operations
+    
+    def _generate_drop_column_sql(self, change: Dict) -> List[Tuple]:
+        """
+        Generate DROP COLUMN operations.
+        
+        Note: SQLite doesn't support DROP COLUMN directly until 3.35.0+
+        For older versions, this requires table recreation.
+        """
+        table_name = change["table"]
+        field_name = change["field"]
+        
+        operations = []
+        
+        # Drop column from main table
+        drop_sql = self._get_drop_column_sql(table_name, field_name)
+        operations.append((drop_sql, (), f"Drop column {field_name} from {table_name}"))
+        
+        # Drop column from history table
+        history_drop_sql = self._get_drop_column_sql(f"{table_name}_history", field_name)
+        operations.append((history_drop_sql, (), f"Drop column {field_name} from {table_name}_history"))
+        
+        # Remove from meta table
+        meta_delete_sql = f"DELETE FROM [{table_name}_meta] WHERE [name] = ?"
+        operations.append((meta_delete_sql, (field_name,), f"Remove {field_name} from meta"))
+        
+        return operations
+    
+    def _generate_drop_table_sql(self, change: Dict) -> List[Tuple]:
+        """Generate DROP TABLE operations"""
+        table_name = change["table"]
+        
+        operations = []
+        
+        # Drop main table
+        operations.append((
+            f"DROP TABLE IF EXISTS [{table_name}]",
+            (),
+            f"Drop table {table_name}"
+        ))
+        
+        # Drop meta table
+        operations.append((
+            f"DROP TABLE IF EXISTS [{table_name}_meta]",
+            (),
+            f"Drop meta table {table_name}_meta"
+        ))
+        
+        # Drop history table
+        operations.append((
+            f"DROP TABLE IF EXISTS [{table_name}_history]",
+            (),
+            f"Drop history table {table_name}_history"
+        ))
+        
+        return operations
+    
+    def _get_create_index_sql(self, table_name: str, field_name: str) -> str:
+        """Generate CREATE INDEX SQL in portable [bracket] syntax"""
+        index_name = f"idx_{table_name}_{field_name}"
+        sql = f"CREATE INDEX [{index_name}] ON [{table_name}]([{field_name}])"
+        return sql
+    
+    def _get_drop_column_sql(self, table_name: str, field_name: str) -> str:
+        """
+        Generate DROP COLUMN SQL.
+        
+        Note: SQLite < 3.35.0 doesn't support this.
+        The sql_generator will need to handle this per-backend.
+        """
+        # Most databases use this syntax
+        sql = f"ALTER TABLE [{table_name}] DROP COLUMN [{field_name}]"
+        return sql
+    
+    def _save_audit(self, migration_id: str, changes: List[Dict], operations: List[Tuple]):
+        """Save migration to audit file in portable [bracket] syntax"""
+        audit_file = self.audit_dir / f"{migration_id}.sql"
+        
+        with open(audit_file, 'w') as f:
+            f.write(f"-- Migration: {migration_id}\n")
+            f.write(f"-- Backend-agnostic (uses [bracket] syntax)\n")
+            f.write(f"-- Generated: {datetime.now().isoformat()}\n")
+            f.write(f"-- Changes: {len(changes)}\n")
+            
+            # Warn about deletions
+            has_deletions = any(c["type"] in ["drop_column", "drop_table"] for c in changes)
+            if has_deletions:
+                f.write(f"-- ⚠️  WARNING: This migration includes DELETIONS (data loss!)\n")
+            
+            f.write("\n")
+            
+            for i, (sql, params, description) in enumerate(operations, 1):
+                f.write(f"-- {description}\n")
+                f.write(sql)
+                if params:
+                    f.write(f"  -- params: {params}")
+                f.write(";\n\n")
+        
+        # Save JSON metadata
+        meta_file = self.audit_dir / f"{migration_id}.json"
+        
+        with open(meta_file, 'w') as f:
+            json.dump({
+                "migration_id": migration_id,
+                "timestamp": datetime.now().isoformat(),
+                "backend": type(self.sql_gen).__name__,
+                "has_deletions": has_deletions,
+                "changes": [
+                    {k: str(v) if k == 'entity' else v for k, v in change.items()}
+                    for change in changes
+                ],
+            }, f, indent=2, default=str)
+    
+    async def _apply_migration(self, operations: List[Tuple]):
+        """Execute migration SQL operations"""
+        for sql, params, description in operations:
+            native_sql, native_params = self.sql_gen.convert_query_to_native(sql, params)
+            await self.db.execute(native_sql, native_params)
+    
+    async def _record_migration(self, schema_hash: str, operations: List[Tuple]):
+        """Record migration as applied in tracking table"""
+        sql = "INSERT INTO [_schema_migrations] ([schema_hash], [applied_at], [operations]) VALUES (?, ?, ?)"
+        operations_json = json.dumps([
+            {"sql": op[0], "params": op[1], "desc": op[2]}
+            for op in operations
+        ])
+        
+        native_sql, params = self.sql_gen.convert_query_to_native(
+            sql,
+            (schema_hash, datetime.now().isoformat(), operations_json)
+        )
+        await self.db.execute(native_sql, params)

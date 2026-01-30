@@ -10,25 +10,6 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-async def init_flags_schema(db) -> None:
-    """Create feature flags table."""
-    await db.execute("""
-        CREATE TABLE IF NOT EXISTS feature_flags (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL UNIQUE,
-            description TEXT,
-            enabled INTEGER DEFAULT 0,
-            rollout_percent INTEGER DEFAULT 100,
-            allowed_workspaces TEXT,
-            allowed_users TEXT,
-            metadata TEXT,
-            created_at TEXT,
-            updated_at TEXT
-        )
-    """)
-    await db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_flags_name ON feature_flags(name)")
-
-
 async def set_flag(
     db,
     name: str,

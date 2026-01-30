@@ -139,9 +139,7 @@ from .utils import (
 )
 
 from .db import (
-    init_kernel_schema,
-    init_saas_schema,
-    init_request_metrics_schema,
+    init_all_schemas,
     cleanup_expired_idempotency_keys,
     cleanup_old_rate_limits,
     db_connection,
@@ -273,9 +271,7 @@ __all__ = [
     "close_db",
     
     # Schema
-    "init_kernel_schema",
-    "init_saas_schema",
-    "init_request_metrics_schema",
+    "init_all_schemas",
     "cleanup_expired_idempotency_keys",
     "cleanup_old_rate_limits",
     

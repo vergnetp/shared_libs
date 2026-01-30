@@ -70,6 +70,7 @@ class DatabaseManager:
         pool_creation_timeout: float = 30.0,
         query_execution_timeout: float = 60.0,
         connection_creation_timeout: float = 15.0,
+        migrations_on: bool = True,
     ):
         self._db_type = db_type.lower()
         
@@ -91,6 +92,7 @@ class DatabaseManager:
                 pool_creation_timeout=pool_creation_timeout,
                 query_execution_timeout=query_execution_timeout,
                 connection_creation_timeout=connection_creation_timeout,
+                migrations_on=migrations_on,
             )
         
         self._db: ConnectionManager = DatabaseFactory.create_database(self._db_type, self._config)

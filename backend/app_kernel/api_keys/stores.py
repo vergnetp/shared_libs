@@ -23,29 +23,6 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-async def init_api_keys_schema(db) -> None:
-    """Create API keys table."""
-    await db.execute("""
-        CREATE TABLE IF NOT EXISTS api_keys (
-            id TEXT PRIMARY KEY,
-            user_id TEXT NOT NULL,
-            workspace_id TEXT,
-            name TEXT NOT NULL,
-            key_hash TEXT NOT NULL UNIQUE,
-            key_prefix TEXT,
-            scopes TEXT,
-            expires_at TEXT,
-            last_used_at TEXT,
-            revoked_at TEXT,
-            created_at TEXT,
-            updated_at TEXT
-        )
-    """)
-    await db.execute("CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys(user_id)")
-    await db.execute("CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash)")
-    await db.execute("CREATE INDEX IF NOT EXISTS idx_api_keys_workspace ON api_keys(workspace_id)")
-
-
 async def create_api_key(
     db,
     user_id: str,

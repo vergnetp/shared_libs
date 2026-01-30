@@ -30,7 +30,6 @@ from .stores import (
     set_flag,
     list_flags,
     delete_flag,
-    init_flags_schema,
 )
 from .router import create_flags_router
 
@@ -40,6 +39,5 @@ __all__ = [
     "set_flag",
     "list_flags",
     "delete_flag",
-    "init_flags_schema",
     "create_flags_router",
 ]

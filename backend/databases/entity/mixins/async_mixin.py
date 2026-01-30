@@ -154,7 +154,8 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
     async def save_entity(self, entity_name: str, entity: Dict[str, Any], 
                         user_id: Optional[str] = None, 
                         comment: Optional[str] = None,
-                        timeout: Optional[float] = 60) -> Dict[str, Any]:
+                        timeout: Optional[float] = 60,
+                        skip_schema_check: bool = False) -> Dict[str, Any]:
         """
         Save an entity (create or update).
         
@@ -164,6 +165,7 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
             user_id: Optional ID of the user making the change
             comment: Optional comment about the change
             timeout: Optional timeout in seconds for the operation (defaults to 60)
+            skip_schema_check: If True, skip schema/metadata checks (optimization when migrations_on=False)
             
         Returns:
             The saved entity with updated fields
@@ -172,14 +174,19 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
             # Prepare entity with timestamps, IDs, etc.
             prepared_entity = self._prepare_entity(entity_name, entity, user_id, comment)
             
-            # Ensure schema exists (will be a no-op if already exists)
-            await self._ensure_entity_schema(entity_name, prepared_entity)
+            # Skip schema checks if migrations_on=True (use AutoMigrator) or skip_schema_check=True
+            should_skip_schema = getattr(self.config, 'migrations_on', True) or skip_schema_check
             
-            # Update metadata based on entity fields
-            await self._update_entity_metadata(entity_name, prepared_entity)
+            if not should_skip_schema:
+                # Legacy behavior: runtime DDL
+                # Ensure schema exists (will be a no-op if already exists)
+                await self._ensure_entity_schema(entity_name, prepared_entity)
+                
+                # Update metadata based on entity fields
+                await self._update_entity_metadata(entity_name, prepared_entity)
             
             # Serialize the entity to string values
-            meta = await self._get_entity_metadata(entity_name)
+            meta = await self._get_entity_metadata(entity_name) if not should_skip_schema else {}
             serialized = self._serialize_entity(prepared_entity, meta)
             
             # Always use targeted upsert with exactly the fields provided
@@ -209,7 +216,8 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
     async def save_entities(self, entity_name: str, entities: List[Dict[str, Any]],
                         user_id: Optional[str] = None,
                         comment: Optional[str] = None,
-                        timeout: Optional[float] = 60) -> List[Dict[str, Any]]:
+                        timeout: Optional[float] = 60,
+                        skip_schema_check: bool = False) -> List[Dict[str, Any]]:
         """
         Save multiple entities in a single transaction with batch operations.
         
@@ -219,6 +227,7 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
             user_id: Optional ID of the user making the change
             comment: Optional comment about the change
             timeout: Optional timeout in seconds for the entire operation (defaults to 60)
+            skip_schema_check: If True, skip schema/metadata checks (optimization when migrations_on=False)
             
         Returns:
             List of saved entities with their IDs
@@ -236,21 +245,26 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
                 prepared_entities.append(prepared)
                 all_fields.update(prepared.keys())
             
-            # Ensure schema exists and can accommodate all fields
-            await self._ensure_entity_schema(entity_name, {field: None for field in all_fields})
+            # Skip schema checks if migrations_on=True (use AutoMigrator) or skip_schema_check=True
+            should_skip_schema = getattr(self.config, 'migrations_on', True) or skip_schema_check
             
-            # Update metadata for all fields at once
-            meta = {}
-            for entity in prepared_entities:
-                for field_name, value in entity.items():
-                    if field_name not in meta:
-                        meta[field_name] = self._infer_type(value)
-            
-            # Batch update the metadata
-            meta_params = [(field_name, field_type) for field_name, field_type in meta.items()]
-            if meta_params:
-                sql = self.sql_generator.get_meta_upsert_sql(entity_name)
-                await self.executemany(sql, meta_params)
+            if not should_skip_schema:
+                # Legacy behavior: runtime DDL
+                # Ensure schema exists and can accommodate all fields
+                await self._ensure_entity_schema(entity_name, {field: None for field in all_fields})
+                
+                # Update metadata for all fields at once
+                meta = {}
+                for entity in prepared_entities:
+                    for field_name, value in entity.items():
+                        if field_name not in meta:
+                            meta[field_name] = self._infer_type(value)
+                
+                # Batch update the metadata
+                meta_params = [(field_name, field_type) for field_name, field_type in meta.items()]
+                if meta_params:
+                    sql = self.sql_generator.get_meta_upsert_sql(entity_name)
+                    await self.executemany(sql, meta_params)
             
             # Add all entities to the database with batch upsert
             fields = list(all_fields)
