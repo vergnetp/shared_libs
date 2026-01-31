@@ -111,7 +111,7 @@ def _add_dict_access(cls):
     def __setitem__(self, key, value):
         setattr(self, key, value)
     
-    def get(self, key, default=None):
+    def get_field(self, key, default=None):
         return getattr(self, key, default)
     
     def keys(self):
@@ -128,7 +128,7 @@ def _add_dict_access(cls):
     
     cls.__getitem__ = __getitem__
     cls.__setitem__ = __setitem__
-    cls.get = get
+    cls.get_field = get_field  # Renamed to avoid collision with CRUD .get()
     cls.keys = keys
     cls.items = items
     cls.__iter__ = __iter__
@@ -349,34 +349,25 @@ def entity(table: str = None, history: bool = True):
         # Add dict-like access (obj['key'] and obj.key both work)
         _add_dict_access(cls)
         
-        # Add methods (if not already defined)
+        # Add CRUD methods (always set - these are the primary API)
+        # Note: cls.get from _add_dict_access is instance method for dict-like access
+        # but we need classmethod for database operations, so we override it
         if not hasattr(cls, 'from_dict'):
             cls.from_dict = _make_from_dict(cls)
         
-        if not hasattr(cls, 'get'):
-            cls.get = _make_get(tbl, cls)
-        
-        if not hasattr(cls, 'find'):
-            cls.find = _make_find(tbl, cls)
-        
-        if not hasattr(cls, 'save'):
-            cls.save = _make_save(tbl, cls)
+        # Always set CRUD classmethods (override dict-like .get if present)
+        cls.get = _make_get(tbl, cls)
+        cls.find = _make_find(tbl, cls)
+        cls.save = _make_save(tbl, cls)
         
         # Alias create -> save for backward compatibility
         if not hasattr(cls, 'create'):
             cls.create = cls.save
         
-        if not hasattr(cls, 'delete'):
-            cls.delete = _make_delete(tbl)
-        
-        if not hasattr(cls, 'update'):
-            cls.update = _make_update(tbl, cls)
-        
-        if not hasattr(cls, 'count'):
-            cls.count = _make_count(tbl)
-        
-        if not hasattr(cls, 'soft_delete'):
-            cls.soft_delete = _make_soft_delete(tbl)
+        cls.delete = _make_delete(tbl)
+        cls.update = _make_update(tbl, cls)
+        cls.count = _make_count(tbl)
+        cls.soft_delete = _make_soft_delete(tbl)
         
         # Register in global schemas
         ENTITY_SCHEMAS[tbl] = cls
