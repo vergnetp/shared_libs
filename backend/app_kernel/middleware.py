@@ -26,7 +26,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from .settings import CorsSettings, SecuritySettings, TracingSettings
 
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("app_kernel")
 
 
 # =============================================================================
@@ -332,36 +332,36 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 # Request Logging Middleware
 # =============================================================================
 
-class RequestLoggingMiddleware(BaseHTTPMiddleware):
+class RequestLoggingMiddleware:
     """
-    Log all requests with timing and context.
+    Log all requests with timing and context (pure ASGI middleware).
+    
+    Uses pure ASGI to measure actual end-to-end time including response body
+    streaming, not just time to start the response.
     
     Logs:
     - Request method, path, status
     - Duration in ms
     - Request ID
     - User ID (if authenticated)
+    
+    Adds headers:
+    - X-Runtime: Server processing time (HH:MM:SS.mmm format)
     """
     
-    async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        start_time = time.perf_counter()
-        
-        # Get request context
-        request_id = getattr(request.state, "request_id", "unknown")
-        method = request.method
-        path = request.url.path
-        
-        # Call next middleware/route
-        response = await call_next(request)
-        
-        # Calculate duration
-        duration_ms = (time.perf_counter() - start_time) * 1000
-        
-        # Get user ID if available (set by auth middleware)
-        user_id = getattr(request.state, "user_id", None)
-        
-        # Log based on status code
-        status_code = response.status_code
+    def __init__(self, app: ASGIApp):
+        self.app = app
+    
+    @staticmethod
+    def _format_runtime(duration_seconds: float) -> str:
+        """Format duration as HH:MM:SS.mmm"""
+        hours = int(duration_seconds // 3600)
+        minutes = int((duration_seconds % 3600) // 60)
+        seconds = duration_seconds % 60
+        return f"{hours:02d}:{minutes:02d}:{seconds:06.3f}"
+    
+    def _log_request(self, method: str, path: str, status_code: int, duration_ms: float, request_id: str, user_id: str = None):
+        """Log the completed request."""
         log_data = {
             "request_id": request_id,
             "method": method,
@@ -378,13 +378,72 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         elif status_code >= 400:
             logger.warning(f"Request error: {log_data}")
         else:
-            # Only log at debug for health checks to reduce noise
             if path in ("/healthz", "/readyz", "/health"):
                 logger.debug(f"Request: {log_data}")
             else:
                 logger.info(f"Request: {log_data}")
+    
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
         
-        return response
+        start_time = time.perf_counter()
+        
+        # Extract request info from scope
+        method = scope.get("method", "?")
+        path = scope.get("path", "/")
+        
+        # Request ID will be extracted from headers or state later
+        request_id = "unknown"
+        user_id = None
+        status_code = 500  # Default if we never see response start
+        logged = False
+        
+        async def send_with_timing(message):
+            nonlocal status_code, logged, request_id
+            
+            if message["type"] == "http.response.start":
+                status_code = message.get("status", 500)
+                
+                # Calculate runtime at response start (for header)
+                runtime_seconds = time.perf_counter() - start_time
+                runtime_header = self._format_runtime(runtime_seconds)
+                
+                # Try to get request_id from existing headers
+                headers = list(message.get("headers", []))
+                for name, value in headers:
+                    if name.lower() == b"x-request-id":
+                        request_id = value.decode() if isinstance(value, bytes) else value
+                        break
+                
+                # Add X-Runtime header
+                headers.append((b"x-runtime", runtime_header.encode()))
+                message = {**message, "headers": headers}
+            
+            await send(message)
+            
+            # Log after sending the final body chunk
+            if message["type"] == "http.response.body" and not logged:
+                more_body = message.get("more_body", False)
+                if not more_body:
+                    logged = True
+                    duration_ms = (time.perf_counter() - start_time) * 1000
+                    self._log_request(method, path, status_code, duration_ms, request_id, user_id)
+        
+        try:
+            await self.app(scope, receive, send_with_timing)
+        except Exception as e:
+            # Log failed requests too
+            if not logged:
+                duration_ms = (time.perf_counter() - start_time) * 1000
+                logger.error(f"Request exception: request_id={request_id}, method={method}, path={path}, duration_ms={round(duration_ms, 2)}, error={e}")
+            raise
+        finally:
+            # Fallback logging if we never got a final body chunk
+            if not logged:
+                duration_ms = (time.perf_counter() - start_time) * 1000
+                self._log_request(method, path, status_code, duration_ms, request_id, user_id)
 
 
 # =============================================================================
@@ -449,6 +508,7 @@ def setup_cors(app: FastAPI, settings: CorsSettings) -> None:
         allow_credentials=settings.allow_credentials,
         allow_methods=list(settings.allow_methods),
         allow_headers=list(settings.allow_headers),
+        expose_headers=list(settings.expose_headers),
     )
     
     logger.debug(f"CORS enabled: origins={settings.allow_origins}")

@@ -140,9 +140,18 @@ class Config:
             return
             
         try:
+            # Get extension - handle .env files specially (no extension from splitext)
+            filename = os.path.basename(file_path)
             extension = os.path.splitext(file_path)[1].lower()
             
-            if extension in ('.yml', '.yaml'):
+            # .env files have no extension from splitext, check filename
+            if filename == '.env' or filename.endswith('.env'):
+                if DOTENV_AVAILABLE:
+                    dotenv.load_dotenv(file_path)
+                else:
+                    raise ConfigError("Loading .env files requires python-dotenv library")
+                    
+            elif extension in ('.yml', '.yaml'):
                 if not YAML_AVAILABLE:
                     raise ConfigError("YAML configuration requires PyYAML library")
                 with open(file_path, 'r') as f:
@@ -156,11 +165,6 @@ class Config:
                     if json_config:
                         cls._deep_update(cls._config, json_config)
                         
-            elif extension == '.env':
-                if DOTENV_AVAILABLE:
-                    dotenv.load_dotenv(file_path)
-                else:
-                    raise ConfigError("Loading .env files requires python-dotenv library")
             else:
                 raise ConfigError(f"Unsupported configuration file format: {extension}")
                 

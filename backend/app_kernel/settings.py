@@ -125,6 +125,7 @@ class CorsSettings:
     allow_credentials: bool = True
     allow_methods: Tuple[str, ...] = ("*",)
     allow_headers: Tuple[str, ...] = ("*",)
+    expose_headers: Tuple[str, ...] = ("X-Runtime", "X-Request-ID")
     
     @classmethod
     def from_env(cls) -> "CorsSettings":
