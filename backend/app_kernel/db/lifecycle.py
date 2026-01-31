@@ -12,6 +12,10 @@ import os
 from pathlib import Path
 from typing import Optional, Tuple
 from ... import log as logger
+from ...databases.backup import BackupStrategy, list_restore_points
+from ...databases.backup.restore import import_csv_backup
+from ...databases.entity import ENTITY_SCHEMAS
+from ...databases.migrations import AutoMigrator
 
 
 def _get_backend_type(db_connection) -> str:
@@ -144,9 +148,7 @@ async def run_database_lifecycle(
             print(f"🔄 DATABASE BACKEND CHANGED: {old_backend} → {new_backend}")
             print(f"{'='*80}")
             
-            # Try to auto-migrate using latest CSV backup
-            from databases.backup import list_restore_points
-            
+            # Try to auto-migrate using latest CSV backup            
             try:
                 restore_points = list_restore_points(backup_dir)
                 
@@ -161,16 +163,10 @@ async def run_database_lifecycle(
                     print(f"✓ Found backup from {latest.datetime.isoformat()}")
                     print(f"  Auto-migrating data to new backend...")
                     
-                    # Import CSV data to new backend
-                    from databases.backup.restore import restore_from_csv
+                    # Import CSV data to new backend                    
+                    csv_dir = Path(backup_dir) / latest.backup_id
                     
-                    csv_dir = str(Path(backup_dir) / latest.backup_id)
-                    
-                    await restore_from_csv(
-                        db_connection,
-                        csv_dir,
-                        clear_database=False  # New backend is likely empty
-                    )
+                    await import_csv_backup(db_connection, csv_dir)
                     
                     print(f"✓ Data migrated successfully from {old_backend} to {new_backend}")
                     print(f"{'='*80}\n")
@@ -191,9 +187,7 @@ async def run_database_lifecycle(
             _store_backend(data_dir, new_backend)
             
             # Create backup on new backend (after migration)
-            if backup_enabled:
-                from databases.backup import BackupStrategy
-                
+            if backup_enabled:                
                 logger.info(f"Creating backup on new backend ({new_backend})...")
                 strategy = BackupStrategy(db_connection)
                 
@@ -215,10 +209,7 @@ async def run_database_lifecycle(
                     logger.error(f"Backup failed: {e}", extra={"error": str(e)})
             
             # Now run migrations on new backend (with migrated data)
-            if migration_enabled:
-                from databases.entity import ENTITY_SCHEMAS
-                from databases.migrations import AutoMigrator
-                
+            if migration_enabled:               
                 if ENTITY_SCHEMAS:
                     logger.info(f"Running migrations on new backend...")
                     migrator = AutoMigrator(
@@ -247,37 +238,43 @@ async def run_database_lifecycle(
         # Store backend (first run or same backend)
         _store_backend(data_dir, new_backend)
         
-        # Step 1: Always create backup (before any migrations)
+        # Step 1: Create backup (skip in dev, skip if empty)
         if backup_enabled:
-            from databases.backup import BackupStrategy
-            
-            logger.info("Creating database backup...")
-            strategy = BackupStrategy(db_connection)
-            
-            try:
-                result = await strategy.backup_database(
-                    backup_dir,
-                    include_native=True,
-                    include_csv=True
-                )
-                
-                results["backup_created"] = True
-                results["backup_path"] = result.get("csv_dir")
-                
-                logger.info("Database backup created", extra={
-                    "backup_dir": backup_dir,
-                    "schema_hash": result.get("schema_hash", "N/A"),
-                    "timestamp": result.get("timestamp", "N/A"),
-                })
-            except Exception as e:
-                logger.error(f"Backup failed: {e}", extra={"error": str(e)})
-                # Continue even if backup fails
+            # Skip in dev environment
+            env = os.environ.get("ENVIRONMENT", "dev").lower()
+            if env == "dev":
+                logger.info("Skipping backup in dev environment")
+            else:
+                # Check if database has any user tables
+                try:
+                    tables = await db_connection.list_tables()
+                    user_tables = [t for t in tables if not t.startswith('_')]
+                    
+                    if not user_tables:
+                        logger.info("Skipping backup - database is empty")
+                    else:
+                        logger.info("Creating database backup...")
+                        strategy = BackupStrategy(db_connection)
+                        
+                        result = await strategy.backup_database(
+                            backup_dir,
+                            include_native=True,
+                            include_csv=True
+                        )
+                        
+                        results["backup_created"] = True
+                        results["backup_path"] = result.get("csv_dir")
+                        
+                        logger.info("Database backup created", extra={
+                            "backup_dir": backup_dir,
+                            "tables": len(user_tables),
+                        })
+                except Exception as e:
+                    logger.error(f"Backup failed: {e}", extra={"error": str(e)})
+                    # Continue even if backup fails
         
         # Step 2: Run migrations (only if @entity schemas detected)
         if migration_enabled:
-            from databases.entity import ENTITY_SCHEMAS
-            from databases.migrations import AutoMigrator
-            
             # Check if any entities are registered
             if not ENTITY_SCHEMAS:
                 logger.info("No @entity schemas detected - skipping migration")
@@ -325,7 +322,7 @@ def get_lifecycle_config() -> dict:
     Get lifecycle configuration from environment variables.
     
     Environment variables:
-        BACKUP_ENABLED: Enable/disable backups (default: true)
+        BACKUP_ENABLED: Enable/disable backups (default: false in dev, true in prod)
         MIGRATION_ENABLED: Enable/disable migrations (default: true)
         BACKUP_DIR: Custom backup directory (default: .data/backups)
         MIGRATIONS_DIR: Custom migrations directory (default: .data/migrations_audit)
@@ -334,8 +331,13 @@ def get_lifecycle_config() -> dict:
     Returns:
         dict with configuration
     """
+    env = os.environ.get("ENVIRONMENT", "dev").lower()
+    
+    # Default backup to false in dev (too slow), true in prod
+    backup_default = "false" if env == "dev" else "true"
+    
     return {
-        "backup_enabled": os.environ.get("BACKUP_ENABLED", "true").lower() == "true",
+        "backup_enabled": os.environ.get("BACKUP_ENABLED", backup_default).lower() == "true",
         "migration_enabled": os.environ.get("MIGRATION_ENABLED", "true").lower() == "true",
         "data_dir": os.environ.get("DATA_DIR", ".data"),
     }

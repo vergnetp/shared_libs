@@ -59,7 +59,7 @@ async def track_request(
     
     # Log individual request (optional)
     if log_individual:
-        await db.save_entity("usage_requests", {
+        await db.save_entity("kernel_usage_requests", {
             "id": str(uuid.uuid4()),
             "user_id": user_id,
             "workspace_id": workspace_id,
@@ -136,7 +136,7 @@ async def _increment_metric(
         where += " AND [user_id] IS NULL"
     
     results = await db.find_entities(
-        "usage_summary",
+        "kernel_usage_summary",
         where_clause=where,
         params=tuple(params),
         limit=1,
@@ -146,14 +146,14 @@ async def _increment_metric(
     
     if results:
         # Update existing
-        await db.save_entity("usage_summary", {
+        await db.save_entity("kernel_usage_summary", {
             "id": results[0]["id"],
             "value": (results[0].get("value") or 0) + value,
             "updated_at": now,
         })
     else:
         # Create new
-        await db.save_entity("usage_summary", {
+        await db.save_entity("kernel_usage_summary", {
             "id": str(uuid.uuid4()),
             "workspace_id": workspace_id,
             "user_id": user_id,
@@ -190,7 +190,7 @@ async def get_usage(
         params.append(user_id)
     
     results = await db.find_entities(
-        "usage_summary",
+        "kernel_usage_summary",
         where_clause=where,
         params=tuple(params),
     )
@@ -226,7 +226,7 @@ async def get_usage_by_endpoint(
         params.append(user_id)
     
     results = await db.find_entities(
-        "usage_summary",
+        "kernel_usage_summary",
         where_clause=where,
         params=tuple(params),
     )

@@ -31,7 +31,7 @@ def _now_iso() -> str:
 
 async def process_audit_event(admin_db, event: dict) -> None:
     """Process an audit event and write to admin_db."""
-    await admin_db.save_entity("audit_logs", {
+    await admin_db.save_entity("kernel_audit_logs", {
         "id": str(uuid.uuid4()),
         "app": event.get("app"),
         "entity": event.get("entity"),
@@ -103,7 +103,7 @@ async def _increment_metric(
         where += " AND [user_id] IS NULL"
     
     results = await admin_db.find_entities(
-        "usage_summary",
+        "kernel_usage_summary",
         where_clause=where,
         params=tuple(params),
         limit=1,
@@ -113,14 +113,14 @@ async def _increment_metric(
     
     if results:
         # Update existing
-        await admin_db.save_entity("usage_summary", {
+        await admin_db.save_entity("kernel_usage_summary", {
             "id": results[0]["id"],
             "value": (results[0].get("value") or 0) + value,
             "updated_at": now,
         })
     else:
         # Create new
-        await admin_db.save_entity("usage_summary", {
+        await admin_db.save_entity("kernel_usage_summary", {
             "id": str(uuid.uuid4()),
             "app": app,
             "workspace_id": workspace_id,

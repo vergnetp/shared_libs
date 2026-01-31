@@ -9,7 +9,7 @@ Tables for multi-tenant SaaS applications:
 """
 
 SAAS_TABLES = {
-    "workspaces": {
+    "kernel_workspaces": {
         "id": "TEXT PRIMARY KEY",
         "name": "TEXT NOT NULL",
         "slug": "TEXT UNIQUE",  # URL-friendly name
@@ -19,7 +19,7 @@ SAAS_TABLES = {
         "created_at": "TEXT",
         "updated_at": "TEXT",
     },
-    "workspace_members": {
+    "kernel_workspace_members": {
         "id": "TEXT PRIMARY KEY",
         "workspace_id": "TEXT NOT NULL",
         "user_id": "TEXT NOT NULL",
@@ -30,7 +30,7 @@ SAAS_TABLES = {
         "updated_at": "TEXT",
         # Composite unique constraint handled by store
     },
-    "workspace_invites": {
+    "kernel_workspace_invites": {
         "id": "TEXT PRIMARY KEY",
         "workspace_id": "TEXT NOT NULL",
         "email": "TEXT NOT NULL",

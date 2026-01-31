@@ -43,7 +43,7 @@ class KernelUserStore(UserStore):
         async with self._get_db() as db:
             # Use find_entities which is available on the connection
             results = await db.find_entities(
-                "auth_users",
+                "kernel_auth_users",
                 where_clause="[email] = ?",
                 params=(username,),
                 limit=1,
@@ -59,7 +59,7 @@ class KernelUserStore(UserStore):
         async with self._get_db() as db:
             # Use get_entity for ID lookup
             result = await db.get_entity(
-                "auth_users",
+                "kernel_auth_users",
                 user_id,
                 include_deleted=False,
                 deserialize=True
@@ -73,7 +73,7 @@ class KernelUserStore(UserStore):
         async with self._get_db() as db:
             # Check if email exists using find_entities
             existing = await db.find_entities(
-                "auth_users",
+                "kernel_auth_users",
                 where_clause="[email] = ?",
                 params=(email or username,),
                 limit=1,
@@ -97,7 +97,7 @@ class KernelUserStore(UserStore):
                 "updated_at": now,
             }
             
-            await db.save_entity("auth_users", user_data)
+            await db.save_entity("kernel_auth_users", user_data)
             
             return {
                 "id": user_id,
@@ -111,7 +111,7 @@ class KernelUserStore(UserStore):
         """Update user's password hash."""
         async with self._get_db() as db:
             # Get existing user
-            user = await db.get_entity("auth_users", user_id, include_deleted=False)
+            user = await db.get_entity("kernel_auth_users", user_id, include_deleted=False)
             if not user:
                 return False
             
@@ -119,7 +119,7 @@ class KernelUserStore(UserStore):
             user["password_hash"] = password_hash
             user["updated_at"] = _now()
             
-            await db.save_entity("auth_users", user)
+            await db.save_entity("kernel_auth_users", user)
             return True
     
     def _entity_to_user(self, entity: Dict[str, Any]) -> Dict[str, Any]:

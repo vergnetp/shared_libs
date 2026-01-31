@@ -32,7 +32,7 @@ async def create_oauth_account(
     
     if existing:
         # Update existing
-        await db.save_entity("oauth_accounts", {
+        await db.save_entity("kernel_oauth_accounts", {
             "id": existing["id"],
             "user_id": user_id,
             "email": email,
@@ -48,7 +48,7 @@ async def create_oauth_account(
     
     # Create new
     account_id = str(uuid.uuid4())
-    await db.save_entity("oauth_accounts", {
+    await db.save_entity("kernel_oauth_accounts", {
         "id": account_id,
         "user_id": user_id,
         "provider": provider,
@@ -81,7 +81,7 @@ async def get_oauth_account(
 ) -> Optional[Dict[str, Any]]:
     """Get OAuth account by provider and provider user ID."""
     results = await db.find_entities(
-        "oauth_accounts",
+        "kernel_oauth_accounts",
         where_clause="[provider] = ? AND [provider_user_id] = ?",
         params=(provider, provider_user_id),
         limit=1,
@@ -96,7 +96,7 @@ async def get_oauth_account_by_user(
 ) -> Optional[Dict[str, Any]]:
     """Get OAuth account for a user and provider."""
     results = await db.find_entities(
-        "oauth_accounts",
+        "kernel_oauth_accounts",
         where_clause="[user_id] = ? AND [provider] = ?",
         params=(user_id, provider),
         limit=1,
@@ -110,7 +110,7 @@ async def get_user_oauth_accounts(
 ) -> List[Dict[str, Any]]:
     """Get all OAuth accounts for a user."""
     results = await db.find_entities(
-        "oauth_accounts",
+        "kernel_oauth_accounts",
         where_clause="[user_id] = ?",
         params=(user_id,),
     )
@@ -163,7 +163,7 @@ async def unlink_oauth_account(
     if not account:
         return False
     
-    await db.delete_entity("oauth_accounts", account["id"], permanent=True)
+    await db.delete_entity("kernel_oauth_accounts", account["id"], permanent=True)
     return True
 
 

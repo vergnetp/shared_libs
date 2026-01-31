@@ -44,7 +44,7 @@ async def get_usage(
         params.append(user_id)
     
     results = await admin_db.find_entities(
-        "usage_summary",
+        "kernel_usage_summary",
         where_clause=where,
         params=tuple(params),
     )
@@ -81,7 +81,7 @@ async def get_usage_by_endpoint(
         params.append(user_id)
     
     results = await admin_db.find_entities(
-        "usage_summary",
+        "kernel_usage_summary",
         where_clause=where,
         params=tuple(params),
     )

@@ -56,7 +56,7 @@ async def set_flag(
         flag_data["id"] = str(uuid.uuid4())
         flag_data["created_at"] = now
     
-    await db.save_entity("feature_flags", flag_data)
+    await db.save_entity("kernel_feature_flags", flag_data)
     
     return await get_flag(db, name)
 
@@ -64,7 +64,7 @@ async def set_flag(
 async def get_flag(db, name: str) -> Optional[Dict[str, Any]]:
     """Get a feature flag by name."""
     results = await db.find_entities(
-        "feature_flags",
+        "kernel_feature_flags",
         where_clause="[name] = ?",
         params=(name,),
         limit=1,
@@ -80,7 +80,7 @@ async def get_flag(db, name: str) -> Optional[Dict[str, Any]]:
 async def list_flags(db) -> List[Dict[str, Any]]:
     """List all feature flags."""
     results = await db.find_entities(
-        "feature_flags",
+        "kernel_feature_flags",
         order_by="[name] ASC",
     )
     
@@ -93,7 +93,7 @@ async def delete_flag(db, name: str) -> bool:
     if not flag:
         return False
     
-    await db.delete_entity("feature_flags", flag["id"], permanent=True)
+    await db.delete_entity("kernel_feature_flags", flag["id"], permanent=True)
     return True
 
 

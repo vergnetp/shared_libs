@@ -18,6 +18,7 @@ from .restore import (
     list_restore_points,
     find_restore_point,
     RestorePoint,
+    import_csv_backup,
 )
 
 __all__ = [
@@ -34,4 +35,5 @@ __all__ = [
     "list_restore_points",
     "find_restore_point",
     "RestorePoint",
+    "import_csv_backup",
 ]

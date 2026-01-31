@@ -20,7 +20,7 @@ Usage:
     
     @app.get("/users")
     async def get_users(db=Depends(db_connection)):
-        return await db.find_entities("users")
+        return await db.find_entities("kernel_users")
 """
 from typing import Optional, Callable, Awaitable
 from contextlib import asynccontextmanager

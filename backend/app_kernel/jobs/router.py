@@ -74,7 +74,7 @@ def create_jobs_router(
                 pass
         
         # Fall back to direct DB query
-        job = await db.get_entity("jobs", job_id)
+        job = await db.get_entity("kernel_jobs", job_id)
         if not job:
             raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
         
@@ -123,7 +123,7 @@ def create_jobs_router(
             params.append(user_id)
         
         jobs = await db.find_entities(
-            "jobs",
+            "kernel_jobs",
             where_clause=" AND ".join(conditions) if conditions else None,
             params=tuple(params) if params else None,
             order_by="created_at DESC",
@@ -131,7 +131,7 @@ def create_jobs_router(
         )
         
         return {
-            "jobs": [
+            "kernel_jobs": [
                 {
                     "job_id": j.get("id"),
                     "task": j.get("task"),
@@ -168,7 +168,7 @@ def create_jobs_router(
                 pass
         
         # Direct DB update
-        job = await db.get_entity("jobs", job_id)
+        job = await db.get_entity("kernel_jobs", job_id)
         if not job:
             raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
         
@@ -176,7 +176,7 @@ def create_jobs_router(
             return {"job_id": job_id, "cancelled": False, "reason": "Job already started"}
         
         job["status"] = "cancelled"
-        await db.save_entity("jobs", job)
+        await db.save_entity("kernel_jobs", job)
         return {"job_id": job_id, "cancelled": True}
     
     return router

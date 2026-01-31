@@ -147,7 +147,7 @@ def create_oauth_router(
                 )
                 
                 # Get user for JWT
-                user = await db.get_entity("auth_users", existing_user_id)
+                user = await db.get_entity("kernel_auth_users", existing_user_id)
                 if not user:
                     raise HTTPException(400, "User not found")
                 
@@ -159,7 +159,7 @@ def create_oauth_router(
                 
                 # Check if email exists (link to existing account)
                 existing_by_email = await db.find_entities(
-                    "auth_users",
+                    "kernel_auth_users",
                     where_clause="[email] = ?",
                     params=(oauth_user.email,),
                     limit=1,

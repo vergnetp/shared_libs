@@ -48,7 +48,7 @@ async def create_api_key(
     if expires_in_days:
         expires_at = (datetime.now(timezone.utc) + timedelta(days=expires_in_days)).isoformat()
     
-    await db.save_entity("api_keys", {
+    await db.save_entity("kernel_api_keys", {
         "id": key_id,
         "user_id": user_id,
         "workspace_id": workspace_id,
@@ -83,7 +83,7 @@ async def verify_api_key(db, key: str) -> Optional[Dict[str, Any]]:
     key_hash = _hash_key(key)
     
     results = await db.find_entities(
-        "api_keys",
+        "kernel_api_keys",
         where_clause="[key_hash] = ?",
         params=(key_hash,),
         limit=1,
@@ -105,7 +105,7 @@ async def verify_api_key(db, key: str) -> Optional[Dict[str, Any]]:
             return None
     
     # Update last_used_at
-    await db.save_entity("api_keys", {
+    await db.save_entity("kernel_api_keys", {
         "id": key_data["id"],
         "last_used_at": _now_iso(),
     })
@@ -147,7 +147,7 @@ async def list_api_keys(
         where += " AND [revoked_at] IS NULL"
     
     results = await db.find_entities(
-        "api_keys",
+        "kernel_api_keys",
         where_clause=where,
         params=tuple(params),
         order_by="[created_at] DESC",
@@ -182,7 +182,7 @@ async def get_api_key(db, key_id: str, user_id: str) -> Optional[Dict[str, Any]]
     import json
     
     results = await db.find_entities(
-        "api_keys",
+        "kernel_api_keys",
         where_clause="[id] = ? AND [user_id] = ?",
         params=(key_id, user_id),
         limit=1,
@@ -219,7 +219,7 @@ async def revoke_api_key(db, key_id: str, user_id: str) -> bool:
     if not key:
         return False
     
-    await db.save_entity("api_keys", {
+    await db.save_entity("kernel_api_keys", {
         "id": key_id,
         "revoked_at": _now_iso(),
         "updated_at": _now_iso(),

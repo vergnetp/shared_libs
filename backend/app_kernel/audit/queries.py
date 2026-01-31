@@ -64,7 +64,7 @@ async def get_audit_logs(
     where_clause = " AND ".join(conditions) if conditions else None
     
     results = await admin_db.find_entities(
-        "audit_logs",
+        "kernel_audit_logs",
         where_clause=where_clause,
         params=tuple(params) if params else None,
         order_by="[timestamp] DESC",
@@ -129,7 +129,7 @@ async def count_audit_logs(
     where_clause = " AND ".join(conditions) if conditions else None
     
     return await admin_db.count_entities(
-        "audit_logs",
+        "kernel_audit_logs",
         where_clause=where_clause,
         params=tuple(params) if params else None,
     )

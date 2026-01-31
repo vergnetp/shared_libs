@@ -44,7 +44,7 @@ async def create_webhook(
     if not secret:
         secret = _generate_secret()
     
-    await db.save_entity("webhooks", {
+    await db.save_entity("kernel_webhooks", {
         "id": webhook_id,
         "workspace_id": workspace_id,
         "url": url,
@@ -80,7 +80,7 @@ async def get_webhook(
         params.append(workspace_id)
     
     results = await db.find_entities(
-        "webhooks",
+        "kernel_webhooks",
         where_clause=where,
         params=tuple(params),
         limit=1,
@@ -105,7 +105,7 @@ async def list_webhooks(
         where += " AND [enabled] = 1"
     
     results = await db.find_entities(
-        "webhooks",
+        "kernel_webhooks",
         where_clause=where,
         params=tuple(params),
         order_by="[created_at] DESC",
@@ -136,7 +136,7 @@ async def update_webhook(
     if enabled is not None:
         updates["enabled"] = 1 if enabled else 0
     
-    await db.save_entity("webhooks", updates)
+    await db.save_entity("kernel_webhooks", updates)
     
     return await get_webhook(db, webhook_id, workspace_id)
 
@@ -151,7 +151,7 @@ async def delete_webhook(
     if not webhook:
         return False
     
-    await db.delete_entity("webhooks", webhook_id, permanent=True)
+    await db.delete_entity("kernel_webhooks", webhook_id, permanent=True)
     return True
 
 
@@ -161,7 +161,7 @@ async def get_webhooks_for_workspace(
 ) -> List[Dict[str, Any]]:
     """Get all enabled webhooks for a workspace (with secrets for dispatching)."""
     results = await db.find_entities(
-        "webhooks",
+        "kernel_webhooks",
         where_clause="[workspace_id] = ? AND [enabled] = 1",
         params=(workspace_id,),
     )
@@ -201,7 +201,7 @@ async def log_delivery(
     """Log a webhook delivery attempt."""
     import uuid
     
-    await db.save_entity("webhook_deliveries", {
+    await db.save_entity("kernel_webhook_deliveries", {
         "id": str(uuid.uuid4()),
         "webhook_id": webhook_id,
         "event": event,
@@ -222,7 +222,7 @@ async def get_delivery_logs(
 ) -> List[Dict[str, Any]]:
     """Get delivery logs for a webhook."""
     results = await db.find_entities(
-        "webhook_deliveries",
+        "kernel_webhook_deliveries",
         where_clause="[webhook_id] = ?",
         params=(webhook_id,),
         order_by="[created_at] DESC",

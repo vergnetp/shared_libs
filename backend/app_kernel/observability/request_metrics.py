@@ -401,7 +401,7 @@ class RequestMetricsStore:
         stats = await store.get_stats(hours=24)
     """
     
-    TABLE_NAME = "request_metrics"
+    TABLE_NAME = "kernel_request_metrics"
     
     # Schema for table creation
     SCHEMA = """

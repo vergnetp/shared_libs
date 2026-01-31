@@ -14,11 +14,11 @@ Usage:
     # In routes (FastAPI dependency)
     @app.get("/users")
     async def get_users(db=Depends(db_connection)):
-        return await db.find_entities("users")
+        return await db.find_entities("kernel_users")
     
     # In workers/scripts (context manager)
     async with get_db_connection() as db:
-        await db.save_entity("users", user)
+        await db.save_entity("kernel_users", user)
     
     # Initialize app schema (in on_startup)
     await init_schema(my_init_fn)

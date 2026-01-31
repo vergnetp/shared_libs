@@ -187,6 +187,11 @@ class BackupStrategy:
         or empty string if no migrations have been applied.
         """
         try:
+            # First check if the table exists to avoid retry loops
+            tables = await self.db.list_tables()
+            if "_schema_migrations" not in tables:
+                return "00000000"
+            
             # Query the _schema_migrations table for the latest hash
             sql = "SELECT [schema_hash] FROM [_schema_migrations] ORDER BY [id] DESC LIMIT 1"
             native_sql, params = self.sql_gen.convert_query_to_native(sql, ())

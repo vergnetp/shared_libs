@@ -57,20 +57,19 @@ def entity_field(**kwargs) -> Field:
     """
     Create a dataclass field with entity metadata.
     
+    Always provides a default (None unless specified), so field order never matters.
+    
     Usage:
         @entity(table="users")
         @dataclass
         class User:
-            email: str = entity_field(unique=True, nullable=False)
-            tags: List[str] = entity_field(default=None)
+            email: str = entity_field(unique=True)      # default=None
+            role: str = entity_field(default="user")    # default="user"
+            tags: List[str] = entity_field(index=True)  # default=None
     """
     default_value = kwargs.pop('default', None)
     metadata = {k: v for k, v in kwargs.items()}
-    
-    if default_value is not None:
-        return field(default=default_value, metadata=metadata)
-    else:
-        return field(metadata=metadata)
+    return field(default=default_value, metadata=metadata)
 
 
 # Global registry of entity schemas

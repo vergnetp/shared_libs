@@ -20,7 +20,7 @@ from ...databases import entity, entity_field
 # Core Infrastructure
 # =============================================================================
 
-@entity(table="jobs")
+@entity(table="kernel_jobs")
 @dataclass
 class Job:
     """Background job tracking."""
@@ -39,7 +39,7 @@ class Job:
     completed_at: Optional[str] = None
 
 
-@entity(table="rate_limits", history=False)
+@entity(table="kernel_rate_limits", history=False)
 @dataclass
 class RateLimit:
     """Sliding window rate limiting."""
@@ -50,7 +50,7 @@ class RateLimit:
     request_count: int = entity_field(default=0)
 
 
-@entity(table="idempotency_keys", history=False)
+@entity(table="kernel_idempotency_keys", history=False)
 @dataclass
 class IdempotencyKey:
     """Request deduplication."""
@@ -66,11 +66,11 @@ class IdempotencyKey:
 # Authentication
 # =============================================================================
 
-@entity(table="users")
+@entity(table="kernel_users")
 @dataclass
 class User:
     """Legacy users table."""
-    email: str = entity_field(unique=True)
+    email: str = entity_field(default="", unique=True)
     password_hash: Optional[str] = None
     name: Optional[str] = None
     role: str = entity_field(default="user")
@@ -78,11 +78,11 @@ class User:
     metadata: str = entity_field(default="{}")
 
 
-@entity(table="auth_users")
+@entity(table="kernel_auth_users")
 @dataclass
 class AuthUser:
     """Authentication users."""
-    email: str = entity_field(unique=True, index=True)
+    email: str = entity_field(default="", unique=True, index=True)
     password_hash: Optional[str] = None
     name: Optional[str] = None
     role: str = entity_field(default="user", index=True)
@@ -90,33 +90,33 @@ class AuthUser:
     metadata: str = entity_field(default="{}")
 
 
-@entity(table="auth_roles")
+@entity(table="kernel_auth_roles")
 @dataclass
 class AuthRole:
     """Role definitions with permissions."""
-    name: str = entity_field(unique=True, index=True)
+    name: str = entity_field(default="", unique=True, index=True)
     permissions: Optional[str] = None
     description: Optional[str] = None
 
 
-@entity(table="auth_role_assignments")
+@entity(table="kernel_auth_role_assignments")
 @dataclass
 class AuthRoleAssignment:
     """User-role mappings."""
-    user_id: str = entity_field(index=True)
-    role_id: str = entity_field(index=True)
-    resource_type: str = entity_field(index=True)
+    user_id: str = entity_field(default="", index=True)
+    role_id: str = entity_field(default="", index=True)
+    resource_type: str = entity_field(default="", index=True)
     resource_id: Optional[str] = entity_field(default=None, index=True)
     granted_by: Optional[str] = None
     expires_at: Optional[str] = None
 
 
-@entity(table="auth_sessions", history=False)
+@entity(table="kernel_auth_sessions", history=False)
 @dataclass
 class AuthSession:
     """Sessions for token revocation."""
-    user_id: str = entity_field(index=True)
-    token_hash: str = entity_field(index=True)
+    user_id: str = entity_field(default="", index=True)
+    token_hash: str = entity_field(default="", index=True)
     expires_at: str = ""
     metadata: Optional[str] = None
 
@@ -125,14 +125,14 @@ class AuthSession:
 # API Keys
 # =============================================================================
 
-@entity(table="api_keys")
+@entity(table="kernel_api_keys")
 @dataclass
 class ApiKey:
     """API key management."""
-    user_id: str = entity_field(index=True)
+    user_id: str = entity_field(default="", index=True)
+    key_hash: str = entity_field(default="", unique=True, index=True)
     workspace_id: Optional[str] = entity_field(default=None, index=True)
     name: str = ""
-    key_hash: str = entity_field(unique=True, index=True)
     key_prefix: Optional[str] = None
     scopes: Optional[str] = None
     expires_at: Optional[str] = None
@@ -144,11 +144,11 @@ class ApiKey:
 # Feature Flags
 # =============================================================================
 
-@entity(table="feature_flags")
+@entity(table="kernel_feature_flags")
 @dataclass
 class FeatureFlag:
     """Feature flag management."""
-    name: str = entity_field(unique=True, index=True)
+    name: str = entity_field(default="", unique=True, index=True)
     description: Optional[str] = None
     enabled: int = entity_field(default=0)
     rollout_percent: int = entity_field(default=100)
@@ -161,22 +161,22 @@ class FeatureFlag:
 # Webhooks
 # =============================================================================
 
-@entity(table="webhooks")
+@entity(table="kernel_webhooks")
 @dataclass
 class Webhook:
     """Webhook subscriptions."""
-    workspace_id: str = entity_field(index=True)
+    workspace_id: str = entity_field(default="", index=True)
     url: str = ""
     secret: Optional[str] = None
     description: Optional[str] = None
     enabled: int = entity_field(default=1)
 
 
-@entity(table="webhook_deliveries", history=False)
+@entity(table="kernel_webhook_deliveries", history=False)
 @dataclass
 class WebhookDelivery:
     """Webhook delivery logs."""
-    webhook_id: str = entity_field(index=True)
+    webhook_id: str = entity_field(default="", index=True)
     event: str = ""
     payload: Optional[str] = None
     response_status: Optional[int] = None
@@ -190,13 +190,13 @@ class WebhookDelivery:
 # OAuth
 # =============================================================================
 
-@entity(table="oauth_accounts")
+@entity(table="kernel_oauth_accounts")
 @dataclass
 class OAuthAccount:
     """OAuth account links."""
-    user_id: str = entity_field(index=True)
-    provider: str = entity_field(index=True)
-    provider_user_id: str = entity_field(index=True)
+    user_id: str = entity_field(default="", index=True)
+    provider: str = entity_field(default="", index=True)
+    provider_user_id: str = entity_field(default="", index=True)
     email: Optional[str] = None
     name: Optional[str] = None
     picture: Optional[str] = None
@@ -210,13 +210,13 @@ class OAuthAccount:
 # Audit
 # =============================================================================
 
-@entity(table="audit_logs", history=False)
+@entity(table="kernel_audit_logs", history=False)
 @dataclass
 class AuditLog:
     """Audit log entries."""
+    action: str = entity_field(default="", index=True)
     workspace_id: Optional[str] = entity_field(default=None, index=True)
     user_id: Optional[str] = entity_field(default=None, index=True)
-    action: str = entity_field(index=True)
     entity: Optional[str] = entity_field(default=None, index=True)
     entity_id: Optional[str] = entity_field(default=None, index=True)
     changes: Optional[str] = None
@@ -230,7 +230,7 @@ class AuditLog:
 # Metering
 # =============================================================================
 
-@entity(table="usage_requests", history=False)
+@entity(table="kernel_usage_requests", history=False)
 @dataclass
 class UsageRequest:
     """Individual request logs."""
@@ -245,7 +245,7 @@ class UsageRequest:
     timestamp: Optional[str] = entity_field(default=None, index=True)
 
 
-@entity(table="usage_summary", history=False)
+@entity(table="kernel_usage_summary", history=False)
 @dataclass
 class UsageSummary:
     """Aggregated usage for billing."""
@@ -260,49 +260,49 @@ class UsageSummary:
 # SaaS (Optional)
 # =============================================================================
 
-@entity(table="workspaces")
+@entity(table="kernel_workspaces")
 @dataclass
 class Workspace:
     """Teams/organizations."""
+    owner_id: str = entity_field(default="", index=True)
     name: str = ""
     slug: Optional[str] = entity_field(default=None, unique=True, index=True)
-    owner_id: str = entity_field(index=True)
     is_personal: int = entity_field(default=0)
     settings_json: Optional[str] = None
 
 
-@entity(table="workspace_members")
+@entity(table="kernel_workspace_members")
 @dataclass
 class WorkspaceMember:
     """Workspace membership."""
-    workspace_id: str = entity_field(index=True)
-    user_id: str = entity_field(index=True)
+    workspace_id: str = entity_field(default="", index=True)
+    user_id: str = entity_field(default="", index=True)
     role: str = entity_field(default="member")
     invited_by: Optional[str] = None
     joined_at: Optional[str] = None
 
 
-@entity(table="workspace_invites")
+@entity(table="kernel_workspace_invites")
 @dataclass
 class WorkspaceInvite:
     """Workspace invitations."""
-    workspace_id: str = entity_field(index=True)
-    email: str = entity_field(index=True)
+    workspace_id: str = entity_field(default="", index=True)
+    email: str = entity_field(default="", index=True)
+    token: str = entity_field(default="", unique=True, index=True)
     role: str = entity_field(default="member")
-    token: str = entity_field(unique=True, index=True)
     invited_by: str = ""
     status: str = entity_field(default="pending")
     expires_at: Optional[str] = None
     accepted_at: Optional[str] = None
 
 
-@entity(table="projects")
+@entity(table="kernel_projects")
 @dataclass
-class Project:
-    """Deployment groupings within workspaces."""
-    workspace_id: str = entity_field(index=True)
+class KernelProject:
+    """Deployment groupings within workspaces (kernel-managed)."""
+    workspace_id: str = entity_field(default="", index=True)
+    slug: str = entity_field(default="", index=True)
     name: str = ""
-    slug: str = entity_field(index=True)
     description: Optional[str] = None
     settings_json: Optional[str] = None
     created_by: str = ""
@@ -312,15 +312,19 @@ class Project:
 # Observability (Optional)
 # =============================================================================
 
-@entity(table="request_metrics", history=False)
+@entity(table="kernel_request_metrics", history=False)
 @dataclass
 class RequestMetric:
     """Request metrics for observability."""
+    path: str = entity_field(default="", index=True)
+    status_code: int = entity_field(default=0, index=True)
+    timestamp: str = entity_field(default="", index=True)
+    year: int = entity_field(default=0, index=True)
+    month: int = entity_field(default=0, index=True)
+    day: int = entity_field(default=0, index=True)
     request_id: str = ""
     method: str = ""
-    path: str = entity_field(index=True)
     query_params: Optional[str] = None
-    status_code: int = entity_field(index=True)
     error: Optional[str] = None
     error_type: Optional[str] = None
     server_latency_ms: float = 0.0
@@ -332,10 +336,6 @@ class RequestMetric:
     country: Optional[str] = None
     city: Optional[str] = None
     continent: Optional[str] = None
-    timestamp: str = entity_field(index=True)
-    year: int = entity_field(index=True)
-    month: int = entity_field(index=True)
-    day: int = entity_field(index=True)
     hour: int = 0
     metadata: Optional[str] = None
 
@@ -371,14 +371,14 @@ async def cleanup_expired_idempotency_keys(conn) -> int:
     now = datetime.now(timezone.utc).isoformat()
     
     results = await conn.find_entities(
-        "idempotency_keys",
+        "kernel_idempotency_keys",
         where_clause="[expires_at] < ?",
         params=(now,)
     )
     count = len(results)
     
     for row in results:
-        await conn.delete_entity("idempotency_keys", row["id"], permanent=True)
+        await conn.delete_entity("kernel_idempotency_keys", row["id"], permanent=True)
     
     return count
 
@@ -390,13 +390,13 @@ async def cleanup_old_rate_limits(conn, older_than_hours: int = 24) -> int:
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=older_than_hours)).isoformat()
     
     results = await conn.find_entities(
-        "rate_limits",
+        "kernel_rate_limits",
         where_clause="[window_start] < ?",
         params=(cutoff,)
     )
     count = len(results)
     
     for row in results:
-        await conn.delete_entity("rate_limits", row["id"], permanent=True)
+        await conn.delete_entity("kernel_rate_limits", row["id"], permanent=True)
     
     return count

@@ -166,9 +166,16 @@ class AutoMigrator:
                 code_fields = self._get_entity_fields(entity_class)
                 db_fields = await self._get_db_columns(table_name)
                 
-                # Detect new columns
+                # System columns - managed by CREATE TABLE, skip for add detection
+                system_columns = {'id', 'created_at', 'updated_at', 'deleted_at', 
+                                  'created_by', 'updated_by'}
+                
+                # Detect new columns (compare lowercase, skip system columns)
                 for field_name, field_info in code_fields.items():
-                    if field_name not in db_fields:
+                    # Skip system columns - they're added by CREATE TABLE
+                    if field_name.lower() in system_columns:
+                        continue
+                    if field_name.lower() not in db_fields:
                         changes.append({
                             "type": "add_column",
                             "table": table_name,
@@ -178,13 +185,15 @@ class AutoMigrator:
                 
                 # Detect removed columns
                 if self.allow_column_deletion:
+                    # Build lowercase code fields set for comparison
+                    code_fields_lower = {k.lower() for k in code_fields.keys()}
+                    
                     for field_name in db_fields:
                         # Skip system columns
-                        if field_name in ['id', 'created_at', 'updated_at', 'deleted_at', 
-                                         'created_by', 'updated_by']:
+                        if field_name in system_columns:
                             continue
                         
-                        if field_name not in code_fields:
+                        if field_name not in code_fields_lower:
                             changes.append({
                                 "type": "drop_column",
                                 "table": table_name,
@@ -276,8 +285,8 @@ class AutoMigrator:
         # SQLite returns (cid, name, type, ...) - name is at index 1
         # Other DBs return just column name at index 0
         if len(result[0]) > 1 and isinstance(result[0][0], int):
-            return {row[1] for row in result}
-        return {row[0] for row in result}
+            return {row[1].lower() for row in result}  # Normalize to lowercase
+        return {row[0].lower() for row in result}  # Normalize to lowercase
     
     def _generate_sql(self, changes: List[Dict]) -> List[Tuple[str, tuple, str]]:
         """Generate SQL operations from detected changes"""
@@ -303,11 +312,19 @@ class AutoMigrator:
         
         operations = []
         
+        # System columns - added automatically below, skip from entity fields
+        system_columns = {'id', 'created_at', 'updated_at', 'deleted_at', 
+                          'created_by', 'updated_by'}
+        
         # Build column definitions
         columns = [("id", "TEXT PRIMARY KEY")]
         indexes = []
         
         for field_name, field_info in field_dict.items():
+            # Skip system columns - added below
+            if field_name.lower() in system_columns:
+                continue
+                
             col_type = field_info['type']
             
             if field_info.get("unique"):
@@ -330,7 +347,7 @@ class AutoMigrator:
             if field_info.get("index"):
                 indexes.append(field_name)
         
-        # Add base entity columns
+        # Add base entity columns (system columns)
         columns.extend([
             ("created_at", "TEXT"),
             ("updated_at", "TEXT"),
@@ -352,8 +369,10 @@ class AutoMigrator:
         meta_sql = self.sql_gen.get_create_meta_table_sql(table_name)
         operations.append((meta_sql, (), f"Create meta table for {table_name}"))
         
-        # 4. POPULATE META TABLE
+        # 4. POPULATE META TABLE (skip system columns)
         for field_name, field_info in field_dict.items():
+            if field_name.lower() in system_columns:
+                continue
             meta_insert = self.sql_gen.get_meta_upsert_sql(table_name)
             operations.append((
                 meta_insert,
@@ -481,7 +500,7 @@ class AutoMigrator:
     def _get_create_index_sql(self, table_name: str, field_name: str) -> str:
         """Generate CREATE INDEX SQL in portable [bracket] syntax"""
         index_name = f"idx_{table_name}_{field_name}"
-        sql = f"CREATE INDEX [{index_name}] ON [{table_name}]([{field_name}])"
+        sql = f"CREATE INDEX IF NOT EXISTS [{index_name}] ON [{table_name}]([{field_name}])"
         return sql
     
     def _get_drop_column_sql(self, table_name: str, field_name: str) -> str:
@@ -536,9 +555,31 @@ class AutoMigrator:
     
     async def _apply_migration(self, operations: List[Tuple]):
         """Execute migration SQL operations"""
+        import logging
+        logger = logging.getLogger(__name__)
+        
         for sql, params, description in operations:
             native_sql, native_params = self.sql_gen.convert_query_to_native(sql, params)
-            await self.db.execute(native_sql, native_params)
+            try:
+                await self.db.execute(native_sql, native_params)
+            except Exception as e:
+                error_str = str(e).lower()
+                
+                # Idempotent errors - safe to skip
+                if "already exists" in error_str:
+                    continue  # Table, index, column already exists
+                if "duplicate column" in error_str:
+                    continue  
+                if "duplicate key" in error_str:
+                    continue  # Meta table entry already exists
+                    
+                # Table doesn't exist yet - might be order issue, log and continue
+                if "no such table" in error_str or "doesn't exist" in error_str:
+                    logger.warning(f"Migration skipped (table not ready): {description} - {e}")
+                    continue
+                    
+                # Re-raise other errors
+                raise
     
     async def _record_migration(self, schema_hash: str, operations: List[Tuple]):
         """Record migration as applied in tracking table"""

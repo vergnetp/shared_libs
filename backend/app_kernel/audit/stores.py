@@ -43,7 +43,7 @@ async def audit_log(
     now = _now_iso()
     log_id = str(uuid.uuid4())
     
-    await db.save_entity("audit_logs", {
+    await db.save_entity("kernel_audit_logs", {
         "id": log_id,
         "workspace_id": workspace_id,
         "user_id": user_id,
@@ -125,7 +125,7 @@ async def get_audit_logs(
     where_clause = " AND ".join(conditions) if conditions else None
     
     results = await db.find_entities(
-        "audit_logs",
+        "kernel_audit_logs",
         where_clause=where_clause,
         params=tuple(params) if params else None,
         order_by="[timestamp] DESC",
@@ -192,7 +192,7 @@ async def count_audit_logs(
     where_clause = " AND ".join(conditions) if conditions else None
     
     return await db.count_entities(
-        "audit_logs",
+        "kernel_audit_logs",
         where_clause=where_clause,
         params=tuple(params) if params else None,
     )

@@ -915,14 +915,14 @@ def create_service(
                 from .db import get_db_connection
                 
                 lifecycle_config = get_lifecycle_config()
-                db = await get_db_connection()
                 
-                lifecycle_result = await run_database_lifecycle(
-                    db,
-                    data_dir=lifecycle_config["data_dir"],
-                    backup_enabled=lifecycle_config["backup_enabled"],
-                    migration_enabled=lifecycle_config["migration_enabled"],
-                )
+                async with get_db_connection() as db:
+                    lifecycle_result = await run_database_lifecycle(
+                        db,
+                        data_dir=lifecycle_config["data_dir"],
+                        backup_enabled=lifecycle_config["backup_enabled"],
+                        migration_enabled=lifecycle_config["migration_enabled"],
+                    )
                 
                 if lifecycle_result["backup_created"]:
                     logger.info("✓ Automated backup completed")

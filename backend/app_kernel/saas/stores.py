@@ -39,7 +39,7 @@ class WorkspaceStore:
             "updated_at": datetime.utcnow().isoformat(),
         }
         
-        await self.conn.save_entity("workspaces", workspace)
+        await self.conn.save_entity("kernel_workspaces", workspace)
         
         # Add owner as member with 'owner' role
         member_store = MemberStore(self.conn)
@@ -54,7 +54,7 @@ class WorkspaceStore:
     async def get(self, workspace_id: str) -> Optional[Dict[str, Any]]:
         """Get workspace by ID."""
         results = await self.conn.find_entities(
-            "workspaces",
+            "kernel_workspaces",
             where_clause="id = ?",
             params=(workspace_id,),
             limit=1,
@@ -64,7 +64,7 @@ class WorkspaceStore:
     async def get_by_slug(self, slug: str) -> Optional[Dict[str, Any]]:
         """Get workspace by slug."""
         results = await self.conn.find_entities(
-            "workspaces",
+            "kernel_workspaces",
             where_clause="slug = ?",
             params=(slug,),
             limit=1,
@@ -75,7 +75,7 @@ class WorkspaceStore:
         """List all workspaces user is a member of."""
         # Get workspace IDs from membership
         members = await self.conn.find_entities(
-            "workspace_members",
+            "kernel_workspace_members",
             where_clause="user_id = ?",
             params=(user_id,),
         )
@@ -91,7 +91,7 @@ class WorkspaceStore:
         # Get workspaces
         placeholders = ",".join(["?"] * len(workspace_ids))
         workspaces = await self.conn.find_entities(
-            "workspaces",
+            "kernel_workspaces",
             where_clause=f"id IN ({placeholders})",
             params=tuple(workspace_ids),
         )
@@ -105,7 +105,7 @@ class WorkspaceStore:
     async def get_personal_workspace(self, user_id: str) -> Optional[Dict[str, Any]]:
         """Get user's personal workspace."""
         results = await self.conn.find_entities(
-            "workspaces",
+            "kernel_workspaces",
             where_clause="owner_id = ? AND is_personal = 1",
             params=(user_id,),
             limit=1,
@@ -120,7 +120,7 @@ class WorkspaceStore:
         
         workspace.update(updates)
         workspace["updated_at"] = datetime.utcnow().isoformat()
-        await self.conn.save_entity("workspaces", workspace)
+        await self.conn.save_entity("kernel_workspaces", workspace)
         return workspace
     
     async def delete(self, workspace_id: str) -> bool:
@@ -183,13 +183,13 @@ class MemberStore:
             "updated_at": datetime.utcnow().isoformat(),
         }
         
-        await self.conn.save_entity("workspace_members", member)
+        await self.conn.save_entity("kernel_workspace_members", member)
         return member
     
     async def get(self, workspace_id: str, user_id: str) -> Optional[Dict[str, Any]]:
         """Get specific membership."""
         results = await self.conn.find_entities(
-            "workspace_members",
+            "kernel_workspace_members",
             where_clause="workspace_id = ? AND user_id = ?",
             params=(workspace_id, user_id),
             limit=1,
@@ -199,7 +199,7 @@ class MemberStore:
     async def list_for_workspace(self, workspace_id: str) -> List[Dict[str, Any]]:
         """List all members of a workspace."""
         return await self.conn.find_entities(
-            "workspace_members",
+            "kernel_workspace_members",
             where_clause="workspace_id = ?",
             params=(workspace_id,),
         )
@@ -212,7 +212,7 @@ class MemberStore:
         
         member["role"] = role
         member["updated_at"] = datetime.utcnow().isoformat()
-        await self.conn.save_entity("workspace_members", member)
+        await self.conn.save_entity("kernel_workspace_members", member)
         return member
     
     async def remove(self, workspace_id: str, user_id: str) -> bool:
@@ -277,13 +277,13 @@ class InviteStore:
             "updated_at": datetime.utcnow().isoformat(),
         }
         
-        await self.conn.save_entity("workspace_invites", invite)
+        await self.conn.save_entity("kernel_workspace_invites", invite)
         return invite
     
     async def get(self, invite_id: str) -> Optional[Dict[str, Any]]:
         """Get invite by ID."""
         results = await self.conn.find_entities(
-            "workspace_invites",
+            "kernel_workspace_invites",
             where_clause="id = ?",
             params=(invite_id,),
             limit=1,
@@ -293,7 +293,7 @@ class InviteStore:
     async def get_by_token(self, token: str) -> Optional[Dict[str, Any]]:
         """Get invite by token."""
         results = await self.conn.find_entities(
-            "workspace_invites",
+            "kernel_workspace_invites",
             where_clause="token = ?",
             params=(token,),
             limit=1,
@@ -303,7 +303,7 @@ class InviteStore:
     async def get_pending_for_email(self, workspace_id: str, email: str) -> Optional[Dict[str, Any]]:
         """Get pending invite for email in workspace."""
         results = await self.conn.find_entities(
-            "workspace_invites",
+            "kernel_workspace_invites",
             where_clause="workspace_id = ? AND email = ? AND status = 'pending'",
             params=(workspace_id, email.lower()),
             limit=1,
@@ -314,12 +314,12 @@ class InviteStore:
         """List invites for workspace."""
         if status:
             return await self.conn.find_entities(
-                "workspace_invites",
+                "kernel_workspace_invites",
                 where_clause="workspace_id = ? AND status = ?",
                 params=(workspace_id, status),
             )
         return await self.conn.find_entities(
-            "workspace_invites",
+            "kernel_workspace_invites",
             where_clause="workspace_id = ?",
             params=(workspace_id,),
         )
@@ -327,7 +327,7 @@ class InviteStore:
     async def list_for_email(self, email: str) -> List[Dict[str, Any]]:
         """List pending invites for an email."""
         return await self.conn.find_entities(
-            "workspace_invites",
+            "kernel_workspace_invites",
             where_clause="email = ? AND status = 'pending'",
             params=(email.lower(),),
         )
@@ -345,7 +345,7 @@ class InviteStore:
         expires_at = datetime.fromisoformat(invite["expires_at"])
         if datetime.utcnow() > expires_at:
             invite["status"] = "expired"
-            await self.conn.save_entity("workspace_invites", invite)
+            await self.conn.save_entity("kernel_workspace_invites", invite)
             return None
         
         # Add user to workspace
@@ -361,7 +361,7 @@ class InviteStore:
         invite["status"] = "accepted"
         invite["accepted_at"] = datetime.utcnow().isoformat()
         invite["updated_at"] = datetime.utcnow().isoformat()
-        await self.conn.save_entity("workspace_invites", invite)
+        await self.conn.save_entity("kernel_workspace_invites", invite)
         
         return invite
     
@@ -373,7 +373,7 @@ class InviteStore:
         
         invite["status"] = "cancelled"
         invite["updated_at"] = datetime.utcnow().isoformat()
-        await self.conn.save_entity("workspace_invites", invite)
+        await self.conn.save_entity("kernel_workspace_invites", invite)
         return True
     
     async def delete(self, invite_id: str) -> bool:
