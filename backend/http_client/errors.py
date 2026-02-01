@@ -195,16 +195,19 @@ def raise_for_status(
     # Try to extract message from response
     message = _extract_error_message(response_body) or f"HTTP {status_code}"
     
+    # Subclasses that hardcode status_code must not receive it via kwargs
+    kwargs_no_status = {k: v for k, v in kwargs.items() if k != "status_code"}
+    
     # Map status codes to error types
     if status_code == 401:
-        raise AuthenticationError(message, **kwargs)
+        raise AuthenticationError(message, **kwargs_no_status)
     elif status_code == 403:
-        raise AuthorizationError(message, **kwargs)
+        raise AuthorizationError(message, **kwargs_no_status)
     elif status_code == 404:
-        raise NotFoundError(message, **kwargs)
+        raise NotFoundError(message, **kwargs_no_status)
     elif status_code == 429:
         retry_after = _parse_retry_after(headers)
-        raise RateLimitError(message, retry_after=retry_after, **kwargs)
+        raise RateLimitError(message, retry_after=retry_after, **kwargs_no_status)
     elif status_code in (400, 422):
         errors = _extract_validation_errors(response_body)
         raise ValidationError(message, errors=errors, **kwargs)
