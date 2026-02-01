@@ -1,7 +1,11 @@
 """Cache decorator for functions."""
 
+import os
 import functools
 from typing import Optional, Callable
+
+
+CACHE_ENABLED = os.environ.get("CACHE_ENABLED", "false").lower() == "true"
 
 
 def cached(
@@ -11,6 +15,8 @@ def cached(
 ):
     """
     Decorator to cache function results.
+    
+    Disabled by default. Set CACHE_ENABLED=true to enable.
     
     Args:
         ttl: Time to live in seconds
@@ -32,6 +38,10 @@ def cached(
     def decorator(func: Callable):
         @functools.wraps(func)
         async def wrapper(*args, **kwargs):
+            # Bypass if caching disabled
+            if not CACHE_ENABLED:
+                return await func(*args, **kwargs)
+            
             from .client import get_cache
             
             cache = get_cache()

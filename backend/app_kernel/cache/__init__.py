@@ -26,7 +26,7 @@ from .client import (
     init_cache,
     cache,
 )
-from .decorator import cached
+from .decorator import cached, CACHE_ENABLED
 
 __all__ = [
     "Cache",
@@ -34,4 +34,5 @@ __all__ = [
     "init_cache",
     "cache",
     "cached",
+    "CACHE_ENABLED",
 ]
