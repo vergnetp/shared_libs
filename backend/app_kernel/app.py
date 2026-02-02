@@ -67,6 +67,24 @@ class KernelRuntime:
     # Optional components (may be None if not configured)
     redis_config: Any = None  # QueueRedisConfig if Redis available
     job_registry: Optional[JobRegistry] = None
+    
+    async def http_client(self, base_url: str):
+        """
+        Get a pooled HTTP client for the given base URL.
+        
+        Connections are reused across calls (same base_url = same TCP connection).
+        Do NOT close the returned client — the kernel manages lifecycle via close_pool() on shutdown.
+        
+        Usage:
+            kernel = get_kernel(app)
+            client = await kernel.http_client("https://api.stripe.com")
+            response = await client.get("/v1/products")
+        
+        Returns:
+            AsyncHttpClient with connection reuse, retry, and circuit breaker.
+        """
+        from shared_libs.backend.http_client import get_pooled_client
+        return await get_pooled_client(base_url)
 
 
 def get_kernel(app: FastAPI) -> KernelRuntime:
@@ -84,6 +102,27 @@ def get_kernel(app: FastAPI) -> KernelRuntime:
     if not hasattr(app.state, "kernel"):
         raise RuntimeError("Kernel not initialized. Call init_app_kernel() first.")
     return app.state.kernel
+
+
+async def http_client(base_url: str):
+    """
+    Get a pooled HTTP client. Standalone shortcut — no kernel instance needed.
+    
+    Connections are reused across calls (same base_url = same TCP connection).
+    Pool is cleaned up automatically on app shutdown.
+    Do NOT close the returned client.
+    
+    Usage:
+        from app_kernel import http_client
+        
+        client = await http_client("https://api.stripe.com")
+        response = await client.get("/v1/products")
+    
+    Returns:
+        AsyncHttpClient with connection reuse, retry, and circuit breaker.
+    """
+    from shared_libs.backend.http_client import get_pooled_client
+    return await get_pooled_client(base_url)
 
 
 def init_app_kernel(

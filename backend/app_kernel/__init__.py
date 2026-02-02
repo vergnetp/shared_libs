@@ -68,7 +68,7 @@ from .settings import (
     SecuritySettings,
 )
 
-from .app import init_app_kernel, get_kernel, KernelRuntime
+from .app import init_app_kernel, get_kernel, KernelRuntime, http_client
 
 # Environment loading
 from .env import (
@@ -186,6 +186,7 @@ __all__ = [
     "init_app_kernel",
     "get_kernel",
     "KernelRuntime",
+    "http_client",
     
     # Bootstrap (simplified)
     "create_service",

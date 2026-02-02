@@ -67,9 +67,36 @@ Routes appear at `/auth/oauth/{provider}` - no code needed.
 
 | Feature | What You Do | What It Does |
 |---------|-------------|--------------|
+| **HTTP Client** | `await http_client("https://api.example.com")` | Pooled connections with retry + circuit breaker |
 | **API Keys** | `create_api_key()` + `create_combined_auth()` | Service-to-service auth |
 | **Feature Flags** | `flag_enabled()` / `set_flag()` | Toggle features without deploy |
 | **Webhooks** | `create_webhook()` + `trigger_webhook_event()` | Notify external systems |
+
+<details>
+<summary>HTTP Client Example</summary>
+
+```python
+from app_kernel import http_client
+
+# In any async function — no setup needed
+client = await http_client("https://api.stripe.com")
+client.set_bearer_token("sk_live_xxx")
+response = await client.get("/v1/products")
+
+# Same base URL = reuses TCP connection (no handshake overhead)
+# Different base URL = separate pooled connection
+client2 = await http_client("https://api.digitalocean.com")
+```
+
+**Why use this instead of raw `AsyncHttpClient()`?**
+- `AsyncHttpClient()` creates a new TCP connection every call (~200-500ms overhead)
+- `http_client()` reuses connections from a global pool (~20-50ms)
+- Pool auto-cleans idle connections (5 min) and shuts down with the app
+- Includes retry with exponential backoff and circuit breaker per base URL
+
+**⚠️ Do NOT close the returned client** — the pool manages its lifecycle.
+
+</details>
 
 <details>
 <summary>API Keys Example</summary>
@@ -1108,6 +1135,82 @@ await cache.delete("projects:ws-123")
 @cached(ttl=300, key="projects:{workspace_id}")
 async def get_projects(workspace_id: str):
     return await db.find_entities("projects", ...)
+```
+
+---
+
+## HTTP Client (Connection Pooling)
+
+**Always use `http_client()` for outbound HTTP calls.** It reuses TCP connections across calls, saving 200-500ms per request.
+
+### Quick Usage
+
+```python
+from app_kernel import http_client
+
+# Standalone function — works anywhere, no kernel instance needed
+client = await http_client("https://api.stripe.com")
+client.set_bearer_token("sk_live_xxx")
+response = await client.get("/v1/products")
+products = response.json()
+```
+
+### Via Kernel Instance
+
+```python
+from app_kernel import get_kernel
+
+kernel = get_kernel(app)
+client = await kernel.http_client("https://api.digitalocean.com")
+client.set_bearer_token(do_token)
+droplets = (await client.get("/v2/droplets")).json()
+```
+
+### What You Get
+
+| Feature | Details |
+|---------|---------|
+| **Connection reuse** | Same base_url = same TCP connection. 200ms → 20ms on repeat calls |
+| **Retry** | Exponential backoff on 5xx / timeouts |
+| **Circuit breaker** | Per base_url. Opens after repeated failures, prevents cascading |
+| **Auto-cleanup** | Idle connections close after 5 min. Pool shut down on app shutdown |
+
+### Common Patterns
+
+```python
+# Multiple APIs — each gets its own pooled connection
+stripe = await http_client("https://api.stripe.com")
+do = await http_client("https://api.digitalocean.com/v2")
+github = await http_client("https://api.github.com")
+
+# Parallel calls to same API — all share one connection
+client = await http_client("https://api.example.com")
+results = await asyncio.gather(
+    client.get("/users"),
+    client.get("/products"),
+    client.get("/orders"),
+)
+
+# Setting auth per-request (pool is shared, headers are per-call)
+client = await http_client("https://api.example.com")
+resp1 = await client.get("/data", headers={"Authorization": "Bearer user1_token"})
+resp2 = await client.get("/data", headers={"Authorization": "Bearer user2_token"})
+```
+
+### ⚠️ Do NOT
+
+```python
+# ❌ BAD: Creates new TCP connection every call
+async with AsyncHttpClient() as client:
+    response = await client.get("https://api.example.com/data")
+
+# ❌ BAD: Don't close pooled clients
+client = await http_client("https://api.example.com")
+await client.close()  # Pool manages lifecycle!
+
+# ✅ GOOD: Reuses connection
+client = await http_client("https://api.example.com")
+response = await client.get("/data")
 ```
 
 ---
