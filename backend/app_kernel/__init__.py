@@ -70,6 +70,9 @@ from .settings import (
 
 from .app import init_app_kernel, get_kernel, KernelRuntime, http_client
 
+# HTTP client config (re-exported from http_client library)
+from ..http_client.config import HttpConfig
+
 # Environment loading
 from .env import (
     load_env_hierarchy,
@@ -187,6 +190,7 @@ __all__ = [
     "get_kernel",
     "KernelRuntime",
     "http_client",
+    "HttpConfig",
     
     # Bootstrap (simplified)
     "create_service",

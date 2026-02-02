@@ -104,7 +104,7 @@ def get_kernel(app: FastAPI) -> KernelRuntime:
     return app.state.kernel
 
 
-async def http_client(base_url: str):
+async def http_client(base_url: str, config=None):
     """
     Get a pooled HTTP client. Standalone shortcut — no kernel instance needed.
     
@@ -117,12 +117,16 @@ async def http_client(base_url: str):
         
         client = await http_client("https://api.stripe.com")
         response = await client.get("/v1/products")
+        
+        # No-retry client (for use inside an outer retry loop):
+        from http_client.config import HttpConfig
+        client = await http_client("https://...", config=HttpConfig.no_retry())
     
     Returns:
         AsyncHttpClient with connection reuse, retry, and circuit breaker.
     """
     from shared_libs.backend.http_client import get_pooled_client
-    return await get_pooled_client(base_url)
+    return await get_pooled_client(base_url, config=config)
 
 
 def init_app_kernel(

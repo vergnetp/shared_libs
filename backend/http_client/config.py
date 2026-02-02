@@ -140,3 +140,14 @@ class HttpConfig:
         return cls(
             retry=RetryConfig(max_retries=0),
         )
+
+    @classmethod
+    def probe(cls) -> 'HttpConfig':
+        """Config for probing/polling (no retries, no circuit breaker).
+        
+        Use when caller has its own retry loop (e.g. waiting for a server to boot).
+        """
+        return cls(
+            retry=RetryConfig(max_retries=0),
+            circuit_breaker=CircuitBreakerConfig(enabled=False),
+        )
