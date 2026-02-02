@@ -4,23 +4,32 @@ Database connection management.
 Kernel manages the connection pool via DatabaseManager.
 Apps provide config (in ServiceConfig) and schema (via schema_init).
 
+Two connection modes:
+    db_dependency / db_context         - strict (default for app code)
+    raw_db_dependency / raw_db_context - no guard (kernel internals)
+
+Strict mode enforces that all operations go through entity classes
+(e.g. User.find(db, ...)) not raw db.find_entities(). This ensures
+proper type coercion and prevents backend-specific bugs (e.g. SQLite
+string comparison on integer fields).
+
 When REDIS_URL is configured, audit logging is automatically enabled:
 - Every save_entity() and delete_entity() pushes an audit event to Redis
 - The admin_worker consumes these events and writes to admin_db
 
 Usage:
-    # Config in create_service
-    ServiceConfig(
-        database_url="sqlite:///./data/app.db",
-        redis_url="redis://localhost:6379",  # Enables audit
-    )
+    # In routes (FastAPI dependency) - strict by default
+    from app_kernel.db import db_dependency
     
-    # In routes (FastAPI dependency)
-    from ..db import db_connection
+    @app.get("/deployments")
+    async def list_deps(db=Depends(db_dependency)):
+        return await Deployment.find(db, where="env = ?", params=("prod",))
     
-    @app.get("/users")
-    async def get_users(db=Depends(db_connection)):
-        return await db.find_entities("kernel_users")
+    # In workers (context manager) - strict by default
+    from app_kernel.db import db_context
+    
+    async with db_context() as db:
+        deploys = await Deployment.find(db)
 """
 from typing import Optional, Callable, Awaitable
 from contextlib import asynccontextmanager
@@ -88,6 +97,9 @@ class AuditWrappedConnection:
         self._redis_url = redis_url
         self._app = app_name
         self._redis = None
+        # Import sentinel for strict entity access bypass
+        from ...databases.entity.decorators import _ENTITY_CALLER
+        self._entity_caller = _ENTITY_CALLER
     
     async def _get_redis(self):
         """Lazy-init Redis connection."""
@@ -109,7 +121,7 @@ class AuditWrappedConnection:
         entity_id = data.get("id")
         if entity_id:
             try:
-                old = await self._conn.get_entity(table, entity_id)
+                old = await self._conn.get_entity(table, entity_id, _caller=self._entity_caller)
             except:
                 pass
         
@@ -141,12 +153,12 @@ class AuditWrappedConnection:
         # Get snapshot before delete
         old = None
         try:
-            old = await self._conn.get_entity(table, entity_id)
+            old = await self._conn.get_entity(table, entity_id, _caller=self._entity_caller)
         except:
             pass
         
         # Actual delete
-        result = await self._conn.delete_entity(table, entity_id, **kwargs)
+        result = await self._conn.delete_entity(table, entity_id, _caller=self._entity_caller, **kwargs)
         
         # Push audit event
         redis = await self._get_redis()
@@ -168,13 +180,15 @@ class AuditWrappedConnection:
         return result
 
 
+# =============================================================================
+# Connection providers
+# =============================================================================
+
 @asynccontextmanager
-async def get_db_connection():
+async def _base_connection():
     """
-    Get a database connection from the pool.
-    
-    If audit is enabled (REDIS_URL configured), connection is automatically
-    wrapped to log all save/delete operations to Redis.
+    Internal: get a raw connection from the pool, with audit wrapping if enabled.
+    All public connection providers build on this.
     """
     if _db_manager is None:
         raise RuntimeError("Database not initialized. Set database_url in ServiceConfig.")
@@ -186,15 +200,75 @@ async def get_db_connection():
             yield conn
 
 
-async def db_connection():
-    """FastAPI dependency for database connections."""
-    async with get_db_connection() as conn:
+# --- Strict (default for app code) ---
+
+@asynccontextmanager
+async def db_context():
+    """
+    Context manager for database connections (strict, default for app code).
+    
+    Enforces entity class usage: db.find_entities() etc will raise RuntimeError.
+    Use MyEntity.find(db, ...) instead.
+    
+    Usage:
+        async with db_context() as db:
+            deploys = await Deployment.find(db, where="env = ?", params=("prod",))
+    """
+    async with _base_connection() as conn:
+        conn._strict_entity_access = True
         yield conn
 
 
+async def db_dependency():
+    """
+    FastAPI dependency for database connections (strict, default for app code).
+    
+    Enforces entity class usage: db.find_entities() etc will raise RuntimeError.
+    Use MyEntity.find(db, ...) instead.
+    
+    Usage:
+        from app_kernel.db import db_dependency
+        
+        @app.get("/deployments")
+        async def list_deployments(db=Depends(db_dependency)):
+            return await Deployment.find(db, where="env = ?", params=("prod",))
+    """
+    async with db_context() as conn:
+        yield conn
+
+
+# --- Raw (kernel internals, power users) ---
+
+@asynccontextmanager
+async def raw_db_context():
+    """
+    Context manager for database connections WITHOUT strict entity access.
+    
+    Used by kernel internal stores that don't have @entity schemas.
+    App code should use db_context() instead.
+    """
+    async with _base_connection() as conn:
+        yield conn
+
+
+async def raw_db_dependency():
+    """
+    FastAPI dependency for database connections WITHOUT strict entity access.
+    
+    Used by kernel internal stores that don't have @entity schemas.
+    App code should use db_dependency() instead.
+    """
+    async with raw_db_context() as conn:
+        yield conn
+
+
+# =============================================================================
+# Schema init / shutdown
+# =============================================================================
+
 async def init_schema(init_fn: Callable[[any], Awaitable[None]]):
     """Initialize database schema using provided function."""
-    async with get_db_connection() as db:
+    async with raw_db_context() as db:
         await init_fn(db)
 
 
@@ -205,3 +279,14 @@ async def close_db():
         from ...databases.manager import DatabaseManager
         await DatabaseManager.close_all()
         _db_manager = None
+
+
+# =============================================================================
+# Backward compatibility aliases (kernel code uses old names)
+# =============================================================================
+
+# Old name -> new name:
+#   get_db_connection -> raw_db_context   (context manager, no guard)
+#   db_connection     -> db_dependency    (FastAPI dep, strict)
+get_db_connection = raw_db_context
+db_connection = db_dependency

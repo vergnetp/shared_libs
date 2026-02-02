@@ -1,4 +1,3 @@
-
 import asyncio
 import datetime
 from typing import Dict, Tuple, List, Any, Optional
@@ -10,6 +9,25 @@ from ....resilience import with_timeout
 from .utils_mixin import EntityUtilsMixin
 from ...utils.decorators import auto_transaction
 from ...connections.connection import  ConnectionInterface
+from ..decorators import _ENTITY_CALLER
+
+
+def _check_entity_access(db, method_name: str, _caller=None):
+    """
+    Guard against direct db method calls when strict entity access is enabled.
+    
+    When db._strict_entity_access = True, only calls from entity class methods
+    (passing _ENTITY_CALLER sentinel) are allowed. Direct calls from app code raise.
+    """
+    if _caller is _ENTITY_CALLER:
+        return
+    if not getattr(db, '_strict_entity_access', False):
+        return
+    raise RuntimeError(
+        f"Direct call to db.{method_name}() is not allowed when strict entity access is enabled. "
+        f"Use YourEntity.{method_name.replace('_entity', '').replace('_entities', '')}(db, ...) instead. "
+        f"Entity classes are defined in your schemas.py."
+    )
 
   
 class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
@@ -103,7 +121,8 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
     @auto_transaction
     async def get_entity(self, entity_name: str, entity_id: str, 
                          include_deleted: bool = False, 
-                         deserialize: bool = True) -> Optional[Dict[str, Any]]:
+                         deserialize: bool = True,
+                         _caller=None) -> Optional[Dict[str, Any]]:
         """
         Fetch an entity by ID.
         
@@ -116,6 +135,7 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
         Returns:
             Entity dictionary or None if not found
         """
+        _check_entity_access(self, 'get_entity', _caller)
         if not await self._table_exists(entity_name):
             return None  # No table = no entity
     
@@ -155,7 +175,8 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
                         user_id: Optional[str] = None, 
                         comment: Optional[str] = None,
                         timeout: Optional[float] = 60,
-                        skip_schema_check: bool = False) -> Dict[str, Any]:
+                        skip_schema_check: bool = False,
+                        _caller=None) -> Dict[str, Any]:
         """
         Save an entity (create or update).
         
@@ -170,6 +191,7 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
         Returns:
             The saved entity with updated fields
         """
+        _check_entity_access(self, 'save_entity', _caller)
         async def perform_save():
             # Prepare entity with timestamps, IDs, etc.
             prepared_entity = self._prepare_entity(entity_name, entity, user_id, comment)
@@ -217,7 +239,8 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
                         user_id: Optional[str] = None,
                         comment: Optional[str] = None,
                         timeout: Optional[float] = 60,
-                        skip_schema_check: bool = False) -> List[Dict[str, Any]]:
+                        skip_schema_check: bool = False,
+                        _caller=None) -> List[Dict[str, Any]]:
         """
         Save multiple entities in a single transaction with batch operations.
         
@@ -232,6 +255,7 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
         Returns:
             List of saved entities with their IDs
         """
+        _check_entity_access(self, 'save_entities', _caller)
         if not entities:
             return []
         
@@ -330,7 +354,8 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
     @auto_transaction
     async def delete_entity(self, entity_name: str, entity_id: str, 
                            user_id: Optional[str] = None, 
-                           permanent: bool = False) -> bool:
+                           permanent: bool = False,
+                           _caller=None) -> bool:
         """
         Delete an entity by ID.
         
@@ -343,10 +368,12 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
         Returns:
             True if deletion was successful
         """
+        _check_entity_access(self, 'delete_entity', _caller)
+        
         # Get current entity state for history
         current_entity = None
         if not permanent:
-            current_entity = await self.get_entity(entity_name, entity_id, include_deleted=True)
+            current_entity = await self.get_entity(entity_name, entity_id, include_deleted=True, _caller=_ENTITY_CALLER)
             if not current_entity:
                 return False
         
@@ -385,7 +412,8 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
     @with_timeout()
     @auto_transaction
     async def restore_entity(self, entity_name: str, entity_id: str, 
-                            user_id: Optional[str] = None) -> bool:
+                            user_id: Optional[str] = None,
+                            _caller=None) -> bool:
         """
         Restore a soft-deleted entity.
         
@@ -397,8 +425,10 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
         Returns:
             True if restoration was successful
         """
+        _check_entity_access(self, 'restore_entity', _caller)
+        
         # Check if entity exists and is deleted
-        current_entity = await self.get_entity(entity_name, entity_id, include_deleted=True)
+        current_entity = await self.get_entity(entity_name, entity_id, include_deleted=True, _caller=_ENTITY_CALLER)
         if not current_entity or current_entity.get('deleted_at') is None:
             return False
             
@@ -432,7 +462,8 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
     async def find_entities(self, entity_name: str, where_clause: Optional[str] = None,
                           params: Optional[Tuple] = None, order_by: Optional[str] = None,
                           limit: Optional[int] = None, offset: Optional[int] = None,
-                          include_deleted: bool = False, deserialize: bool = True) -> List[Dict[str, Any]]:
+                          include_deleted: bool = False, deserialize: bool = True,
+                          _caller=None) -> List[Dict[str, Any]]:
         """
         Query entities with flexible filtering.
         
@@ -449,6 +480,7 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
         Returns:
             List of entity dictionaries
         """
+        _check_entity_access(self, 'find_entities', _caller)
         if not await self._table_exists(entity_name):
             return []  # No table = empty list
     
@@ -494,7 +526,8 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
     @auto_transaction
     async def count_entities(self, entity_name: str, where_clause: Optional[str] = None,
                            params: Optional[Tuple] = None, 
-                           include_deleted: bool = False) -> int:
+                           include_deleted: bool = False,
+                           _caller=None) -> int:
         """
         Count entities matching criteria.
         
@@ -507,6 +540,7 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
         Returns:
             Count of matching entities
         """
+        _check_entity_access(self, 'count_entities', _caller)
         # If soft-delete filtering requested, check if column exists first
         if not include_deleted:
             has_deleted_at = await self._check_column_exists(entity_name, "deleted_at")
@@ -532,7 +566,8 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
     @with_timeout()
     @auto_transaction
     async def get_entity_history(self, entity_name: str, entity_id: str, 
-                                deserialize: bool = False) -> List[Dict[str, Any]]:
+                                deserialize: bool = False,
+                                _caller=None) -> List[Dict[str, Any]]:
         """
         Get the history of an entity.
         
@@ -544,6 +579,7 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
         Returns:
             List of historical versions
         """
+        _check_entity_access(self, 'get_entity_history', _caller)
         # Generate SQL
         sql, params = self.sql_generator.get_entity_history_sql(entity_name, entity_id)
         
@@ -577,7 +613,8 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
     @with_timeout()
     @auto_transaction
     async def get_entity_by_version(self, entity_name: str, entity_id: str, 
-                            version: int, deserialize: bool = False) -> Optional[Dict[str, Any]]:
+                            version: int, deserialize: bool = False,
+                            _caller=None) -> Optional[Dict[str, Any]]:
         """
         Get a specific version of an entity.
         
@@ -590,6 +627,7 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
         Returns:
             Entity version or None if not found
         """
+        _check_entity_access(self, 'get_entity_by_version', _caller)
         # Get all field names for complete entity comparison
         all_fields = set(await self._get_field_names(entity_name))
         all_history_fields = set(await self._get_field_names(entity_name, is_history=True))
@@ -943,4 +981,3 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
         # Execute insert
         params = tuple(filtered_entry[field] for field in fields)
         await self.execute(history_sql, params)
-

@@ -1,36 +1,47 @@
 """
 app_kernel.db - Database connection management.
 
-Kernel manages the connection pool via DatabaseManager.
-Apps provide config (in ServiceConfig) and schema (via init_schema callback).
+Two connection modes (strict = enforces entity class usage):
+
+    db_dependency / db_context         - strict (default for app code)
+    raw_db_dependency / raw_db_context - no guard (kernel internals)
 
 Usage:
-    # Config in create_service
-    ServiceConfig(
-        database_name="./data/app.db",
-        database_type="sqlite",
-    )
+    # In routes (FastAPI dependency) - strict by default
+    from app_kernel.db import db_dependency
     
-    # In routes (FastAPI dependency)
-    @app.get("/users")
-    async def get_users(db=Depends(db_connection)):
-        return await db.find_entities("kernel_users")
+    @app.get("/deployments")
+    async def list_deps(db=Depends(db_dependency)):
+        return await Deployment.find(db, where="env = ?", params=("prod",))
     
-    # In workers/scripts (context manager)
-    async with get_db_connection() as db:
-        await db.save_entity("kernel_users", user)
+    # In workers (context manager) - strict by default
+    from app_kernel.db import db_context
     
-    # Initialize app schema (in on_startup)
+    async with db_context() as db:
+        await Deployment.save(db, {"name": "new"})
+    
+    # Schema initialization (in on_startup)
     await init_schema(my_init_fn)
 """
 
 from .session import (
+    # Setup
     init_db_session,
     get_db_manager,
-    get_db_connection,
-    db_connection,
     init_schema,
     close_db,
+    
+    # Strict (default for app code)
+    db_dependency,
+    db_context,
+    
+    # Raw (kernel internals, power users)
+    raw_db_dependency,
+    raw_db_context,
+    
+    # Backward compatibility aliases
+    get_db_connection,  # -> raw_db_context
+    db_connection,      # -> db_dependency
 )
 
 from .schema import (
@@ -43,13 +54,23 @@ from .schema import (
 from ...databases.connections import AsyncConnection, SyncConnection
 
 __all__ = [
-    # Connection management
+    # Setup
     "init_db_session",
     "get_db_manager",
-    "get_db_connection",
-    "db_connection",
     "init_schema",
     "close_db",
+    
+    # Strict connections (default for app code)
+    "db_dependency",
+    "db_context",
+    
+    # Raw connections (kernel internals, power users)
+    "raw_db_dependency",
+    "raw_db_context",
+    
+    # Backward compatibility
+    "get_db_connection",
+    "db_connection",
     
     # Schema init
     "init_all_schemas",

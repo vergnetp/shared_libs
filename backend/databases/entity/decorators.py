@@ -22,6 +22,13 @@ from datetime import datetime, timezone
 from typing import Any, Optional, Dict, List, get_type_hints, get_origin, get_args, TYPE_CHECKING
 
 
+# Sentinel for strict entity access - only entity methods should call db methods directly.
+# When db._strict_entity_access is True, db methods like find_entities() and save_entity() 
+# will raise unless this sentinel is passed as _caller. This prevents app code from
+# bypassing entity classes (e.g. calling db.find_entities() instead of MyEntity.find()).
+_ENTITY_CALLER = object()
+
+
 class EntityField:
     """Enhanced field metadata for entity attributes"""
     
@@ -135,8 +142,33 @@ def _add_dict_access(cls):
     cls.__contains__ = __contains__
 
 
+def _get_base_type(type_hint):
+    """
+    Unwrap Optional/Union to get the base type.
+    
+    Optional[int] -> int, Optional[str] -> str, int -> int
+    Union[int, None] -> int, Union[str, int] -> None (ambiguous)
+    """
+    origin = get_origin(type_hint)
+    if origin is type(None):
+        return None
+    # Handle Optional[X] which is Union[X, None]
+    args = get_args(type_hint)
+    if args:
+        non_none = [a for a in args if a is not type(None)]
+        if len(non_none) == 1:
+            return non_none[0]
+        return None  # Ambiguous union
+    return type_hint
+
+
 def _make_from_dict(cls):
-    """Create from_dict classmethod that deserializes JSON fields based on type hints."""
+    """Create from_dict classmethod that deserializes fields based on type hints.
+    
+    Handles coercion for all types since database backends may return
+    everything as strings (e.g. SQLite). Coercion maps are built once
+    at decoration time for zero per-call overhead.
+    """
     
     # Cache type hints at decoration time
     try:
@@ -147,12 +179,24 @@ def _make_from_dict(cls):
     known_fields = {f.name for f in dataclass_fields(cls)}
     json_fields = {k for k, v in hints.items() if _is_json_type(v)}
     
+    # Build coercion map: field_name -> base_type for primitive types
+    # This handles int, float, bool coercion from string values
+    _COERCE_TYPES = {int, float, bool}
+    coerce_fields = {}  # field_name -> type
+    for k, v in hints.items():
+        base = _get_base_type(v)
+        if base in _COERCE_TYPES:
+            coerce_fields[k] = base
+    
     @classmethod
     def from_dict(cls, data: Dict[str, Any]):
         """
-        Create entity from dict, filtering unknown fields and deserializing JSON.
+        Create entity from dict, filtering unknown fields and deserializing.
         
-        JSON fields (List, Dict types) are automatically deserialized from strings.
+        Automatically coerces values to match type hints:
+        - JSON fields (List, Dict) deserialized from strings
+        - int/float fields cast from strings  
+        - bool fields parsed from strings ('1'/'0'/'true'/'false')
         """
         if data is None:
             return None
@@ -168,6 +212,23 @@ def _make_from_dict(cls):
                     v = json.loads(v)
                 except (json.JSONDecodeError, TypeError):
                     pass
+            
+            # Coerce primitive types (int, float, bool) from strings
+            # Databases like SQLite return everything as text
+            elif k in coerce_fields and v is not None:
+                target = coerce_fields[k]
+                if not isinstance(v, target):
+                    try:
+                        if target is bool:
+                            # Handle string booleans: '1'/'0'/'true'/'false'
+                            if isinstance(v, str):
+                                v = v.lower() in ('true', '1', 'yes', 'y', 't')
+                            else:
+                                v = bool(v)
+                        else:
+                            v = target(v)
+                    except (ValueError, TypeError):
+                        pass  # Keep original value if coercion fails
             
             result[k] = v
         
@@ -187,6 +248,7 @@ def _make_get(table_name: str, cls):
             params=(id,),
             limit=1,
             deserialize=False,
+            _caller=_ENTITY_CALLER,
         )
         return cls.from_dict(results[0]) if results else None
     return get
@@ -219,6 +281,7 @@ def _make_find(table_name: str, cls):
             offset=offset,
             include_deleted=include_deleted,
             deserialize=False,
+            _caller=_ENTITY_CALLER,
         )
         return [cls.from_dict(r) for r in results]
     return find
@@ -239,7 +302,7 @@ def _make_save(table_name: str, cls):
         data['created_at'] = data.get('created_at') or _now_iso()
         data['updated_at'] = _now_iso()
         
-        await db.save_entity(table_name, data)
+        await db.save_entity(table_name, data, _caller=_ENTITY_CALLER)
         return cls.from_dict(data)
     return save
 
@@ -261,7 +324,7 @@ def _make_delete(table_name: str):
                 'id': id,
                 'deleted_at': _now_iso(),
                 'updated_at': _now_iso(),
-            })
+            }, _caller=_ENTITY_CALLER)
         return True
     return delete
 
@@ -286,7 +349,7 @@ def _make_update(table_name: str, cls):
         merged.update(data)
         merged['updated_at'] = _now_iso()
         
-        await db.save_entity(table_name, merged)
+        await db.save_entity(table_name, merged, _caller=_ENTITY_CALLER)
         return await cls.get(db, id)
     return update
 
@@ -302,6 +365,7 @@ def _make_count(table_name: str):
             where_clause=where,
             params=params,
             include_deleted=include_deleted,
+            _caller=_ENTITY_CALLER,
         )
     return count
 
@@ -315,7 +379,7 @@ def _make_soft_delete(table_name: str):
             'id': id,
             'deleted_at': _now_iso(),
             'updated_at': _now_iso(),
-        })
+        }, _caller=_ENTITY_CALLER)
         return True
     return soft_delete
 
