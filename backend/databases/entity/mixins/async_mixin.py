@@ -171,6 +171,58 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
     @async_method
     @with_timeout()
     @auto_transaction
+    async def get_entities(self, entity_name: str, entity_ids: List[str],
+                           include_deleted: bool = False,
+                           deserialize: bool = True,
+                           _caller=None) -> List[Dict[str, Any]]:
+        """
+        Fetch multiple entities by IDs in a single query.
+        
+        Handles large ID lists by chunking to stay within database parameter
+        limits (SQLite ~999, Postgres ~32767). Returns results in no guaranteed
+        order — caller should build a lookup dict if order matters.
+        
+        Args:
+            entity_name: Name of the entity type
+            entity_ids: List of entity IDs to fetch
+            include_deleted: Whether to include soft-deleted entities
+            deserialize: Whether to deserialize values based on metadata
+            
+        Returns:
+            List of entity dictionaries (may be fewer than input IDs if some not found)
+        """
+        _check_entity_access(self, 'get_entities', _caller)
+        if not entity_ids:
+            return []
+        
+        # Deduplicate while preserving input type
+        unique_ids = list(set(entity_ids))
+        
+        # Chunk to stay within DB parameter limits
+        # SQLite: 999, Postgres: 32767, MySQL: ~65535
+        # Use 900 as safe default (leaves room for other params like deleted_at filter)
+        CHUNK_SIZE = 900
+        
+        all_results = []
+        for i in range(0, len(unique_ids), CHUNK_SIZE):
+            chunk = unique_ids[i:i + CHUNK_SIZE]
+            placeholders = ','.join(['?'] * len(chunk))
+            
+            rows = await self.find_entities(
+                entity_name,
+                where_clause=f"[id] IN ({placeholders})",
+                params=tuple(chunk),
+                include_deleted=include_deleted,
+                deserialize=deserialize,
+                _caller=_ENTITY_CALLER,
+            )
+            all_results.extend(rows)
+        
+        return all_results
+    
+    @async_method
+    @with_timeout()
+    @auto_transaction
     async def save_entity(self, entity_name: str, entity: Dict[str, Any], 
                         user_id: Optional[str] = None, 
                         comment: Optional[str] = None,

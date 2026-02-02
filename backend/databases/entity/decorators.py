@@ -254,6 +254,39 @@ def _make_get(table_name: str, cls):
     return get
 
 
+def _make_get_many(table_name: str, cls):
+    """Create get_many classmethod for batch fetching by IDs."""
+    @classmethod
+    async def get_many(cls, db, ids, include_deleted: bool = False):
+        """
+        Fetch multiple entities by IDs in a single query.
+        
+        Handles deduplication and chunking for large ID lists automatically.
+        Returns entities in no guaranteed order — build a dict if you need
+        keyed lookup: ``{e.id: e for e in await MyEntity.get_many(db, ids)}``
+        
+        Args:
+            db: Database connection
+            ids: Collection of entity IDs (list, set, or any iterable)
+            include_deleted: Whether to include soft-deleted entities
+            
+        Returns:
+            List of entities (may be fewer than input if some IDs not found)
+        """
+        id_list = list(ids) if not isinstance(ids, list) else ids
+        if not id_list:
+            return []
+        results = await db.get_entities(
+            table_name,
+            entity_ids=id_list,
+            include_deleted=include_deleted,
+            deserialize=False,
+            _caller=_ENTITY_CALLER,
+        )
+        return [cls.from_dict(r) for r in results]
+    return get_many
+
+
 def _make_find(table_name: str, cls):
     """Create find classmethod."""
     @classmethod
@@ -421,6 +454,7 @@ def entity(table: str = None, history: bool = True):
         
         # Always set CRUD classmethods (override dict-like .get if present)
         cls.get = _make_get(tbl, cls)
+        cls.get_many = _make_get_many(tbl, cls)
         cls.find = _make_find(tbl, cls)
         cls.save = _make_save(tbl, cls)
         
