@@ -1,3 +1,4 @@
+
 import asyncio
 import datetime
 from typing import Dict, Tuple, List, Any, Optional
@@ -136,37 +137,41 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
             Entity dictionary or None if not found
         """
         _check_entity_access(self, 'get_entity', _caller)
-        if not await self._table_exists(entity_name):
-            return None  # No table = no entity
-    
-        # If soft-delete filtering requested, check if column exists first
-        if not include_deleted:
-            has_deleted_at = await self._check_column_exists(entity_name, "deleted_at")
-            if not has_deleted_at:
-                include_deleted = True  # Can't filter on non-existent column
+        self._entity_op_depth = getattr(self, '_entity_op_depth', 0) + 1
+        try:
+            if not await self._table_exists(entity_name):
+                return None  # No table = no entity
         
-        # Generate the SQL
-        sql = self.sql_generator.get_entity_by_id_sql(entity_name, include_deleted)
-        
-        # Execute the query
-        result = await self.execute(sql, (entity_id,))
-        
-        # Return None if no entity found
-        if not result or len(result) == 0:
-            return None
-        
-        # Get schema information from metadata cache or retrieve it
-        field_names = await self._get_field_names(entity_name)
-        
-        # Convert the first row to a dictionary
-        entity_dict = dict(zip(field_names[:len(result[0])], result[0]))
-        
-        # Deserialize if requested
-        if deserialize:
-            meta = await self._get_entity_metadata(entity_name)
-            return self._deserialize_entity(entity_name, entity_dict, meta)
-        
-        return entity_dict
+            # If soft-delete filtering requested, check if column exists first
+            if not include_deleted:
+                has_deleted_at = await self._check_column_exists(entity_name, "deleted_at")
+                if not has_deleted_at:
+                    include_deleted = True  # Can't filter on non-existent column
+            
+            # Generate the SQL
+            sql = self.sql_generator.get_entity_by_id_sql(entity_name, include_deleted)
+            
+            # Execute the query
+            result = await self.execute(sql, (entity_id,))
+            
+            # Return None if no entity found
+            if not result or len(result) == 0:
+                return None
+            
+            # Get schema information from metadata cache or retrieve it
+            field_names = await self._get_field_names(entity_name)
+            
+            # Convert the first row to a dictionary
+            entity_dict = dict(zip(field_names[:len(result[0])], result[0]))
+            
+            # Deserialize if requested
+            if deserialize:
+                meta = await self._get_entity_metadata(entity_name)
+                return self._deserialize_entity(entity_name, entity_dict, meta)
+            
+            return entity_dict
+        finally:
+            self._entity_op_depth -= 1
     
     @async_method
     @with_timeout()
@@ -192,33 +197,37 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
             List of entity dictionaries (may be fewer than input IDs if some not found)
         """
         _check_entity_access(self, 'get_entities', _caller)
-        if not entity_ids:
-            return []
-        
-        # Deduplicate while preserving input type
-        unique_ids = list(set(entity_ids))
-        
-        # Chunk to stay within DB parameter limits
-        # SQLite: 999, Postgres: 32767, MySQL: ~65535
-        # Use 900 as safe default (leaves room for other params like deleted_at filter)
-        CHUNK_SIZE = 900
-        
-        all_results = []
-        for i in range(0, len(unique_ids), CHUNK_SIZE):
-            chunk = unique_ids[i:i + CHUNK_SIZE]
-            placeholders = ','.join(['?'] * len(chunk))
+        self._entity_op_depth = getattr(self, '_entity_op_depth', 0) + 1
+        try:
+            if not entity_ids:
+                return []
             
-            rows = await self.find_entities(
-                entity_name,
-                where_clause=f"[id] IN ({placeholders})",
-                params=tuple(chunk),
-                include_deleted=include_deleted,
-                deserialize=deserialize,
-                _caller=_ENTITY_CALLER,
-            )
-            all_results.extend(rows)
-        
-        return all_results
+            # Deduplicate while preserving input type
+            unique_ids = list(set(entity_ids))
+            
+            # Chunk to stay within DB parameter limits
+            # SQLite: 999, Postgres: 32767, MySQL: ~65535
+            # Use 900 as safe default (leaves room for other params like deleted_at filter)
+            CHUNK_SIZE = 900
+            
+            all_results = []
+            for i in range(0, len(unique_ids), CHUNK_SIZE):
+                chunk = unique_ids[i:i + CHUNK_SIZE]
+                placeholders = ','.join(['?'] * len(chunk))
+                
+                rows = await self.find_entities(
+                    entity_name,
+                    where_clause=f"[id] IN ({placeholders})",
+                    params=tuple(chunk),
+                    include_deleted=include_deleted,
+                    deserialize=deserialize,
+                    _caller=_ENTITY_CALLER,
+                )
+                all_results.extend(rows)
+            
+            return all_results
+        finally:
+            self._entity_op_depth -= 1
     
     @async_method
     @with_timeout()
@@ -244,46 +253,48 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
             The saved entity with updated fields
         """
         _check_entity_access(self, 'save_entity', _caller)
-        async def perform_save():
-            # Prepare entity with timestamps, IDs, etc.
-            prepared_entity = self._prepare_entity(entity_name, entity, user_id, comment)
-            
-            # Skip schema checks if migrations_on=True (use AutoMigrator) or skip_schema_check=True
-            should_skip_schema = getattr(self.config, 'migrations_on', True) or skip_schema_check
-            
-            if not should_skip_schema:
-                # Legacy behavior: runtime DDL
-                # Ensure schema exists (will be a no-op if already exists)
-                await self._ensure_entity_schema(entity_name, prepared_entity)
-                
-                # Update metadata based on entity fields
-                await self._update_entity_metadata(entity_name, prepared_entity)
-            
-            # Serialize the entity to string values
-            meta = await self._get_entity_metadata(entity_name) if not should_skip_schema else {}
-            serialized = self._serialize_entity(prepared_entity, meta)
-            
-            # Always use targeted upsert with exactly the fields provided
-            # (plus system fields added by _prepare_entity)
-            fields = list(serialized.keys())
-            sql = self.sql_generator.get_upsert_sql(entity_name, fields)
-            
-            # Execute the upsert
-            params = tuple(serialized[field] for field in fields)
-            await self.execute(sql, params)
-            
-            # Add to history
-            await self._add_to_history(entity_name, serialized, user_id, comment)
-            
-            # Return the prepared entity
-            return prepared_entity        
-
+        self._entity_op_depth = getattr(self, '_entity_op_depth', 0) + 1
         try:
+            async def perform_save():
+                # Prepare entity with timestamps, IDs, etc.
+                prepared_entity = self._prepare_entity(entity_name, entity, user_id, comment)
+                
+                # Skip schema checks if migrations_on=True (use AutoMigrator) or skip_schema_check=True
+                should_skip_schema = getattr(self.config, 'migrations_on', True) or skip_schema_check
+                
+                if not should_skip_schema:
+                    # Legacy behavior: runtime DDL
+                    # Ensure schema exists (will be a no-op if already exists)
+                    await self._ensure_entity_schema(entity_name, prepared_entity)
+                    
+                    # Update metadata based on entity fields
+                    await self._update_entity_metadata(entity_name, prepared_entity)
+                
+                # Serialize the entity to string values
+                meta = await self._get_entity_metadata(entity_name) if not should_skip_schema else {}
+                serialized = self._serialize_entity(prepared_entity, meta)
+                
+                # Always use targeted upsert with exactly the fields provided
+                # (plus system fields added by _prepare_entity)
+                fields = list(serialized.keys())
+                sql = self.sql_generator.get_upsert_sql(entity_name, fields)
+                
+                # Execute the upsert
+                params = tuple(serialized[field] for field in fields)
+                await self.execute(sql, params)
+                
+                # Add to history
+                await self._add_to_history(entity_name, serialized, user_id, comment)
+                
+                # Return the prepared entity
+                return prepared_entity        
+
             return await asyncio.wait_for(perform_save(), timeout=timeout)
         except asyncio.TimeoutError:
             raise TimeoutError(f"save_entity operation for {entity_name} timed out after {timeout:.1f}s")
-        
-    
+        finally:
+            self._entity_op_depth -= 1
+
     @async_method
     @with_timeout()
     @auto_transaction
@@ -308,99 +319,101 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
             List of saved entities with their IDs
         """
         _check_entity_access(self, 'save_entities', _caller)
-        if not entities:
-            return []
-        
-        async def perform_batch_save():
-            # Prepare all entities and collect fields
-            prepared_entities = []
-            all_fields = set()
-            
-            for entity in entities:
-                prepared = self._prepare_entity(entity_name, entity, user_id, comment)
-                prepared_entities.append(prepared)
-                all_fields.update(prepared.keys())
-            
-            # Skip schema checks if migrations_on=True (use AutoMigrator) or skip_schema_check=True
-            should_skip_schema = getattr(self.config, 'migrations_on', True) or skip_schema_check
-            
-            if not should_skip_schema:
-                # Legacy behavior: runtime DDL
-                # Ensure schema exists and can accommodate all fields
-                await self._ensure_entity_schema(entity_name, {field: None for field in all_fields})
-                
-                # Update metadata for all fields at once
-                meta = {}
-                for entity in prepared_entities:
-                    for field_name, value in entity.items():
-                        if field_name not in meta:
-                            meta[field_name] = self._infer_type(value)
-                
-                # Batch update the metadata
-                meta_params = [(field_name, field_type) for field_name, field_type in meta.items()]
-                if meta_params:
-                    sql = self.sql_generator.get_meta_upsert_sql(entity_name)
-                    await self.executemany(sql, meta_params)
-            
-            # Add all entities to the database with batch upsert
-            fields = list(all_fields)
-            sql = self.sql_generator.get_upsert_sql(entity_name, fields)
-            
-            # Prepare parameters for batch upsert
-            batch_params = []
-            for entity in prepared_entities:
-                params = tuple(entity.get(field, None) for field in fields)
-                batch_params.append(params)
-            
-            # Execute batch upsert
-            await self.executemany(sql, batch_params)
-            
-            # Get all entity IDs for history lookup
-            entity_ids = [entity['id'] for entity in prepared_entities]
-            
-            # Single query to get all existing versions
-            versions = {}
-            if entity_ids:
-                placeholders = ','.join(['?'] * len(entity_ids))
-                version_sql = f"SELECT [id], MAX([version]) as max_version FROM [{entity_name}_history] WHERE [id] IN ({placeholders}) GROUP BY [id]"
-                version_results = await self.execute(version_sql, tuple(entity_ids))
-                
-                # Create a dictionary of id -> current max version
-                versions = {row[0]: row[1] for row in version_results if row[1] is not None}
-            
-            # Prepare history entries
-            now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-            history_fields = list(all_fields) + ['version', 'history_timestamp', 'history_user_id', 'history_comment']
-            history_sql = f"INSERT INTO [{entity_name}_history] ({', '.join(['['+f+']' for f in history_fields])}) VALUES ({', '.join(['?'] * len(history_fields))})"
-            
-            history_params = []
-            for entity in prepared_entities:
-                history_entry = entity.copy()
-                entity_id = entity['id']
-                
-                # Get next version (default to 1 if no previous versions exist)
-                next_version = (versions.get(entity_id, 0) or 0) + 1
-                
-                history_entry['version'] = next_version
-                history_entry['history_timestamp'] = now
-                history_entry['history_user_id'] = user_id
-                history_entry['history_comment'] = comment
-                
-                # Create params tuple with all fields in the correct order
-                params = tuple(history_entry.get(field, None) for field in history_fields)
-                history_params.append(params)
-            
-            # Execute batch history insert
-            await self.executemany(history_sql, history_params)
-            
-            return prepared_entities
-        
+        self._entity_op_depth = getattr(self, '_entity_op_depth', 0) + 1
         try:
+            if not entities:
+                return []
+            
+            async def perform_batch_save():
+                # Prepare all entities and collect fields
+                prepared_entities = []
+                all_fields = set()
+                
+                for entity in entities:
+                    prepared = self._prepare_entity(entity_name, entity, user_id, comment)
+                    prepared_entities.append(prepared)
+                    all_fields.update(prepared.keys())
+                
+                # Skip schema checks if migrations_on=True (use AutoMigrator) or skip_schema_check=True
+                should_skip_schema = getattr(self.config, 'migrations_on', True) or skip_schema_check
+                
+                if not should_skip_schema:
+                    # Legacy behavior: runtime DDL
+                    # Ensure schema exists and can accommodate all fields
+                    await self._ensure_entity_schema(entity_name, {field: None for field in all_fields})
+                    
+                    # Update metadata for all fields at once
+                    meta = {}
+                    for entity in prepared_entities:
+                        for field_name, value in entity.items():
+                            if field_name not in meta:
+                                meta[field_name] = self._infer_type(value)
+                    
+                    # Batch update the metadata
+                    meta_params = [(field_name, field_type) for field_name, field_type in meta.items()]
+                    if meta_params:
+                        sql = self.sql_generator.get_meta_upsert_sql(entity_name)
+                        await self.executemany(sql, meta_params)
+                
+                # Add all entities to the database with batch upsert
+                fields = list(all_fields)
+                sql = self.sql_generator.get_upsert_sql(entity_name, fields)
+                
+                # Prepare parameters for batch upsert
+                batch_params = []
+                for entity in prepared_entities:
+                    params = tuple(entity.get(field, None) for field in fields)
+                    batch_params.append(params)
+                
+                # Execute batch upsert
+                await self.executemany(sql, batch_params)
+                
+                # Get all entity IDs for history lookup
+                entity_ids = [entity['id'] for entity in prepared_entities]
+                
+                # Single query to get all existing versions
+                versions = {}
+                if entity_ids:
+                    placeholders = ','.join(['?'] * len(entity_ids))
+                    version_sql = f"SELECT [id], MAX([version]) as max_version FROM [{entity_name}_history] WHERE [id] IN ({placeholders}) GROUP BY [id]"
+                    version_results = await self.execute(version_sql, tuple(entity_ids))
+                    
+                    # Create a dictionary of id -> current max version
+                    versions = {row[0]: row[1] for row in version_results if row[1] is not None}
+                
+                # Prepare history entries
+                now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                history_fields = list(all_fields) + ['version', 'history_timestamp', 'history_user_id', 'history_comment']
+                history_sql = f"INSERT INTO [{entity_name}_history] ({', '.join(['['+f+']' for f in history_fields])}) VALUES ({', '.join(['?'] * len(history_fields))})"
+                
+                history_params = []
+                for entity in prepared_entities:
+                    history_entry = entity.copy()
+                    entity_id = entity['id']
+                    
+                    # Get next version (default to 1 if no previous versions exist)
+                    next_version = (versions.get(entity_id, 0) or 0) + 1
+                    
+                    history_entry['version'] = next_version
+                    history_entry['history_timestamp'] = now
+                    history_entry['history_user_id'] = user_id
+                    history_entry['history_comment'] = comment
+                    
+                    # Create params tuple with all fields in the correct order
+                    params = tuple(history_entry.get(field, None) for field in history_fields)
+                    history_params.append(params)
+                
+                # Execute batch history insert
+                await self.executemany(history_sql, history_params)
+                
+                return prepared_entities
+        
             return await asyncio.wait_for(perform_batch_save(), timeout=timeout)
         except asyncio.TimeoutError:
             raise TimeoutError(f"save_entities operation timed out after {timeout:.1f}s")
+        finally:
+            self._entity_op_depth -= 1
 
-    
     @async_method
     @with_timeout()
     @auto_transaction
@@ -421,44 +434,47 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
             True if deletion was successful
         """
         _check_entity_access(self, 'delete_entity', _caller)
-        
-        # Get current entity state for history
-        current_entity = None
-        if not permanent:
-            current_entity = await self.get_entity(entity_name, entity_id, include_deleted=True, _caller=_ENTITY_CALLER)
-            if not current_entity:
-                return False
-        
-        # For permanent deletion, use a direct DELETE
-        if permanent:
-            sql = f"DELETE FROM [{entity_name}] WHERE [id] = ?"
-            result = await self.execute(sql, (entity_id,))
-            # For DELETE we expect an empty result if successful, but some drivers might
-            # return a tuple with count
-            if result and len(result) > 0 and isinstance(result[0], tuple) and len(result[0]) > 0:
-                return result[0][0] > 0
-            # Otherwise consider it successful if the query didn't raise an exception
-            return True
+        self._entity_op_depth = getattr(self, '_entity_op_depth', 0) + 1
+        try:
+            # Get current entity state for history
+            current_entity = None
+            if not permanent:
+                current_entity = await self.get_entity(entity_name, entity_id, include_deleted=True, _caller=_ENTITY_CALLER)
+                if not current_entity:
+                    return False
+            
+            # For permanent deletion, use a direct DELETE
+            if permanent:
+                sql = f"DELETE FROM [{entity_name}] WHERE [id] = ?"
+                result = await self.execute(sql, (entity_id,))
+                # For DELETE we expect an empty result if successful, but some drivers might
+                # return a tuple with count
+                if result and len(result) > 0 and isinstance(result[0], tuple) and len(result[0]) > 0:
+                    return result[0][0] > 0
+                # Otherwise consider it successful if the query didn't raise an exception
+                return True
 
-        # For soft deletion, use an UPDATE
-        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        sql = self.sql_generator.get_soft_delete_sql(entity_name)
-        result = await self.execute(sql, (now, now, user_id, entity_id))
-        
-        # Add to history if soft-deleted
-        if current_entity:
-            # Update the entity with deletion info
-            current_entity['deleted_at'] = now
-            current_entity['updated_at'] = now
-            if user_id:
-                current_entity['updated_by'] = user_id
-                
-            # Serialize and add to history
-            meta = await self._get_entity_metadata(entity_name)
-            serialized = self._serialize_entity(current_entity, meta)
-            await self._add_to_history(entity_name, serialized, user_id, "Soft deleted")
-                
-        return True
+            # For soft deletion, use an UPDATE
+            now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            sql = self.sql_generator.get_soft_delete_sql(entity_name)
+            result = await self.execute(sql, (now, now, user_id, entity_id))
+            
+            # Add to history if soft-deleted
+            if current_entity:
+                # Update the entity with deletion info
+                current_entity['deleted_at'] = now
+                current_entity['updated_at'] = now
+                if user_id:
+                    current_entity['updated_by'] = user_id
+                    
+                # Serialize and add to history
+                meta = await self._get_entity_metadata(entity_name)
+                serialized = self._serialize_entity(current_entity, meta)
+                await self._add_to_history(entity_name, serialized, user_id, "Soft deleted")
+                    
+            return True
+        finally:
+            self._entity_op_depth -= 1
     
     @async_method
     @with_timeout()
@@ -478,33 +494,36 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
             True if restoration was successful
         """
         _check_entity_access(self, 'restore_entity', _caller)
-        
-        # Check if entity exists and is deleted
-        current_entity = await self.get_entity(entity_name, entity_id, include_deleted=True, _caller=_ENTITY_CALLER)
-        if not current_entity or current_entity.get('deleted_at') is None:
-            return False
-            
-        # Update timestamps
-        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        
-        # Generate restore SQL
-        sql = self.sql_generator.get_restore_entity_sql(entity_name)
-        result = await self.execute(sql, (now, user_id, entity_id))
-        
-        # Add to history if restored
-
-        # Update the entity with restoration info
-        current_entity['deleted_at'] = None
-        current_entity['updated_at'] = now
-        if user_id:
-            current_entity['updated_by'] = user_id
-            
-        # Serialize and add to history
-        meta = await self._get_entity_metadata(entity_name)
-        serialized = self._serialize_entity(current_entity, meta)
-        await self._add_to_history(entity_name, serialized, user_id, "Restored")
+        self._entity_op_depth = getattr(self, '_entity_op_depth', 0) + 1
+        try:
+            # Check if entity exists and is deleted
+            current_entity = await self.get_entity(entity_name, entity_id, include_deleted=True, _caller=_ENTITY_CALLER)
+            if not current_entity or current_entity.get('deleted_at') is None:
+                return False
                 
-        return True
+            # Update timestamps
+            now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            
+            # Generate restore SQL
+            sql = self.sql_generator.get_restore_entity_sql(entity_name)
+            result = await self.execute(sql, (now, user_id, entity_id))
+            
+            # Add to history if restored
+
+            # Update the entity with restoration info
+            current_entity['deleted_at'] = None
+            current_entity['updated_at'] = now
+            if user_id:
+                current_entity['updated_by'] = user_id
+                
+            # Serialize and add to history
+            meta = await self._get_entity_metadata(entity_name)
+            serialized = self._serialize_entity(current_entity, meta)
+            await self._add_to_history(entity_name, serialized, user_id, "Restored")
+                    
+            return True
+        finally:
+            self._entity_op_depth -= 1
     
     # Query operations
     
@@ -533,45 +552,49 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
             List of entity dictionaries
         """
         _check_entity_access(self, 'find_entities', _caller)
-        if not await self._table_exists(entity_name):
-            return []  # No table = empty list
-    
-        # If soft-delete filtering requested, check if column exists first
-        if not include_deleted:
-            has_deleted_at = await self._check_column_exists(entity_name, "deleted_at")
-            if not has_deleted_at:
-                include_deleted = True  # Can't filter on non-existent column
+        self._entity_op_depth = getattr(self, '_entity_op_depth', 0) + 1
+        try:
+            if not await self._table_exists(entity_name):
+                return []  # No table = empty list
+        
+            # If soft-delete filtering requested, check if column exists first
+            if not include_deleted:
+                has_deleted_at = await self._check_column_exists(entity_name, "deleted_at")
+                if not has_deleted_at:
+                    include_deleted = True  # Can't filter on non-existent column
 
-        # Generate query SQL
-        sql = self.sql_generator.get_query_builder_sql(
-            entity_name, where_clause, order_by, limit, offset, include_deleted
-        )
-        
-        # Execute the query
-        result = await self.execute(sql, params or ())
-        
-        # If no results, return empty list
-        if not result:
-            return []
+            # Generate query SQL
+            sql = self.sql_generator.get_query_builder_sql(
+                entity_name, where_clause, order_by, limit, offset, include_deleted
+            )
             
-        # Get field names from result description
-        field_names = await self._get_field_names(entity_name)
-        
-        if deserialize:
-            meta = await self._get_entity_metadata(entity_name)
-
-        # Convert rows to dictionaries
-        entities = []
-        for row in result:
-            entity_dict = dict(zip(field_names, row))
+            # Execute the query
+            result = await self.execute(sql, params or ())
             
-            # Deserialize if requested
-            if deserialize:
-                entity_dict = self._deserialize_entity(entity_name, entity_dict, meta)
+            # If no results, return empty list
+            if not result:
+                return []
                 
-            entities.append(entity_dict)
+            # Get field names from result description
+            field_names = await self._get_field_names(entity_name)
             
-        return entities
+            if deserialize:
+                meta = await self._get_entity_metadata(entity_name)
+
+            # Convert rows to dictionaries
+            entities = []
+            for row in result:
+                entity_dict = dict(zip(field_names, row))
+                
+                # Deserialize if requested
+                if deserialize:
+                    entity_dict = self._deserialize_entity(entity_name, entity_dict, meta)
+                    
+                entities.append(entity_dict)
+                
+            return entities
+        finally:
+            self._entity_op_depth -= 1
     
     @async_method
     @with_timeout()
@@ -593,24 +616,28 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
             Count of matching entities
         """
         _check_entity_access(self, 'count_entities', _caller)
-        # If soft-delete filtering requested, check if column exists first
-        if not include_deleted:
-            has_deleted_at = await self._check_column_exists(entity_name, "deleted_at")
-            if not has_deleted_at:
-                include_deleted = True  # Can't filter on non-existent column
-        
-        # Generate count SQL
-        sql = self.sql_generator.get_count_entities_sql(
-            entity_name, where_clause, include_deleted
-        )
-        
-        # Execute the query
-        result = await self.execute(sql, params or ())
-        
-        # Return the count
-        if result and len(result) > 0:
-            return result[0][0]
-        return 0
+        self._entity_op_depth = getattr(self, '_entity_op_depth', 0) + 1
+        try:
+            # If soft-delete filtering requested, check if column exists first
+            if not include_deleted:
+                has_deleted_at = await self._check_column_exists(entity_name, "deleted_at")
+                if not has_deleted_at:
+                    include_deleted = True  # Can't filter on non-existent column
+            
+            # Generate count SQL
+            sql = self.sql_generator.get_count_entities_sql(
+                entity_name, where_clause, include_deleted
+            )
+            
+            # Execute the query
+            result = await self.execute(sql, params or ())
+            
+            # Return the count
+            if result and len(result) > 0:
+                return result[0][0]
+            return 0
+        finally:
+            self._entity_op_depth -= 1
     
     # History operations
     
@@ -632,34 +659,38 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
             List of historical versions
         """
         _check_entity_access(self, 'get_entity_history', _caller)
-        # Generate SQL
-        sql, params = self.sql_generator.get_entity_history_sql(entity_name, entity_id)
-        
-        # Execute the query
-        result = await self.execute(sql, params)
-        
-        # If no results, return empty list
-        if not result:
-            return []
+        self._entity_op_depth = getattr(self, '_entity_op_depth', 0) + 1
+        try:
+            # Generate SQL
+            sql, params = self.sql_generator.get_entity_history_sql(entity_name, entity_id)
             
-        # Get field names from result description
-        field_names = await self._get_field_names(entity_name)
-        
-        if deserialize:
-            meta = await self._get_entity_metadata(entity_name)
-
-        # Convert rows to dictionaries
-        history_entries = []
-        for row in result:
-            entity_dict = dict(zip(field_names, row))
+            # Execute the query
+            result = await self.execute(sql, params)
             
-            # Deserialize if requested
-            if deserialize:
-                entity_dict = self._deserialize_entity(entity_name, entity_dict, meta)
+            # If no results, return empty list
+            if not result:
+                return []
                 
-            history_entries.append(entity_dict)
+            # Get field names from result description
+            field_names = await self._get_field_names(entity_name)
             
-        return history_entries
+            if deserialize:
+                meta = await self._get_entity_metadata(entity_name)
+
+            # Convert rows to dictionaries
+            history_entries = []
+            for row in result:
+                entity_dict = dict(zip(field_names, row))
+                
+                # Deserialize if requested
+                if deserialize:
+                    entity_dict = self._deserialize_entity(entity_name, entity_dict, meta)
+                    
+                history_entries.append(entity_dict)
+                
+            return history_entries
+        finally:
+            self._entity_op_depth -= 1
 
     @async_method
     @with_timeout()
@@ -680,48 +711,52 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
             Entity version or None if not found
         """
         _check_entity_access(self, 'get_entity_by_version', _caller)
-        # Get all field names for complete entity comparison
-        all_fields = set(await self._get_field_names(entity_name))
-        all_history_fields = set(await self._get_field_names(entity_name, is_history=True))
-        
-        # Generate SQL
-        sql, params = self.sql_generator.get_entity_version_sql(entity_name, entity_id, version)
-        
-        # Execute the query
-        result = await self.execute(sql, params)
-        
-        # Return None if no entity found
-        if not result or len(result) == 0:
-            return None
+        self._entity_op_depth = getattr(self, '_entity_op_depth', 0) + 1
+        try:
+            # Get all field names for complete entity comparison
+            all_fields = set(await self._get_field_names(entity_name))
+            all_history_fields = set(await self._get_field_names(entity_name, is_history=True))
             
-        # Convert the first row to a dictionary using history field names
-        field_names = await self._get_field_names(entity_name, is_history=True)
-        history_entity = {}
-        
-        # Map values by name and handle column length discrepancies
-        for i, column_name in enumerate(field_names):
-            if i < len(result[0]):
-                history_entity[column_name] = result[0][i]
-        
-        # Find fields that exist in current entity but not in this version
-        missing_fields = all_fields - set(history_entity.keys())
-        
-        # If this version doesn't have certain fields that exist in the current version,
-        # they should be explicitly set to None
-        for field in missing_fields:
-            history_entity[field] = None
-        
-        # Remove history-specific fields
-        for field in list(history_entity.keys()):
-            if field in ['version', 'history_timestamp', 'history_user_id', 'history_comment'] and field not in all_fields:
-                history_entity.pop(field)
-        
-        # Deserialize if requested
-        if deserialize:
-            meta = await self._get_entity_metadata(entity_name)
-            return self._deserialize_entity(entity_name, history_entity, meta)
+            # Generate SQL
+            sql, params = self.sql_generator.get_entity_version_sql(entity_name, entity_id, version)
             
-        return history_entity
+            # Execute the query
+            result = await self.execute(sql, params)
+            
+            # Return None if no entity found
+            if not result or len(result) == 0:
+                return None
+                
+            # Convert the first row to a dictionary using history field names
+            field_names = await self._get_field_names(entity_name, is_history=True)
+            history_entity = {}
+            
+            # Map values by name and handle column length discrepancies
+            for i, column_name in enumerate(field_names):
+                if i < len(result[0]):
+                    history_entity[column_name] = result[0][i]
+            
+            # Find fields that exist in current entity but not in this version
+            missing_fields = all_fields - set(history_entity.keys())
+            
+            # If this version doesn't have certain fields that exist in the current version,
+            # they should be explicitly set to None
+            for field in missing_fields:
+                history_entity[field] = None
+            
+            # Remove history-specific fields
+            for field in list(history_entity.keys()):
+                if field in ['version', 'history_timestamp', 'history_user_id', 'history_comment'] and field not in all_fields:
+                    history_entity.pop(field)
+            
+            # Deserialize if requested
+            if deserialize:
+                meta = await self._get_entity_metadata(entity_name)
+                return self._deserialize_entity(entity_name, history_entity, meta)
+                
+            return history_entity
+        finally:
+            self._entity_op_depth -= 1
 
 
     # Schema operations
@@ -1033,3 +1068,4 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
         # Execute insert
         params = tuple(filtered_entry[field] for field in fields)
         await self.execute(history_sql, params)
+

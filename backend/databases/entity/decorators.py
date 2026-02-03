@@ -6,11 +6,14 @@ schema generation, and automatic migrations.
 
 The @entity decorator auto-adds:
 - from_dict(cls, data) - creates instance, deserializing JSON fields based on type hints
-- get(cls, db, id) - fetch by ID
-- find(cls, db, where, params, ...) - query with filters
-- save(cls, db, data) - create/update with auto id/timestamps
-- delete(cls, db, id) - hard delete
-- soft_delete(cls, db, id) - set deleted_at
+- get(cls, db, id) - fetch by ID (excludes soft-deleted by default)
+- get_many(cls, db, ids) - batch fetch by IDs
+- find(cls, db, where, params, ...) - query with filters (excludes soft-deleted by default)
+- save(cls, db, data) - create/update (upsert) with auto id/timestamps
+- update(cls, db, id, data) - merge update (fetch + merge + save)
+- soft_delete(cls, db, id) - set deleted_at timestamp
+- hard_delete(cls, db, id) - permanently remove row
+- count(cls, db, where, params) - count matching entities
 
 No separate store layer needed - the entity class IS the store.
 """
@@ -340,26 +343,28 @@ def _make_save(table_name: str, cls):
     return save
 
 
-def _make_delete(table_name: str):
-    """Create delete classmethod."""
+def _make_soft_delete(table_name: str):
+    """Create soft_delete classmethod — sets deleted_at timestamp."""
     @classmethod
-    async def delete(cls, db, id: str, permanent: bool = False):
-        """
-        Delete entity by ID.
-        
-        Args:
-            permanent: If True, hard delete. If False, soft delete (set deleted_at).
-        """
-        if permanent:
-            await db.execute(f"DELETE FROM {table_name} WHERE id = ?", (id,))
-        else:
-            await db.save_entity(table_name, {
-                'id': id,
-                'deleted_at': _now_iso(),
-                'updated_at': _now_iso(),
-            }, _caller=_ENTITY_CALLER)
+    async def soft_delete(cls, db, id: str) -> bool:
+        """Soft delete entity (set deleted_at). Record remains queryable with include_deleted=True."""
+        await db.save_entity(table_name, {
+            'id': id,
+            'deleted_at': _now_iso(),
+            'updated_at': _now_iso(),
+        }, _caller=_ENTITY_CALLER)
         return True
-    return delete
+    return soft_delete
+
+
+def _make_hard_delete(table_name: str):
+    """Create hard_delete classmethod — permanently removes row."""
+    @classmethod
+    async def hard_delete(cls, db, id: str) -> bool:
+        """Permanently delete entity. Row is removed from database."""
+        await db.delete_entity(table_name, id, permanent=True, _caller=_ENTITY_CALLER)
+        return True
+    return hard_delete
 
 
 def _make_update(table_name: str, cls):
@@ -403,20 +408,6 @@ def _make_count(table_name: str):
     return count
 
 
-def _make_soft_delete(table_name: str):
-    """Create soft_delete classmethod."""
-    @classmethod
-    async def soft_delete(cls, db, id: str) -> bool:
-        """Soft delete (set deleted_at timestamp)."""
-        await db.save_entity(table_name, {
-            'id': id,
-            'deleted_at': _now_iso(),
-            'updated_at': _now_iso(),
-        }, _caller=_ENTITY_CALLER)
-        return True
-    return soft_delete
-
-
 def entity(table: str = None, history: bool = True):
     """
     Decorator to mark a dataclass as a database entity.
@@ -434,7 +425,8 @@ def entity(table: str = None, history: bool = True):
         project = await Project.get(db, "123")
         projects = await Project.find(db, where="name = ?", params=("test",))
         await Project.save(db, {"name": "new"})
-        await Project.delete(db, "123")
+        await Project.soft_delete(db, "123")
+        await Project.hard_delete(db, "456")
     """
     def decorator(cls):
         tbl = table or cls.__name__.lower()
@@ -462,10 +454,10 @@ def entity(table: str = None, history: bool = True):
         if not hasattr(cls, 'create'):
             cls.create = cls.save
         
-        cls.delete = _make_delete(tbl)
+        cls.soft_delete = _make_soft_delete(tbl)
+        cls.hard_delete = _make_hard_delete(tbl)
         cls.update = _make_update(tbl, cls)
         cls.count = _make_count(tbl)
-        cls.soft_delete = _make_soft_delete(tbl)
         
         # Register in global schemas
         ENTITY_SCHEMAS[tbl] = cls

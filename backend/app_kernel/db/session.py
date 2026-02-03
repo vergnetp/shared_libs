@@ -216,6 +216,7 @@ async def db_context():
     """
     async with _base_connection() as conn:
         conn._strict_entity_access = True
+        conn._block_raw_execute = True
         yield conn
 
 

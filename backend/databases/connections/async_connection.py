@@ -32,6 +32,7 @@ class AsyncConnection(Connection):
         self._last_active_time = None
         self._leaked = False
         self._id = str(uuid.uuid4())  # Unique ID for tracking
+        self._tx_lock = asyncio.Lock()  # Serializes transaction boundaries for concurrent coroutines
 
     def _mark_active(self):
         """Mark the connection as active (used recently)"""
@@ -65,6 +66,8 @@ class AsyncConnection(Connection):
         
         Note:
             Automatically prepares and caches statements for repeated executions.
+            When _block_raw_execute is True (set by db_context/db_dependency),
+            only entity framework internals can call this method.
 
         Args:
             sql: SQL query with ? placeholders
@@ -75,6 +78,12 @@ class AsyncConnection(Connection):
         Returns:
             List[Tuple]: Result rows as tuples
         """
+        if getattr(self, '_block_raw_execute', False) and getattr(self, '_entity_op_depth', 0) == 0:
+            raise RuntimeError(
+                "Direct db.execute() is not allowed when using db_context/db_dependency. "
+                "Use entity class methods (MyEntity.find(), .save(), .soft_delete(), etc.) instead. "
+                "If you need raw SQL, use raw_db_context/raw_db_dependency."
+            )
         timeout = timeout or self.config.query_execution_timeout
         self._mark_active()        
         
@@ -102,6 +111,8 @@ class AsyncConnection(Connection):
         Note:
             This runs on a single connection sequentially. For parallel execution,
             you would need multiple connections from a connection pool.
+            When _block_raw_execute is True (set by db_context/db_dependency),
+            only entity framework internals can call this method.
             
         Args:
             sql: SQL query with ? placeholders
@@ -112,6 +123,12 @@ class AsyncConnection(Connection):
         Returns:
             List[Tuple]: Combined result rows from all executions
         """        
+        if getattr(self, '_block_raw_execute', False) and getattr(self, '_entity_op_depth', 0) == 0:
+            raise RuntimeError(
+                "Direct db.executemany() is not allowed when using db_context/db_dependency. "
+                "Use entity class methods instead. "
+                "If you need raw SQL, use raw_db_context/raw_db_dependency."
+            )
         timeout = timeout or self.config.query_execution_timeout
         self._mark_active()
 
@@ -256,4 +273,3 @@ class AsyncConnection(Connection):
         pass
  
     # endregion --------------------------------
-

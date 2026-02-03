@@ -14,6 +14,15 @@ def auto_transaction(func):
 
     Need to be applied to methods of a class that offers in_transaction, begin_transaction (and commit/rollback)
     
+    Concurrency safety:
+        For async functions, uses self._tx_lock (asyncio.Lock) to serialize
+        transaction boundaries. This prevents race conditions when multiple
+        coroutines share a single connection (e.g. via asyncio.gather).
+        
+        The lock is ONLY acquired when starting a new transaction (in_transaction=False).
+        Reentrant calls (where a transaction is already active) skip the lock entirely,
+        so nested @auto_transaction (e.g. save_entity → execute) cannot deadlock.
+    
     Usage:
         @auto_transaction
         def some_function(self, ...):
@@ -54,11 +63,25 @@ def auto_transaction(func):
 
     @functools.wraps(func)
     async def async_wrapper(self, *args, **kwargs):
-        # For async methods, always use the _safely_await_if_needed helper
-        # to handle both sync and async transaction methods
+        # Fast path: already in a transaction (reentrant call from e.g. save_entity → execute).
+        # No lock needed — the outer caller holds it.
         if await _safely_await_if_needed(self.in_transaction):
             return await func(self, *args, **kwargs)
-        else:
+        
+        # Slow path: need to start a new transaction.
+        # Serialize with _tx_lock to prevent concurrent BEGINs on shared connections.
+        lock = getattr(self, '_tx_lock', None)
+        if lock is None:
+            # Fallback: create lock lazily (safe — no await between check and set)
+            self._tx_lock = asyncio.Lock()
+            lock = self._tx_lock
+        
+        async with lock:
+            # Double-check after acquiring lock: another coroutine may have
+            # started and committed a transaction while we waited.
+            if await _safely_await_if_needed(self.in_transaction):
+                return await func(self, *args, **kwargs)
+            
             await _safely_await_if_needed(self.begin_transaction)
             try:
                 result = await func(self, *args, **kwargs)
