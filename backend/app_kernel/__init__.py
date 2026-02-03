@@ -181,6 +181,18 @@ from .bootstrap import (
     ServiceConfig,
 )
 
+# Tasks - cancellable SSE-streamed operations
+from .tasks import (
+    TaskStream,
+    Cancelled,
+    create_tasks_router,
+    sse_event,
+    sse_task_id,
+    sse_log,
+    sse_complete,
+    sse_urls,
+)
+
 __all__ = [
     # Version
     "__version__",
@@ -304,4 +316,14 @@ __all__ = [
     # Utils
     "Profiler",
     "profiled_function",
+    
+    # Tasks
+    "TaskStream",
+    "Cancelled",
+    "create_tasks_router",
+    "sse_event",
+    "sse_task_id",
+    "sse_log",
+    "sse_complete",
+    "sse_urls",
 ]

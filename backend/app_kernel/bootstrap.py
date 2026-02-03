@@ -1243,6 +1243,14 @@ def create_service(
         )
         app.include_router(jobs_router, prefix=api_prefix)
     
+    # Mount task cancellation routes (always available)
+    from .tasks import create_tasks_router
+    _tasks_auth = None
+    if cfg.auth_enabled:
+        from .auth.deps import get_current_user as _tasks_auth
+    tasks_router = create_tasks_router(auth_dependency=_tasks_auth)
+    app.include_router(tasks_router, prefix=api_prefix)
+    
     # Mount OAuth routes if providers configured
     if cfg.oauth_providers:
         from .oauth import create_oauth_router, configure_providers
