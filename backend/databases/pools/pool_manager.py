@@ -247,7 +247,7 @@ class PoolManager(ABC):
                     metrics['peak_active'] = max(metrics['peak_active'], metrics['current_active'])
 
         try:
-            logger.info(f"Pool status:\n{json.dumps(self.get_pool_status())}")
+            logger.debug(f"Pool status:\n{json.dumps(self.get_pool_status())}")
         except Exception as e:
             logger.warning(f"Error logging metrics: {e}")
 

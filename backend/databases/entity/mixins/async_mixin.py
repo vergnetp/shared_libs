@@ -1,4 +1,3 @@
-
 import asyncio
 import datetime
 from typing import Dict, Tuple, List, Any, Optional
@@ -10,7 +9,8 @@ from ....resilience import with_timeout
 from .utils_mixin import EntityUtilsMixin
 from ...utils.decorators import auto_transaction
 from ...connections.connection import  ConnectionInterface
-from ..decorators import _ENTITY_CALLER
+from ..decorators import _ENTITY_CALLER, ENTITY_SCHEMAS
+from dataclasses import fields as dataclass_fields
 
 
 def _check_entity_access(db, method_name: str, _caller=None):
@@ -53,14 +53,19 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
         except Exception:
             return False
     
+    # Cache for field names derived from entity schemas (class-level, never changes)
+    _field_names_cache: Dict[str, List[str]] = {}
+    
+    _HISTORY_FIELDS = ["version", "history_timestamp", "history_user_id", "history_comment"]
+    
     @async_method
     async def _get_field_names(self, entity_name: str, is_history: bool = False) -> List[str]:
         """
         Get field names for an entity table.
         
-        This method tries multiple approaches to get field names:
-        1. Use metadata cache if available
-        2. Query database schema as fallback
+        Uses the ENTITY_SCHEMAS registry first (zero DB queries for registered
+        entities). Falls back to querying the database schema for unregistered
+        tables.
         
         Args:
             entity_name: Name of the entity type
@@ -69,50 +74,54 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
         Returns:
             List of field names
         """
-        table_name = f"{entity_name}_history" if is_history else entity_name
+        cache_key = f"{entity_name}_history" if is_history else entity_name
         
-        # Try to get from schema directly - more reliable way to get columns in order
+        # Check cache first
+        if cache_key in self._field_names_cache:
+            return self._field_names_cache[cache_key]
+        
+        # Try entity registry — no DB query needed
+        entity_cls = ENTITY_SCHEMAS.get(entity_name)
+        if entity_cls is not None:
+            field_names = [f.name for f in dataclass_fields(entity_cls)]
+            if is_history:
+                for hf in self._HISTORY_FIELDS:
+                    if hf not in field_names:
+                        field_names.append(hf)
+            self._field_names_cache[cache_key] = field_names
+            logger.debug(f"Got field names for {cache_key} from entity schema: {field_names}")
+            return field_names
+        
+        # Fallback: query DB schema for unregistered tables
+        table_name = cache_key
         schema_sql, schema_params = self.sql_generator.get_list_columns_sql(table_name)
         schema_result = await self.execute(schema_sql, schema_params)
         if schema_result:
-            # Check if this is SQLite's PRAGMA table_info() result
-            # SQLite PRAGMA returns rows in format (cid, name, type, notnull, dflt_value, pk)
             if isinstance(schema_result[0][0], int) and len(schema_result[0]) >= 3 and isinstance(schema_result[0][1], str):
-                # For SQLite, column name is at index 1
                 field_names = [row[1] for row in schema_result]
             else:
-                # For other databases, column name is at index 0
                 field_names = [row[0] for row in schema_result]
-            logger.info(f"Got field names for {table_name} from schema: {field_names}")
+            self._field_names_cache[cache_key] = field_names
+            logger.debug(f"Got field names for {table_name} from DB schema: {field_names}")
             return field_names
         
-        # Only fall back to metadata if schema query failed
+        # Last resort: metadata table
         if not is_history:
             meta = await self._get_entity_metadata(entity_name)
             if meta:
                 field_names = list(meta.keys())
-                logger.info(f"Got field names for {table_name} from metadata: {field_names}")
-                if is_history:
-                    # Add history-specific fields
-                    history_fields = ["version", "history_timestamp", "history_user_id", "history_comment"]
-                    for field in history_fields:
-                        if field not in field_names:
-                            field_names.append(field)
+                self._field_names_cache[cache_key] = field_names
+                return field_names
+        else:
+            meta = await self._get_entity_metadata(entity_name)
+            if meta:
+                field_names = list(meta.keys())
+                for hf in self._HISTORY_FIELDS:
+                    if hf not in field_names:
+                        field_names.append(hf)
+                self._field_names_cache[cache_key] = field_names
                 return field_names
         
-        # Last resort for history tables - use base entity + history fields
-        if is_history:
-            meta = await self._get_entity_metadata(entity_name)
-            field_names = list(meta.keys())
-            # Add history-specific fields
-            history_fields = ["version", "history_timestamp", "history_user_id", "history_comment"]
-            for field in history_fields:
-                if field not in field_names:
-                    field_names.append(field)
-            logger.info(f"Constructed field names for history table {table_name}: {field_names}")
-            return field_names
-        
-        # If all else fails, return an empty list
         return []
 
     # Core CRUD operations
@@ -1068,4 +1077,3 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
         # Execute insert
         params = tuple(filtered_entry[field] for field in fields)
         await self.execute(history_sql, params)
-
