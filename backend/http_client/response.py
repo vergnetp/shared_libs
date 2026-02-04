@@ -62,6 +62,11 @@ class HttpResponse:
         """Get response body as text."""
         return self.body.decode('utf-8', errors='replace')
     
+    @property
+    def content(self) -> bytes:
+        """Alias for body (requests/httpx compatibility)."""
+        return self.body
+    
     def json(self) -> Any:
         """
         Parse response body as JSON.
