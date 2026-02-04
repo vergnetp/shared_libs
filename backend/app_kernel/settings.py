@@ -196,6 +196,11 @@ class FeatureSettings:
     # Base URL for invite links (e.g., "https://app.example.com/invite")
     saas_invite_base_url: str = None
     
+    # Functional test endpoint (admin only, opt-in)
+    # Requires test_runner passed to init_app_kernel / create_service
+    enable_test_routes: bool = False
+    test_prefix: str = "/test"
+    
     # Router prefix for all kernel routes (empty = mount at root)
     kernel_prefix: str = ""
     
@@ -213,6 +218,7 @@ class FeatureSettings:
             KERNEL_ALLOW_SIGNUP=false
             KERNEL_ENABLE_JOBS=true
             KERNEL_ENABLE_AUDIT=false
+            KERNEL_ENABLE_TESTS=false
         """
         def env_bool(key: str, default: bool) -> bool:
             val = os.environ.get(key, "").lower()
@@ -233,6 +239,7 @@ class FeatureSettings:
             enable_audit_routes=env_bool("KERNEL_ENABLE_AUDIT", False),
             enable_saas_routes=env_bool("KERNEL_ENABLE_SAAS", True),
             saas_invite_base_url=os.environ.get("KERNEL_SAAS_INVITE_URL"),
+            enable_test_routes=env_bool("KERNEL_ENABLE_TESTS", False),
         )
 
 

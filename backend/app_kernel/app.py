@@ -138,6 +138,9 @@ def init_app_kernel(
     is_admin: Optional[Callable] = None,  # For metrics protection
     setup_reliability_middleware: bool = True,
     mount_routers: bool = True,  # Auto-mount kernel routers
+    test_runner: Optional[Callable] = None,  # For functional test route
+    test_required_env: Optional[list] = None,  # Env vars checked before test starts
+    test_extra_kwargs_fn: Optional[Callable] = None,  # Extra context for test runner
 ) -> None:
     """
     Initialize the app kernel. SIDE-EFFECTFUL.
@@ -166,6 +169,10 @@ def init_app_kernel(
         is_admin: Optional function(user) -> bool for admin checks
         setup_reliability_middleware: Whether to add rate limiting/idempotency
         mount_routers: Whether to auto-mount kernel routers based on settings.features
+        test_runner: Optional async generator for functional tests (admin only).
+            Signature: (base_url: str, auth_token: str, **kwargs) -> AsyncIterator[str]
+        test_required_env: Env vars that must be set before tests start (e.g. ["DO_TOKEN"])
+        test_extra_kwargs_fn: Optional function(request) -> dict of extra kwargs for test_runner
     
     Returns:
         None - access components via app.state.kernel
@@ -358,6 +365,9 @@ def init_app_kernel(
             user_store=user_store,
             is_admin=is_admin,
             logger=logger,
+            test_runner=test_runner,
+            test_required_env=test_required_env,
+            test_extra_kwargs_fn=test_extra_kwargs_fn,
         )
     
     # =========================================================================
@@ -385,6 +395,9 @@ def _mount_kernel_routers(
     user_store,
     is_admin: Optional[Callable],
     logger,
+    test_runner: Optional[Callable] = None,
+    test_required_env: Optional[list] = None,
+    test_extra_kwargs_fn: Optional[Callable] = None,
 ):
     """
     Mount kernel routers based on feature settings.
@@ -480,3 +493,18 @@ def _mount_kernel_routers(
         )
         app.include_router(saas_router, prefix=f"{prefix}/api/v1")
         logger.info(f"SaaS routes: enabled (workspaces, members, invites)")
+    
+    # -------------------------------------------------------------------------
+    # Functional test route (admin only, opt-in)
+    # -------------------------------------------------------------------------
+    if features.enable_test_routes and test_runner:
+        from .testing import create_test_router
+        
+        test_router = create_test_router(
+            runner_fn=test_runner,
+            required_env=test_required_env or [],
+            prefix=features.test_prefix,
+            extra_kwargs_fn=test_extra_kwargs_fn,
+        )
+        app.include_router(test_router, prefix=prefix)
+        logger.info(f"Mounted test routes: {features.test_prefix}/functional (admin only)")

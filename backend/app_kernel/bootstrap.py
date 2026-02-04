@@ -739,6 +739,11 @@ def create_service(
     api_prefix: str = "/api/v1",
     docs_url: str = "/docs",
     redoc_url: str = "/redoc",
+    
+    # Functional testing (admin only, opt-in)
+    test_runner: Optional[Callable] = None,  # Async generator yielding SSE events
+    test_required_env: Optional[list] = None,  # Env vars checked before test starts
+    test_extra_kwargs_fn: Optional[Callable] = None,  # Extra context for test runner
 ) -> FastAPI:
     """
     Create a production-ready FastAPI service.
@@ -765,6 +770,11 @@ def create_service(
         api_prefix: Prefix for app routers (default: /api/v1)
         docs_url: OpenAPI docs URL
         redoc_url: ReDoc URL
+        test_runner: Optional async generator for functional tests (admin only).
+            Signature: (base_url: str, auth_token: str, **kwargs) -> AsyncIterator[str]
+            Auto-mounts POST /test/functional when provided.
+        test_required_env: Env vars that must be set before tests start (e.g. ["DO_TOKEN"])
+        test_extra_kwargs_fn: Optional function(request) -> dict of extra kwargs for test_runner
     
     Returns:
         Configured FastAPI application
@@ -860,7 +870,7 @@ def create_service(
             registry.register(task_name, handler)
     
     # Build kernel settings from service config
-    kernel_settings = _build_kernel_settings(name, version, cfg, health_checks)
+    kernel_settings = _build_kernel_settings(name, version, cfg, health_checks, test_runner=test_runner)
     
     # Create lifespan
     @asynccontextmanager
@@ -1184,6 +1194,9 @@ def create_service(
         is_admin=is_admin or _default_is_admin,
         setup_reliability_middleware=bool(cfg.redis_url),
         mount_routers=True,
+        test_runner=test_runner,
+        test_required_env=test_required_env,
+        test_extra_kwargs_fn=test_extra_kwargs_fn,
     )
     
     # Add request metrics middleware if enabled
@@ -1326,6 +1339,7 @@ def _build_kernel_settings(
     version: str,
     cfg: ServiceConfig,
     health_checks: Sequence[HealthCheck],
+    test_runner: Optional[Callable] = None,
 ) -> KernelSettings:
     """Build KernelSettings from ServiceConfig."""
     return KernelSettings(
@@ -1400,6 +1414,7 @@ def _build_kernel_settings(
             enable_audit_routes=False,
             enable_saas_routes=cfg.saas_enabled,
             saas_invite_base_url=cfg.saas_invite_base_url,
+            enable_test_routes=test_runner is not None,
         ),
         
         health_checks=tuple(health_checks)
