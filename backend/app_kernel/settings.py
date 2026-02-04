@@ -196,10 +196,9 @@ class FeatureSettings:
     # Base URL for invite links (e.g., "https://app.example.com/invite")
     saas_invite_base_url: str = None
     
-    # Functional test endpoint (admin only, opt-in)
-    # Requires test_runner passed to init_app_kernel / create_service
+    # Functional test endpoints (admin only, opt-in)
+    # Auto-enabled when test_runners passed to create_service
     enable_test_routes: bool = False
-    test_prefix: str = "/test"
     
     # Router prefix for all kernel routes (empty = mount at root)
     kernel_prefix: str = ""

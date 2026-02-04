@@ -35,7 +35,7 @@ Usage:
     # Workers run separately - see jobs/worker.py for worker process example
 """
 from dataclasses import dataclass
-from typing import Optional, Callable, Any
+from typing import Optional, Callable, Any, List
 
 from fastapi import FastAPI, Request
 
@@ -138,9 +138,7 @@ def init_app_kernel(
     is_admin: Optional[Callable] = None,  # For metrics protection
     setup_reliability_middleware: bool = True,
     mount_routers: bool = True,  # Auto-mount kernel routers
-    test_runner: Optional[Callable] = None,  # For functional test route
-    test_required_env: Optional[list] = None,  # Env vars checked before test starts
-    test_extra_kwargs_fn: Optional[Callable] = None,  # Extra context for test runner
+    test_runners: Optional[List[Callable]] = None,  # Async generators for /test/* endpoints
 ) -> None:
     """
     Initialize the app kernel. SIDE-EFFECTFUL.
@@ -169,10 +167,9 @@ def init_app_kernel(
         is_admin: Optional function(user) -> bool for admin checks
         setup_reliability_middleware: Whether to add rate limiting/idempotency
         mount_routers: Whether to auto-mount kernel routers based on settings.features
-        test_runner: Optional async generator for functional tests (admin only).
-            Signature: (base_url: str, auth_token: str, **kwargs) -> AsyncIterator[str]
-        test_required_env: Env vars that must be set before tests start (e.g. ["DO_TOKEN"])
-        test_extra_kwargs_fn: Optional function(request) -> dict of extra kwargs for test_runner
+        test_runners: List of async generators for test endpoints (admin only).
+            Each fn signature: (base_url: str, auth_token: str) -> AsyncIterator[str]
+            Auto-mounted at POST /test/{fn-name} (run_ prefix stripped, _ → -).
     
     Returns:
         None - access components via app.state.kernel
@@ -365,9 +362,7 @@ def init_app_kernel(
             user_store=user_store,
             is_admin=is_admin,
             logger=logger,
-            test_runner=test_runner,
-            test_required_env=test_required_env,
-            test_extra_kwargs_fn=test_extra_kwargs_fn,
+            test_runners=test_runners,
         )
     
     # =========================================================================
@@ -395,9 +390,7 @@ def _mount_kernel_routers(
     user_store,
     is_admin: Optional[Callable],
     logger,
-    test_runner: Optional[Callable] = None,
-    test_required_env: Optional[list] = None,
-    test_extra_kwargs_fn: Optional[Callable] = None,
+    test_runners: Optional[List[Callable]] = None,
 ):
     """
     Mount kernel routers based on feature settings.
@@ -495,16 +488,13 @@ def _mount_kernel_routers(
         logger.info(f"SaaS routes: enabled (workspaces, members, invites)")
     
     # -------------------------------------------------------------------------
-    # Functional test route (admin only, opt-in)
+    # Functional test routes (admin only, opt-in)
     # -------------------------------------------------------------------------
-    if features.enable_test_routes and test_runner:
-        from .testing import create_test_router
+    if features.enable_test_routes and test_runners:
+        from .testing.router import _create_test_router
         
-        test_router = create_test_router(
-            runner_fn=test_runner,
-            required_env=test_required_env or [],
-            prefix=features.test_prefix,
-            extra_kwargs_fn=test_extra_kwargs_fn,
-        )
+        test_router = _create_test_router(test_runners)
         app.include_router(test_router, prefix=prefix)
-        logger.info(f"Mounted test routes: {features.test_prefix}/functional (admin only)")
+        from .testing.router import _slug_from_fn
+        slugs = [_slug_from_fn(fn) for fn in test_runners]
+        logger.info(f"Mounted test routes: /test/{', /test/'.join(slugs)} (admin only)")

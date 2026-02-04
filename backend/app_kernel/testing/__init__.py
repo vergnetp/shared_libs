@@ -7,7 +7,18 @@ cancellation via the kernel's TaskStream system.
 
 Kernel provides the harness; apps provide the tests.
 
-Quick start:
+Quick start — pass runner(s) to create_service:
+
+    # my_app/main.py
+    app = create_service(
+        name="my_app",
+        routers=[router],
+        config=config,
+        test_runners=[run_functional_tests],
+    )
+    # → auto-mounts POST /test/functional-tests (admin only, SSE, cancellable)
+
+Runner signature:
 
     # my_app/test_runner.py
     from app_kernel.testing import TestReport, TestApiClient
@@ -17,7 +28,7 @@ Quick start:
         async def create_widget(self, name):
             return await self.post("/widgets", json={"name": name})
 
-    async def run_functional_tests(base_url, auth_token, **kwargs):
+    async def run_functional_tests(base_url: str, auth_token: str):
         stream = TaskStream("functional-test")
         yield stream.task_id_event()
         
@@ -30,24 +41,13 @@ Quick start:
         stream(report.summary_line())
         yield stream.log()
         yield stream.complete(report.all_passed, report=report.to_dict())
-
-    # my_app/routes/test.py
-    from app_kernel.testing import create_test_router
-    from ..test_runner import run_functional_tests
-
-    router = create_test_router(
-        runner_fn=run_functional_tests,
-        required_env=["MY_API_KEY"],
-    )
 """
 
 from .report import TestReport
 from .client import TestApiClient, consume_sse
-from .router import create_test_router
 
 __all__ = [
     "TestReport",
     "TestApiClient",
     "consume_sse",
-    "create_test_router",
 ]

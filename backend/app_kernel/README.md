@@ -27,7 +27,7 @@ class MyClient(TestApiClient):
         return await self.delete(f"/widgets/{widget_id}")
 
 
-async def run_functional_tests(base_url, auth_token, **kwargs):
+async def run_functional_tests(base_url: str, auth_token: str):
     stream = TaskStream("functional-test")
     yield stream.task_id_event()
     
@@ -67,53 +67,43 @@ async def run_functional_tests(base_url, auth_token, **kwargs):
 
 ### 2. Wire it up
 
-**Option A: Auto-mount via `create_service` (recommended)**
-
 ```python
 # main.py
-from app_kernel.bootstrap import create_service, ServiceConfig
+from app_kernel import create_service, ServiceConfig
 from .test_runner import run_functional_tests
 
 app = create_service(
     name="my_service",
     routers=[widgets_router],
     config=ServiceConfig.from_env(),
-    test_runner=run_functional_tests,
-    test_required_env=["MY_API_KEY"],
+    test_runners=[run_functional_tests],
 )
-# POST /test/functional is now live (admin only)
+# → POST /test/functional-tests is now live (admin only, SSE, cancellable)
 ```
 
-**Option B: Auto-mount via `init_app_kernel`**
+Endpoint names are derived from function names: strip `run_` prefix, replace `_` with `-`.
+
+| Function name | Endpoint |
+|---------------|----------|
+| `run_functional_tests` | `POST /test/functional-tests` |
+| `run_smoke` | `POST /test/smoke` |
+| `run_integration_suite` | `POST /test/integration-suite` |
+
+Multiple runners are supported:
 
 ```python
-from app_kernel.app import init_app_kernel
-
-init_app_kernel(
-    app, settings,
-    test_runner=run_functional_tests,
-    test_required_env=["MY_API_KEY"],
+app = create_service(
+    ...
+    test_runners=[run_functional_tests, run_smoke],
 )
-```
-
-**Option C: Manual route (full control)**
-
-```python
-# routes/test.py
-from app_kernel.testing import create_test_router
-from ..test_runner import run_functional_tests
-
-router = create_test_router(
-    runner_fn=run_functional_tests,
-    required_env=["MY_API_KEY"],
-    extra_kwargs_fn=lambda req: {"services_path": "/path/to/services"},
-)
+# → POST /test/functional-tests
+# → POST /test/smoke
 ```
 
 ### 3. Run tests
 
 ```bash
-curl -X POST http://localhost:8000/test/functional \
+curl -X POST http://localhost:8000/test/functional-tests \
   -H "Authorization: Bearer <admin_token>" \
   --no-buffer
 ```
@@ -140,6 +130,16 @@ Cancel mid-flight:
 curl -X POST http://localhost:8000/tasks/functional-test-a1b2c3d4/cancel \
   -H "Authorization: Bearer <admin_token>"
 ```
+
+## Runner Contract
+
+**Signature:** `async def my_runner(base_url: str, auth_token: str) -> AsyncIterator[str]`
+
+The kernel injects:
+- `base_url` — detected from the incoming request (e.g. `http://localhost:8000/api/v1`)
+- `auth_token` — the admin's bearer token
+
+Everything else (env var checks, path resolution, external config) is the runner's responsibility. If something's wrong, raise early — before the first `yield`.
 
 ## SSE-Consuming Client
 
@@ -174,7 +174,7 @@ Kernel-standard events get special handling:
 The `on_log` callback lets you forward inner progress to an outer stream:
 
 ```python
-async def run_tests(base_url, auth_token, **kwargs):
+async def run_tests(base_url: str, auth_token: str):
     stream = TaskStream("functional-test")
     api = MyClient(base_url, auth_token, outer_task_id=stream.task_id)
     
@@ -186,20 +186,9 @@ async def run_tests(base_url, auth_token, **kwargs):
 
 ## Configuration
 
-### Feature Settings
-
 | Setting | Default | Env Var | Description |
 |---------|---------|---------|-------------|
-| `enable_test_routes` | `False` | `KERNEL_ENABLE_TESTS` | Enable test endpoint (auto-set when `test_runner` provided to `create_service`) |
-| `test_prefix` | `"/test"` | — | URL prefix for test routes |
-
-### create_service / init_app_kernel params
-
-| Param | Type | Description |
-|-------|------|-------------|
-| `test_runner` | `Callable[..., AsyncIterator[str]]` | Async generator yielding SSE events. Signature: `(base_url, auth_token, **kwargs)` |
-| `test_required_env` | `list[str]` | Env vars checked before streaming (e.g. `["DO_TOKEN", "CF_TOKEN"]`) |
-| `test_extra_kwargs_fn` | `Callable[[Request], dict]` | Builds extra kwargs passed to test_runner from the request |
+| `enable_test_routes` | `False` | `KERNEL_ENABLE_TESTS` | Enable test endpoints. Auto-set `True` when `test_runners` is provided to `create_service`. |
 
 ---
 
@@ -308,34 +297,6 @@ Consume an SSE stream from an httpx response with cancel propagation.
 **Returns:** `dict` — At minimum `{"success": bool, "_logs": list}`. Complete event data merged in. Any app-specific events captured as `result[event_name] = data`.
 
 **Raises:** `Cancelled` if outer task was cancelled during consumption.
-
-</details>
-
-<br>
-
-</div>
-
-
-<div style="background-color:#f8f9fa; border:1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 24px;margin-top: 24px;">
-
-### function `create_test_router`
-
-Factory that creates a test router with admin gating, base_url detection, and StreamingResponse wrapping.
-
-<details>
-<summary><strong>Signature</strong></summary>
-
-| Param | Type | Default | Description |
-|-------|------|---------|-------------|
-| `runner_fn` | `Callable[..., AsyncIterator[str]]` | *(required)* | Async generator yielding SSE events. Signature: `(base_url, auth_token, **kwargs)`. |
-| `required_env` | `list[str]` | `None` | Env vars that must be set (checked before streaming). |
-| `prefix` | `str` | `"/test"` | URL prefix for the router. |
-| `require_admin` | `bool` | `True` | Require admin role to run tests. |
-| `summary` | `str` | `"Run functional tests"` | OpenAPI summary. |
-| `description` | `str` | `None` | OpenAPI description (auto-generated if None). |
-| `extra_kwargs_fn` | `Callable[[Request], dict]` | `None` | Builds extra kwargs from request, passed to runner_fn. |
-
-**Returns:** `APIRouter` — Ready to include in app. Mounts `POST {prefix}/functional`.
 
 </details>
 

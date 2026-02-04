@@ -1,30 +1,19 @@
 """
-Test router factory.
+Test router factory (internal).
 
-Creates the /test/functional endpoint with admin gating, base_url detection,
-and StreamingResponse wrapping. Apps just provide the runner function.
+Creates POST /test/{name} endpoints from a list of runner functions.
+Endpoint names derived from function names: run_functional_tests → POST /test/functional-tests.
 
-Usage:
-    from app_kernel.testing import create_test_router
-    from .my_tests import run_functional_tests
+Each endpoint gets: admin gate, bearer token extraction, base_url detection,
+SSE StreamingResponse wrapping, and cancel support via TaskStream.
 
-    router = create_test_router(
-        runner_fn=run_functional_tests,
-        required_env=["DO_TOKEN", "CF_TOKEN"],
-    )
-
-The runner_fn signature must be:
-
-    async def run_functional_tests(
-        base_url: str,
-        auth_token: str,
-        **kwargs,
-    ) -> AsyncIterator[str]:
+Runner fn signature:
+    async def run_functional_tests(base_url: str, auth_token: str) -> AsyncIterator[str]:
         ...
 """
 
 import os
-from typing import AsyncIterator, Callable, List, Optional
+from typing import AsyncIterator, Callable, List
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -41,7 +30,7 @@ def _detect_base_url(request: Request) -> str:
     Build API base URL from the incoming request.
     
     Detects the API prefix by finding where /test/ starts in the path.
-    E.g. /api/v1/test/functional → base = http://host:port/api/v1
+    E.g. /api/v1/test/functional-tests → base = http://host:port/api/v1
     """
     override = os.environ.get("API_BASE_URL")
     if override:
@@ -58,81 +47,71 @@ def _detect_base_url(request: Request) -> str:
     return base
 
 
-def create_test_router(
-    runner_fn: Callable[..., AsyncIterator[str]],
-    required_env: List[str] = None,
-    prefix: str = "/test",
-    require_admin: bool = True,
-    summary: str = "Run functional tests",
-    description: str = None,
-    extra_kwargs_fn: Callable[[Request], dict] = None,
-) -> APIRouter:
+def _slug_from_fn(fn: Callable) -> str:
+    """Derive URL slug from function name.
+    
+    run_functional_tests → functional-tests
+    run_smoke            → smoke
+    my_tests             → my-tests
     """
-    Create a test router that mounts POST {prefix}/functional.
-    
-    Args:
-        runner_fn: Async generator that yields SSE events.
-            Signature: (base_url: str, auth_token: str, **kwargs) -> AsyncIterator[str]
-        required_env: Environment variables that must be set (checked before streaming).
-        prefix: URL prefix (default "/test").
-        require_admin: If True, require admin role (default True).
-        summary: OpenAPI summary for the endpoint.
-        description: OpenAPI description.
-        extra_kwargs_fn: Optional function(request) -> dict of extra kwargs
-            passed to runner_fn. Useful for app-specific context like services_path.
-    
-    Returns:
-        FastAPI APIRouter ready to include in app.
+    name = fn.__name__
+    if name.startswith("run_"):
+        name = name[4:]
+    return name.replace("_", "-")
+
+
+def _create_test_router(runners: List[Callable]) -> APIRouter:
     """
-    router = APIRouter(tags=["testing"], prefix=prefix)
-    required_env = required_env or []
+    Build a router with one POST /test/{slug} per runner function.
     
-    if description is None:
-        description = (
-            "Run functional tests against the running API. "
-            "Streams SSE events with progress logs and emits a final report. "
-            "Cancellable via POST /tasks/{task_id}/cancel."
-        )
+    Each endpoint: admin-only, extracts base_url + auth_token,
+    wraps the runner's SSE stream in a StreamingResponse.
+    """
+    router = APIRouter(tags=["testing"], prefix="/test")
     
-    @router.post("/functional", summary=summary, description=description)
-    async def run_functional_test(
-        request: Request,
-        user: UserIdentity = Depends(get_current_user),
-        credentials: HTTPAuthorizationCredentials = Depends(_bearer_scheme),
-    ):
-        # Admin gate
-        if require_admin and user.role != "admin":
-            raise HTTPException(403, "Functional tests require admin role")
+    for fn in runners:
+        slug = _slug_from_fn(fn)
         
-        # Validate required env vars
-        for env_name in required_env:
-            if not os.environ.get(env_name):
-                raise HTTPException(500, f"{env_name} not configured")
-        
-        base_url = _detect_base_url(request)
-        auth_token = credentials.credentials
-        
-        # Build kwargs
-        kwargs = {}
-        if extra_kwargs_fn:
-            kwargs = extra_kwargs_fn(request)
-        
-        async def stream():
-            async for event in runner_fn(
-                base_url=base_url,
-                auth_token=auth_token,
-                **kwargs,
+        # Closure needs its own fn reference
+        def _make_endpoint(runner_fn: Callable, endpoint_slug: str):
+            
+            @router.post(
+                f"/{endpoint_slug}",
+                summary=f"Run {endpoint_slug.replace('-', ' ')} tests",
+                description=(
+                    f"Run {endpoint_slug.replace('-', ' ')} against the running API. "
+                    "Streams SSE events with progress logs and emits a final report. "
+                    "Cancellable via POST /tasks/{{task_id}}/cancel."
+                ),
+            )
+            async def run_test(
+                request: Request,
+                user: UserIdentity = Depends(get_current_user),
+                credentials: HTTPAuthorizationCredentials = Depends(_bearer_scheme),
             ):
-                yield event
+                if user.role != "admin":
+                    raise HTTPException(403, "Test endpoints require admin role")
+                
+                base_url = _detect_base_url(request)
+                auth_token = credentials.credentials
+                
+                async def stream():
+                    async for event in runner_fn(
+                        base_url=base_url,
+                        auth_token=auth_token,
+                    ):
+                        yield event
+                
+                return StreamingResponse(
+                    stream(),
+                    media_type="text/event-stream",
+                    headers={
+                        "Cache-Control": "no-cache",
+                        "Connection": "keep-alive",
+                        "X-Accel-Buffering": "no",
+                    },
+                )
         
-        return StreamingResponse(
-            stream(),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no",
-            },
-        )
+        _make_endpoint(fn, slug)
     
     return router
