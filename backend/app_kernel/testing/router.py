@@ -25,26 +25,20 @@ from ..auth import get_current_user, UserIdentity
 _bearer_scheme = HTTPBearer(auto_error=False)
 
 
-def _detect_base_url(request: Request) -> str:
+def _detect_base_url(request: Request, api_prefix: str) -> str:
     """
-    Build API base URL from the incoming request.
+    Build API base URL from the incoming request + known api_prefix.
     
-    Detects the API prefix by finding where /test/ starts in the path.
-    E.g. /api/v1/test/functional-tests → base = http://host:port/api/v1
+    E.g. request to http://localhost:8000/test/functional-tests
+         with api_prefix="/api/v1"
+         → http://localhost:8000/api/v1
     """
     override = os.environ.get("API_BASE_URL")
     if override:
         return override.rstrip("/")
     
     base = str(request.base_url).rstrip("/")
-    path = request.url.path
-    
-    test_idx = path.find("/test/")
-    if test_idx > 0:
-        api_prefix = path[:test_idx]
-        return f"{base}{api_prefix}"
-    
-    return base
+    return f"{base}{api_prefix}"
 
 
 def _slug_from_fn(fn: Callable) -> str:
@@ -60,12 +54,16 @@ def _slug_from_fn(fn: Callable) -> str:
     return name.replace("_", "-")
 
 
-def _create_test_router(runners: List[Callable]) -> APIRouter:
+def _create_test_router(runners: List[Callable], api_prefix: str = "/api/v1") -> APIRouter:
     """
     Build a router with one POST /test/{slug} per runner function.
     
     Each endpoint: admin-only, extracts base_url + auth_token,
     wraps the runner's SSE stream in a StreamingResponse.
+    
+    Args:
+        runners: List of async generator functions.
+        api_prefix: API prefix for building base_url (e.g. "/api/v1").
     """
     router = APIRouter(tags=["testing"], prefix="/test")
     
@@ -92,7 +90,7 @@ def _create_test_router(runners: List[Callable]) -> APIRouter:
                 if user.role != "admin":
                     raise HTTPException(403, "Test endpoints require admin role")
                 
-                base_url = _detect_base_url(request)
+                base_url = _detect_base_url(request, api_prefix)
                 auth_token = credentials.credentials
                 
                 async def stream():

@@ -1191,6 +1191,7 @@ def create_service(
         setup_reliability_middleware=bool(cfg.redis_url),
         mount_routers=True,
         test_runners=test_runners,
+        api_prefix=api_prefix,
     )
     
     # Add request metrics middleware if enabled

@@ -139,6 +139,7 @@ def init_app_kernel(
     setup_reliability_middleware: bool = True,
     mount_routers: bool = True,  # Auto-mount kernel routers
     test_runners: Optional[List[Callable]] = None,  # Async generators for /test/* endpoints
+    api_prefix: str = "/api/v1",  # API prefix for test runner base_url detection
 ) -> None:
     """
     Initialize the app kernel. SIDE-EFFECTFUL.
@@ -170,6 +171,8 @@ def init_app_kernel(
         test_runners: List of async generators for test endpoints (admin only).
             Each fn signature: (base_url: str, auth_token: str) -> AsyncIterator[str]
             Auto-mounted at POST /test/{fn-name} (run_ prefix stripped, _ → -).
+        api_prefix: API prefix used by app routers (default: /api/v1).
+            Test runners receive base_url = {host}{api_prefix}.
     
     Returns:
         None - access components via app.state.kernel
@@ -363,6 +366,7 @@ def init_app_kernel(
             is_admin=is_admin,
             logger=logger,
             test_runners=test_runners,
+            api_prefix=api_prefix,
         )
     
     # =========================================================================
@@ -391,6 +395,7 @@ def _mount_kernel_routers(
     is_admin: Optional[Callable],
     logger,
     test_runners: Optional[List[Callable]] = None,
+    api_prefix: str = "/api/v1",
 ):
     """
     Mount kernel routers based on feature settings.
@@ -493,7 +498,7 @@ def _mount_kernel_routers(
     if features.enable_test_routes and test_runners:
         from .testing.router import _create_test_router
         
-        test_router = _create_test_router(test_runners)
+        test_router = _create_test_router(test_runners, api_prefix=api_prefix)
         app.include_router(test_router, prefix=prefix)
         from .testing.router import _slug_from_fn
         slugs = [_slug_from_fn(fn) for fn in test_runners]
