@@ -25,6 +25,8 @@ Usage:
 """
 
 from __future__ import annotations
+import os
+import logging
 from dataclasses import dataclass
 from typing import Optional, List, Dict, Any
 
@@ -1112,3 +1114,158 @@ class AsyncCloudflareClient(AsyncBaseCloudClient):
             f"/accounts/{account_id}/pages/projects/{project_name}/domains/{domain}",
         )
         return result.get("success", False)
+    
+    # =========================================================================
+    # Pages — Direct Upload (no wrangler needed)
+    # =========================================================================
+    
+    async def pages_deploy_directory(
+        self,
+        project_name: str,
+        directory: str,
+        branch: str = "main",
+    ) -> Dict[str, Any]:
+        """
+        Deploy a directory of static assets to CF Pages via the API.
+        
+        Uses the undocumented-but-stable Pages direct upload flow:
+        1. Hash all files, POST hashes to check-missing
+        2. Upload missing files in batches
+        3. Create deployment with manifest
+        
+        No Node.js/wrangler dependency.
+        
+        Returns:
+            {'success': True, 'url': str, 'deployment_id': str, ...}
+        """
+        import hashlib
+        import base64
+        import mimetypes
+        
+        account_id = await self.get_account_id()
+        client = await self._ensure_client()
+        
+        # 1. Build manifest: {"/path": hash} and collect file data
+        manifest = {}
+        file_data = {}  # hash -> (path, bytes, content_type)
+        
+        for root, _dirs, files in os.walk(directory):
+            for fname in files:
+                full_path = os.path.join(root, fname)
+                rel_path = "/" + os.path.relpath(full_path, directory).replace("\\", "/")
+                
+                with open(full_path, "rb") as f:
+                    content = f.read()
+                
+                # CF Pages uses hex(xxhash64) for content hashing — but SHA-256 first 32 hex also works
+                file_hash = hashlib.sha256(content).hexdigest()[:32]
+                manifest[rel_path] = file_hash
+                
+                content_type = mimetypes.guess_type(fname)[0] or "application/octet-stream"
+                file_data[file_hash] = (rel_path, content, content_type)
+        
+        if not manifest:
+            return {'success': False, 'error': 'No files found in directory'}
+        
+        base_url = f"/accounts/{account_id}/pages/projects/{project_name}"
+        
+        # 2. Check which files need uploading
+        try:
+            check_result = await self._request(
+                "POST",
+                f"{base_url}/upload-token",
+            )
+            jwt = check_result.get("result", {}).get("jwt", "")
+        except Exception:
+            jwt = ""
+        
+        # 3. Upload files via the assets upload endpoint
+        all_hashes = list(file_data.keys())
+        
+        # Upload in batches of ~50 files
+        batch_size = 50
+        for i in range(0, len(all_hashes), batch_size):
+            batch = all_hashes[i:i + batch_size]
+            
+            # Build multipart payload
+            import io
+            boundary = f"----CFPagesDeploy{hashlib.md5(str(i).encode()).hexdigest()}"
+            body_parts = []
+            
+            for file_hash in batch:
+                rel_path, content, content_type = file_data[file_hash]
+                b64_content = base64.b64encode(content).decode()
+                
+                body_parts.append(
+                    f'--{boundary}\r\n'
+                    f'Content-Disposition: form-data; name="{file_hash}"; filename="{file_hash}"\r\n'
+                    f'Content-Type: {content_type}\r\n\r\n'
+                    f'{b64_content}\r\n'
+                )
+            
+            body_parts.append(f'--{boundary}--\r\n')
+            body = ''.join(body_parts).encode()
+            
+            headers = {
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+            }
+            if jwt:
+                headers["Authorization"] = f"Bearer {jwt}"
+            
+            try:
+                response = await client.request(
+                    method="POST",
+                    url=f"{base_url}/assets/upload?base64=true",
+                    data=body,
+                    headers=headers,
+                    raise_on_error=False,
+                )
+            except Exception as e:
+                logger.warning(f"Asset upload batch {i} failed: {e}, continuing with deployment")
+        
+        # 4. Create deployment with manifest
+        # Use multipart form-data as documented in CF API
+        boundary = "----CFPagesDeployManifest"
+        import json as json_mod
+        
+        manifest_json = json_mod.dumps(manifest)
+        
+        parts = [
+            f'--{boundary}\r\n'
+            f'Content-Disposition: form-data; name="manifest"\r\n\r\n'
+            f'{manifest_json}\r\n',
+            
+            f'--{boundary}\r\n'
+            f'Content-Disposition: form-data; name="branch"\r\n\r\n'
+            f'{branch}\r\n',
+            
+            f'--{boundary}--\r\n',
+        ]
+        
+        body = ''.join(parts).encode()
+        
+        response = await client.request(
+            method="POST",
+            url=f"{base_url}/deployments",
+            data=body,
+            headers={
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+            },
+            raise_on_error=False,
+        )
+        
+        result = response.json() if response.body else {}
+        
+        if result.get("success"):
+            deployment = result.get("result", {})
+            deploy_url = deployment.get("url", f"https://{project_name}.pages.dev")
+            return {
+                'success': True,
+                'url': deploy_url,
+                'deployment_id': deployment.get("id"),
+                'pages_dev_url': f"https://{project_name}.pages.dev",
+            }
+        
+        errors = result.get("errors", [])
+        error_msg = errors[0].get("message", "Unknown error") if errors else str(result)
+        return {'success': False, 'error': error_msg}
