@@ -96,7 +96,7 @@ class DatabaseManager:
             )
         
         self._db: ConnectionManager = DatabaseFactory.create_database(self._db_type, self._config)
-        self._async_conn: Optional[AsyncConnection] = None
+        self._async_cm = None  # For backwards-compat __aenter__/__aexit__ (single-caller only)
         self._sync_conn: Optional[SyncConnection] = None
     
     # region ---- Factory ----
@@ -138,15 +138,44 @@ class DatabaseManager:
     # endregion
     
     # region ---- Async Context Manager ----
+    #
+    # WARNING: DatabaseManager is often used as a shared, module-level singleton
+    # (e.g. app_kernel's _db_manager). The __aenter__/__aexit__ pattern CANNOT
+    # safely store per-call state on self because concurrent callers would
+    # overwrite each other's connections.
+    #
+    # Instead, use connection() which returns a proper per-call context manager,
+    # or use __aenter__/__aexit__ ONLY for single-caller scenarios (scripts, tests).
+    #
+    # For concurrent use (FastAPI, workers), always use:
+    #     async with db_manager.connection() as conn: ...
+    
+    @contextlib.asynccontextmanager
+    async def connection(self):
+        """
+        Get a connection from the pool. Safe for concurrent use.
+        
+        This is the recommended way to get connections from a shared DatabaseManager.
+        Each call gets its own connection, properly released on exit.
+        
+        Usage:
+            async with db_manager.connection() as conn:
+                await conn.find_entities("users")
+        """
+        async with self._db.async_connection() as conn:
+            yield conn
     
     async def __aenter__(self) -> AsyncConnection:
-        self._async_conn = await self._db.get_async_connection()
-        return self._async_conn
+        # For backwards compatibility. Safe ONLY when DatabaseManager is not shared.
+        # For shared instances, use db_manager.connection() instead.
+        self._async_cm = self._db.async_connection()
+        return await self._async_cm.__aenter__()
     
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
-        if self._async_conn:
-            await self._db.release_async_connection(self._async_conn)
-            self._async_conn = None
+        cm = getattr(self, '_async_cm', None)
+        if cm:
+            await cm.__aexit__(exc_type, exc_val, exc_tb)
+            self._async_cm = None
     
     # endregion
     

@@ -189,11 +189,14 @@ async def _base_connection():
     """
     Internal: get a raw connection from the pool, with audit wrapping if enabled.
     All public connection providers build on this.
+    
+    Uses _db_manager.connection() (not `async with _db_manager`) to ensure
+    each caller gets its own connection — safe for concurrent requests.
     """
     if _db_manager is None:
         raise RuntimeError("Database not initialized. Set database_url in ServiceConfig.")
     
-    async with _db_manager as conn:
+    async with _db_manager.connection() as conn:
         if _audit_redis_url and _audit_app_name:
             yield AuditWrappedConnection(conn, _audit_redis_url, _audit_app_name)
         else:
