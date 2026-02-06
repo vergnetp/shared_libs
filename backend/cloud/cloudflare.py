@@ -102,6 +102,7 @@ class CloudflareClient(BaseCloudClient):
     ):
         super().__init__(api_token, config)
         self._zone_cache: Dict[str, str] = {}  # domain -> zone_id
+        self._account_id: Optional[str] = None
     
     # =========================================================================
     # HTTP Helpers
@@ -478,6 +479,149 @@ class CloudflareClient(BaseCloudClient):
         """Delete a DNS record by ID."""
         self._request("DELETE", f"/zones/{zone_id}/dns_records/{record_id}")
         return True
+    
+    # =========================================================================
+    # Account
+    # =========================================================================
+    
+    def get_account_id(self) -> str:
+        """Get the account ID for this token (cached after first call)."""
+        if self._account_id:
+            return self._account_id
+        
+        result = self._request("GET", "/accounts")
+        accounts = result.get("result", [])
+        
+        if not accounts:
+            raise CloudflareError("No accounts found for this API token")
+        
+        self._account_id = accounts[0]["id"]
+        return self._account_id
+    
+    # =========================================================================
+    # Pages — Internal
+    # =========================================================================
+    
+    def _request_safe(
+        self,
+        method: str,
+        path: str,
+        data: Dict = None,
+        params: Dict = None,
+    ) -> Dict[str, Any]:
+        """Like _request but returns raw CF response dict instead of raising."""
+        response = self._client.request(
+            method=method,
+            url=path,
+            json=data,
+            params=params,
+            raise_on_error=False,
+        )
+        return response.json() if response.body else {}
+    
+    # =========================================================================
+    # Pages — Project Management
+    # =========================================================================
+    
+    def pages_create_project(
+        self,
+        project_name: str,
+        production_branch: str = "main",
+    ) -> Dict[str, Any]:
+        """Create a CF Pages project (idempotent)."""
+        account_id = self.get_account_id()
+        result = self._request_safe(
+            "POST",
+            f"/accounts/{account_id}/pages/projects",
+            data={
+                "name": project_name,
+                "production_branch": production_branch,
+            },
+        )
+        
+        if result.get("success"):
+            return {'success': True, 'project_name': project_name, 'already_existed': False, 'result': result.get('result')}
+        
+        errors = result.get("errors", [])
+        if any('already' in str(e).lower() or 'being used' in str(e).lower() for e in errors):
+            return {'success': True, 'project_name': project_name, 'already_existed': True}
+        
+        return {'success': False, 'errors': errors}
+    
+    def pages_get_project(self, project_name: str) -> Optional[Dict[str, Any]]:
+        """Get Pages project info. Returns None if not found."""
+        account_id = self.get_account_id()
+        result = self._request_safe(
+            "GET",
+            f"/accounts/{account_id}/pages/projects/{project_name}",
+        )
+        if result.get("success"):
+            return result.get("result")
+        return None
+    
+    def pages_delete_project(self, project_name: str) -> bool:
+        """Delete a CF Pages project and all its deployments."""
+        account_id = self.get_account_id()
+        result = self._request_safe(
+            "DELETE",
+            f"/accounts/{account_id}/pages/projects/{project_name}",
+        )
+        return result.get("success", False)
+    
+    def pages_list_deployments(self, project_name: str) -> List[Dict[str, Any]]:
+        """List all deployments for a Pages project."""
+        account_id = self.get_account_id()
+        result = self._request_safe(
+            "GET",
+            f"/accounts/{account_id}/pages/projects/{project_name}/deployments",
+        )
+        if result.get("success"):
+            return result.get("result", [])
+        return []
+    
+    def pages_rollback(self, project_name: str, deployment_id: str) -> Dict[str, Any]:
+        """Rollback to a previous deployment."""
+        account_id = self.get_account_id()
+        result = self._request_safe(
+            "POST",
+            f"/accounts/{account_id}/pages/projects/{project_name}/deployments/{deployment_id}/rollback",
+        )
+        
+        if result.get("success"):
+            return {'success': True, 'deployment_id': deployment_id}
+        
+        return {'success': False, 'errors': result.get("errors", [])}
+    
+    # =========================================================================
+    # Pages — Custom Domains
+    # =========================================================================
+    
+    def pages_add_domain(self, project_name: str, domain: str) -> Dict[str, Any]:
+        """Bind a custom domain to a Pages project."""
+        account_id = self.get_account_id()
+        result = self._request_safe(
+            "POST",
+            f"/accounts/{account_id}/pages/projects/{project_name}/domains",
+            data={"name": domain},
+        )
+        
+        if result.get("success"):
+            return {'success': True, 'domain': domain, 'already_existed': False}
+        
+        errors = result.get("errors", [])
+        if any('already' in str(e).lower() for e in errors):
+            return {'success': True, 'domain': domain, 'already_existed': True}
+        
+        return {'success': False, 'errors': errors}
+    
+    def pages_remove_domain(self, project_name: str, domain: str) -> bool:
+        """Remove a custom domain from a Pages project."""
+        account_id = self.get_account_id()
+        result = self._request_safe(
+            "DELETE",
+            f"/accounts/{account_id}/pages/projects/{project_name}/domains/{domain}",
+        )
+        return result.get("success", False)
 
 
 # =============================================================================
@@ -503,6 +647,7 @@ class AsyncCloudflareClient(AsyncBaseCloudClient):
     ):
         super().__init__(api_token, config)
         self._zone_cache: Dict[str, str] = {}
+        self._account_id: Optional[str] = None
     
     # =========================================================================
     # HTTP Helpers
@@ -784,3 +929,186 @@ class AsyncCloudflareClient(AsyncBaseCloudClient):
         zone_id = await self.get_zone_id(domain)
         records = await self.list_records(zone_id=zone_id, record_type="A", name=domain)
         return [r.content for r in records]
+    
+    # =========================================================================
+    # Account
+    # =========================================================================
+    
+    async def get_account_id(self) -> str:
+        """
+        Get the account ID for this token (cached after first call).
+        Removes the need for CF_ACCOUNT_ID env variable.
+        """
+        if self._account_id:
+            return self._account_id
+        
+        result = await self._request("GET", "/accounts")
+        accounts = result.get("result", [])
+        
+        if not accounts:
+            raise CloudflareError("No accounts found for this API token")
+        
+        self._account_id = accounts[0]["id"]
+        return self._account_id
+    
+    # =========================================================================
+    # Pages — Project Management
+    # =========================================================================
+    
+    async def _request_safe(
+        self,
+        method: str,
+        path: str,
+        data: Dict = None,
+        params: Dict = None,
+    ) -> Dict[str, Any]:
+        """
+        Like _request but returns the raw CF response dict instead of raising.
+        Used for Pages endpoints where 'errors' may be expected (e.g. already exists).
+        """
+        client = await self._ensure_client()
+        
+        response = await client.request(
+            method=method,
+            url=path,
+            json=data,
+            params=params,
+            raise_on_error=False,
+        )
+        
+        return response.json() if response.body else {}
+    
+    async def pages_create_project(
+        self,
+        project_name: str,
+        production_branch: str = "main",
+    ) -> Dict[str, Any]:
+        """
+        Create a CF Pages project (idempotent).
+        
+        Returns:
+            {'success': True, 'project_name': ..., 'already_existed': bool}
+        """
+        account_id = await self.get_account_id()
+        result = await self._request_safe(
+            "POST",
+            f"/accounts/{account_id}/pages/projects",
+            data={
+                "name": project_name,
+                "production_branch": production_branch,
+            },
+        )
+        
+        if result.get("success"):
+            return {'success': True, 'project_name': project_name, 'already_existed': False, 'result': result.get('result')}
+        
+        errors = result.get("errors", [])
+        if any('already' in str(e).lower() or 'being used' in str(e).lower() for e in errors):
+            return {'success': True, 'project_name': project_name, 'already_existed': True}
+        
+        return {'success': False, 'errors': errors}
+    
+    async def pages_get_project(
+        self,
+        project_name: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Get Pages project info. Returns None if not found."""
+        account_id = await self.get_account_id()
+        result = await self._request_safe(
+            "GET",
+            f"/accounts/{account_id}/pages/projects/{project_name}",
+        )
+        if result.get("success"):
+            return result.get("result")
+        return None
+    
+    async def pages_delete_project(
+        self,
+        project_name: str,
+    ) -> bool:
+        """Delete a CF Pages project and all its deployments."""
+        account_id = await self.get_account_id()
+        result = await self._request_safe(
+            "DELETE",
+            f"/accounts/{account_id}/pages/projects/{project_name}",
+        )
+        return result.get("success", False)
+    
+    async def pages_list_deployments(
+        self,
+        project_name: str,
+    ) -> List[Dict[str, Any]]:
+        """List all deployments for a Pages project."""
+        account_id = await self.get_account_id()
+        result = await self._request_safe(
+            "GET",
+            f"/accounts/{account_id}/pages/projects/{project_name}/deployments",
+        )
+        if result.get("success"):
+            return result.get("result", [])
+        return []
+    
+    async def pages_rollback(
+        self,
+        project_name: str,
+        deployment_id: str,
+    ) -> Dict[str, Any]:
+        """
+        Rollback to a previous deployment.
+        CF Pages keeps all deployments — this promotes an older one to production.
+        """
+        account_id = await self.get_account_id()
+        result = await self._request_safe(
+            "POST",
+            f"/accounts/{account_id}/pages/projects/{project_name}/deployments/{deployment_id}/rollback",
+        )
+        
+        if result.get("success"):
+            return {'success': True, 'deployment_id': deployment_id}
+        
+        return {'success': False, 'errors': result.get("errors", [])}
+    
+    # =========================================================================
+    # Pages — Custom Domains (async)
+    # =========================================================================
+    
+    async def pages_add_domain(
+        self,
+        project_name: str,
+        domain: str,
+    ) -> Dict[str, Any]:
+        """
+        Bind a custom domain to a Pages project.
+        CF handles DNS + SSL when domain is already on CF.
+        
+        Returns:
+            {'success': True, 'domain': ..., 'already_existed': bool}
+        """
+        account_id = await self.get_account_id()
+        result = await self._request_safe(
+            "POST",
+            f"/accounts/{account_id}/pages/projects/{project_name}/domains",
+            data={"name": domain},
+        )
+        
+        if result.get("success"):
+            return {'success': True, 'domain': domain, 'already_existed': False}
+        
+        errors = result.get("errors", [])
+        if any('already' in str(e).lower() for e in errors):
+            return {'success': True, 'domain': domain, 'already_existed': True}
+        
+        return {'success': False, 'errors': errors}
+    
+    async def pages_remove_domain(
+        self,
+        project_name: str,
+        domain: str,
+    ) -> bool:
+        """Remove a custom domain from a Pages project."""
+        account_id = await self.get_account_id()
+        result = await self._request_safe(
+            "DELETE",
+            f"/accounts/{account_id}/pages/projects/{project_name}/domains/{domain}",
+        )
+        return result.get("success", False)
