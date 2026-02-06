@@ -1,5 +1,5 @@
 """
-Cloudflare Client - DNS record management.
+Cloudflare Client - DNS record management + Pages project management.
 
 Sync and async clients with retry, circuit breaker, and tracing.
 
@@ -9,6 +9,7 @@ Handles:
 - Zone lookup
 - DNS record cleanup
 - Multi-server setup (FREE load balancing via multiple A records)
+- CF Pages project/domain management (deploy via wrangler CLI)
 
 Usage:
     # Sync
@@ -22,6 +23,12 @@ Usage:
     
     async with AsyncCloudflareClient(api_token="...") as cf:
         await cf.upsert_a_record(domain="api.example.com", ip="1.2.3.4")
+
+Note:
+    Pages deployment (uploading assets) should use wrangler CLI:
+        wrangler pages deploy <dir> --project-name <name>
+    
+    This client handles Pages project/domain CRUD, not asset uploads.
 """
 
 from __future__ import annotations
@@ -134,6 +141,23 @@ class CloudflareClient(BaseCloudClient):
             raise CloudflareError(msg, errors, response.status_code)
         
         return result
+    
+    def _request_safe(
+        self,
+        method: str,
+        path: str,
+        data: Dict = None,
+        params: Dict = None,
+    ) -> Dict[str, Any]:
+        """Like _request but returns raw CF response dict instead of raising."""
+        response = self._client.request(
+            method=method,
+            url=path,
+            json=data,
+            params=params,
+            raise_on_error=False,
+        )
+        return response.json() if response.body else {}
     
     # =========================================================================
     # Zone Management
@@ -501,27 +525,6 @@ class CloudflareClient(BaseCloudClient):
         return self._account_id
     
     # =========================================================================
-    # Pages — Internal
-    # =========================================================================
-    
-    def _request_safe(
-        self,
-        method: str,
-        path: str,
-        data: Dict = None,
-        params: Dict = None,
-    ) -> Dict[str, Any]:
-        """Like _request but returns raw CF response dict instead of raising."""
-        response = self._client.request(
-            method=method,
-            url=path,
-            json=data,
-            params=params,
-            raise_on_error=False,
-        )
-        return response.json() if response.body else {}
-    
-    # =========================================================================
     # Pages — Project Management
     # =========================================================================
     
@@ -569,6 +572,17 @@ class CloudflareClient(BaseCloudClient):
             f"/accounts/{account_id}/pages/projects/{project_name}",
         )
         return result.get("success", False)
+    
+    def pages_list_projects(self) -> List[Dict[str, Any]]:
+        """List all Pages projects in the account."""
+        account_id = self.get_account_id()
+        result = self._request_safe(
+            "GET",
+            f"/accounts/{account_id}/pages/projects",
+        )
+        if result.get("success"):
+            return result.get("result", [])
+        return []
     
     def pages_list_deployments(self, project_name: str) -> List[Dict[str, Any]]:
         """List all deployments for a Pages project."""
@@ -637,6 +651,12 @@ class AsyncCloudflareClient(AsyncBaseCloudClient):
     Usage:
         async with AsyncCloudflareClient(api_token="...") as cf:
             await cf.upsert_a_record(domain="api.example.com", ip="1.2.3.4")
+    
+    Note:
+        For Pages asset deployment, use wrangler CLI:
+            wrangler pages deploy <directory> --project-name <name>
+        
+        This client handles Pages project/domain CRUD, not asset uploads.
     """
     
     PROVIDER = "Cloudflare"
@@ -663,7 +683,6 @@ class AsyncCloudflareClient(AsyncBaseCloudClient):
         params: Dict = None,
     ) -> Dict[str, Any]:
         """Make API request."""
-        # Ensure cached client is initialized (lazy init for async)
         client = await self._ensure_client()
         
         response = await client.request(
@@ -682,6 +701,29 @@ class AsyncCloudflareClient(AsyncBaseCloudClient):
             raise CloudflareError(msg, errors, response.status_code)
         
         return result
+    
+    async def _request_safe(
+        self,
+        method: str,
+        path: str,
+        data: Dict = None,
+        params: Dict = None,
+    ) -> Dict[str, Any]:
+        """
+        Like _request but returns the raw CF response dict instead of raising.
+        Used for Pages endpoints where 'errors' may be expected (e.g. already exists).
+        """
+        client = await self._ensure_client()
+        
+        response = await client.request(
+            method=method,
+            url=path,
+            json=data,
+            params=params,
+            raise_on_error=False,
+        )
+        
+        return response.json() if response.body else {}
     
     # =========================================================================
     # Zone Management
@@ -937,10 +979,7 @@ class AsyncCloudflareClient(AsyncBaseCloudClient):
     # =========================================================================
     
     async def get_account_id(self) -> str:
-        """
-        Get the account ID for this token (cached after first call).
-        Removes the need for CF_ACCOUNT_ID env variable.
-        """
+        """Get the account ID for this token (cached after first call)."""
         if self._account_id:
             return self._account_id
         
@@ -956,29 +995,6 @@ class AsyncCloudflareClient(AsyncBaseCloudClient):
     # =========================================================================
     # Pages — Project Management
     # =========================================================================
-    
-    async def _request_safe(
-        self,
-        method: str,
-        path: str,
-        data: Dict = None,
-        params: Dict = None,
-    ) -> Dict[str, Any]:
-        """
-        Like _request but returns the raw CF response dict instead of raising.
-        Used for Pages endpoints where 'errors' may be expected (e.g. already exists).
-        """
-        client = await self._ensure_client()
-        
-        response = await client.request(
-            method=method,
-            url=path,
-            json=data,
-            params=params,
-            raise_on_error=False,
-        )
-        
-        return response.json() if response.body else {}
     
     async def pages_create_project(
         self,
@@ -1010,10 +1026,7 @@ class AsyncCloudflareClient(AsyncBaseCloudClient):
         
         return {'success': False, 'errors': errors}
     
-    async def pages_get_project(
-        self,
-        project_name: str,
-    ) -> Optional[Dict[str, Any]]:
+    async def pages_get_project(self, project_name: str) -> Optional[Dict[str, Any]]:
         """Get Pages project info. Returns None if not found."""
         account_id = await self.get_account_id()
         result = await self._request_safe(
@@ -1024,10 +1037,7 @@ class AsyncCloudflareClient(AsyncBaseCloudClient):
             return result.get("result")
         return None
     
-    async def pages_delete_project(
-        self,
-        project_name: str,
-    ) -> bool:
+    async def pages_delete_project(self, project_name: str) -> bool:
         """Delete a CF Pages project and all its deployments."""
         account_id = await self.get_account_id()
         result = await self._request_safe(
@@ -1036,10 +1046,18 @@ class AsyncCloudflareClient(AsyncBaseCloudClient):
         )
         return result.get("success", False)
     
-    async def pages_list_deployments(
-        self,
-        project_name: str,
-    ) -> List[Dict[str, Any]]:
+    async def pages_list_projects(self) -> List[Dict[str, Any]]:
+        """List all Pages projects in the account."""
+        account_id = await self.get_account_id()
+        result = await self._request_safe(
+            "GET",
+            f"/accounts/{account_id}/pages/projects",
+        )
+        if result.get("success"):
+            return result.get("result", [])
+        return []
+    
+    async def pages_list_deployments(self, project_name: str) -> List[Dict[str, Any]]:
         """List all deployments for a Pages project."""
         account_id = await self.get_account_id()
         result = await self._request_safe(
@@ -1050,11 +1068,7 @@ class AsyncCloudflareClient(AsyncBaseCloudClient):
             return result.get("result", [])
         return []
     
-    async def pages_rollback(
-        self,
-        project_name: str,
-        deployment_id: str,
-    ) -> Dict[str, Any]:
+    async def pages_rollback(self, project_name: str, deployment_id: str) -> Dict[str, Any]:
         """
         Rollback to a previous deployment.
         CF Pages keeps all deployments — this promotes an older one to production.
@@ -1071,14 +1085,10 @@ class AsyncCloudflareClient(AsyncBaseCloudClient):
         return {'success': False, 'errors': result.get("errors", [])}
     
     # =========================================================================
-    # Pages — Custom Domains (async)
+    # Pages — Custom Domains
     # =========================================================================
     
-    async def pages_add_domain(
-        self,
-        project_name: str,
-        domain: str,
-    ) -> Dict[str, Any]:
+    async def pages_add_domain(self, project_name: str, domain: str) -> Dict[str, Any]:
         """
         Bind a custom domain to a Pages project.
         CF handles DNS + SSL when domain is already on CF.
@@ -1102,11 +1112,7 @@ class AsyncCloudflareClient(AsyncBaseCloudClient):
         
         return {'success': False, 'errors': errors}
     
-    async def pages_remove_domain(
-        self,
-        project_name: str,
-        domain: str,
-    ) -> bool:
+    async def pages_remove_domain(self, project_name: str, domain: str) -> bool:
         """Remove a custom domain from a Pages project."""
         account_id = await self.get_account_id()
         result = await self._request_safe(
@@ -1114,158 +1120,3 @@ class AsyncCloudflareClient(AsyncBaseCloudClient):
             f"/accounts/{account_id}/pages/projects/{project_name}/domains/{domain}",
         )
         return result.get("success", False)
-    
-    # =========================================================================
-    # Pages — Direct Upload (no wrangler needed)
-    # =========================================================================
-    
-    async def pages_deploy_directory(
-        self,
-        project_name: str,
-        directory: str,
-        branch: str = "main",
-    ) -> Dict[str, Any]:
-        """
-        Deploy a directory of static assets to CF Pages via the API.
-        
-        Uses the undocumented-but-stable Pages direct upload flow:
-        1. Hash all files, POST hashes to check-missing
-        2. Upload missing files in batches
-        3. Create deployment with manifest
-        
-        No Node.js/wrangler dependency.
-        
-        Returns:
-            {'success': True, 'url': str, 'deployment_id': str, ...}
-        """
-        import hashlib
-        import base64
-        import mimetypes
-        
-        account_id = await self.get_account_id()
-        client = await self._ensure_client()
-        
-        # 1. Build manifest: {"/path": hash} and collect file data
-        manifest = {}
-        file_data = {}  # hash -> (path, bytes, content_type)
-        
-        for root, _dirs, files in os.walk(directory):
-            for fname in files:
-                full_path = os.path.join(root, fname)
-                rel_path = "/" + os.path.relpath(full_path, directory).replace("\\", "/")
-                
-                with open(full_path, "rb") as f:
-                    content = f.read()
-                
-                # CF Pages uses hex(xxhash64) for content hashing — but SHA-256 first 32 hex also works
-                file_hash = hashlib.sha256(content).hexdigest()[:32]
-                manifest[rel_path] = file_hash
-                
-                content_type = mimetypes.guess_type(fname)[0] or "application/octet-stream"
-                file_data[file_hash] = (rel_path, content, content_type)
-        
-        if not manifest:
-            return {'success': False, 'error': 'No files found in directory'}
-        
-        base_url = f"/accounts/{account_id}/pages/projects/{project_name}"
-        
-        # 2. Check which files need uploading
-        try:
-            check_result = await self._request(
-                "POST",
-                f"{base_url}/upload-token",
-            )
-            jwt = check_result.get("result", {}).get("jwt", "")
-        except Exception:
-            jwt = ""
-        
-        # 3. Upload files via the assets upload endpoint
-        all_hashes = list(file_data.keys())
-        
-        # Upload in batches of ~50 files
-        batch_size = 50
-        for i in range(0, len(all_hashes), batch_size):
-            batch = all_hashes[i:i + batch_size]
-            
-            # Build multipart payload
-            import io
-            boundary = f"----CFPagesDeploy{hashlib.md5(str(i).encode()).hexdigest()}"
-            body_parts = []
-            
-            for file_hash in batch:
-                rel_path, content, content_type = file_data[file_hash]
-                b64_content = base64.b64encode(content).decode()
-                
-                body_parts.append(
-                    f'--{boundary}\r\n'
-                    f'Content-Disposition: form-data; name="{file_hash}"; filename="{file_hash}"\r\n'
-                    f'Content-Type: {content_type}\r\n\r\n'
-                    f'{b64_content}\r\n'
-                )
-            
-            body_parts.append(f'--{boundary}--\r\n')
-            body = ''.join(body_parts).encode()
-            
-            headers = {
-                "Content-Type": f"multipart/form-data; boundary={boundary}",
-            }
-            if jwt:
-                headers["Authorization"] = f"Bearer {jwt}"
-            
-            try:
-                response = await client.request(
-                    method="POST",
-                    url=f"{base_url}/assets/upload?base64=true",
-                    data=body,
-                    headers=headers,
-                    raise_on_error=False,
-                )
-            except Exception as e:
-                logger.warning(f"Asset upload batch {i} failed: {e}, continuing with deployment")
-        
-        # 4. Create deployment with manifest
-        # Use multipart form-data as documented in CF API
-        boundary = "----CFPagesDeployManifest"
-        import json as json_mod
-        
-        manifest_json = json_mod.dumps(manifest)
-        
-        parts = [
-            f'--{boundary}\r\n'
-            f'Content-Disposition: form-data; name="manifest"\r\n\r\n'
-            f'{manifest_json}\r\n',
-            
-            f'--{boundary}\r\n'
-            f'Content-Disposition: form-data; name="branch"\r\n\r\n'
-            f'{branch}\r\n',
-            
-            f'--{boundary}--\r\n',
-        ]
-        
-        body = ''.join(parts).encode()
-        
-        response = await client.request(
-            method="POST",
-            url=f"{base_url}/deployments",
-            data=body,
-            headers={
-                "Content-Type": f"multipart/form-data; boundary={boundary}",
-            },
-            raise_on_error=False,
-        )
-        
-        result = response.json() if response.body else {}
-        
-        if result.get("success"):
-            deployment = result.get("result", {})
-            deploy_url = deployment.get("url", f"https://{project_name}.pages.dev")
-            return {
-                'success': True,
-                'url': deploy_url,
-                'deployment_id': deployment.get("id"),
-                'pages_dev_url': f"https://{project_name}.pages.dev",
-            }
-        
-        errors = result.get("errors", [])
-        error_msg = errors[0].get("message", "Unknown error") if errors else str(result)
-        return {'success': False, 'error': error_msg}
