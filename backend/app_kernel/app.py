@@ -332,28 +332,42 @@ def init_app_kernel(
         logger.info(f"Database: URL configured (call init_db_session with connection manager)")
     
     # =========================================================================
-    # 9. Setup reliability middleware (if Redis available)
+    # 9. Setup reliability middleware (always enabled, uses fakeredis fallback)
     # =========================================================================
-    if setup_reliability_middleware and settings.reliability.rate_limit_enabled and redis_config is not None:
+    if setup_reliability_middleware and settings.reliability.rate_limit_enabled:
         from .reliability.ratelimit import init_rate_limiter, RateLimitConfig
+        from .dev_deps import get_redis_client, is_fake_redis_url
         
         rate_config = RateLimitConfig(
             requests=settings.reliability.rate_limit_requests,
             window_seconds=settings.reliability.rate_limit_window_seconds,
         )
         
-        init_rate_limiter(redis_config, rate_config)
-        logger.info(f"Rate limiting: {settings.reliability.rate_limit_requests} req/{settings.reliability.rate_limit_window_seconds}s")
+        # Get Redis client (real or fakeredis)
+        redis_client = get_redis_client(settings.redis.url)
+        init_rate_limiter(redis_client, rate_config)
+        
+        if is_fake_redis_url(settings.redis.url):
+            logger.info(f"Rate limiting: {settings.reliability.rate_limit_requests} req/{settings.reliability.rate_limit_window_seconds}s (fakeredis)")
+        else:
+            logger.info(f"Rate limiting: {settings.reliability.rate_limit_requests} req/{settings.reliability.rate_limit_window_seconds}s (Redis)")
     
-    if setup_reliability_middleware and settings.reliability.idempotency_enabled and redis_config is not None:
+    if setup_reliability_middleware and settings.reliability.idempotency_enabled:
         from .reliability.idempotency import init_idempotency_checker, IdempotencyConfig
+        from .dev_deps import get_redis_client, is_fake_redis_url
         
         idempotency_config = IdempotencyConfig(
             ttl_seconds=settings.reliability.idempotency_ttl_seconds,
         )
         
-        init_idempotency_checker(redis_config, idempotency_config)
-        logger.info(f"Idempotency: TTL {settings.reliability.idempotency_ttl_seconds}s")
+        # Get Redis client (real or fakeredis) - reuse from rate limiter if same URL
+        redis_client = get_redis_client(settings.redis.url)
+        init_idempotency_checker(redis_client, idempotency_config)
+        
+        if is_fake_redis_url(settings.redis.url):
+            logger.info(f"Idempotency: TTL {settings.reliability.idempotency_ttl_seconds}s (fakeredis)")
+        else:
+            logger.info(f"Idempotency: TTL {settings.reliability.idempotency_ttl_seconds}s (Redis)")
     
     # =========================================================================
     # 10. Auto-mount kernel routers based on feature settings

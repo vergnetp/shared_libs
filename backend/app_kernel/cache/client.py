@@ -1,8 +1,8 @@
-"""Cache client - Redis with in-memory fallback."""
+"""Cache client - Redis with fakeredis fallback."""
 
 import json
 import time
-from typing import Any, Optional, Dict
+from typing import Any, Optional
 from collections import OrderedDict
 
 
@@ -61,7 +61,7 @@ class InMemoryCache:
 
 
 class RedisCache:
-    """Redis-backed cache."""
+    """Async Redis-backed cache."""
     
     def __init__(self, redis_client, prefix: str = "cache:"):
         self._redis = redis_client
@@ -140,10 +140,13 @@ class Cache:
         
         if self._redis_url:
             try:
-                import redis.asyncio as redis
-                client = redis.from_url(self._redis_url)
-                # Test connection
-                await client.ping()
+                from ..dev_deps import get_async_redis_client, is_fake_redis_url
+                client = get_async_redis_client(self._redis_url)
+                
+                # Test connection (skip for fakeredis)
+                if not is_fake_redis_url(self._redis_url):
+                    await client.ping()
+                
                 self._backend = RedisCache(client, self._prefix)
             except Exception as e:
                 # Fall back to in-memory

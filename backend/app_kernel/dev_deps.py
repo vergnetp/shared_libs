@@ -14,11 +14,16 @@ Container names:
 - appkernel-mysql
 
 Containers persist between app restarts.
+
+Redis Fallback Chain:
+1. Explicit REDIS_URL set and reachable → use it
+2. Localhost Redis running → use it  
+3. Docker available → start container
+4. Fallback to fakeredis (in-memory)
 """
 
 import asyncio
 import logging
-import os
 import shutil
 import socket
 import subprocess
@@ -41,7 +46,7 @@ def _is_port_open(host: str, port: int, timeout: float = 1.0) -> bool:
         result = sock.connect_ex((host, port))
         sock.close()
         return result == 0
-    except:
+    except Exception:
         return False
 
 
@@ -77,7 +82,7 @@ def _container_exists(name: str) -> bool:
             timeout=5,
         )
         return result.returncode == 0
-    except:
+    except Exception:
         return False
 
 
@@ -91,7 +96,7 @@ def _container_running(name: str) -> bool:
             timeout=5,
         )
         return result.returncode == 0 and result.stdout.strip() == "true"
-    except:
+    except Exception:
         return False
 
 
@@ -104,7 +109,7 @@ def _start_container(name: str) -> bool:
             timeout=10,
         )
         return result.returncode == 0
-    except:
+    except Exception:
         return False
 
 
@@ -138,55 +143,95 @@ async def _wait_for_port(host: str, port: int, timeout: float = 30.0) -> bool:
 
 REDIS_CONTAINER_NAME = "appkernel-redis"
 
+# Special URL indicating fakeredis mode
+REDIS_FAKE_URL = "fakeredis://"
 
-async def ensure_redis(redis_url: str) -> Tuple[bool, str]:
+
+def get_async_redis_client(url: str = None):
     """
-    Ensure Redis is available, starting a container if needed.
+    Get an async Redis client for the given URL.
+    
+    Args:
+        url: Redis URL, or None/fakeredis:// for in-memory fakeredis
     
     Returns:
-        (success, message)
+        Async Redis client (real or fakeredis.aioredis)
     """
-    if not redis_url:
-        return True, "Redis not configured"
-    
-    config = _parse_redis_url(redis_url)
-    host = config["host"]
-    port = config["port"]
-    
-    # Check if already reachable
-    if _is_port_open(host, port):
-        return True, f"Redis already running at {host}:{port}"
-    
-    # Only auto-start for localhost
-    if host not in ("localhost", "127.0.0.1"):
-        return False, f"Redis at {host}:{port} not reachable (not localhost, won't auto-start)"
-    
-    if not _is_docker_available():
-        return False, "Redis not reachable and Docker not available"
-    
-    # Check if container exists
-    if _container_exists(REDIS_CONTAINER_NAME):
-        if not _container_running(REDIS_CONTAINER_NAME):
-            logger.info(f"Starting existing Redis container: {REDIS_CONTAINER_NAME}")
-            if not _start_container(REDIS_CONTAINER_NAME):
-                return False, "Failed to start existing Redis container"
+    if url is None or is_fake_redis_url(url):
+        import fakeredis.aioredis
+        return fakeredis.aioredis.FakeRedis(decode_responses=False)
     else:
-        # Create new container
-        logger.info(f"Creating Redis container: {REDIS_CONTAINER_NAME}")
-        args = [
-            "-d",
-            "--name", REDIS_CONTAINER_NAME,
-            "-p", f"{port}:6379",
-            "redis:7-alpine",
-        ]
-        if not _run_container(args):
-            return False, "Failed to create Redis container"
+        import redis.asyncio as aioredis
+        return aioredis.from_url(url)
+
+
+def is_fake_redis_url(url: str) -> bool:
+    """Check if URL indicates fakeredis."""
+    return url is None or url == REDIS_FAKE_URL or url.startswith("fakeredis://")
+
+
+async def ensure_redis(redis_url: Optional[str] = None) -> Tuple[bool, str, str]:
+    """
+    Ensure Redis is available using fallback chain.
     
-    # Wait for Redis to be ready
-    if await _wait_for_port(host, port, timeout=15):
-        return True, f"Redis started at {host}:{port}"
-    else:
-        return False, "Redis container started but not responding"
+    Fallback chain:
+    1. Explicit URL set and reachable → use it
+    2. Localhost:6379 running → use it
+    3. Docker available → start container
+    4. Fallback to fakeredis (in-memory)
+    
+    Args:
+        redis_url: Optional explicit Redis URL
+    
+    Returns:
+        (success, message, actual_url)
+        - actual_url is the URL to use (may differ from input)
+        - actual_url = "fakeredis://" means use fakeredis
+    """
+    # 1. Explicit URL provided
+    if redis_url and not is_fake_redis_url(redis_url):
+        config = _parse_redis_url(redis_url)
+        host, port = config["host"], config["port"]
+        
+        if _is_port_open(host, port):
+            return True, f"Redis connected at {host}:{port}", redis_url
+        
+        # URL provided but not reachable - only try Docker for localhost
+        if host not in ("localhost", "127.0.0.1"):
+            # Remote URL not reachable - fall through to fakeredis
+            logger.warning(f"Redis at {host}:{port} not reachable, using fakeredis")
+    
+    # 2. Check localhost:6379 (default)
+    if _is_port_open("localhost", 6379):
+        return True, "Redis found on localhost:6379", "redis://localhost:6379"
+    
+    # 3. Try Docker
+    if _is_docker_available():
+        if _container_exists(REDIS_CONTAINER_NAME):
+            if not _container_running(REDIS_CONTAINER_NAME):
+                logger.info(f"Starting existing Redis container: {REDIS_CONTAINER_NAME}")
+                if _start_container(REDIS_CONTAINER_NAME):
+                    if await _wait_for_port("localhost", 6379, timeout=15):
+                        return True, "Redis started (existing container)", "redis://localhost:6379"
+            else:
+                # Container running but port not open? Wait a bit
+                if await _wait_for_port("localhost", 6379, timeout=5):
+                    return True, "Redis container already running", "redis://localhost:6379"
+        else:
+            # Create new container
+            logger.info(f"Creating Redis container: {REDIS_CONTAINER_NAME}")
+            args = [
+                "-d",
+                "--name", REDIS_CONTAINER_NAME,
+                "-p", "6379:6379",
+                "redis:7-alpine",
+            ]
+            if _run_container(args):
+                if await _wait_for_port("localhost", 6379, timeout=15):
+                    return True, "Redis started (new container)", "redis://localhost:6379"
+    
+    # 4. Fallback to fakeredis
+    return True, "Using fakeredis (in-memory, single-instance)", REDIS_FAKE_URL
 
 
 # =============================================================================
@@ -335,21 +380,25 @@ async def ensure_dev_deps(
     
     Args:
         database_url: DATABASE_URL (postgres/mysql will be auto-started)
-        redis_url: REDIS_URL (will be auto-started if needed)
+        redis_url: REDIS_URL (will be auto-started or fall back to fakeredis)
     
     Returns:
-        Dict with status of each dependency
+        Dict with status of each dependency, including resolved URLs
     """
     results = {}
     
-    # Redis
-    if redis_url:
-        success, msg = await ensure_redis(redis_url)
-        results["redis"] = {"success": success, "message": msg}
-        if success:
-            logger.info(f"✓ {msg}")
-        else:
-            logger.warning(f"✗ Redis: {msg}")
+    # Redis (always succeeds - has fakeredis fallback)
+    success, msg, actual_url = await ensure_redis(redis_url)
+    results["redis"] = {
+        "success": success,
+        "message": msg,
+        "url": actual_url,
+        "is_fake": is_fake_redis_url(actual_url),
+    }
+    if is_fake_redis_url(actual_url):
+        logger.info(f"⚡ {msg}")
+    else:
+        logger.info(f"✓ {msg}")
     
     # Database
     if database_url:
@@ -362,7 +411,7 @@ async def ensure_dev_deps(
             success, msg = await ensure_mysql(database_url)
             results["mysql"] = {"success": success, "message": msg}
         else:
-            results["database"] = {"success": True, "message": f"SQLite doesn't need Docker"}
+            results["database"] = {"success": True, "message": "SQLite doesn't need Docker"}
         
         if results.get("postgres") or results.get("mysql"):
             key = "postgres" if "postgres" in results else "mysql"

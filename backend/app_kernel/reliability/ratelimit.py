@@ -1,27 +1,22 @@
 """
 Rate limiting middleware.
 
-Provides Redis-backed rate limiting for API endpoints.
+Provides async Redis-backed rate limiting for API endpoints.
+Uses fakeredis.aioredis as fallback when real Redis unavailable.
 
 Usage:
-    from app_kernel.reliability import RateLimiter, rate_limit
+    from app_kernel.reliability import rate_limit
     
-    # Use as dependency
     @app.post("/api/action")
     async def action(
         user: UserIdentity = Depends(get_current_user),
         _: None = Depends(rate_limit(requests=10, window=60))
     ):
         ...
-    
-    # Or use limiter directly
-    limiter = get_rate_limiter()
-    allowed = await limiter.check("user:123", limit=10, window=60)
 """
 from typing import Optional, Callable
 from dataclasses import dataclass
 import time
-import asyncio
 
 from fastapi import Request, HTTPException, Depends
 
@@ -39,27 +34,28 @@ class RateLimitConfig:
 
 class RateLimiter:
     """
-    Redis-backed sliding window rate limiter.
+    Async Redis-backed sliding window rate limiter.
     
     Uses a sorted set to track request timestamps.
+    Works with real redis.asyncio or fakeredis.aioredis.
     """
     
-    def __init__(self, redis_config, config: Optional[RateLimitConfig] = None):
+    def __init__(self, redis_client, config: Optional[RateLimitConfig] = None):
         """
         Initialize rate limiter.
         
         Args:
-            redis_config: Redis configuration with get_client()
+            redis_client: Async Redis client (redis.asyncio or fakeredis.aioredis)
             config: Rate limit configuration
         """
-        self._redis_config = redis_config
+        self._redis = redis_client
         self._config = config or RateLimitConfig()
     
     def _get_key(self, identifier: str) -> str:
         """Get Redis key for identifier."""
         return f"{self._config.key_prefix}{identifier}"
     
-    def check(
+    async def check(
         self,
         identifier: str,
         limit: Optional[int] = None,
@@ -79,34 +75,30 @@ class RateLimiter:
         limit = limit or self._config.requests
         window = window or self._config.window_seconds
         
-        redis = self._redis_config.get_client()
         key = self._get_key(identifier)
         now = time.time()
         window_start = now - window
         
-        pipe = redis.pipeline(transaction=True)
-        try:
-            # Remove old entries
-            pipe.zremrangebyscore(key, 0, window_start)
-            
-            # Count current entries
-            pipe.zcard(key)
-            
-            # Add new entry
-            pipe.zadd(key, {str(now): now})
-            
-            # Set expiry
-            pipe.expire(key, window + 1)
-            
-            results = pipe.execute()
-            current_count = results[1]
-            
-            return current_count < limit
-            
-        finally:
-            pipe.reset()
+        pipe = self._redis.pipeline(transaction=True)
+        
+        # Remove old entries
+        pipe.zremrangebyscore(key, 0, window_start)
+        
+        # Count current entries
+        pipe.zcard(key)
+        
+        # Add new entry
+        pipe.zadd(key, {str(now): now})
+        
+        # Set expiry
+        pipe.expire(key, window + 1)
+        
+        results = await pipe.execute()
+        current_count = results[1]
+        
+        return current_count < limit
     
-    def get_remaining(
+    async def get_remaining(
         self,
         identifier: str,
         limit: Optional[int] = None,
@@ -116,39 +108,56 @@ class RateLimiter:
         limit = limit or self._config.requests
         window = window or self._config.window_seconds
         
-        redis = self._redis_config.get_client()
         key = self._get_key(identifier)
         now = time.time()
         window_start = now - window
         
         # Clean and count
-        redis.zremrangebyscore(key, 0, window_start)
-        count = redis.zcard(key)
+        await self._redis.zremrangebyscore(key, 0, window_start)
+        count = await self._redis.zcard(key)
         
         return max(0, limit - count)
     
-    def reset(self, identifier: str):
+    async def reset(self, identifier: str):
         """Reset rate limit for identifier."""
-        redis = self._redis_config.get_client()
         key = self._get_key(identifier)
-        redis.delete(key)
+        await self._redis.delete(key)
 
 
 # Module-level limiter
 _rate_limiter: Optional[RateLimiter] = None
+_is_fake_redis: bool = False
 
 
-def init_rate_limiter(redis_config, config: Optional[RateLimitConfig] = None):
-    """Initialize the rate limiter. Called by init_app_kernel()."""
-    global _rate_limiter
-    _rate_limiter = RateLimiter(redis_config, config)
+def init_rate_limiter(
+    redis_client,
+    config: Optional[RateLimitConfig] = None,
+    is_fake: bool = False,
+):
+    """
+    Initialize the rate limiter.
+    
+    Args:
+        redis_client: Async Redis client
+        config: Rate limit configuration
+        is_fake: Whether using fakeredis
+    """
+    global _rate_limiter, _is_fake_redis
+    _rate_limiter = RateLimiter(redis_client, config)
+    _is_fake_redis = is_fake
 
 
 def get_rate_limiter() -> RateLimiter:
     """Get the initialized rate limiter."""
+    global _rate_limiter
     if _rate_limiter is None:
-        raise RuntimeError("Rate limiter not initialized. Call init_app_kernel() first.")
+        raise RuntimeError("Rate limiter not initialized. Call init_rate_limiter() first.")
     return _rate_limiter
+
+
+def is_fake_redis() -> bool:
+    """Check if using fakeredis (in-memory)."""
+    return _is_fake_redis
 
 
 def rate_limit(
@@ -184,15 +193,11 @@ def rate_limit(
         else:
             key = f"ip:{request.client.host if request.client else 'unknown'}"
         
-        # Check rate limit (sync, run in thread)
-        allowed = await asyncio.to_thread(
-            limiter.check, key, requests, window
-        )
+        # Check rate limit
+        allowed = await limiter.check(key, requests, window)
         
         if not allowed:
-            remaining = await asyncio.to_thread(
-                limiter.get_remaining, key, requests, window
-            )
+            remaining = await limiter.get_remaining(key, requests, window)
             raise HTTPException(
                 status_code=429,
                 detail="Rate limit exceeded",

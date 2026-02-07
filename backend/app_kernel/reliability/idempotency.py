@@ -10,7 +10,7 @@ Usage:
     # Add to app
     app.add_middleware(
         IdempotencyMiddleware,
-        redis_config=redis_config,
+        redis_client=redis_client,  # async redis or fakeredis.aioredis
         exclude_paths=["/stream", "/chat/stream"]
     )
     
@@ -18,11 +18,9 @@ Usage:
     # POST /api/payment
     # Idempotency-Key: unique-request-id-123
 """
-from typing import Optional, Set, Callable, Any
+from typing import Optional, Set, Any
 from dataclasses import dataclass
 import json
-import hashlib
-import asyncio
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -60,7 +58,7 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
     def __init__(
         self,
         app,
-        redis_config,
+        redis_client,
         config: Optional[IdempotencyConfig] = None,
         exclude_paths: Optional[Set[str]] = None
     ):
@@ -69,12 +67,12 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
         
         Args:
             app: ASGI application
-            redis_config: Redis configuration with get_client()
+            redis_client: Async Redis client (redis.asyncio or fakeredis.aioredis)
             config: Idempotency configuration
             exclude_paths: Additional paths to exclude
         """
         super().__init__(app)
-        self._redis_config = redis_config
+        self._redis = redis_client
         self._config = config or IdempotencyConfig()
         
         if exclude_paths:
@@ -117,8 +115,8 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
         
         redis_key = self._get_key(request)
         
-        # Check for cached response (sync operation)
-        cached = await asyncio.to_thread(self._get_cached_response, redis_key)
+        # Check for cached response
+        cached = await self._get_cached_response(redis_key)
         
         if cached:
             # Return cached response
@@ -140,11 +138,10 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
         
         return response
     
-    def _get_cached_response(self, key: str) -> Optional[dict]:
+    async def _get_cached_response(self, key: str) -> Optional[dict]:
         """Get cached response from Redis."""
         try:
-            redis = self._redis_config.get_client()
-            data = redis.get(key)
+            data = await self._redis.get(key)
             
             if data:
                 return json.loads(data)
@@ -162,9 +159,6 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
             async for chunk in response.body_iterator:
                 body += chunk
             
-            # Rebuild response with new body iterator
-            # (since we consumed it)
-            
             # Cache the response data
             cache_data = {
                 "status_code": response.status_code,
@@ -172,10 +166,10 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
                 "headers": dict(response.headers)
             }
             
-            await asyncio.to_thread(
-                self._store_cached_response,
+            await self._redis.setex(
                 key,
-                cache_data
+                self._config.ttl_seconds,
+                json.dumps(cache_data)
             )
             
             # Create new response with the body
@@ -189,18 +183,6 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
         except Exception:
             # On error, just return original response
             pass
-    
-    def _store_cached_response(self, key: str, data: dict):
-        """Store response in Redis."""
-        try:
-            redis = self._redis_config.get_client()
-            redis.setex(
-                key,
-                self._config.ttl_seconds,
-                json.dumps(data)
-            )
-        except Exception:
-            pass
 
 
 # Simpler functional approach for checking idempotency
@@ -211,8 +193,8 @@ class IdempotencyChecker:
     Use this for explicit idempotency control in handlers.
     """
     
-    def __init__(self, redis_config, config: Optional[IdempotencyConfig] = None):
-        self._redis_config = redis_config
+    def __init__(self, redis_client, config: Optional[IdempotencyConfig] = None):
+        self._redis = redis_client
         self._config = config or IdempotencyConfig()
     
     async def check_and_set(
@@ -229,40 +211,30 @@ class IdempotencyChecker:
         ttl = ttl or self._config.ttl_seconds
         full_key = f"{self._config.key_prefix}{key}"
         
-        def _check():
-            redis = self._redis_config.get_client()
-            
-            # Try to get existing
-            existing = redis.get(full_key)
-            if existing:
-                return (False, json.loads(existing))
-            
-            # Set placeholder
-            redis.setex(full_key, ttl, json.dumps({"status": "processing"}))
-            return (True, None)
+        # Try to get existing
+        existing = await self._redis.get(full_key)
+        if existing:
+            return (False, json.loads(existing))
         
-        return await asyncio.to_thread(_check)
+        # Set placeholder
+        await self._redis.setex(full_key, ttl, json.dumps({"status": "processing"}))
+        return (True, None)
     
     async def set_result(self, key: str, result: Any, ttl: Optional[int] = None):
         """Store the result for an idempotency key."""
         ttl = ttl or self._config.ttl_seconds
         full_key = f"{self._config.key_prefix}{key}"
-        
-        def _set():
-            redis = self._redis_config.get_client()
-            redis.setex(full_key, ttl, json.dumps(result))
-        
-        await asyncio.to_thread(_set)
+        await self._redis.setex(full_key, ttl, json.dumps(result))
 
 
 # Module-level checker
 _idempotency_checker: Optional[IdempotencyChecker] = None
 
 
-def init_idempotency_checker(redis_config, config: Optional[IdempotencyConfig] = None):
-    """Initialize idempotency checker. Called by init_app_kernel()."""
+def init_idempotency_checker(redis_client, config: Optional[IdempotencyConfig] = None):
+    """Initialize idempotency checker."""
     global _idempotency_checker
-    _idempotency_checker = IdempotencyChecker(redis_config, config)
+    _idempotency_checker = IdempotencyChecker(redis_client, config)
 
 
 def get_idempotency_checker() -> IdempotencyChecker:
