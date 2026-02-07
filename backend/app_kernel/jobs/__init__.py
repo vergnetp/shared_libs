@@ -9,25 +9,29 @@ This module provides:
 
 The kernel provides mechanisms; apps provide task implementations.
 
+Handler signature: (data, ctx, db)
+- data: The dict you enqueued
+- ctx: JobContext with job metadata
+- db: Database connection (ready to use)
+
 Usage:
-    from app_kernel.jobs import JobRegistry, get_job_client, start_workers
+    from app_kernel.jobs import JobRegistry, JobContext, get_job_client
     
-    # Create registry and register tasks
-    registry = JobRegistry()
+    # Define handler
+    async def process_document(data, ctx, db):
+        doc = await db.find_entity("documents", data["doc_id"])
+        # process...
+        return {"status": "done"}
     
-    @registry.task("process_document")
-    async def process_document(payload, ctx):
+    # Register in create_service
+    app = create_service(
+        tasks={"process_document": process_document},
         ...
-    
-    # Pass to kernel
-    init_app_kernel(app, settings, registry)
+    )
     
     # Enqueue work
     client = get_job_client()
     await client.enqueue("process_document", {"doc_id": "123"})
-    
-    # Start workers
-    await start_workers()
 """
 
 from .registry import JobRegistry, JobContext, ProcessorFunc

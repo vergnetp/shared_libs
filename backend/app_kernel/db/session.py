@@ -114,9 +114,18 @@ class AuditWrappedConnection:
     def __getattr__(self, name):
         return getattr(self._conn, name)
     
-    async def save_entity(self, table, data, **kwargs):
-        """Save entity and push audit event."""
-        # Get old value for diff (if update)
+    async def save_entity(self, table, data, match_by=None, **kwargs):
+        """
+        Save entity and push audit event.
+        
+        Args:
+            table: Entity table name
+            data: Entity data dict
+            match_by: Field(s) to match existing entity by (for upsert without id).
+                      Passed through to underlying database save_entity.
+            **kwargs: Additional args passed to underlying save
+        """
+        # Get old value for diff (if updating by id)
         old = None
         entity_id = data.get("id")
         if entity_id:
@@ -125,8 +134,18 @@ class AuditWrappedConnection:
             except:
                 pass
         
-        # Actual save
-        result = await self._conn.save_entity(table, data, **kwargs)
+        # Actual save (match_by handled by databases module)
+        result = await self._conn.save_entity(table, data, match_by=match_by, _caller=self._entity_caller, **kwargs)
+        
+        # For match_by without id, we need to check if it was update or create
+        if not entity_id and match_by:
+            # Result has id now - check if it existed before
+            try:
+                # If result id matches something that existed, it was an update
+                # We already have result, so this was handled by databases module
+                pass
+            except:
+                pass
         
         # Push audit event (fire and forget)
         redis = await self._get_redis()

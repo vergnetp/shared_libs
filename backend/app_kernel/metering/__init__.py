@@ -1,26 +1,32 @@
 """
 Usage Metering - Track API calls, quotas, billing.
 
-Writes to shared admin_db via Redis (async, no runtime penalty).
+Writes to database via Redis (async, no runtime penalty).
 
 Usage:
     # Auto-tracked via middleware (every request) - pushed to Redis
-    app.add_middleware(UsageMeteringMiddleware, ...)
+    # No setup needed - enabled by default
     
     # Manual tracking for custom metrics (AI tokens, etc)
-    await track_usage(redis, app="deploy_api",
+    await track_usage(redis, app="my-api",
         user_id=user.id,
         workspace_id=workspace_id,
         tokens=1500,
     )
     
-    # Query usage (from admin_db)
-    usage = await get_usage(admin_db, app="deploy_api", period="2025-01")
+    # Query usage
+    usage = await get_usage(db, app="my-api", period="2025-01")
     # {"requests": 4521, "tokens": 125000, ...}
     
     # Check quota
-    if not await check_quota(admin_db, app="deploy_api", workspace_id=ws, metric="tokens", limit=100000):
+    if not await check_quota(db, app="my-api", workspace_id=ws, metric="tokens", limit=100000):
         raise HTTPException(402, "Token limit reached")
+    
+    # Auto-mounted routes:
+    #   GET /api/v1/usage                - Get usage for current user
+    #   GET /api/v1/usage/workspace/{id} - Get workspace usage
+    #   GET /api/v1/usage/endpoints      - Get usage by endpoint
+    #   GET /api/v1/usage/quota/{metric} - Check quota status
 """
 
 from .publisher import track_request, track_usage
@@ -33,7 +39,7 @@ __all__ = [
     # Publishers (write to Redis)
     "track_request",
     "track_usage",
-    # Queries (read from admin_db)
+    # Queries (read from DB)
     "get_usage",
     "get_usage_by_endpoint",
     "check_quota",

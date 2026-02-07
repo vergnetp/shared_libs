@@ -1,37 +1,33 @@
 """
 TaskStream - combines SSE streaming, logging, and cancellation.
 
-Two patterns:
+Basic usage:
 
-1. Auto-generated task_id (snapshot, rollback):
-
-    stream = TaskStream("snapshot")  # auto-registers
+    stream = TaskStream("deploy")
     try:
-        yield stream.task_id_event()
-        stream("Working...")
-        yield stream.log()
-        stream.check()
+        yield stream.log("Building...")   # Auto-sends task_id on first call
+        stream.check()                    # Raises Cancelled if user cancelled
+        
+        yield stream.log("Pushing...")
+        yield stream.log("Done!")
+        
         yield stream.complete(True)
-    except Cancelled:
+    except TaskCancelled:
         yield stream.complete(False, error='Cancelled')
     finally:
         stream.cleanup()
 
-2. Known task_id (deploy with DB-generated ID):
+With known task_id (e.g., from DB):
 
-    stream = TaskStream(task_id=deployment_id)  # auto-registers with known id
-    try:
-        yield stream.task_id_event(deployment_id=deployment_id)
-        ...
+    stream = TaskStream(task_id=deployment_id)
+    yield stream.log("Starting...")  # task_id event uses deployment_id
 
-3. Deferred registration (logger first, register later):
+Deferred registration (logger first, register later):
 
     stream = TaskStream(register=False)  # just a logger
-    stream("Setting up...")
-    yield stream.log()
+    yield stream.log("Setting up...")
     # ... create DB record ...
-    stream.register(deployment_id)
-    yield stream.task_id_event()
+    stream.register(deployment_id)  # now cancellable
 """
 
 import uuid
@@ -40,7 +36,7 @@ from typing import List
 from datetime import datetime, timezone
 
 from . import cancel
-from .cancel import Cancelled
+from .cancel import TaskCancelled, Cancelled
 from .sse import sse_task_id, sse_log, sse_complete, sse_event
 
 
@@ -51,6 +47,7 @@ class TaskStream:
         self.task_id = task_id or f"{prefix}-{uuid.uuid4().hex[:12]}"
         self._logs: List[str] = []
         self._registered = False
+        self._task_id_sent = False
         if register:
             self._do_register()
     
@@ -98,14 +95,38 @@ class TaskStream:
     # --- SSE event helpers ---
     
     def task_id_event(self, **extra) -> str:
-        """Emit task_id SSE event. Call once at start, yield the result."""
+        """Emit task_id SSE event. Usually not needed - log() auto-sends on first call."""
+        self._task_id_sent = True
         return sse_task_id(self.task_id, **extra)
     
-    def log(self, level: str = "info") -> str:
-        """Emit the last logged message as an SSE log event."""
+    def log(self, message: str = None, level: str = "info") -> str:
+        """Emit a log message as an SSE event.
+        
+        First call automatically prepends the task_id event (unless 
+        task_id_event() was already called explicitly).
+        
+        Args:
+            message: Log message. If None, uses last message from __call__().
+            level: Log level (info, warn, error).
+        
+        Example:
+            yield stream.log("Building...")
+            yield stream.log("Pushing...")
+        """
+        # If message provided, add it to logs
+        if message:
+            self(message)  # Calls __call__ to add timestamped message
+        
         if not self._logs:
             return ""
-        return sse_log(self._logs[-1], level)
+        
+        result = ""
+        if not self._task_id_sent:
+            result += sse_task_id(self.task_id)
+            self._task_id_sent = True
+        
+        result += sse_log(self._logs[-1], level)
+        return result
     
     def complete(self, success: bool, error: str = None, **extra) -> str:
         """Emit completion SSE event."""

@@ -119,10 +119,6 @@ async def run_database_lifecycle(
     backup_dir = str(data_path / "backups")
     migrations_dir = str(data_path / "migrations_audit")
     
-    # Allow override via environment variables
-    backup_dir = os.environ.get("BACKUP_DIR", backup_dir)
-    migrations_dir = os.environ.get("MIGRATIONS_DIR", migrations_dir)
-    
     # Create directories
     Path(backup_dir).mkdir(parents=True, exist_ok=True)
     Path(migrations_dir).mkdir(parents=True, exist_ok=True)
@@ -238,12 +234,12 @@ async def run_database_lifecycle(
         # Store backend (first run or same backend)
         _store_backend(data_dir, new_backend)
         
-        # Step 1: Create backup (skip in dev, skip if empty)
+        # Step 1: Create backup (skip in non-prod, skip if empty)
         if backup_enabled:
-            # Skip in dev environment
-            env = os.environ.get("ENVIRONMENT", "dev").lower()
-            if env == "dev":
-                logger.info("Skipping backup in dev environment")
+            from ..env_checks import is_prod
+            
+            if not is_prod():
+                logger.info("Skipping backup in non-prod environment")
             else:
                 # Check if database has any user tables
                 try:
@@ -317,27 +313,30 @@ async def run_database_lifecycle(
     return results
 
 
-def get_lifecycle_config() -> dict:
+def get_lifecycle_config(
+    backup_enabled: bool = None,
+    migration_enabled: bool = True,
+    data_dir: str = ".data",
+) -> dict:
     """
-    Get lifecycle configuration from environment variables.
+    Get lifecycle configuration.
     
-    Environment variables:
-        BACKUP_ENABLED: Enable/disable backups (default: false in dev, true in prod)
-        MIGRATION_ENABLED: Enable/disable migrations (default: true)
-        BACKUP_DIR: Custom backup directory (default: .data/backups)
-        MIGRATIONS_DIR: Custom migrations directory (default: .data/migrations_audit)
-        DATA_DIR: Base data directory (default: .data)
+    Args:
+        backup_enabled: Enable/disable backups. Default: False in dev/uat/staging, True in prod.
+        migration_enabled: Enable/disable migrations (default: True)
+        data_dir: Base data directory (default: .data)
     
     Returns:
         dict with configuration
     """
-    env = os.environ.get("ENVIRONMENT", "dev").lower()
+    from ..env_checks import is_prod
     
-    # Default backup to false in dev (too slow), true in prod
-    backup_default = "false" if env == "dev" else "true"
+    # Default backup to false in non-prod (too slow), true in prod
+    if backup_enabled is None:
+        backup_enabled = is_prod()
     
     return {
-        "backup_enabled": os.environ.get("BACKUP_ENABLED", backup_default).lower() == "true",
-        "migration_enabled": os.environ.get("MIGRATION_ENABLED", "true").lower() == "true",
-        "data_dir": os.environ.get("DATA_DIR", ".data"),
+        "backup_enabled": backup_enabled,
+        "migration_enabled": migration_enabled,
+        "data_dir": data_dir,
     }

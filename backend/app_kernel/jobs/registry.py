@@ -13,20 +13,27 @@ IMPORTANT:
 
 Usage:
     # In your app
-    from app_kernel.jobs import JobRegistry
+    from app_kernel.jobs import JobRegistry, JobContext
     
     registry = JobRegistry()
     
     @registry.task("process_document")
-    async def process_document(payload: dict, ctx: JobContext) -> dict:
-        # Process the document
+    async def process_document(data: dict, ctx: JobContext, db) -> dict:
+        # data: the dict you enqueued
+        # ctx: job metadata (job_id, attempt, max_attempts, etc.)
+        # db: database connection (ready to use)
+        doc = await db.find_entity("documents", data["doc_id"])
         return {"status": "done"}
     
     # Or register manually
-    registry.register("send_email", send_email_processor)
+    registry.register("send_email", send_email_handler)
     
-    # Pass to kernel
-    init_app_kernel(app, settings, registry)
+    # Pass to create_service
+    app = create_service(
+        name="my-app",
+        tasks={"send_email": send_email_handler},
+        ...
+    )
 """
 from typing import Callable, Dict, Any, Optional, Protocol, Union, Awaitable
 from dataclasses import dataclass, field
@@ -41,9 +48,12 @@ UTC = timezone.utc
 @dataclass
 class JobContext:
     """
-    Context passed to job processors.
+    Context/metadata passed to job handlers.
     
-    Contains metadata about the job execution.
+    Job handlers receive: (data, ctx, db)
+    - data: The dict you enqueued
+    - ctx: This JobContext with job metadata
+    - db: Database connection (from db_context pool)
     """
     job_id: str
     task_name: str
@@ -60,8 +70,8 @@ class JobContext:
 
 
 # Type for processor functions
-# Can be sync or async, takes (payload, context) -> result
-ProcessorFunc = Callable[[Dict[str, Any], JobContext], Union[Any, Awaitable[Any]]]
+# Signature: (data, ctx, db) -> result
+ProcessorFunc = Callable[[Dict[str, Any], JobContext, Any], Union[Any, Awaitable[Any]]]
 
 
 class JobRegistry:

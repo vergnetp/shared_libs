@@ -7,7 +7,6 @@ All settings are optional with sensible defaults.
 IMPORTANT: All settings are FROZEN (immutable) after creation.
 No per-request or runtime mutation of kernel config is allowed.
 """
-import os
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, Tuple, Literal, List, Callable, Awaitable
 
@@ -107,10 +106,13 @@ class TracingSettings:
 @dataclass(frozen=True)
 class ReliabilitySettings:
     """Rate limiting and idempotency settings."""
-    # Rate limiting
+    # Rate limiting - enabled by default
     rate_limit_enabled: bool = True
-    rate_limit_requests: int = 100
-    rate_limit_window_seconds: int = 60
+    
+    # Tiered rate limits (requests per minute)
+    rate_limit_anonymous_rpm: int = 30      # Anonymous/unauthenticated
+    rate_limit_authenticated_rpm: int = 120  # Authenticated users
+    rate_limit_admin_rpm: int = 600          # Admin users
     
     # Idempotency
     idempotency_enabled: bool = True
@@ -126,16 +128,6 @@ class CorsSettings:
     allow_methods: Tuple[str, ...] = ("*",)
     allow_headers: Tuple[str, ...] = ("*",)
     expose_headers: Tuple[str, ...] = ("X-Runtime", "X-Request-ID")
-    
-    @classmethod
-    def from_env(cls) -> "CorsSettings":
-        """Create from environment variables."""
-        origins = os.environ.get("CORS_ORIGINS", "*")
-        origins_tuple = tuple(origins.split(",")) if origins else ("*",)
-        return cls(
-            enabled=os.environ.get("CORS_ENABLED", "true").lower() in ("true", "1", "yes"),
-            allow_origins=origins_tuple,
-        )
 
 
 @dataclass(frozen=True)
@@ -202,44 +194,6 @@ class FeatureSettings:
     
     # Router prefix for all kernel routes (empty = mount at root)
     kernel_prefix: str = ""
-    
-    @classmethod
-    def from_env(cls) -> "FeatureSettings":
-        """
-        Create settings from environment variables.
-        
-        Env vars (all optional, defaults used if not set):
-            KERNEL_ENABLE_HEALTH=true
-            KERNEL_ENABLE_METRICS=true
-            KERNEL_PROTECT_METRICS=admin
-            KERNEL_ENABLE_AUTH=true
-            KERNEL_AUTH_MODE=local
-            KERNEL_ALLOW_SIGNUP=false
-            KERNEL_ENABLE_JOBS=true
-            KERNEL_ENABLE_AUDIT=false
-            KERNEL_ENABLE_TESTS=false
-        """
-        def env_bool(key: str, default: bool) -> bool:
-            val = os.environ.get(key, "").lower()
-            if val in ("true", "1", "yes"):
-                return True
-            elif val in ("false", "0", "no"):
-                return False
-            return default
-        
-        return cls(
-            enable_health_routes=env_bool("KERNEL_ENABLE_HEALTH", True),
-            enable_metrics=env_bool("KERNEL_ENABLE_METRICS", True),
-            protect_metrics=os.environ.get("KERNEL_PROTECT_METRICS", "admin"),  # type: ignore
-            enable_auth_routes=env_bool("KERNEL_ENABLE_AUTH", True),
-            auth_mode=os.environ.get("KERNEL_AUTH_MODE", "local"),  # type: ignore
-            allow_self_signup=True,  # Always enabled
-            enable_job_routes=env_bool("KERNEL_ENABLE_JOBS", True),
-            enable_audit_routes=env_bool("KERNEL_ENABLE_AUDIT", False),
-            enable_saas_routes=env_bool("KERNEL_ENABLE_SAAS", True),
-            saas_invite_base_url=os.environ.get("KERNEL_SAAS_INVITE_URL"),
-            enable_test_routes=env_bool("KERNEL_ENABLE_TESTS", False),
-        )
 
 
 # Type alias for health check functions
@@ -256,7 +210,7 @@ class KernelSettings:
     Usage:
         settings = KernelSettings(
             redis=RedisSettings(url="redis://localhost:6379"),
-            auth=AuthSettings(token_secret=os.environ["JWT_SECRET"]),
+            auth=AuthSettings(token_secret="your-32-char-secret-key"),
             observability=ObservabilitySettings(service_name="my-api"),
         )
         

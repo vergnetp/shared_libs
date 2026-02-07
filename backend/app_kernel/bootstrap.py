@@ -1,73 +1,29 @@
 """
-app_kernel.bootstrap - Simplified service creation.
+app_kernel.bootstrap - Service creation internals.
 
-Create a production-ready service in minutes with zero boilerplate.
+For most users, use create_service from app_kernel directly:
 
-Usage:
-    from app_kernel.bootstrap import create_service, ServiceConfig
+    from app_kernel import create_service
     
-    # Minimal example
     app = create_service(
-        name="order_service",
-        routers=[orders_router, products_router],
-    )
-    
-    # Full example with all options
-    app = create_service(
-        name="agent_service",
-        version="1.0.0",
-        description="AI Agents as a Service",
-        
-        # Your business logic
-        routers=[
-            agents_router,
-            threads_router,
-            chat_router,
-        ],
-        
-        # Background tasks (optional)
-        tasks={
-            "process_document": process_document_handler,
-            "send_notification": send_notification_handler,
-        },
-        
-        # Configuration
-        config=ServiceConfig(
-            jwt_secret=os.environ["JWT_SECRET"],
-            redis_url=os.environ.get("REDIS_URL"),
-            database_url=os.environ.get("DATABASE_URL"),
-            cors_origins=["http://localhost:3000"],
-        ),
-        
-        # Lifecycle hooks (optional)
-        on_startup=init_database,
-        on_shutdown=close_connections,
-        
-        # Health checks (optional)
-        health_checks=[check_db, check_redis],
-        
-        # Auth adapter (optional - for login/register routes)
-        auth_service=get_auth_service,
+        name="my-api",
+        database_url="postgresql://...",
+        redis_url="redis://...",
+        jwt_secret="your-32-char-secret...",
+        cors_origins=["https://myapp.com"],
+        routers=[my_router],
     )
 
-What you get for free:
-- Auth (JWT tokens, login/register routes)
-- CORS (configured or sensible defaults)
-- Security headers
-- Request ID tracking
-- Structured logging
-- Metrics endpoint (/metrics)
-- Health endpoints (/healthz, /readyz)
-- Rate limiting (if Redis configured)
-- Idempotency (if Redis configured)
-- Background jobs (if Redis configured)
-- Error handling
+See app_kernel.create_service for full documentation.
+
+This module contains:
+- ServiceConfig: Internal configuration dataclass
+- Internal create_service: Used by the public create_service wrapper
 """
 
 from __future__ import annotations
 
 import asyncio
-import os
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import (
@@ -104,25 +60,6 @@ from .settings import (
 # =============================================================================
 # Configuration
 # =============================================================================
-
-def _load_oauth_providers_from_env(env_fn) -> Dict[str, Dict[str, str]]:
-    """Load OAuth providers from environment variables."""
-    providers = {}
-    
-    # Google
-    google_id = env_fn("GOOGLE_CLIENT_ID")
-    google_secret = env_fn("GOOGLE_CLIENT_SECRET")
-    if google_id and google_secret:
-        providers["google"] = {"client_id": google_id, "client_secret": google_secret}
-    
-    # GitHub
-    github_id = env_fn("GITHUB_CLIENT_ID")
-    github_secret = env_fn("GITHUB_CLIENT_SECRET")
-    if github_id and github_secret:
-        providers["github"] = {"client_id": github_id, "client_secret": github_secret}
-    
-    return providers
-
 
 def _parse_database_url(url: str) -> dict:
     """
@@ -188,30 +125,6 @@ def _parse_database_url(url: str) -> dict:
         }
     else:
         raise ValueError(f"Unsupported database scheme: {scheme}")
-
-
-def _build_db_url_from_manifest(db: dict, interpolate) -> Optional[str]:
-    """Build database URL from manifest fields (backwards compat)."""
-    path_or_name = interpolate(db.get("path") or db.get("name"))
-    if not path_or_name:
-        return None
-    
-    db_type = interpolate(db.get("type")) or "sqlite"
-    
-    if db_type == "sqlite":
-        return f"sqlite:///{path_or_name}"
-    else:
-        host = interpolate(db.get("host")) or "localhost"
-        port = interpolate(db.get("port")) or (5432 if db_type == "postgres" else 3306)
-        user = interpolate(db.get("user")) or ""
-        password = interpolate(db.get("password")) or ""
-        
-        if user and password:
-            return f"{db_type}://{user}:{password}@{host}:{port}/{path_or_name}"
-        elif user:
-            return f"{db_type}://{user}@{host}:{port}/{path_or_name}"
-        else:
-            return f"{db_type}://{host}:{port}/{path_or_name}"
 
 
 async def _run_embedded_admin_worker(
@@ -363,6 +276,7 @@ class ServiceConfig:
     jwt_secret: str = "dev-secret-change-me"
     jwt_expiry_hours: int = 24
     auth_enabled: bool = True
+    allow_self_signup: bool = True  # Allow open registration
     
     # SaaS (workspaces, members, invites)
     saas_enabled: bool = True
@@ -384,7 +298,6 @@ class ServiceConfig:
     # When True: runs as background task in one of the uvicorn workers
     # When False: you run `python -m app_kernel.admin_worker` separately
     admin_worker_embedded: bool = True
-    admin_db_url: Optional[str] = None  # If None, uses DATABASE_URL
     
     # CORS
     cors_origins: List[str] = field(default_factory=lambda: ["*"])
@@ -430,270 +343,6 @@ class ServiceConfig:
         "/health", "/healthz", "/readyz", "/metrics", "/favicon.ico"
     ])
     tracing_sample_rate: float = 1.0
-    
-    @classmethod
-    def from_env(cls, prefix: str = "") -> "ServiceConfig":
-        """
-        Load config from environment variables.
-        
-        Args:
-            prefix: Optional prefix for env vars (e.g., "MY_APP_")
-        
-        Environment variables:
-            # Auth
-            {prefix}JWT_SECRET: Required for production
-            {prefix}AUTH_ENABLED: Enable auth (default: true)
-            {prefix}ALLOW_SELF_SIGNUP: Allow self-registration (default: false)
-            
-            # SaaS
-            {prefix}SAAS_ENABLED: Enable workspaces/teams (default: false)
-            {prefix}SAAS_INVITE_BASE_URL: Base URL for invite links
-            
-            # Database
-            {prefix}DATABASE_NAME: DB name or file path
-            {prefix}DATABASE_TYPE: sqlite, postgres, mysql (default: sqlite)
-            {prefix}DATABASE_HOST: DB host (default: localhost)
-            {prefix}DATABASE_PORT: DB port
-            {prefix}DATABASE_USER: DB user
-            {prefix}DATABASE_PASSWORD: DB password
-            
-            # Redis
-            {prefix}REDIS_URL: Enables jobs, rate limiting
-            {prefix}REDIS_KEY_PREFIX: Key prefix (default: queue:)
-            
-            # Email
-            {prefix}EMAIL_ENABLED: Enable email (default: false)
-            {prefix}EMAIL_PROVIDER: smtp, ses, sendgrid (default: smtp)
-            {prefix}EMAIL_FROM: Sender address
-            {prefix}EMAIL_REPLY_TO: Reply-to address
-            {prefix}SMTP_HOST: SMTP server host
-            {prefix}SMTP_PORT: SMTP port (default: 587)
-            {prefix}SMTP_USER: SMTP username
-            {prefix}SMTP_PASSWORD: SMTP password
-            {prefix}SMTP_USE_TLS: Use TLS (default: true)
-            
-            # Other
-            {prefix}CORS_ORIGINS: Comma-separated origins
-            {prefix}DEBUG: Enable debug mode
-            {prefix}LOG_LEVEL: Logging level (default: INFO)
-        """
-        def env(key: str, default: Any = None) -> Any:
-            return os.environ.get(f"{prefix}{key}", default)
-        
-        def env_bool(key: str, default: bool = False) -> bool:
-            val = env(key, str(default)).lower()
-            return val in ("true", "1", "yes")
-        
-        def env_int(key: str, default: int) -> int:
-            return int(env(key, default))
-        
-        def env_list(key: str, default: List[str]) -> List[str]:
-            val = env(key)
-            if val:
-                return [s.strip() for s in val.split(",")]
-            return default
-        
-        return cls(
-            jwt_secret=env("JWT_SECRET", "dev-secret-change-me"),
-            jwt_expiry_hours=env_int("JWT_EXPIRY_HOURS", 24),
-            auth_enabled=env_bool("AUTH_ENABLED", True),
-            saas_enabled=env_bool("SAAS_ENABLED", True),
-            saas_invite_base_url=env("SAAS_INVITE_BASE_URL"),
-            oauth_providers=_load_oauth_providers_from_env(env),
-            redis_url=env("REDIS_URL"),
-            redis_key_prefix=env("REDIS_KEY_PREFIX", "queue:"),
-            database_url=env("DATABASE_URL"),
-            cors_origins=env_list("CORS_ORIGINS", ["*"]),
-            cors_credentials=env_bool("CORS_CREDENTIALS", True),
-            rate_limit_enabled=env_bool("RATE_LIMIT_ENABLED", True),
-            rate_limit_requests=env_int("RATE_LIMIT_REQUESTS", 100),
-            rate_limit_window=env_int("RATE_LIMIT_WINDOW", 60),
-            max_concurrent_streams=env_int("MAX_CONCURRENT_STREAMS", 3),
-            stream_lease_ttl=env_int("STREAM_LEASE_TTL", 300),
-            worker_count=env_int("WORKER_COUNT", 4),
-            job_max_attempts=env_int("JOB_MAX_ATTEMPTS", 3),
-            # Email
-            email_enabled=env_bool("EMAIL_ENABLED", False),
-            email_provider=env("EMAIL_PROVIDER", "smtp"),
-            email_from=env("EMAIL_FROM"),
-            email_reply_to=env("EMAIL_REPLY_TO"),
-            smtp_host=env("SMTP_HOST"),
-            smtp_port=env_int("SMTP_PORT", 587),
-            smtp_user=env("SMTP_USER"),
-            smtp_password=env("SMTP_PASSWORD"),
-            smtp_use_tls=env_bool("SMTP_USE_TLS", True),
-            # Debug
-            debug=env_bool("DEBUG", False),
-            log_level=env("LOG_LEVEL", "INFO"),
-            # Request Metrics
-            request_metrics_enabled=env_bool("REQUEST_METRICS_ENABLED", False),
-            request_metrics_exclude_paths=env_list("REQUEST_METRICS_EXCLUDE_PATHS", [
-                "/health", "/healthz", "/readyz", "/metrics", "/favicon.ico"
-            ]),
-            # Tracing - enabled by default
-            tracing_enabled=env_bool("TRACING_ENABLED", True),
-            tracing_sample_rate=float(env("TRACING_SAMPLE_RATE", "1.0")),
-            # Admin worker
-            admin_worker_embedded=env_bool("ADMIN_WORKER_EMBEDDED", True),
-            admin_db_url=env("ADMIN_DB_URL"),
-        )
-    
-    @classmethod
-    def from_manifest(cls, manifest_path: str = "manifest.yaml") -> "ServiceConfig":
-        """
-        Load config from manifest.yaml with env var interpolation.
-        
-        Manifest values can use ${ENV_VAR} or ${ENV_VAR:-default} syntax.
-        Environment variables override manifest values.
-        
-        Args:
-            manifest_path: Path to manifest.yaml
-            
-        Example manifest.yaml:
-            name: my-service
-            version: "1.0.0"
-            
-            database:
-              type: sqlite
-              path: ${DATABASE_PATH:-./data/app.db}
-            
-            redis:
-              url: ${REDIS_URL}
-              key_prefix: "myapp:"
-            
-            auth:
-              jwt_secret: ${JWT_SECRET}
-            
-            saas:
-              enabled: true
-              invite_base_url: ${SAAS_INVITE_BASE_URL}
-            
-            email:
-              enabled: ${EMAIL_ENABLED:-false}
-              from: ${EMAIL_FROM:-noreply@example.com}
-              smtp_host: ${SMTP_HOST}
-              smtp_port: 587
-              smtp_user: ${SMTP_USER}
-              smtp_password: ${SMTP_PASSWORD}
-        """
-        import re
-        import yaml
-        from pathlib import Path
-        
-        manifest_file = Path(manifest_path)
-        if not manifest_file.exists():
-            raise FileNotFoundError(f"Manifest not found: {manifest_path}")
-        
-        with open(manifest_file) as f:
-            manifest = yaml.safe_load(f)
-        
-        def interpolate(value: Any) -> Any:
-            """Interpolate ${ENV_VAR} and ${ENV_VAR:-default} in strings."""
-            if not isinstance(value, str):
-                return value
-            
-            # Pattern: ${VAR} or ${VAR:-default}
-            pattern = r'\$\{([^}:]+)(?::-([^}]*))?\}'
-            
-            def replacer(match):
-                var_name = match.group(1)
-                default = match.group(2)
-                return os.environ.get(var_name, default if default is not None else "")
-            
-            result = re.sub(pattern, replacer, value)
-            
-            # Convert string bools
-            if result.lower() in ("true", "yes", "1"):
-                return True
-            if result.lower() in ("false", "no", "0"):
-                return False
-            
-            # Try to convert to int
-            try:
-                return int(result)
-            except (ValueError, TypeError):
-                pass
-            
-            return result if result else None
-        
-        def get_nested(d: dict, *keys, default=None):
-            """Get nested dict value with interpolation."""
-            for key in keys:
-                if not isinstance(d, dict):
-                    return default
-                d = d.get(key, default)
-                if d is default:
-                    return default
-            return interpolate(d) if d is not None else default
-        
-        # Extract config sections
-        db = manifest.get("database", {})
-        redis = manifest.get("redis", {})
-        auth = manifest.get("auth", {})
-        saas = manifest.get("saas", {})
-        email = manifest.get("email", {})
-        cors = manifest.get("cors", {})
-        jobs = manifest.get("jobs", {})
-        
-        # Helper: apply default AFTER interpolation (fixes ${VAR} without env set)
-        def _default(val, default):
-            """Return default if val is None. Handles interpolated empty strings."""
-            return default if val is None else val
-        
-        return cls(
-            # Auth
-            jwt_secret=interpolate(auth.get("jwt_secret")) or "dev-secret-change-me",
-            jwt_expiry_hours=_default(interpolate(auth.get("jwt_expiry_hours")), 24),
-            auth_enabled=_default(interpolate(auth.get("enabled")), True),
-            
-            # SaaS
-            saas_enabled=_default(interpolate(saas.get("enabled")), True),
-            saas_invite_base_url=interpolate(saas.get("invite_base_url")),
-            
-            # Redis
-            redis_url=interpolate(redis.get("url")),
-            redis_key_prefix=interpolate(redis.get("key_prefix")) or "queue:",
-            
-            # Database - support both url and path/name for backwards compat
-            database_url=interpolate(db.get("url")) or _build_db_url_from_manifest(db, interpolate),
-            
-            # CORS
-            cors_origins=interpolate(cors.get("origins")) or ["*"],
-            cors_credentials=_default(interpolate(cors.get("credentials")), True),
-            
-            # Jobs
-            worker_count=_default(interpolate(jobs.get("worker_count")), 4),
-            job_max_attempts=_default(interpolate(jobs.get("max_attempts")), 3),
-            
-            # Email
-            email_enabled=_default(interpolate(email.get("enabled")), False),
-            email_provider=interpolate(email.get("provider")) or "smtp",
-            email_from=interpolate(email.get("from")),
-            email_reply_to=interpolate(email.get("reply_to")),
-            smtp_host=interpolate(email.get("smtp_host")),
-            smtp_port=_default(interpolate(email.get("smtp_port")), 587),
-            smtp_user=interpolate(email.get("smtp_user")),
-            smtp_password=interpolate(email.get("smtp_password")),
-            smtp_use_tls=_default(interpolate(email.get("smtp_use_tls")), True),
-            
-            # Debug
-            debug=_default(interpolate(manifest.get("debug")), False),
-            log_level=interpolate(manifest.get("log_level")) or "INFO",
-            # Request Metrics (from observability section)
-            request_metrics_enabled=_default(interpolate(
-                manifest.get("observability", {}).get("request_metrics", {}).get("enabled")
-            ), False),
-            request_metrics_exclude_paths=interpolate(
-                manifest.get("observability", {}).get("request_metrics", {}).get("exclude_paths")
-            ) or ["/health", "/healthz", "/readyz", "/metrics", "/favicon.ico"],
-            # Tracing (from tracing section) - enabled by default
-            tracing_enabled=_default(interpolate(
-                manifest.get("tracing", {}).get("enabled")
-            ), True),
-            tracing_sample_rate=float(_default(interpolate(
-                manifest.get("tracing", {}).get("sample_rate")
-            ), 1.0)),
-        )
 
 
 # Type aliases
@@ -714,9 +363,8 @@ def create_service(
     routers: Sequence[RouterDef] = (),
     tasks: Optional[Dict[str, TaskHandler]] = None,
     
-    # Config
+    # Config (required)
     config: Optional[ServiceConfig] = None,
-    manifest_path: Optional[str] = None,  # Path to manifest.yaml for auto-wiring
     
     # Database schema init (async function that takes db connection)
     schema_init: Optional[Callable] = None,
@@ -731,9 +379,7 @@ def create_service(
     
     # Health & Auth
     health_checks: Sequence[HealthCheck] = (),
-    auth_service: Optional[Callable] = None,
-    user_store: Optional[Any] = None,  # Direct UserStore implementation
-    is_admin: Optional[Callable] = None,
+    user_store: Optional[Any] = None,
     
     # Advanced
     api_prefix: str = "/api/v1",
@@ -741,117 +387,22 @@ def create_service(
     redoc_url: str = "/redoc",
     
     # Functional testing (admin only, opt-in)
-    test_runners: Optional[List[Callable]] = None,  # Async generators for /test/* endpoints
+    test_runners: Optional[List[Callable]] = None,
 ) -> FastAPI:
     """
-    Create a production-ready FastAPI service.
+    Internal: Create a FastAPI service from ServiceConfig.
     
-    Args:
-        name: Service name (used in logs, metrics)
-        routers: List of APIRouters to mount. Can be:
-            - APIRouter (mounted at api_prefix)
-            - (prefix, APIRouter) tuple
-            - (prefix, APIRouter, tags) tuple
-        tasks: Dict of task_name -> handler for background jobs
-        config: ServiceConfig (or uses defaults/env vars)
-        manifest_path: Path to manifest.yaml for auto-wiring integrations
-            When provided, kernel auto-configures:
-            - billing: section → billing routes + tasks
-        schema_init: Async function(db) to initialize app database tables
-        version: Service version
-        description: API description
-        on_startup: Async function called on startup (after db init)
-        on_shutdown: Async function called on shutdown (before db close)
-        health_checks: List of (name, check_fn) for /readyz
-        auth_service: Factory function for auth service (enables login/register)
-        is_admin: Function(user) -> bool for admin checks
-        api_prefix: Prefix for app routers (default: /api/v1)
-        docs_url: OpenAPI docs URL
-        redoc_url: ReDoc URL
-        test_runners: List of async generators for test endpoints (admin only).
-            Each fn: (base_url: str, auth_token: str) -> AsyncIterator[str]
-            Auto-mounted at POST /test/{fn-name} (run_ prefix stripped, _ → -).
-    
-    Returns:
-        Configured FastAPI application
-    
-    Example:
-        # Simple - just config
-        app = create_service(
-            name="widget_service",
-            routers=[widgets_router],
-            config=ServiceConfig.from_env(),
-        )
-        
-        # Full manifest with auto-wiring (billing, etc.)
-        app = create_service(
-            name="my-saas",
-            routers=[my_router],
-            config=ServiceConfig.from_manifest("manifest.yaml"),
-            manifest_path="manifest.yaml",  # Enables auto-wiring
-            schema_init=init_tables,
-        )
+    Use app_kernel.create_service() for the public API.
     """
-    # Load .env hierarchy first (before any config loading)
-    # This ensures env vars are available for ServiceConfig and manifest interpolation
-    from .env import load_env_hierarchy
+    if config is None:
+        raise ValueError("config is required")
     
-    if manifest_path:
-        # Use manifest location to determine service directory
-        from pathlib import Path
-        service_dir = str(Path(manifest_path).parent.resolve())
-        load_env_hierarchy(service_dir=service_dir)
-    else:
-        # Fallback: load from current working directory
-        load_env_hierarchy()
+    cfg = config
     
-    # Use provided config or load from env
-    cfg = config or ServiceConfig.from_env()
-    
-    # Read manifest for auto-wiring integrations
-    manifest = None
-    if manifest_path:
-        import yaml
-        import re
-        from pathlib import Path
-        
-        manifest_file = Path(manifest_path)
-        if manifest_file.exists():
-            with open(manifest_file) as f:
-                content = f.read()
-            
-            # Interpolate env vars
-            def _interpolate(match):
-                var_name = match.group(1)
-                default = match.group(2)
-                return os.environ.get(var_name, default if default is not None else "")
-            
-            content = re.sub(r'\$\{([^}:]+)(?::-([^}]*))?\}', _interpolate, content)
-            manifest = yaml.safe_load(content)
-    
-    # Collect additional routers/tasks from integrations
-    integration_routers = []
+    # Collect integration tasks
     integration_tasks = {}
-    billing_enabled = False
     
-    # Setup billing integration if billing: section exists in manifest
-    if manifest and manifest.get("billing"):
-        from .db import get_db_connection
-        from .auth.deps import require_auth
-        from .integrations.billing import setup_kernel_billing
-        
-        billing_router, billing_tasks = setup_kernel_billing(
-            manifest["billing"],
-            get_db_connection,
-            require_auth,
-        )
-        
-        if billing_router:
-            integration_routers.append(billing_router)
-            integration_tasks.update(billing_tasks)
-            billing_enabled = True
-    
-    # Setup request metrics task if enabled (requires Redis for async storage)
+    # Setup request metrics task if enabled (requires Redis)
     request_metrics_enabled = cfg.request_metrics_enabled and cfg.redis_url
     if request_metrics_enabled:
         from .observability.request_metrics import store_request_metrics
@@ -875,16 +426,31 @@ def create_service(
         logger = get_logger()
         metrics = get_metrics()
         
+        # Run environment validation checks (fails in prod if misconfigured)
+        from .env_checks import run_env_checks, get_env
+        try:
+            run_env_checks(kernel_settings)
+            logger.info(f"Environment: {get_env().upper()}")
+        except RuntimeError as e:
+            logger.error(str(e))
+            raise
+        
+        # Track resolved Redis URL (may differ from config if fallback used)
+        resolved_redis_url = cfg.redis_url
+        
         # Auto-start Redis/Postgres via Docker if localhost and not running
-        if cfg.redis_url or cfg.database_url:
-            try:
-                from .dev_deps import ensure_dev_deps
-                await ensure_dev_deps(
-                    database_url=cfg.database_url,
-                    redis_url=cfg.redis_url,
-                )
-            except Exception as e:
-                logger.debug(f"Dev deps: {e}")
+        # Redis always succeeds (has in-memory fallback)
+        try:
+            from .dev_deps import ensure_dev_deps, is_fake_redis_url
+            deps_result = await ensure_dev_deps(
+                database_url=cfg.database_url,
+                redis_url=cfg.redis_url,
+            )
+            # Use resolved URL (might be fakeredis://, localhost, or original)
+            if "redis" in deps_result:
+                resolved_redis_url = deps_result["redis"].get("url", cfg.redis_url)
+        except Exception as e:
+            logger.debug(f"Dev deps: {e}")
         
         # Initialize database if configured
         if cfg.database_url:
@@ -942,10 +508,11 @@ def create_service(
                 # Fail startup if lifecycle fails (especially migrations)
                 raise
             
-            # Auto-enable audit logging if Redis is configured
-            if cfg.redis_url:
+            # Auto-enable audit logging if Redis is configured (and not fakeredis)
+            from .dev_deps import is_fake_redis_url
+            if resolved_redis_url and not is_fake_redis_url(resolved_redis_url):
                 from .db.session import enable_auto_audit
-                enable_auto_audit(cfg.redis_url, name)
+                enable_auto_audit(resolved_redis_url, name)
                 logger.info("Audit logging enabled (Redis → admin_worker)")
             
             # Initialize ALL kernel schemas at once
@@ -1237,6 +804,37 @@ def create_service(
         )
         app.include_router(metrics_router, prefix=api_prefix)
     
+    # Mount audit log routes (admin only)
+    if cfg.database_url:
+        from .audit import create_audit_router
+        from .auth.deps import get_current_user
+        from .db import db_dependency
+        
+        audit_router = create_audit_router(
+            get_current_user=get_current_user,
+            db_dependency=db_dependency,
+            app_name=name,
+            prefix="/audit",
+            require_admin=True,
+            is_admin=is_admin or _default_is_admin,
+        )
+        app.include_router(audit_router, prefix=api_prefix)
+    
+    # Mount usage metering routes
+    if cfg.database_url:
+        from .metering import create_metering_router
+        from .auth.deps import get_current_user
+        from .db import db_dependency
+        
+        metering_router = create_metering_router(
+            get_current_user=get_current_user,
+            db_dependency=db_dependency,
+            app_name=name,
+            prefix="/usage",
+            is_admin=is_admin or _default_is_admin,
+        )
+        app.include_router(metering_router, prefix=api_prefix)
+    
     # Mount job routes if tasks defined and Redis available
     if tasks and cfg.redis_url:
         from .jobs import create_jobs_router, get_job_client
@@ -1404,7 +1002,7 @@ def _build_kernel_settings(
             protect_metrics="admin",
             enable_auth_routes=True,
             auth_mode="local",
-            allow_self_signup=True,  # Always allow registration
+            allow_self_signup=cfg.allow_self_signup,
             auth_prefix="/api/v1/auth",
             enable_audit_routes=False,
             enable_saas_routes=cfg.saas_enabled,

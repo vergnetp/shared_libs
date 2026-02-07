@@ -700,11 +700,7 @@ class RequestMetricsStore:
 
 async def store_request_metrics(payload: Dict[str, Any], ctx) -> Dict[str, Any]:
     """
-    Worker task to store request metrics.
-    
-    Stores to:
-    1. Database (hot data) - always
-    2. OpenSearch (cold data) - if configured
+    Worker task to store request metrics to database.
     
     Args:
         payload: RequestMetric.to_dict() data
@@ -713,46 +709,13 @@ async def store_request_metrics(payload: Dict[str, Any], ctx) -> Dict[str, Any]:
     Returns:
         Storage result
     """
-    results = {"db": None, "opensearch": None}
-    
-    # 1. Store in database (hot data)
     try:
         store = RequestMetricsStore()
         metric_id = await store.save(payload)
-        results["db"] = {"status": "success", "id": metric_id}
+        return {"status": "success", "id": metric_id}
     except Exception as e:
         logger.error(f"Failed to store metric in DB: {e}")
-        results["db"] = {"status": "error", "error": str(e)}
-    
-    # 2. Store in OpenSearch (cold data) - if configured
-    try:
-        # Try to import OpenSearch storage
-        from ...log.opensearch_storage import OpenSearchLogStorage
-        import os
-        
-        # Check if OpenSearch is configured
-        opensearch_host = os.getenv("OPENSEARCH_HOST")
-        if opensearch_host:
-            storage = OpenSearchLogStorage(
-                host=opensearch_host,
-                port=int(os.getenv("OPENSEARCH_PORT", "9200")),
-                use_ssl=os.getenv("OPENSEARCH_USE_SSL", "false").lower() == "true",
-                index_prefix="request-metrics",
-                auth_type=os.getenv("OPENSEARCH_AUTH_TYPE", "none"),
-                username=os.getenv("OPENSEARCH_USERNAME"),
-                password=os.getenv("OPENSEARCH_PASSWORD"),
-            )
-            result = storage.store_log(payload)
-            results["opensearch"] = result
-        else:
-            results["opensearch"] = {"status": "skipped", "reason": "not configured"}
-    except ImportError:
-        results["opensearch"] = {"status": "skipped", "reason": "module not available"}
-    except Exception as e:
-        logger.warning(f"Failed to store metric in OpenSearch: {e}")
-        results["opensearch"] = {"status": "error", "error": str(e)}
-    
-    return results
+        return {"status": "error", "error": str(e)}
 
 
 # =============================================================================

@@ -1,77 +1,56 @@
 """
-app_kernel.auth - Authentication primitives.
-
-This module provides:
-- User identity models
-- FastAPI dependencies for auth
-- Token creation/verification utilities
-- Password hashing
-- Generic auth router (login/register/me/change-password/logout)
-- AuthServiceAdapter for backend.auth integration
-- Built-in KernelUserStore for auto auth when DB is configured
+OAuth Providers - Google/GitHub login.
 
 Usage:
-    from app_kernel.auth import get_current_user, require_admin, UserIdentity
+    # Configure in create_service
+    app = create_service(
+        name="my-app",
+        oauth_google=("client_id", "client_secret"),
+        oauth_github=("client_id", "client_secret"),
+        ...
+    )
     
-    @app.get("/profile")
-    async def profile(user: UserIdentity = Depends(get_current_user)):
-        return {"id": user.id}
+    # Auto-mounted routes:
+    # GET  /auth/oauth/{provider}          - Start OAuth flow
+    # GET  /auth/oauth/{provider}/callback - Handle callback
+    # POST /auth/oauth/link                - Link OAuth to account
+    # DELETE /auth/oauth/{provider}        - Unlink OAuth
+    
+    # Frontend redirects user to:
+    # /api/v1/auth/oauth/google?redirect_uri=https://app.com/dashboard
 """
 
-from .models import UserIdentity, TokenPayload, RequestContext
-from .deps import (
-    get_current_user,
-    get_current_user_optional,
-    require_admin,
-    require_auth,
-    get_request_context,
-    init_auth_deps,
-    AuthDependencies,
+from .providers import (
+    OAuthProvider,
+    GoogleProvider,
+    GitHubProvider,
+    get_provider,
+    register_provider,
+    configure_providers,
 )
-from .utils import (
-    AuthError,
-    hash_password,
-    verify_password,
-    create_access_token,
-    create_refresh_token,
-    decode_token,
-    verify_token,
+from .stores import (
+    create_oauth_account,
+    get_oauth_account,
+    get_user_oauth_accounts,
+    link_oauth_account,
+    unlink_oauth_account,
 )
-from .router import create_auth_router, UserStore, AuthServiceAdapter
-from .schema import init_auth_schema
-from .stores import KernelUserStore, create_kernel_user_store
+from .router import create_oauth_router
 
 __all__ = [
-    # Models
-    "UserIdentity",
-    "TokenPayload", 
-    "RequestContext",
-    
-    # Dependencies
-    "get_current_user",
-    "get_current_user_optional",
-    "require_admin",
-    "require_auth",
-    "get_request_context",
-    "init_auth_deps",
-    "AuthDependencies",
-    
-    # Utilities
-    "AuthError",
-    "hash_password",
-    "verify_password",
-    "create_access_token",
-    "create_refresh_token",
-    "decode_token",
-    "verify_token",
-    
+    # Providers
+    "OAuthProvider",
+    "GoogleProvider", 
+    "GitHubProvider",
+    "get_provider",
+    "register_provider",
+    "configure_providers",
+    # Stores
+    "create_oauth_account",
+    "get_oauth_account",
+    "get_user_oauth_accounts",
+    "link_oauth_account",
+    "unlink_oauth_account",
     # Router
-    "create_auth_router",
-    "UserStore",
-    "AuthServiceAdapter",
-    
-    # Schema & Stores
-    "init_auth_schema",
-    "KernelUserStore",
-    "create_kernel_user_store",
+    "create_oauth_router",
 ]

@@ -277,11 +277,17 @@ def _create_json_deserializing_wrapper(task_name: str, processor):
             metadata=entity.get("metadata", {})
         )
         
-        # Call the processor
-        if asyncio.iscoroutinefunction(processor):
-            return await processor(payload, ctx)
-        else:
-            return await asyncio.to_thread(processor, payload, ctx)
+        # Rename for clarity
+        data = payload
+        
+        # Call the processor with db connection
+        from ..db import db_context
+        
+        async with db_context() as db:
+            if asyncio.iscoroutinefunction(processor):
+                return await processor(data, ctx, db)
+            else:
+                return await asyncio.to_thread(processor, data, ctx, db)
     
     # Preserve name for queue system
     wrapper.__name__ = task_name
@@ -337,21 +343,22 @@ async def run_worker(
         tasks: Dict mapping task names to processor functions
         redis_url: Redis URL (default: REDIS_URL env var)
         key_prefix: Redis key prefix (default: REDIS_KEY_PREFIX env var or "app:")
-        worker_count: Number of worker threads (default: WORKER_COUNT env var or 3)
+        worker_count: Number of worker threads (default: 3)
         init_app: Optional async function to initialize app dependencies
         shutdown_app: Optional async function to cleanup app dependencies
-        log_level: Logging level (default: LOG_LEVEL env var or INFO)
-        manifest_path: Path to manifest.yaml for auto-adding kernel integration tasks
+        log_level: Logging level (default: INFO)
     """
-    import os
     import sys
     import signal
     
-    # Config from env or args
-    redis_url = redis_url or os.getenv("REDIS_URL")
-    key_prefix = key_prefix or os.getenv("REDIS_KEY_PREFIX", "queue:")
-    worker_count = worker_count or int(os.getenv("WORKER_COUNT", "3"))
-    log_level = log_level or os.getenv("LOG_LEVEL", "INFO")
+    # Validate required args
+    if not redis_url:
+        raise ValueError("redis_url is required")
+    
+    # Defaults
+    key_prefix = key_prefix or "queue:"
+    worker_count = worker_count or 3
+    log_level = log_level or "INFO"
     
     # Use backend.log module
     try:

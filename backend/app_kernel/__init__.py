@@ -73,14 +73,8 @@ from .app import init_app_kernel, get_kernel, KernelRuntime, http_client
 # HTTP client config (re-exported from http_client library)
 from ..http_client.config import HttpConfig
 
-# Environment loading
-from .env import (
-    load_env_hierarchy,
-    get_env,
-    get_env_bool,
-    get_env_int,
-    get_env_list,
-)
+# Environment loading (for .env file support in development)
+from .env import load_env_hierarchy
 
 # Re-export commonly used items
 from .auth import (
@@ -130,6 +124,7 @@ from .observability import (
 
 from .reliability import (
     rate_limit,
+    no_rate_limit,
 )
 
 from .health import create_health_router
@@ -174,11 +169,39 @@ from .integrations import (
     is_email_configured,
 )
 
-# Bootstrap - simplified service creation
+# Billing - optional, only available if billing module installed
+try:
+    from billing import BillingService, BillingConfig, StripeSync
+    _billing_available = True
+except ImportError:
+    BillingService = None
+    BillingConfig = None
+    StripeSync = None
+    _billing_available = False
+
+# Bootstrap - service creation
+from .create_service import create_service
 from .bootstrap import (
-    create_service,
     quick_service,
-    ServiceConfig,
+    ServiceConfig,  # Kept for backward compat
+)
+
+# Environment checks
+from .env_checks import (
+    EnvCheck,
+    run_env_checks,
+    get_env,
+    is_prod,
+    is_dev,
+    is_staging,
+    # Built-in checks (can be reused in app-specific checks)
+    check_database_url,
+    check_redis_url,
+    check_jwt_secret,
+    check_cors_origins,
+    check_email_config,
+    is_uat,
+    is_test,
 )
 
 # Tasks - cancellable SSE-streamed operations
@@ -204,10 +227,25 @@ __all__ = [
     "http_client",
     "HttpConfig",
     
-    # Bootstrap (simplified)
+    # Service creation
     "create_service",
     "quick_service",
-    "ServiceConfig",
+    "ServiceConfig",  # Backward compat
+    
+    # Environment checks
+    "EnvCheck",
+    "run_env_checks",
+    "get_env",
+    "is_prod",
+    "is_dev",
+    "is_staging",
+    "is_uat",
+    "is_test",
+    "check_database_url",
+    "check_redis_url",
+    "check_jwt_secret",
+    "check_cors_origins",
+    "check_email_config",
     
     # Settings
     "KernelSettings",
@@ -224,10 +262,6 @@ __all__ = [
     
     # Environment
     "load_env_hierarchy",
-    "get_env",
-    "get_env_bool",
-    "get_env_int",
-    "get_env_list",
     
     # Auth
     "UserIdentity",
@@ -272,6 +306,7 @@ __all__ = [
     
     # Reliability
     "rate_limit",
+    "no_rate_limit",
     
     # Health
     "create_health_router",
@@ -312,6 +347,11 @@ __all__ = [
     # Integrations
     "send_email",
     "is_email_configured",
+    
+    # Billing (optional)
+    "BillingService",
+    "BillingConfig",
+    "StripeSync",
     
     # Utils
     "Profiler",

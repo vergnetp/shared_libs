@@ -1,24 +1,36 @@
 """
-Rate limiting middleware.
+Rate limiting middleware and decorators.
 
-Provides async Redis-backed rate limiting for API endpoints.
-Uses fakeredis.aioredis as fallback when real Redis unavailable.
+Provides:
+- Global rate limiting middleware with tiers (anonymous/authenticated/admin)
+- @rate_limit(n) decorator for per-route limits
+- @no_rate_limit decorator to exclude routes
 
 Usage:
-    from app_kernel.reliability import rate_limit
+    # Middleware (auto-applied by kernel)
+    # Anonymous: 30/min, Authenticated: 120/min, Admin: 600/min
     
-    @app.post("/api/action")
-    async def action(
-        user: UserIdentity = Depends(get_current_user),
-        _: None = Depends(rate_limit(requests=10, window=60))
-    ):
+    # Override for specific routes:
+    @rate_limit(5)  # 5 per minute
+    async def expensive_operation():
+        ...
+    
+    @rate_limit(100, window=3600)  # 100 per hour
+    async def send_email():
+        ...
+    
+    @no_rate_limit  # Exclude from rate limiting
+    async def health():
         ...
 """
-from typing import Optional, Callable
-from dataclasses import dataclass
+from typing import Optional, Callable, Set
+from dataclasses import dataclass, field
 import time
+import functools
 
 from fastapi import Request, HTTPException, Depends
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response
 
 from ..auth.models import UserIdentity
 from ..auth.deps import get_current_user_optional
@@ -27,9 +39,23 @@ from ..auth.deps import get_current_user_optional
 @dataclass
 class RateLimitConfig:
     """Configuration for rate limiting."""
-    requests: int = 100  # requests per window
-    window_seconds: int = 60  # window size
+    # Default limits per minute
+    anonymous_rpm: int = 30
+    authenticated_rpm: int = 120
+    admin_rpm: int = 600
+    
+    # Key prefix
     key_prefix: str = "ratelimit:"
+    
+    # Paths to exclude from rate limiting
+    exclude_paths: Set[str] = field(default_factory=lambda: {
+        "/health", "/healthz", "/ready", "/metrics", "/docs", "/openapi.json", "/redoc"
+    })
+    
+    # Path prefixes to exclude
+    exclude_prefixes: Set[str] = field(default_factory=lambda: {
+        "/static", "/_next"
+    })
 
 
 class RateLimiter:
@@ -41,40 +67,24 @@ class RateLimiter:
     """
     
     def __init__(self, redis_client, config: Optional[RateLimitConfig] = None):
-        """
-        Initialize rate limiter.
-        
-        Args:
-            redis_client: Async Redis client (redis.asyncio or fakeredis.aioredis)
-            config: Rate limit configuration
-        """
         self._redis = redis_client
         self._config = config or RateLimitConfig()
     
     def _get_key(self, identifier: str) -> str:
-        """Get Redis key for identifier."""
         return f"{self._config.key_prefix}{identifier}"
     
     async def check(
         self,
         identifier: str,
-        limit: Optional[int] = None,
-        window: Optional[int] = None
-    ) -> bool:
+        limit: int,
+        window: int = 60
+    ) -> tuple[bool, int, int]:
         """
         Check if request is allowed and record it.
         
-        Args:
-            identifier: Unique identifier (e.g., user_id, IP)
-            limit: Optional limit override
-            window: Optional window override
-        
         Returns:
-            True if allowed, False if rate limited
+            (allowed, remaining, reset_seconds)
         """
-        limit = limit or self._config.requests
-        window = window or self._config.window_seconds
-        
         key = self._get_key(identifier)
         now = time.time()
         window_start = now - window
@@ -96,35 +106,201 @@ class RateLimiter:
         results = await pipe.execute()
         current_count = results[1]
         
-        return current_count < limit
+        remaining = max(0, limit - current_count - 1)
+        allowed = current_count < limit
+        
+        return allowed, remaining, window
     
-    async def get_remaining(
+    async def get_limit_for_request(
         self,
-        identifier: str,
-        limit: Optional[int] = None,
-        window: Optional[int] = None
-    ) -> int:
-        """Get remaining requests in window."""
-        limit = limit or self._config.requests
-        window = window or self._config.window_seconds
+        request: Request,
+        user: Optional[UserIdentity] = None
+    ) -> tuple[str, int]:
+        """
+        Get rate limit key and limit for a request.
         
-        key = self._get_key(identifier)
-        now = time.time()
-        window_start = now - window
-        
-        # Clean and count
-        await self._redis.zremrangebyscore(key, 0, window_start)
-        count = await self._redis.zcard(key)
-        
-        return max(0, limit - count)
+        Returns:
+            (key, limit_per_minute)
+        """
+        if user:
+            if getattr(user, 'is_admin', False) or getattr(user, 'role', None) == 'admin':
+                return f"admin:{user.id}", self._config.admin_rpm
+            else:
+                return f"user:{user.id}", self._config.authenticated_rpm
+        else:
+            # Anonymous - use IP
+            client_ip = request.client.host if request.client else "unknown"
+            return f"ip:{client_ip}", self._config.anonymous_rpm
+
+
+# Route-level rate limit storage
+_route_limits: dict[str, tuple[int, int]] = {}  # path -> (limit, window)
+_no_rate_limit_routes: Set[str] = set()
+
+
+def rate_limit(limit: int, window: int = 60):
+    """
+    Decorator to set custom rate limit for a route.
     
-    async def reset(self, identifier: str):
-        """Reset rate limit for identifier."""
-        key = self._get_key(identifier)
-        await self._redis.delete(key)
+    Args:
+        limit: Maximum requests allowed
+        window: Time window in seconds (default: 60)
+    
+    Usage:
+        @router.post("/expensive")
+        @rate_limit(5)  # 5 per minute
+        async def expensive():
+            ...
+        
+        @router.post("/hourly")
+        @rate_limit(100, window=3600)  # 100 per hour
+        async def hourly():
+            ...
+    """
+    def decorator(func):
+        # Store the limit for this route
+        # We'll look it up by function name in middleware
+        _route_limits[func.__name__] = (limit, window)
+        
+        @functools.wraps(func)
+        async def wrapper(*args, **kwargs):
+            return await func(*args, **kwargs)
+        
+        # Mark the wrapper with rate limit info
+        wrapper._rate_limit = (limit, window)
+        return wrapper
+    
+    return decorator
 
 
-# Module-level limiter
+def no_rate_limit(func):
+    """
+    Decorator to exclude a route from rate limiting.
+    
+    Usage:
+        @router.get("/health")
+        @no_rate_limit
+        async def health():
+            ...
+    """
+    _no_rate_limit_routes.add(func.__name__)
+    
+    @functools.wraps(func)
+    async def wrapper(*args, **kwargs):
+        return await func(*args, **kwargs)
+    
+    wrapper._no_rate_limit = True
+    return wrapper
+
+
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    """
+    Global rate limiting middleware.
+    
+    Applies tiered rate limits:
+    - Anonymous: 30/min (configurable)
+    - Authenticated: 120/min (configurable)
+    - Admin: 600/min (configurable)
+    
+    Routes can override with @rate_limit(n) or exclude with @no_rate_limit.
+    """
+    
+    def __init__(
+        self,
+        app,
+        redis_client,
+        config: Optional[RateLimitConfig] = None,
+    ):
+        super().__init__(app)
+        self._limiter = RateLimiter(redis_client, config)
+        self._config = config or RateLimitConfig()
+    
+    def _should_skip(self, request: Request) -> bool:
+        """Check if request should skip rate limiting."""
+        path = request.url.path
+        
+        # Check exact path exclusions
+        if path in self._config.exclude_paths:
+            return True
+        
+        # Check prefix exclusions
+        for prefix in self._config.exclude_prefixes:
+            if path.startswith(prefix):
+                return True
+        
+        # Check if route has @no_rate_limit
+        route = request.scope.get("route")
+        if route:
+            endpoint = getattr(route, "endpoint", None)
+            if endpoint:
+                if getattr(endpoint, "_no_rate_limit", False):
+                    return True
+                if endpoint.__name__ in _no_rate_limit_routes:
+                    return True
+        
+        return False
+    
+    def _get_route_limit(self, request: Request) -> Optional[tuple[int, int]]:
+        """Get custom rate limit for route if set via @rate_limit decorator."""
+        route = request.scope.get("route")
+        if route:
+            endpoint = getattr(route, "endpoint", None)
+            if endpoint:
+                # Check wrapper attribute
+                if hasattr(endpoint, "_rate_limit"):
+                    return endpoint._rate_limit
+                # Check registry
+                if endpoint.__name__ in _route_limits:
+                    return _route_limits[endpoint.__name__]
+        return None
+    
+    async def dispatch(self, request: Request, call_next) -> Response:
+        """Process request with rate limiting."""
+        # Skip if excluded
+        if self._should_skip(request):
+            return await call_next(request)
+        
+        # Get user from request state (set by auth middleware)
+        user = getattr(request.state, "user", None) if hasattr(request, "state") else None
+        
+        # Get rate limit key and default limit
+        key, default_limit = await self._limiter.get_limit_for_request(request, user)
+        
+        # Check for route-specific override
+        route_limit = self._get_route_limit(request)
+        if route_limit:
+            limit, window = route_limit
+        else:
+            limit, window = default_limit, 60
+        
+        # Check rate limit
+        allowed, remaining, reset = await self._limiter.check(key, limit, window)
+        
+        if not allowed:
+            return Response(
+                content='{"detail":"Rate limit exceeded"}',
+                status_code=429,
+                media_type="application/json",
+                headers={
+                    "X-RateLimit-Limit": str(limit),
+                    "X-RateLimit-Remaining": "0",
+                    "X-RateLimit-Reset": str(reset),
+                    "Retry-After": str(reset),
+                }
+            )
+        
+        # Process request
+        response = await call_next(request)
+        
+        # Add rate limit headers
+        response.headers["X-RateLimit-Limit"] = str(limit)
+        response.headers["X-RateLimit-Remaining"] = str(remaining)
+        response.headers["X-RateLimit-Reset"] = str(reset)
+        
+        return response
+
+
+# Module-level limiter (for direct use)
 _rate_limiter: Optional[RateLimiter] = None
 _is_fake_redis: bool = False
 
@@ -134,14 +310,7 @@ def init_rate_limiter(
     config: Optional[RateLimitConfig] = None,
     is_fake: bool = False,
 ):
-    """
-    Initialize the rate limiter.
-    
-    Args:
-        redis_client: Async Redis client
-        config: Rate limit configuration
-        is_fake: Whether using fakeredis
-    """
+    """Initialize the rate limiter."""
     global _rate_limiter, _is_fake_redis
     _rate_limiter = RateLimiter(redis_client, config)
     _is_fake_redis = is_fake
@@ -149,63 +318,11 @@ def init_rate_limiter(
 
 def get_rate_limiter() -> RateLimiter:
     """Get the initialized rate limiter."""
-    global _rate_limiter
     if _rate_limiter is None:
-        raise RuntimeError("Rate limiter not initialized. Call init_rate_limiter() first.")
+        raise RuntimeError("Rate limiter not initialized.")
     return _rate_limiter
 
 
 def is_fake_redis() -> bool:
-    """Check if using fakeredis (in-memory)."""
+    """Check if using fakeredis."""
     return _is_fake_redis
-
-
-def rate_limit(
-    requests: int = 100,
-    window: int = 60,
-    key_func: Optional[Callable[[Request, Optional[UserIdentity]], str]] = None
-) -> Callable:
-    """
-    Create a rate limiting dependency.
-    
-    Args:
-        requests: Max requests per window
-        window: Window size in seconds
-        key_func: Optional function to generate rate limit key.
-                  Default uses user_id or IP address.
-    
-    Usage:
-        @app.post("/api/action")
-        async def action(_: None = Depends(rate_limit(10, 60))):
-            ...
-    """
-    async def dependency(
-        request: Request,
-        user: Optional[UserIdentity] = Depends(get_current_user_optional)
-    ):
-        limiter = get_rate_limiter()
-        
-        # Determine key
-        if key_func:
-            key = key_func(request, user)
-        elif user:
-            key = f"user:{user.id}"
-        else:
-            key = f"ip:{request.client.host if request.client else 'unknown'}"
-        
-        # Check rate limit
-        allowed = await limiter.check(key, requests, window)
-        
-        if not allowed:
-            remaining = await limiter.get_remaining(key, requests, window)
-            raise HTTPException(
-                status_code=429,
-                detail="Rate limit exceeded",
-                headers={
-                    "X-RateLimit-Limit": str(requests),
-                    "X-RateLimit-Remaining": str(remaining),
-                    "X-RateLimit-Reset": str(window)
-                }
-            )
-    
-    return dependency

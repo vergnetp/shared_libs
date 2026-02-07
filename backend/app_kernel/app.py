@@ -335,33 +335,42 @@ def init_app_kernel(
     # 9. Setup reliability middleware (always enabled, uses fakeredis fallback)
     # =========================================================================
     if setup_reliability_middleware and settings.reliability.rate_limit_enabled:
-        from .reliability.ratelimit import init_rate_limiter, RateLimitConfig
-        from .dev_deps import get_redis_client, is_fake_redis_url
+        from .reliability.ratelimit import init_rate_limiter, RateLimitConfig, RateLimitMiddleware
+        from .dev_deps import get_async_redis_client, is_fake_redis_url
         
         rate_config = RateLimitConfig(
-            requests=settings.reliability.rate_limit_requests,
-            window_seconds=settings.reliability.rate_limit_window_seconds,
+            anonymous_rpm=settings.reliability.rate_limit_anonymous_rpm,
+            authenticated_rpm=settings.reliability.rate_limit_authenticated_rpm,
+            admin_rpm=settings.reliability.rate_limit_admin_rpm,
         )
         
-        # Get Redis client (real or fakeredis)
-        redis_client = get_redis_client(settings.redis.url)
-        init_rate_limiter(redis_client, rate_config)
+        # Get async Redis client (real or fakeredis.aioredis)
+        redis_client = get_async_redis_client(settings.redis.url)
+        is_fake = is_fake_redis_url(settings.redis.url)
+        init_rate_limiter(redis_client, rate_config, is_fake=is_fake)
         
-        if is_fake_redis_url(settings.redis.url):
-            logger.info(f"Rate limiting: {settings.reliability.rate_limit_requests} req/{settings.reliability.rate_limit_window_seconds}s (fakeredis)")
+        # Add middleware for global rate limiting
+        app.add_middleware(
+            RateLimitMiddleware,
+            redis_client=redis_client,
+            config=rate_config,
+        )
+        
+        if is_fake:
+            logger.info(f"Rate limiting: {rate_config.anonymous_rpm}/{rate_config.authenticated_rpm}/{rate_config.admin_rpm} rpm (anon/auth/admin) (fakeredis)")
         else:
-            logger.info(f"Rate limiting: {settings.reliability.rate_limit_requests} req/{settings.reliability.rate_limit_window_seconds}s (Redis)")
+            logger.info(f"Rate limiting: {rate_config.anonymous_rpm}/{rate_config.authenticated_rpm}/{rate_config.admin_rpm} rpm (anon/auth/admin) (Redis)")
     
     if setup_reliability_middleware and settings.reliability.idempotency_enabled:
         from .reliability.idempotency import init_idempotency_checker, IdempotencyConfig
-        from .dev_deps import get_redis_client, is_fake_redis_url
+        from .dev_deps import get_async_redis_client, is_fake_redis_url
         
         idempotency_config = IdempotencyConfig(
             ttl_seconds=settings.reliability.idempotency_ttl_seconds,
         )
         
-        # Get Redis client (real or fakeredis) - reuse from rate limiter if same URL
-        redis_client = get_redis_client(settings.redis.url)
+        # Get async Redis client (real or fakeredis.aioredis)
+        redis_client = get_async_redis_client(settings.redis.url)
         init_idempotency_checker(redis_client, idempotency_config)
         
         if is_fake_redis_url(settings.redis.url):

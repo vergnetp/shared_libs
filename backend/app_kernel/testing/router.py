@@ -33,10 +33,6 @@ def _detect_base_url(request: Request, api_prefix: str) -> str:
          with api_prefix="/api/v1"
          → http://localhost:8000/api/v1
     """
-    override = os.environ.get("API_BASE_URL")
-    if override:
-        return override.rstrip("/")
-    
     base = str(request.base_url).rstrip("/")
     return f"{base}{api_prefix}"
 

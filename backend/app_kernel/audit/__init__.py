@@ -1,21 +1,25 @@
 """
 Audit Logging - Track who changed what, when.
 
-Writes to shared admin_db via Redis (async, no runtime penalty).
+Writes to database via Redis (async, no runtime penalty).
 
 Usage:
     # Auto-audit: enabled by default when db_connection used
     # Intercepts save_entity/delete_entity calls
     
-    # Query audit logs (from admin_db)
-    logs = await get_audit_logs(admin_db,
-        app="deploy_api",
+    # Query audit logs
+    logs = await get_audit_logs(db,
+        app="my-api",
         entity="deployments",
         since="2025-01-01",
     )
     
     # Get history for specific entity
-    history = await get_entity_audit_history(admin_db, "deployments", deployment_id)
+    history = await get_entity_audit_history(db, "deployments", deployment_id)
+    
+    # Auto-mounted routes (admin only):
+    #   GET /api/v1/audit               - Query audit logs
+    #   GET /api/v1/audit/entity/{type}/{id} - Get entity history
 """
 
 from .publisher import push_audit_event, enable_audit

@@ -5,7 +5,7 @@ Provides TaskStream for long-running operations that stream progress
 via Server-Sent Events and support user-initiated cancellation.
 
 Quick start:
-    from app_kernel.tasks import TaskStream, Cancelled
+    from app_kernel.tasks import TaskStream, TaskCancelled
 
     async def deploy(db, ...) -> AsyncIterator[str]:
         stream = TaskStream("deploy")
@@ -21,7 +21,7 @@ Quick start:
             yield stream.log()
             
             yield stream.complete(True)
-        except Cancelled:
+        except TaskCancelled:
             yield stream.complete(False, error='Cancelled by user')
         finally:
             stream.cleanup()
@@ -37,7 +37,8 @@ Client-side:
 
 # Cancel registry
 from .cancel import (
-    Cancelled,
+    TaskCancelled,
+    Cancelled,  # Backwards compat alias
     register,
     trigger,
     cleanup,
@@ -63,7 +64,8 @@ from .router import create_tasks_router
 
 __all__ = [
     # Exception
-    "Cancelled",
+    "TaskCancelled",
+    "Cancelled",  # Backwards compat,
     
     # Cancel registry
     "register",

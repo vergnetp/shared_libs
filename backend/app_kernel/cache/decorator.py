@@ -1,11 +1,7 @@
 """Cache decorator for functions."""
 
-import os
 import functools
 from typing import Optional, Callable
-
-
-CACHE_ENABLED = os.environ.get("CACHE_ENABLED", "false").lower() == "true"
 
 
 def cached(
@@ -14,12 +10,10 @@ def cached(
     prefix: str = "",
 ):
     """
-    Decorator to cache function results.
-    
-    Disabled by default. Set CACHE_ENABLED=true to enable.
+    Decorator to cache function results in Redis.
     
     Args:
-        ttl: Time to live in seconds
+        ttl: Time to live in seconds (default: 300)
         key: Cache key template with {arg_name} placeholders
         prefix: Optional key prefix
     
@@ -38,10 +32,6 @@ def cached(
     def decorator(func: Callable):
         @functools.wraps(func)
         async def wrapper(*args, **kwargs):
-            # Bypass if caching disabled
-            if not CACHE_ENABLED:
-                return await func(*args, **kwargs)
-            
             from .client import get_cache
             
             cache = get_cache()
@@ -65,11 +55,18 @@ def cached(
         
         # Add cache control methods
         wrapper.cache_key = lambda *a, **kw: _build_key(func, key, prefix, a, kw)
-        wrapper.invalidate = lambda *a, **kw: get_cache().delete(_build_key(func, key, prefix, a, kw))
+        wrapper.invalidate = lambda *a, **kw: _invalidate_key(func, key, prefix, a, kw)
         
         return wrapper
     
     return decorator
+
+
+async def _invalidate_key(func, key, prefix, args, kwargs):
+    """Invalidate a cache key."""
+    from .client import get_cache
+    cache_key = _build_key(func, key, prefix, args, kwargs)
+    return await get_cache().delete(cache_key)
 
 
 def _build_key(

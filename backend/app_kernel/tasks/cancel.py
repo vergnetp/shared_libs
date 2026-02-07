@@ -9,9 +9,13 @@ import asyncio
 from typing import Dict
 
 
-class Cancelled(Exception):
+class TaskCancelled(Exception):
     """Raised when a task is cancelled by user."""
     pass
+
+
+# Backwards compatibility alias
+Cancelled = TaskCancelled
 
 
 # Active task cancel events
@@ -55,4 +59,4 @@ def check(task_id: str):
     Call between task steps for fast bail-out."""
     event = _cancel_events.get(task_id)
     if event and event.is_set():
-        raise Cancelled(f'Task {task_id} cancelled by user')
+        raise TaskCancelled(f'Task {task_id} cancelled by user')

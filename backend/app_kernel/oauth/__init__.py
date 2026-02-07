@@ -2,19 +2,12 @@
 OAuth Providers - Google/GitHub login.
 
 Usage:
-    # Configure in ServiceConfig
-    config = ServiceConfig(
-        oauth_providers={
-            "google": {
-                "client_id": os.environ["GOOGLE_CLIENT_ID"],
-                "client_secret": os.environ["GOOGLE_CLIENT_SECRET"],
-            },
-            "github": {
-                "client_id": os.environ["GITHUB_CLIENT_ID"],
-                "client_secret": os.environ["GITHUB_CLIENT_SECRET"],
-            },
-        },
-        oauth_redirect_url="https://myapp.com/auth/callback",
+    # Configure in create_service
+    app = create_service(
+        name="my-app",
+        oauth_google=("client_id", "client_secret"),
+        oauth_github=("client_id", "client_secret"),
+        ...
     )
     
     # Auto-mounted routes:

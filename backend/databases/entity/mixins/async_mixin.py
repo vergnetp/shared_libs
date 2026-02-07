@@ -1,6 +1,6 @@
 import asyncio
 import datetime
-from typing import Dict, Tuple, List, Any, Optional
+from typing import Dict, Tuple, List, Any, Optional, Union
 
 from ....utils import async_method
 from .... import log as logger
@@ -254,6 +254,7 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
                         comment: Optional[str] = None,
                         timeout: Optional[float] = 60,
                         skip_schema_check: bool = False,
+                        match_by: Optional[Union[str, List[str]]] = None,
                         _caller=None) -> Dict[str, Any]:
         """
         Save an entity (create or update).
@@ -265,16 +266,50 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
             comment: Optional comment about the change
             timeout: Optional timeout in seconds for the operation (defaults to 60)
             skip_schema_check: If True, skip schema/metadata checks (optimization when migrations_on=False)
+            match_by: Field(s) to match existing entity by (for upsert without id).
+                      Can be string ("slug") or list (["workspace_id", "user_id"]).
+                      If provided and no id in entity, will find by these fields first.
             
         Returns:
             The saved entity with updated fields
+            
+        Behavior:
+            - If entity has 'id' → upsert by id (existing behavior)
+            - If no 'id' and match_by provided → find by match fields
+                - Found → merge with existing and update
+                - Not found → create with new id
+            - If no 'id' and no match_by → create with new id
         """
         _check_entity_access(self, 'save_entity', _caller)
         self._entity_op_depth = getattr(self, '_entity_op_depth', 0) + 1
         try:
             async def perform_save():
+                working_entity = entity.copy()
+                
+                # If no id but match_by provided, try to find existing
+                if not working_entity.get('id') and match_by:
+                    match_fields = [match_by] if isinstance(match_by, str) else list(match_by)
+                    filters = {f: working_entity[f] for f in match_fields if f in working_entity}
+                    
+                    if filters:
+                        existing = await self.find_entities(
+                            entity_name,
+                            filters=filters,
+                            limit=1,
+                            _caller=_caller
+                        )
+                        if existing:
+                            # Merge: existing + new data (new wins, but preserve id and created_at)
+                            old = existing[0]
+                            working_entity = {
+                                **old,
+                                **working_entity,
+                                'id': old['id'],  # Keep original id
+                                'created_at': old.get('created_at'),  # Keep original created_at
+                            }
+                
                 # Prepare entity with timestamps, IDs, etc.
-                prepared_entity = self._prepare_entity(entity_name, entity, user_id, comment)
+                prepared_entity = self._prepare_entity(entity_name, working_entity, user_id, comment)
                 
                 # Skip schema checks if migrations_on=True (use AutoMigrator) or skip_schema_check=True
                 should_skip_schema = getattr(self.config, 'migrations_on', True) or skip_schema_check
