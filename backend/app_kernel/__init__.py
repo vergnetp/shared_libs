@@ -125,6 +125,7 @@ from .observability import (
 from .reliability import (
     rate_limit,
     no_rate_limit,
+    idempotent,
 )
 
 from .health import create_health_router
@@ -307,6 +308,7 @@ __all__ = [
     # Reliability
     "rate_limit",
     "no_rate_limit",
+    "idempotent",
     
     # Health
     "create_health_router",

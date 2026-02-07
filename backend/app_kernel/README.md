@@ -314,6 +314,46 @@ async def webhook():
     ...
 ```
 
+## Idempotency
+
+Prevent duplicate execution of dangerous operations (emails, webhooks, one-shot actions).
+
+```python
+from app_kernel import idempotent
+
+@router.post("/send-welcome-email")
+@idempotent
+async def send_welcome_email(req: EmailRequest, user = Depends(get_current_user)):
+    return await send_email(req.to, "Welcome!", ...)
+```
+
+**How it works:**
+- Key = `user_id + endpoint + body_hash`
+- TTL = 1 year
+- Duplicate request → returns cached response, handler NOT called
+- Response header: `X-Idempotency-Replayed: true`
+
+**⚠️ USE WITH CAUTION - Only for truly one-shot operations:**
+
+| ✓ Good use | ✗ Bad use |
+|------------|-----------|
+| Send welcome email | Purchase (user may buy same item twice!) |
+| Process webhook | Search |
+| One-time setup | Update profile |
+| Password reset email | Any operation user may repeat intentionally |
+
+**Example of WRONG usage:**
+```python
+@router.post("/purchase")
+@idempotent  # ❌ WRONG! User can't buy same product twice!
+async def purchase(req: PurchaseRequest):
+    ...
+```
+
+User buys 5 candles Monday, tries to buy 5 more Friday → gets Monday's cached response. **Bad!**
+
+**For purchases/payments:** Use order IDs + Stripe's built-in idempotency, not this decorator.
+
 ## Caching
 
 ```python

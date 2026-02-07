@@ -33,11 +33,11 @@ from .ratelimit import (
 )
 
 from .idempotency import (
-    IdempotencyConfig,
-    IdempotencyMiddleware,
+    idempotent,
+    init_idempotency,
     IdempotencyChecker,
-    init_idempotency_checker,
-    get_idempotency_checker,
+    IdempotencyConfig,
+    ONE_YEAR,
 )
 
 __all__ = [
@@ -52,9 +52,9 @@ __all__ = [
     "no_rate_limit",
     
     # Idempotency
-    "IdempotencyConfig",
-    "IdempotencyMiddleware",
+    "idempotent",
+    "init_idempotency",
     "IdempotencyChecker",
-    "init_idempotency_checker",
-    "get_idempotency_checker",
+    "IdempotencyConfig",
+    "ONE_YEAR",
 ]

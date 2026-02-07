@@ -1,244 +1,274 @@
 """
-Idempotency middleware.
-
-Provides idempotency key support for POST/PUT/PATCH requests.
-Explicitly excludes streaming routes.
+Idempotency - Prevent duplicate execution of dangerous operations.
 
 Usage:
-    from app_kernel.reliability import IdempotencyMiddleware
+    from app_kernel import idempotent
     
-    # Add to app
-    app.add_middleware(
-        IdempotencyMiddleware,
-        redis_client=redis_client,  # async redis or fakeredis.aioredis
-        exclude_paths=["/stream", "/chat/stream"]
-    )
-    
-    # Client sends Idempotency-Key header
-    # POST /api/payment
-    # Idempotency-Key: unique-request-id-123
-"""
-from typing import Optional, Set, Any
-from dataclasses import dataclass
-import json
+    @router.post("/payments")
+    @idempotent
+    async def create_payment(req: PaymentRequest, user = Depends(get_current_user)):
+        # Executes ONCE per unique (user + endpoint + body)
+        # Duplicates return cached response
+        return await process_payment(req)
 
-from starlette.middleware.base import BaseHTTPMiddleware
+How it works:
+    Request 1: POST /payments {amount: 100}
+      → Executes handler
+      → Caches response in Redis (key = user + endpoint + body_hash)
+      → Returns {status: 'success', paid_at: '18:04'}
+    
+    Request 2: POST /payments {amount: 100}  (same user, same body)
+      → Finds cached response
+      → Returns {status: 'success', paid_at: '18:04'} (from cache)
+      → Handler NOT called, payment NOT processed again
+      → Header: X-Idempotency-Replayed: true
+"""
+import hashlib
+import json
+import functools
+from typing import Optional, Any
+from dataclasses import dataclass, field
+
 from starlette.requests import Request
 from starlette.responses import Response, JSONResponse
 
 
-@dataclass
+# =============================================================================
+# Configuration
+# =============================================================================
+
+ONE_YEAR = 365 * 24 * 60 * 60  # 31536000 seconds
+
+@dataclass 
 class IdempotencyConfig:
     """Configuration for idempotency."""
-    ttl_seconds: int = 86400  # 24 hours
-    key_prefix: str = "idempotency:"
-    header_name: str = "Idempotency-Key"
-    
-    # Paths to exclude (streaming routes should be excluded)
-    exclude_paths: Set[str] = None
-    
-    # Methods that support idempotency
-    methods: Set[str] = None
-    
-    def __post_init__(self):
-        if self.exclude_paths is None:
-            self.exclude_paths = set()
-        if self.methods is None:
-            self.methods = {"POST", "PUT", "PATCH"}
+    default_ttl: int = ONE_YEAR
+    key_prefix: str = "idempotent:"
 
 
-class IdempotencyMiddleware(BaseHTTPMiddleware):
+# =============================================================================
+# Module state
+# =============================================================================
+
+_redis_client = None
+_config = IdempotencyConfig()
+
+
+def init_idempotency(redis_client, config: Optional[IdempotencyConfig] = None):
+    """Initialize idempotency with Redis client."""
+    global _redis_client, _config
+    _redis_client = redis_client
+    if config:
+        _config = config
+
+
+def get_redis():
+    """Get Redis client (may be None if not configured)."""
+    return _redis_client
+
+
+# =============================================================================
+# Decorator
+# =============================================================================
+
+def idempotent(func=None, *, ttl: int = ONE_YEAR):
     """
-    Middleware that enforces idempotency for non-GET requests.
+    Decorator to make an endpoint idempotent.
     
-    If a request with the same idempotency key has been processed,
-    returns the cached response instead of processing again.
+    Args:
+        ttl: Cache TTL in seconds. Default 1 year.
+    
+    Usage:
+        @idempotent
+        async def handler(): ...
+        
+        @idempotent(ttl=300)  # 5 minutes
+        async def handler(): ...
     """
-    
-    def __init__(
-        self,
-        app,
-        redis_client,
-        config: Optional[IdempotencyConfig] = None,
-        exclude_paths: Optional[Set[str]] = None
-    ):
-        """
-        Initialize middleware.
-        
-        Args:
-            app: ASGI application
-            redis_client: Async Redis client (redis.asyncio or fakeredis.aioredis)
-            config: Idempotency configuration
-            exclude_paths: Additional paths to exclude
-        """
-        super().__init__(app)
-        self._redis = redis_client
-        self._config = config or IdempotencyConfig()
-        
-        if exclude_paths:
-            self._config.exclude_paths.update(exclude_paths)
-    
-    def _should_process(self, request: Request) -> bool:
-        """Check if request should be processed for idempotency."""
-        # Check method
-        if request.method not in self._config.methods:
-            return False
-        
-        # Check excluded paths
-        path = request.url.path
-        for excluded in self._config.exclude_paths:
-            if path.startswith(excluded):
-                return False
-        
-        # Check for idempotency key header
-        return self._config.header_name in request.headers
-    
-    def _get_key(self, request: Request) -> str:
-        """Get Redis key for the idempotency key."""
-        idempotency_key = request.headers.get(self._config.header_name)
-        
-        # Include user info if available (from request state)
-        user_id = getattr(request.state, 'user_id', None) if hasattr(request, 'state') else None
-        
-        if user_id:
-            key = f"{user_id}:{idempotency_key}"
-        else:
-            key = idempotency_key
-        
-        return f"{self._config.key_prefix}{key}"
-    
-    async def dispatch(self, request: Request, call_next) -> Response:
-        """Process request with idempotency check."""
-        # Skip if not applicable
-        if not self._should_process(request):
-            return await call_next(request)
-        
-        redis_key = self._get_key(request)
-        
-        # Check for cached response
-        cached = await self._get_cached_response(redis_key)
-        
-        if cached:
-            # Return cached response
-            return JSONResponse(
-                content=cached.get("body"),
-                status_code=cached.get("status_code", 200),
-                headers={
-                    "X-Idempotency-Replayed": "true",
-                    **cached.get("headers", {})
-                }
-            )
-        
-        # Process request
-        response = await call_next(request)
-        
-        # Cache successful responses
-        if 200 <= response.status_code < 300:
-            await self._cache_response(redis_key, response)
-        
-        return response
-    
-    async def _get_cached_response(self, key: str) -> Optional[dict]:
-        """Get cached response from Redis."""
-        try:
-            data = await self._redis.get(key)
+    def decorator(fn):
+        @functools.wraps(fn)
+        async def wrapper(*args, **kwargs):
+            redis = get_redis()
+            if not redis:
+                # No Redis configured, just execute
+                return await fn(*args, **kwargs)
             
-            if data:
-                return json.loads(data)
-            return None
+            # Extract request from args/kwargs
+            request = _find_request(args, kwargs)
+            if not request:
+                # No request found, just execute
+                return await fn(*args, **kwargs)
             
-        except Exception:
-            # On error, proceed without idempotency
-            return None
+            # Build key
+            key = await _build_key(request)
+            
+            # Check cache
+            cached = await _get_cached(redis, key)
+            if cached is not None:
+                return _make_cached_response(cached, key)
+            
+            # Execute handler
+            result = await fn(*args, **kwargs)
+            
+            # Cache successful result
+            await _cache_result(redis, key, result, ttl)
+            
+            return result
+        
+        wrapper._idempotent = True
+        return wrapper
     
-    async def _cache_response(self, key: str, response: Response):
-        """Cache the response in Redis."""
-        try:
-            # Read response body
-            body = b""
-            async for chunk in response.body_iterator:
-                body += chunk
+    # Handle @idempotent vs @idempotent()
+    if func is not None:
+        return decorator(func)
+    return decorator
+
+
+# =============================================================================
+# Helpers
+# =============================================================================
+
+def _find_request(args, kwargs) -> Optional[Request]:
+    """Find Request object in function arguments."""
+    # Check kwargs
+    if 'request' in kwargs:
+        return kwargs['request']
+    
+    # Check args
+    for arg in args:
+        if isinstance(arg, Request):
+            return arg
+    
+    return None
+
+
+async def _build_key(request: Request) -> str:
+    """Build idempotency key from request."""
+    # User ID (from auth middleware)
+    user_id = "anon"
+    if hasattr(request, 'state'):
+        if hasattr(request.state, 'user_id'):
+            user_id = request.state.user_id
+        elif hasattr(request.state, 'user') and hasattr(request.state.user, 'id'):
+            user_id = request.state.user.id
+    
+    # Method + path
+    method = request.method
+    path = request.url.path
+    
+    # Body hash
+    body = await request.body()
+    body_hash = hashlib.sha256(body).hexdigest()[:16] if body else "empty"
+    
+    return f"{_config.key_prefix}{user_id}:{method}:{path}:{body_hash}"
+
+
+async def _get_cached(redis, key: str) -> Optional[dict]:
+    """Get cached response from Redis."""
+    try:
+        data = await redis.get(key)
+        if data:
+            return json.loads(data)
+        return None
+    except Exception:
+        return None
+
+
+async def _cache_result(redis, key: str, result: Any, ttl: int):
+    """Cache the result in Redis."""
+    try:
+        # Handle different result types
+        if isinstance(result, Response):
+            # Read body from response
+            if hasattr(result, 'body'):
+                body = result.body
+            else:
+                body = b""
+                async for chunk in result.body_iterator:
+                    body += chunk
             
-            # Cache the response data
+            try:
+                body_content = json.loads(body.decode()) if body else None
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                body_content = body.decode() if body else None
+            
             cache_data = {
-                "status_code": response.status_code,
-                "body": json.loads(body.decode()) if body else None,
-                "headers": dict(response.headers)
+                "status_code": result.status_code,
+                "body": body_content,
             }
-            
-            await self._redis.setex(
-                key,
-                self._config.ttl_seconds,
-                json.dumps(cache_data)
-            )
-            
-            # Create new response with the body
-            return Response(
-                content=body,
-                status_code=response.status_code,
-                headers=dict(response.headers),
-                media_type=response.media_type
-            )
-            
-        except Exception:
-            # On error, just return original response
-            pass
+        elif isinstance(result, dict):
+            cache_data = {
+                "status_code": 200,
+                "body": result,
+            }
+        else:
+            # Try to serialize
+            cache_data = {
+                "status_code": 200,
+                "body": result,
+            }
+        
+        await redis.setex(key, ttl, json.dumps(cache_data))
+    except Exception:
+        pass  # Caching failure shouldn't break the request
 
 
-# Simpler functional approach for checking idempotency
+def _make_cached_response(cached: dict, key: str) -> JSONResponse:
+    """Create response from cached data."""
+    response = JSONResponse(
+        content=cached.get("body"),
+        status_code=cached.get("status_code", 200),
+    )
+    response.headers["X-Idempotency-Replayed"] = "true"
+    return response
+
+
+# =============================================================================
+# Manual checker for complex cases
+# =============================================================================
+
 class IdempotencyChecker:
     """
-    Functional idempotency checker.
+    Manual idempotency checker for complex cases where decorator doesn't fit.
     
-    Use this for explicit idempotency control in handlers.
+    Usage:
+        checker = IdempotencyChecker(redis)
+        
+        is_new, cached = await checker.check(f"payment:{payment_id}")
+        if not is_new:
+            return cached
+        
+        result = await process_payment(...)
+        await checker.set(f"payment:{payment_id}", result)
+        return result
     """
     
-    def __init__(self, redis_client, config: Optional[IdempotencyConfig] = None):
+    def __init__(self, redis_client, ttl: int = ONE_YEAR):
         self._redis = redis_client
-        self._config = config or IdempotencyConfig()
+        self._ttl = ttl
+        self._prefix = "idempotent:"
     
-    async def check_and_set(
-        self,
-        key: str,
-        ttl: Optional[int] = None
-    ) -> tuple[bool, Optional[Any]]:
+    async def check(self, key: str) -> tuple[bool, Optional[Any]]:
         """
-        Check if key exists and set if not.
+        Check if operation was already performed.
         
         Returns:
-            (is_new, cached_result) - is_new is True if first request
+            (is_new, cached_result)
         """
-        ttl = ttl or self._config.ttl_seconds
-        full_key = f"{self._config.key_prefix}{key}"
-        
-        # Try to get existing
-        existing = await self._redis.get(full_key)
-        if existing:
-            return (False, json.loads(existing))
-        
-        # Set placeholder
-        await self._redis.setex(full_key, ttl, json.dumps({"status": "processing"}))
-        return (True, None)
+        full_key = f"{self._prefix}{key}"
+        try:
+            existing = await self._redis.get(full_key)
+            if existing:
+                return (False, json.loads(existing))
+            return (True, None)
+        except Exception:
+            return (True, None)
     
-    async def set_result(self, key: str, result: Any, ttl: Optional[int] = None):
-        """Store the result for an idempotency key."""
-        ttl = ttl or self._config.ttl_seconds
-        full_key = f"{self._config.key_prefix}{key}"
-        await self._redis.setex(full_key, ttl, json.dumps(result))
-
-
-# Module-level checker
-_idempotency_checker: Optional[IdempotencyChecker] = None
-
-
-def init_idempotency_checker(redis_client, config: Optional[IdempotencyConfig] = None):
-    """Initialize idempotency checker."""
-    global _idempotency_checker
-    _idempotency_checker = IdempotencyChecker(redis_client, config)
-
-
-def get_idempotency_checker() -> IdempotencyChecker:
-    """Get the initialized idempotency checker."""
-    if _idempotency_checker is None:
-        raise RuntimeError("Idempotency checker not initialized.")
-    return _idempotency_checker
+    async def set(self, key: str, result: Any, ttl: Optional[int] = None):
+        """Store result for idempotency key."""
+        full_key = f"{self._prefix}{key}"
+        ttl = ttl or self._ttl
+        try:
+            await self._redis.setex(full_key, ttl, json.dumps(result))
+        except Exception:
+            pass
