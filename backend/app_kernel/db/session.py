@@ -125,6 +125,9 @@ class AuditWrappedConnection:
                       Passed through to underlying database save_entity.
             **kwargs: Additional args passed to underlying save
         """
+        # Remove _caller from kwargs if present (we provide our own)
+        kwargs.pop('_caller', None)
+        
         # Get old value for diff (if updating by id)
         old = None
         entity_id = data.get("id")
@@ -169,6 +172,9 @@ class AuditWrappedConnection:
     
     async def delete_entity(self, table, entity_id, **kwargs):
         """Delete entity and push audit event."""
+        # Remove _caller from kwargs if present (we provide our own)
+        kwargs.pop('_caller', None)
+        
         # Get snapshot before delete
         old = None
         try:
