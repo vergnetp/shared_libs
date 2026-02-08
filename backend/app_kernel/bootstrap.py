@@ -127,143 +127,6 @@ def _parse_database_url(url: str) -> dict:
         raise ValueError(f"Unsupported database scheme: {scheme}")
 
 
-async def _run_embedded_admin_worker(
-    redis_url: str,
-    admin_db_url: str,
-    app_name: str,
-    logger,
-    batch_size: int = 100,
-    poll_interval: float = 0.5,
-):
-    """
-    Run admin worker as background task (consumes audit/metering from Redis).
-    
-    With multiple uvicorn workers, Redis RPOP is atomic so events get
-    distributed across workers automatically - each event processed exactly once.
-    """
-    import json
-    import uuid
-    from datetime import datetime, timezone
-    
-    try:
-        import redis.asyncio as aioredis
-    except ImportError:
-        logger.warning("redis library not installed, admin worker disabled")
-        return
-    
-    redis_client = aioredis.from_url(redis_url)
-    
-    # Use databases library for admin_db (same as admin_worker.py)
-    try:
-        from databases import Database
-        admin_db = Database(admin_db_url)
-        await admin_db.connect()
-    except ImportError:
-        logger.warning("databases library not installed, admin worker disabled")
-        return
-    except Exception as e:
-        logger.warning(f"Could not connect to admin_db: {e}")
-        return
-    
-    # Initialize schemas
-    try:
-        from .audit.schema import init_audit_schema
-        from .metering.schema import init_metering_schema
-        await init_audit_schema(admin_db)
-        await init_metering_schema(admin_db)
-    except Exception as e:
-        logger.warning(f"Could not init admin schemas: {e}")
-    
-    def _now_iso():
-        return datetime.now(timezone.utc).isoformat()
-    
-    async def process_audit_event(event: dict):
-        await admin_db.execute(
-            """INSERT INTO audit_logs (id, app, entity, entity_id, action, changes, 
-               old_snapshot, new_snapshot, user_id, request_id, timestamp, created_at)
-               VALUES (:id, :app, :entity, :entity_id, :action, :changes,
-               :old_snapshot, :new_snapshot, :user_id, :request_id, :timestamp, :created_at)""",
-            {
-                "id": str(uuid.uuid4()),
-                "app": event.get("app"),
-                "entity": event.get("entity"),
-                "entity_id": event.get("entity_id"),
-                "action": event.get("action"),
-                "changes": json.dumps(event.get("changes")) if event.get("changes") else None,
-                "old_snapshot": json.dumps(event.get("old_snapshot")) if event.get("old_snapshot") else None,
-                "new_snapshot": json.dumps(event.get("new_snapshot")) if event.get("new_snapshot") else None,
-                "user_id": event.get("user_id"),
-                "request_id": event.get("request_id"),
-                "timestamp": event.get("timestamp", _now_iso()),
-                "created_at": _now_iso(),
-            }
-        )
-    
-    async def process_metering_event(event: dict):
-        # Simplified: just insert raw events, aggregation done at query time
-        await admin_db.execute(
-            """INSERT INTO usage_events (id, app, workspace_id, user_id, event_type,
-               endpoint, method, status_code, latency_ms, bytes_in, bytes_out, 
-               period, timestamp)
-               VALUES (:id, :app, :workspace_id, :user_id, :event_type,
-               :endpoint, :method, :status_code, :latency_ms, :bytes_in, :bytes_out,
-               :period, :timestamp)""",
-            {
-                "id": str(uuid.uuid4()),
-                "app": event.get("app"),
-                "workspace_id": event.get("workspace_id"),
-                "user_id": event.get("user_id"),
-                "event_type": event.get("type", "request"),
-                "endpoint": event.get("endpoint"),
-                "method": event.get("method"),
-                "status_code": event.get("status_code"),
-                "latency_ms": event.get("latency_ms"),
-                "bytes_in": event.get("bytes_in"),
-                "bytes_out": event.get("bytes_out"),
-                "period": event.get("period"),
-                "timestamp": event.get("timestamp", _now_iso()),
-            }
-        )
-    
-    try:
-        while True:
-            processed = 0
-            
-            # Process audit events
-            for _ in range(batch_size):
-                event_data = await redis_client.rpop("admin:audit_events")
-                if not event_data:
-                    break
-                try:
-                    event = json.loads(event_data)
-                    await process_audit_event(event)
-                    processed += 1
-                except Exception as e:
-                    logger.debug(f"Audit event error: {e}")
-            
-            # Process metering events
-            for _ in range(batch_size):
-                event_data = await redis_client.rpop("admin:metering_events")
-                if not event_data:
-                    break
-                try:
-                    event = json.loads(event_data)
-                    await process_metering_event(event)
-                    processed += 1
-                except Exception as e:
-                    logger.debug(f"Metering event error: {e}")
-            
-            # Sleep if no events
-            if processed == 0:
-                await asyncio.sleep(poll_interval)
-    
-    except asyncio.CancelledError:
-        pass
-    finally:
-        await admin_db.disconnect()
-        await redis_client.close()
-
-
 @dataclass
 class ServiceConfig:
     """
@@ -294,11 +157,10 @@ class ServiceConfig:
     # Format: sqlite:///./data/app.db or postgres://user:pass@host:5432/dbname
     database_url: Optional[str] = None
     
-    # Admin worker (consumes audit/metering from Redis, writes to DB)
+    # Admin worker (consumes audit/metering from Redis, writes to app DB)
     # When True: runs as background task in one of the uvicorn workers
     # When False: you run `python -m app_kernel.admin_worker` separately
     admin_worker_embedded: bool = True
-    admin_db_url: Optional[str] = None  # Separate DB for admin worker (defaults to database_url)
     
     # CORS
     cors_origins: List[str] = field(default_factory=lambda: ["*"])
@@ -554,13 +416,12 @@ def create_service(
         
         # Start embedded admin worker if enabled
         admin_worker_task = None
-        if cfg.redis_url and cfg.admin_worker_embedded:
-            admin_db_url = cfg.admin_db_url or cfg.database_url
-            if admin_db_url:
-                admin_worker_task = asyncio.create_task(
-                    _run_embedded_admin_worker(cfg.redis_url, admin_db_url, name, logger)
-                )
-                logger.info("Embedded admin worker started")
+        if cfg.redis_url and cfg.admin_worker_embedded and cfg.database_url:
+            from .admin_worker import run_embedded
+            admin_worker_task = asyncio.create_task(
+                run_embedded(cfg.redis_url, name, logger)
+            )
+            logger.info("Embedded admin worker started")
         
         yield
         
