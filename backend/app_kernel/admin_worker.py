@@ -1,11 +1,11 @@
 """
 Admin Worker - Consumes audit and metering events from Redis, writes to database.
 
-Two modes:
-1. Embedded: runs as asyncio task inside FastAPI (use run_embedded)
-2. Standalone: runs as separate process (use main / run_worker)
+Runs as a separate process. Handles:
+- audit_logs (entity changes)
+- usage_metrics (API call counts)
 
-Usage (standalone):
+Usage:
     python -m app_kernel.admin_worker --redis-url redis://localhost:6379 --database-url postgresql://...
 """
 
@@ -24,9 +24,9 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-async def process_audit_event(db, event: dict) -> None:
-    """Process an audit event and write to db."""
-    await db.save_entity("kernel_audit_logs", {
+async def process_audit_event(admin_db, event: dict) -> None:
+    """Process an audit event and write to admin_db."""
+    await admin_db.save_entity("kernel_audit_logs", {
         "id": str(uuid.uuid4()),
         "app": event.get("app"),
         "entity": event.get("entity"),
@@ -38,37 +38,41 @@ async def process_audit_event(db, event: dict) -> None:
         "user_id": event.get("user_id"),
         "request_id": event.get("request_id"),
         "timestamp": event.get("timestamp", _now_iso()),
+        "created_at": _now_iso(),
     })
 
 
-async def process_metering_event(db, event: dict) -> None:
-    """Process a metering event and update usage_summary."""
+async def process_metering_event(admin_db, event: dict) -> None:
+    """Process a metering event and update usage_summary in admin_db."""
     app = event.get("app")
     user_id = event.get("user_id")
     workspace_id = event.get("workspace_id")
     period = event.get("period")
     
     if event.get("type") == "request":
-        await _increment_metric(db, app, workspace_id, user_id, period, "requests", 1)
-        await _increment_metric(db, app, workspace_id, user_id, period, "latency_ms_total", event.get("latency_ms", 0))
-        await _increment_metric(db, app, workspace_id, user_id, period, "bytes_in", event.get("bytes_in", 0))
-        await _increment_metric(db, app, workspace_id, user_id, period, "bytes_out", event.get("bytes_out", 0))
+        # Track request metrics
+        await _increment_metric(admin_db, app, workspace_id, user_id, period, "requests", 1)
+        await _increment_metric(admin_db, app, workspace_id, user_id, period, "latency_ms_total", event.get("latency_ms", 0))
+        await _increment_metric(admin_db, app, workspace_id, user_id, period, "bytes_in", event.get("bytes_in", 0))
+        await _increment_metric(admin_db, app, workspace_id, user_id, period, "bytes_out", event.get("bytes_out", 0))
         
+        # Track by endpoint
         endpoint = event.get("endpoint", "")
         method = event.get("method", "")
         if endpoint:
             endpoint_key = f"endpoint:{method}:{endpoint}"
-            await _increment_metric(db, app, workspace_id, user_id, period, endpoint_key, 1)
+            await _increment_metric(admin_db, app, workspace_id, user_id, period, endpoint_key, 1)
     
     elif event.get("type") == "custom":
+        # Track custom metrics
         metrics = event.get("metrics", {})
         for metric, value in metrics.items():
             if value:
-                await _increment_metric(db, app, workspace_id, user_id, period, metric, value)
+                await _increment_metric(admin_db, app, workspace_id, user_id, period, metric, value)
 
 
 async def _increment_metric(
-    db,
+    admin_db,
     app: str,
     workspace_id: Optional[str],
     user_id: Optional[str],
@@ -77,6 +81,7 @@ async def _increment_metric(
     value: int,
 ) -> None:
     """Increment a metric in usage_summary table."""
+    # Build unique lookup
     where = "[app] = ? AND [period] = ? AND [metric] = ?"
     params = [app, period, metric]
     
@@ -92,7 +97,7 @@ async def _increment_metric(
     else:
         where += " AND [user_id] IS NULL"
     
-    results = await db.find_entities(
+    results = await admin_db.find_entities(
         "kernel_usage_summary",
         where_clause=where,
         params=tuple(params),
@@ -102,12 +107,15 @@ async def _increment_metric(
     now = _now_iso()
     
     if results:
-        await db.save_entity("kernel_usage_summary", {
+        # Update existing
+        await admin_db.save_entity("kernel_usage_summary", {
             "id": results[0]["id"],
             "value": (results[0].get("value") or 0) + value,
+            "updated_at": now,
         })
     else:
-        await db.save_entity("kernel_usage_summary", {
+        # Create new
+        await admin_db.save_entity("kernel_usage_summary", {
             "id": str(uuid.uuid4()),
             "app": app,
             "workspace_id": workspace_id,
@@ -115,120 +123,76 @@ async def _increment_metric(
             "period": period,
             "metric": metric,
             "value": value,
+            "created_at": now,
+            "updated_at": now,
         })
-
-
-async def _process_batch(db, redis_client, batch_size: int = 100) -> int:
-    """Process a batch of events. Returns number processed."""
-    processed = 0
-    
-    # Process audit events
-    for _ in range(batch_size):
-        event_data = await redis_client.rpop("admin:audit_events")
-        if not event_data:
-            break
-        try:
-            event = json.loads(event_data)
-            await process_audit_event(db, event)
-            processed += 1
-        except Exception as e:
-            logger.debug(f"Audit event error: {e}")
-    
-    # Process metering events
-    for _ in range(batch_size):
-        event_data = await redis_client.rpop("admin:metering_events")
-        if not event_data:
-            break
-        try:
-            event = json.loads(event_data)
-            await process_metering_event(db, event)
-            processed += 1
-        except Exception as e:
-            logger.debug(f"Metering event error: {e}")
-    
-    return processed
-
-
-async def run_embedded(
-    redis_url: str,
-    app_name: str,
-    logger,
-    batch_size: int = 100,
-    poll_interval: float = 0.5,
-):
-    """
-    Run admin worker as embedded asyncio task (inside FastAPI).
-    
-    Uses app's existing db connection via raw_db_context.
-    """
-    try:
-        import redis.asyncio as aioredis
-    except ImportError:
-        logger.warning("redis library not installed, admin worker disabled")
-        return
-    
-    from .db import raw_db_context
-    
-    redis_client = aioredis.from_url(redis_url)
-    
-    try:
-        while True:
-            async with raw_db_context() as db:
-                processed = await _process_batch(db, redis_client, batch_size)
-            
-            if processed == 0:
-                await asyncio.sleep(poll_interval)
-    
-    except asyncio.CancelledError:
-        pass
-    finally:
-        await redis_client.close()
 
 
 async def run_worker(
     redis_url: str,
-    database_url: str,
+    admin_db_url: str,
     batch_size: int = 100,
     poll_interval: float = 0.1,
 ):
     """
-    Run admin worker as standalone process.
+    Run the admin worker.
     
-    Initializes its own db connection from database_url.
+    Consumes events from Redis queues and writes to admin_db.
     """
-    import redis.asyncio as aioredis
-    from .db import init_db_session, raw_db_context
-    from .bootstrap import _parse_database_url
+    import redis.asyncio as redis
     
-    # Initialize db
-    db_config = _parse_database_url(database_url)
-    if db_config["type"] == "sqlite":
-        init_db_session(database_name=db_config["name"], database_type="sqlite")
-    else:
-        init_db_session(
-            database_name=db_config["name"],
-            database_type=db_config["type"],
-            host=db_config["host"],
-            port=db_config["port"],
-            user=db_config["user"],
-            password=db_config["password"],
-        )
+    # Connect to Redis
+    redis_client = redis.from_url(redis_url)
     
-    redis_client = aioredis.from_url(redis_url)
-    logger.info(f"Admin worker started - Redis: {redis_url}, DB: {database_url}")
+    # Connect to admin_db
+    # TODO: Use databases library connection
+    from databases import Database
+    admin_db = Database(admin_db_url)
+    await admin_db.connect()
+    
+    # Initialize schemas
+    from .audit.schema import init_audit_schema
+    from .metering.schema import init_metering_schema
+    await init_audit_schema(admin_db)
+    await init_metering_schema(admin_db)
+    
+    logger.info(f"Admin worker started - Redis: {redis_url}, DB: {admin_db_url}")
     
     try:
         while True:
-            async with raw_db_context() as db:
-                processed = await _process_batch(db, redis_client, batch_size)
+            processed = 0
             
+            # Process audit events
+            for _ in range(batch_size):
+                event_data = await redis_client.rpop("admin:audit_events")
+                if not event_data:
+                    break
+                try:
+                    event = json.loads(event_data)
+                    await process_audit_event(admin_db, event)
+                    processed += 1
+                except Exception as e:
+                    logger.error(f"Failed to process audit event: {e}")
+            
+            # Process metering events
+            for _ in range(batch_size):
+                event_data = await redis_client.rpop("admin:metering_events")
+                if not event_data:
+                    break
+                try:
+                    event = json.loads(event_data)
+                    await process_metering_event(admin_db, event)
+                    processed += 1
+                except Exception as e:
+                    logger.error(f"Failed to process metering event: {e}")
+            
+            # Sleep if no events
             if processed == 0:
                 await asyncio.sleep(poll_interval)
     
     finally:
+        await admin_db.disconnect()
         await redis_client.close()
-        from .db import close_db
-        await close_db()
 
 
 def main():
@@ -248,6 +212,7 @@ def main():
         format="%(asctime)s [%(levelname)s] %(message)s",
     )
     
+    # Handle graceful shutdown
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
@@ -257,7 +222,7 @@ def main():
     try:
         loop.run_until_complete(run_worker(
             redis_url=args.redis_url,
-            database_url=args.database_url,
+            admin_db_url=args.database_url,
             batch_size=args.batch_size,
             poll_interval=args.poll_interval,
         ))

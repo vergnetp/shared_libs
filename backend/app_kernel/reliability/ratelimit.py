@@ -263,18 +263,23 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         # Get user from request state (set by auth middleware)
         user = getattr(request.state, "user", None) if hasattr(request, "state") else None
         
-        # Get rate limit key and default limit
-        key, default_limit = await self._limiter.get_limit_for_request(request, user)
-        
-        # Check for route-specific override
-        route_limit = self._get_route_limit(request)
-        if route_limit:
-            limit, window = route_limit
-        else:
-            limit, window = default_limit, 60
-        
-        # Check rate limit
-        allowed, remaining, reset = await self._limiter.check(key, limit, window)
+        try:
+            # Get rate limit key and default limit
+            key, default_limit = await self._limiter.get_limit_for_request(request, user)
+            
+            # Check for route-specific override
+            route_limit = self._get_route_limit(request)
+            if route_limit:
+                limit, window = route_limit
+            else:
+                limit, window = default_limit, 60
+            
+            # Check rate limit
+            allowed, remaining, reset = await self._limiter.check(key, limit, window)
+        except Exception:
+            # Redis unavailable (BusyLoadingError, ConnectionError, etc.)
+            # Degrade gracefully: allow the request through
+            return await call_next(request)
         
         if not allowed:
             return Response(

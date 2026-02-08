@@ -214,16 +214,12 @@ class OAuthAccount:
 @dataclass
 class AuditLog:
     """Audit log entries."""
-    app: Optional[str] = entity_field(default=None, index=True)
     action: str = entity_field(default="", index=True)
     workspace_id: Optional[str] = entity_field(default=None, index=True)
     user_id: Optional[str] = entity_field(default=None, index=True)
     entity: Optional[str] = entity_field(default=None, index=True)
     entity_id: Optional[str] = entity_field(default=None, index=True)
     changes: Optional[str] = None
-    old_snapshot: Optional[str] = None
-    new_snapshot: Optional[str] = None
-    request_id: Optional[str] = entity_field(default=None, index=True)
     metadata: Optional[str] = None
     ip: Optional[str] = None
     user_agent: Optional[str] = None
@@ -238,7 +234,6 @@ class AuditLog:
 @dataclass
 class UsageRequest:
     """Individual request logs."""
-    app: Optional[str] = entity_field(default=None, index=True)
     user_id: Optional[str] = entity_field(default=None, index=True)
     workspace_id: Optional[str] = entity_field(default=None, index=True)
     endpoint: Optional[str] = None
@@ -254,7 +249,6 @@ class UsageRequest:
 @dataclass
 class UsageSummary:
     """Aggregated usage for billing."""
-    app: Optional[str] = entity_field(default=None, index=True)
     workspace_id: Optional[str] = entity_field(default=None, index=True)
     user_id: Optional[str] = entity_field(default=None, index=True)
     period: Optional[str] = entity_field(default=None, index=True)
