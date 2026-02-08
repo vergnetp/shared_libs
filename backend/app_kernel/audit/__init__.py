@@ -22,14 +22,13 @@ Usage:
     #   GET /api/v1/audit/entity/{type}/{id} - Get entity history
 """
 
-from .publisher import push_audit_event, enable_audit
+from .publisher import push_audit_event
 from .queries import get_audit_logs, get_entity_audit_history
 from .schema import init_audit_schema
 from .router import create_audit_router
 
 __all__ = [
     "push_audit_event",
-    "enable_audit",
     "get_audit_logs",
     "get_entity_audit_history",
     "init_audit_schema",

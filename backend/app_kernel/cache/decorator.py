@@ -1,7 +1,11 @@
 """Cache decorator for functions."""
 
 import functools
+import os
 from typing import Optional, Callable
+
+# Global flag to enable/disable caching (default: enabled)
+CACHE_ENABLED = os.environ.get("CACHE_ENABLED", "true").lower() in ("true", "1", "yes")
 
 
 def cached(

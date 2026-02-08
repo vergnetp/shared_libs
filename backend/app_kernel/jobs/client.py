@@ -1,234 +1,281 @@
-"""Cache client - Redis with fakeredis fallback."""
+"""
+Job client - Enqueue wrapper for applications.
 
-import json
+This is the interface apps use to enqueue jobs. It wraps the
+underlying job_queue module and provides a simpler API.
+
+Usage:
+    from app_kernel.jobs import job_client
+    
+    # Enqueue a job
+    job_id = await job_client.enqueue(
+        "process_document",
+        {"document_id": "123", "action": "ocr"},
+        user_id="user-456"
+    )
+    
+    # Enqueue with priority
+    job_id = await job_client.enqueue(
+        "send_notification",
+        {"user_id": "789", "message": "Hello"},
+        priority="high"
+    )
+"""
+from typing import Any, Dict, Optional, Callable
+from dataclasses import dataclass
+import asyncio
+import uuid
 import time
-from typing import Any, Optional
-from collections import OrderedDict
+
+from .registry import JobRegistry
 
 
-class InMemoryCache:
-    """Simple in-memory LRU cache (fallback when Redis unavailable)."""
-    
-    def __init__(self, max_size: int = 1000):
-        self._cache: OrderedDict[str, tuple[Any, float]] = OrderedDict()
-        self._max_size = max_size
-    
-    async def get(self, key: str) -> Optional[Any]:
-        if key not in self._cache:
-            return None
-        
-        value, expires_at = self._cache[key]
-        
-        # Check expiry
-        if expires_at and time.time() > expires_at:
-            del self._cache[key]
-            return None
-        
-        # Move to end (LRU)
-        self._cache.move_to_end(key)
-        return value
-    
-    async def set(self, key: str, value: Any, ttl: Optional[int] = None) -> None:
-        expires_at = time.time() + ttl if ttl else None
-        
-        # Remove oldest if at capacity
-        while len(self._cache) >= self._max_size:
-            self._cache.popitem(last=False)
-        
-        self._cache[key] = (value, expires_at)
-        self._cache.move_to_end(key)
-    
-    async def delete(self, key: str) -> bool:
-        if key in self._cache:
-            del self._cache[key]
-            return True
-        return False
-    
-    async def delete_pattern(self, pattern: str) -> int:
-        """Delete keys matching pattern (supports * wildcard)."""
-        import fnmatch
-        
-        to_delete = [k for k in self._cache if fnmatch.fnmatch(k, pattern)]
-        for key in to_delete:
-            del self._cache[key]
-        return len(to_delete)
-    
-    async def clear(self) -> None:
-        self._cache.clear()
-    
-    async def exists(self, key: str) -> bool:
-        return await self.get(key) is not None
+@dataclass
+class EnqueueResult:
+    """Result of enqueueing a job."""
+    job_id: str
+    task_name: str
+    status: str = "queued"
+    queue_name: Optional[str] = None
 
 
-class RedisCache:
-    """Async Redis-backed cache."""
-    
-    def __init__(self, redis_client, prefix: str = "cache:"):
-        self._redis = redis_client
-        self._prefix = prefix
-    
-    def _key(self, key: str) -> str:
-        return f"{self._prefix}{key}"
-    
-    async def get(self, key: str) -> Optional[Any]:
-        try:
-            value = await self._redis.get(self._key(key))
-            if value is None:
-                return None
-            return json.loads(value)
-        except Exception:
-            return None
-    
-    async def set(self, key: str, value: Any, ttl: Optional[int] = None) -> None:
-        try:
-            serialized = json.dumps(value)
-            if ttl:
-                await self._redis.setex(self._key(key), ttl, serialized)
-            else:
-                await self._redis.set(self._key(key), serialized)
-        except Exception:
-            pass  # Fail silently
-    
-    async def delete(self, key: str) -> bool:
-        try:
-            result = await self._redis.delete(self._key(key))
-            return result > 0
-        except Exception:
-            return False
-    
-    async def delete_pattern(self, pattern: str) -> int:
-        """Delete keys matching pattern."""
-        try:
-            keys = []
-            async for key in self._redis.scan_iter(self._key(pattern)):
-                keys.append(key)
-            
-            if keys:
-                return await self._redis.delete(*keys)
-            return 0
-        except Exception:
-            return 0
-    
-    async def clear(self) -> None:
-        """Clear all cache keys (dangerous!)."""
-        await self.delete_pattern("*")
-    
-    async def exists(self, key: str) -> bool:
-        try:
-            return await self._redis.exists(self._key(key)) > 0
-        except Exception:
-            return False
-
-
-class Cache:
+class JobClient:
     """
-    Cache facade - uses Redis if available, falls back to in-memory.
+    Client for enqueueing jobs.
     
-    In-memory cache doesn't share across processes, but still helps
-    reduce repeated expensive operations within a single process.
+    Initialized by init_app_kernel() with the underlying queue manager.
+    Apps use this to enqueue work without touching the queue directly.
     """
     
-    def __init__(self, redis_url: Optional[str] = None, prefix: str = "cache:"):
-        self._redis_url = redis_url
-        self._prefix = prefix
-        self._backend: Optional[Any] = None
-        self._initialized = False
-    
-    async def _ensure_backend(self) -> Any:
-        if self._backend is not None:
-            return self._backend
-        
-        if self._redis_url:
-            try:
-                from ..dev_deps import get_async_redis_client, is_fake_redis_url
-                client = get_async_redis_client(self._redis_url)
-                
-                # Test connection (skip for fakeredis)
-                if not is_fake_redis_url(self._redis_url):
-                    await client.ping()
-                
-                self._backend = RedisCache(client, self._prefix)
-            except Exception as e:
-                # Fall back to in-memory
-                import logging
-                logging.warning(f"Redis cache unavailable, using in-memory: {e}")
-                self._backend = InMemoryCache()
-        else:
-            self._backend = InMemoryCache()
-        
-        self._initialized = True
-        return self._backend
-    
-    async def get(self, key: str) -> Optional[Any]:
-        """Get value from cache."""
-        backend = await self._ensure_backend()
-        return await backend.get(key)
-    
-    async def set(self, key: str, value: Any, ttl: Optional[int] = None) -> None:
-        """Set value in cache with optional TTL (seconds)."""
-        backend = await self._ensure_backend()
-        await backend.set(key, value, ttl)
-    
-    async def delete(self, key: str) -> bool:
-        """Delete a key from cache."""
-        backend = await self._ensure_backend()
-        return await backend.delete(key)
-    
-    async def delete_pattern(self, pattern: str) -> int:
-        """Delete keys matching pattern (e.g., 'projects:*')."""
-        backend = await self._ensure_backend()
-        return await backend.delete_pattern(pattern)
-    
-    async def clear(self) -> None:
-        """Clear entire cache."""
-        backend = await self._ensure_backend()
-        await backend.clear()
-    
-    async def exists(self, key: str) -> bool:
-        """Check if key exists."""
-        backend = await self._ensure_backend()
-        return await backend.exists(key)
-    
-    async def get_or_set(
+    def __init__(
         self,
-        key: str,
-        factory,
-        ttl: Optional[int] = None,
-    ) -> Any:
-        """Get from cache or call factory to populate."""
-        value = await self.get(key)
-        if value is not None:
-            return value
+        queue_manager = None,
+        registry: Optional[JobRegistry] = None
+    ):
+        """
+        Initialize job client.
         
-        # Call factory (can be sync or async)
-        import asyncio
-        if asyncio.iscoroutinefunction(factory):
-            value = await factory()
-        else:
-            value = factory()
+        Args:
+            queue_manager: Underlying QueueManager instance
+            registry: Job registry for validation
+        """
+        self._queue_manager = queue_manager
+        self._registry = registry
+        self._initialized = queue_manager is not None
+    
+    def _ensure_initialized(self):
+        """Raise if not initialized."""
+        if not self._initialized:
+            raise RuntimeError(
+                "JobClient not initialized. Call init_app_kernel() first."
+            )
+    
+    async def enqueue(
+        self,
+        task_name: str,
+        payload: Dict[str, Any],
+        *,
+        job_id: Optional[str] = None,
+        priority: str = "normal",
+        user_id: Optional[str] = None,
+        timeout: Optional[float] = None,
+        max_attempts: Optional[int] = None,
+        delay_seconds: Optional[float] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        on_success: Optional[str] = None,
+        on_failure: Optional[str] = None,
+    ) -> EnqueueResult:
+        """
+        Enqueue a job for processing.
         
-        await self.set(key, value, ttl)
-        return value
+        Args:
+            task_name: Name of the registered task
+            payload: Data to pass to the processor
+            job_id: Optional custom job ID (auto-generated if not provided)
+            priority: "high", "normal", or "low"
+            user_id: Optional user ID for context
+            timeout: Optional timeout override
+            max_attempts: Optional max attempts override
+            delay_seconds: Optional delay before processing
+            metadata: Optional additional metadata
+            on_success: Optional task to run on success
+            on_failure: Optional task to run on failure
+        
+        Returns:
+            EnqueueResult with job_id and status
+        
+        Raises:
+            ValueError: If task_name is not registered
+            RuntimeError: If client not initialized
+        """
+        self._ensure_initialized()
+        
+        # Validate task is registered (if we have a registry)
+        if self._registry and not self._registry.has(task_name):
+            raise ValueError(f"Task '{task_name}' is not registered")
+        
+        # Build the entity
+        entity = {
+            "payload": payload,
+            "task_name": task_name,
+            "enqueued_at": time.time(),
+        }
+        
+        if user_id:
+            entity["user_id"] = user_id
+        
+        if metadata:
+            entity["metadata"] = metadata
+        
+        if delay_seconds:
+            entity["delay_until"] = time.time() + delay_seconds
+        
+        # Get task metadata for defaults
+        task_meta = {}
+        if self._registry:
+            task_meta = self._registry.get_metadata(task_name) or {}
+        
+        # Build retry config
+        retry_config = {}
+        if max_attempts is not None:
+            retry_config["max_attempts"] = max_attempts
+        elif task_meta.get("max_attempts"):
+            retry_config["max_attempts"] = task_meta["max_attempts"]
+        
+        if timeout is not None:
+            retry_config["timeout"] = timeout
+        elif task_meta.get("timeout"):
+            retry_config["timeout"] = task_meta["timeout"]
+        
+        # Enqueue via queue manager (runs sync, so wrap in thread)
+        result = await asyncio.to_thread(
+            self._queue_manager.enqueue,
+            entity=entity,
+            processor=task_name,
+            queue_name=task_name,
+            priority=priority,
+            operation_id=job_id,
+            retry_config=retry_config if retry_config else None,
+            on_success=on_success,
+            on_failure=on_failure,
+        )
+        
+        return EnqueueResult(
+            job_id=result.get("operation_id", job_id or str(uuid.uuid4())),
+            task_name=task_name,
+            status=result.get("status", "queued"),
+            queue_name=task_name
+        )
+    
+    async def enqueue_many(
+        self,
+        task_name: str,
+        payloads: list[Dict[str, Any]],
+        *,
+        priority: str = "normal",
+        user_id: Optional[str] = None,
+    ) -> list[EnqueueResult]:
+        """
+        Enqueue multiple jobs efficiently.
+        
+        Args:
+            task_name: Name of the registered task
+            payloads: List of payloads to enqueue
+            priority: Priority for all jobs
+            user_id: Optional user ID for context
+        
+        Returns:
+            List of EnqueueResult for each job
+        """
+        self._ensure_initialized()
+        
+        if self._registry and not self._registry.has(task_name):
+            raise ValueError(f"Task '{task_name}' is not registered")
+        
+        # Build entities
+        entities = []
+        for payload in payloads:
+            entity = {
+                "payload": payload,
+                "task_name": task_name,
+                "enqueued_at": time.time(),
+            }
+            if user_id:
+                entity["user_id"] = user_id
+            entities.append(entity)
+        
+        # Batch enqueue
+        results = await asyncio.to_thread(
+            self._queue_manager.enqueue_batch,
+            entities=entities,
+            processor=task_name,
+            queue_name=task_name,
+            priority=priority,
+        )
+        
+        return [
+            EnqueueResult(
+                job_id=r.get("operation_id", str(uuid.uuid4())),
+                task_name=task_name,
+                status=r.get("status", "queued"),
+                queue_name=task_name
+            )
+            for r in results
+        ]
+    
+    async def get_queue_status(self) -> Dict[str, Any]:
+        """Get status of all queues."""
+        self._ensure_initialized()
+        return await asyncio.to_thread(self._queue_manager.get_queue_status)
+    
+    async def get_job_status(self, job_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get status of a specific job from Redis.
+        
+        Args:
+            job_id: Job/operation ID
+            
+        Returns:
+            Dict with status info (status, step, progress, result, error, timestamps)
+            or None if not found
+        """
+        self._ensure_initialized()
+        return await asyncio.to_thread(self._queue_manager.get_job_status, job_id)
+    
+    async def update_progress(self, job_id: str, step: str = None, progress: int = None):
+        """
+        Update job progress. Call this from within task processors.
+        
+        Args:
+            job_id: Job/operation ID
+            step: Current step name (e.g., "building", "deploying")
+            progress: Progress percentage (0-100)
+        """
+        self._ensure_initialized()
+        await asyncio.to_thread(
+            self._queue_manager.update_job_progress,
+            job_id,
+            step=step,
+            progress=progress,
+        )
 
 
-# Module-level singleton
-_cache: Optional[Cache] = None
+# Module-level instance, initialized by init_app_kernel()
+_job_client: Optional[JobClient] = None
 
 
-def init_cache(redis_url: Optional[str] = None, prefix: str = "cache:") -> Cache:
-    """Initialize the global cache instance."""
-    global _cache
-    _cache = Cache(redis_url=redis_url, prefix=prefix)
-    return _cache
+def init_job_client(queue_manager, registry: Optional[JobRegistry] = None):
+    """Initialize the job client. Called by init_app_kernel()."""
+    global _job_client
+    _job_client = JobClient(queue_manager, registry)
 
 
-def get_cache() -> Cache:
-    """Get the global cache instance."""
-    global _cache
-    if _cache is None:
-        _cache = Cache()  # Default to in-memory
-    return _cache
+def get_job_client() -> JobClient:
+    """Get the initialized job client."""
+    if _job_client is None:
+        raise RuntimeError("Job client not initialized. Call init_app_kernel() first.")
+    return _job_client
 
 
-# Convenience - module-level cache
-cache = get_cache()
+# Convenience alias
+job_client = property(lambda self: get_job_client())

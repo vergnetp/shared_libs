@@ -298,6 +298,7 @@ class ServiceConfig:
     # When True: runs as background task in one of the uvicorn workers
     # When False: you run `python -m app_kernel.admin_worker` separately
     admin_worker_embedded: bool = True
+    admin_db_url: Optional[str] = None  # Separate DB for admin worker (defaults to database_url)
     
     # CORS
     cors_origins: List[str] = field(default_factory=lambda: ["*"])
@@ -380,6 +381,7 @@ def create_service(
     # Health & Auth
     health_checks: Sequence[HealthCheck] = (),
     user_store: Optional[Any] = None,
+    is_admin: Optional[Callable[[Any], bool]] = None,  # Custom admin check function
     
     # Advanced
     api_prefix: str = "/api/v1",
@@ -399,8 +401,9 @@ def create_service(
     
     cfg = config
     
-    # Collect integration tasks
+    # Collect integration tasks and routers
     integration_tasks = {}
+    integration_routers = []
     
     # Setup request metrics task if enabled (requires Redis)
     request_metrics_enabled = cfg.request_metrics_enabled and cfg.redis_url
@@ -537,140 +540,6 @@ def create_service(
             else:
                 logger.warning("Email enabled but setup failed - check SMTP settings")
         
-        # Setup billing catalog (seed products/prices from manifest)
-        if billing_enabled and manifest_path:
-            from .integrations.billing import seed_billing_catalog
-            from .db import get_db_connection
-            
-            try:
-                # Initialize billing tables first
-                try:
-                    from ..billing.services import BillingService
-                    from .db import init_schema as run_init_schema
-                    
-                    async def init_billing_schema(db):
-                        """Create billing tables."""
-                        await db.execute("""
-                            CREATE TABLE IF NOT EXISTS billing_product (
-                                id TEXT PRIMARY KEY,
-                                name TEXT NOT NULL,
-                                slug TEXT UNIQUE NOT NULL,
-                                description TEXT,
-                                features TEXT,
-                                metadata TEXT,
-                                active INTEGER DEFAULT 1,
-                                product_type TEXT DEFAULT 'subscription',
-                                shippable INTEGER DEFAULT 0,
-                                stripe_product_id TEXT,
-                                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-                            )
-                        """)
-                        await db.execute("""
-                            CREATE TABLE IF NOT EXISTS billing_price (
-                                id TEXT PRIMARY KEY,
-                                product_id TEXT NOT NULL,
-                                amount_cents INTEGER NOT NULL,
-                                currency TEXT DEFAULT 'usd',
-                                interval TEXT,
-                                interval_count INTEGER DEFAULT 1,
-                                nickname TEXT,
-                                metadata TEXT,
-                                active INTEGER DEFAULT 1,
-                                stripe_price_id TEXT,
-                                created_at TEXT DEFAULT CURRENT_TIMESTAMP
-                            )
-                        """)
-                        await db.execute("""
-                            CREATE TABLE IF NOT EXISTS billing_customer (
-                                id TEXT PRIMARY KEY,
-                                user_id TEXT UNIQUE NOT NULL,
-                                email TEXT NOT NULL,
-                                name TEXT,
-                                metadata TEXT,
-                                stripe_customer_id TEXT,
-                                created_at TEXT DEFAULT CURRENT_TIMESTAMP
-                            )
-                        """)
-                        await db.execute("""
-                            CREATE TABLE IF NOT EXISTS billing_subscription (
-                                id TEXT PRIMARY KEY,
-                                customer_id TEXT NOT NULL,
-                                price_id TEXT NOT NULL,
-                                status TEXT DEFAULT 'active',
-                                current_period_start TEXT,
-                                current_period_end TEXT,
-                                trial_end TEXT,
-                                cancel_at_period_end INTEGER DEFAULT 0,
-                                cancelled_at TEXT,
-                                metadata TEXT,
-                                stripe_subscription_id TEXT,
-                                created_at TEXT DEFAULT CURRENT_TIMESTAMP
-                            )
-                        """)
-                        await db.execute("""
-                            CREATE TABLE IF NOT EXISTS billing_invoice (
-                                id TEXT PRIMARY KEY,
-                                customer_id TEXT,
-                                subscription_id TEXT,
-                                stripe_invoice_id TEXT,
-                                status TEXT,
-                                amount_due INTEGER,
-                                amount_paid INTEGER,
-                                currency TEXT,
-                                invoice_pdf TEXT,
-                                hosted_invoice_url TEXT,
-                                period_start TEXT,
-                                period_end TEXT,
-                                created_at TEXT DEFAULT CURRENT_TIMESTAMP
-                            )
-                        """)
-                        await db.execute("""
-                            CREATE TABLE IF NOT EXISTS billing_payment_method (
-                                id TEXT PRIMARY KEY,
-                                customer_id TEXT NOT NULL,
-                                stripe_payment_method_id TEXT,
-                                type TEXT,
-                                card_last4 TEXT,
-                                card_brand TEXT,
-                                is_default INTEGER DEFAULT 0,
-                                created_at TEXT DEFAULT CURRENT_TIMESTAMP
-                            )
-                        """)
-                        await db.execute("""
-                            CREATE TABLE IF NOT EXISTS billing_order (
-                                id TEXT PRIMARY KEY,
-                                customer_id TEXT NOT NULL,
-                                price_id TEXT NOT NULL,
-                                product_id TEXT NOT NULL,
-                                quantity INTEGER DEFAULT 1,
-                                amount_cents INTEGER NOT NULL,
-                                currency TEXT DEFAULT 'usd',
-                                status TEXT DEFAULT 'pending',
-                                product_type TEXT,
-                                shipping_address TEXT,
-                                tracking_number TEXT,
-                                shipped_at TEXT,
-                                delivered_at TEXT,
-                                stripe_payment_intent_id TEXT,
-                                stripe_checkout_session_id TEXT,
-                                metadata TEXT,
-                                created_at TEXT DEFAULT CURRENT_TIMESTAMP
-                            )
-                        """)
-                    
-                    await run_init_schema(init_billing_schema)
-                    logger.info("Billing schema initialized")
-                except Exception as e:
-                    logger.warning(f"Billing schema init skipped: {e}")
-                
-                # Seed catalog
-                result = await seed_billing_catalog(manifest_path, get_db_connection)
-                if result.get("products_created"):
-                    logger.info(f"Billing: seeded {len(result['products_created'])} products")
-            except Exception as e:
-                logger.error(f"Billing catalog seed failed: {e}")
-        
         # Run app startup hook
         if on_startup:
             await on_startup()
@@ -736,11 +605,8 @@ def create_service(
         redoc_url=redoc_url,
     )
     
-    # Get user store - either direct, from auth_service adapter, or auto-create
+    # Get user store - either direct or auto-create from DB
     _user_store = user_store  # Direct user_store takes precedence
-    if _user_store is None and auth_service is not None:
-        from .auth import AuthServiceAdapter
-        _user_store = AuthServiceAdapter(auth_service())
     
     # Auto-create user store if DB + auth enabled and no store provided
     if _user_store is None and cfg.database_url and cfg.auth_enabled:
@@ -972,9 +838,10 @@ def _build_kernel_settings(
         ),
         
         reliability=ReliabilitySettings(
-            rate_limit_requests=cfg.rate_limit_requests,
-            rate_limit_window_seconds=cfg.rate_limit_window,
             rate_limit_enabled=cfg.rate_limit_enabled,
+            rate_limit_anonymous_rpm=cfg.rate_limit_requests,  # Use as base rate
+            rate_limit_authenticated_rpm=cfg.rate_limit_requests * 4,  # 4x for authenticated
+            rate_limit_admin_rpm=cfg.rate_limit_requests * 20,  # 20x for admin
         ),
         
         cors=CorsSettings(

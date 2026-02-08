@@ -362,16 +362,16 @@ def init_app_kernel(
             logger.info(f"Rate limiting: {rate_config.anonymous_rpm}/{rate_config.authenticated_rpm}/{rate_config.admin_rpm} rpm (anon/auth/admin) (Redis)")
     
     if setup_reliability_middleware and settings.reliability.idempotency_enabled:
-        from .reliability.idempotency import init_idempotency_checker, IdempotencyConfig
+        from .reliability.idempotency import init_idempotency, IdempotencyConfig
         from .dev_deps import get_async_redis_client, is_fake_redis_url
         
         idempotency_config = IdempotencyConfig(
-            ttl_seconds=settings.reliability.idempotency_ttl_seconds,
+            default_ttl=settings.reliability.idempotency_ttl_seconds,
         )
         
         # Get async Redis client (real or fakeredis.aioredis)
         redis_client = get_async_redis_client(settings.redis.url)
-        init_idempotency_checker(redis_client, idempotency_config)
+        init_idempotency(redis_client, idempotency_config)
         
         if is_fake_redis_url(settings.redis.url):
             logger.info(f"Idempotency: TTL {settings.reliability.idempotency_ttl_seconds}s (fakeredis)")
