@@ -79,7 +79,11 @@ class SqliteSyncConnection(SyncConnection, EntitySyncMixin):
         
         After calling this method, subsequent queries will be part of the transaction
         until either commit_transaction() or rollback_transaction() is called.
+        
+        Safety: skips BEGIN if already in a transaction (defense-in-depth).
         """
+        if self._conn.in_transaction:
+            return
         self._conn.execute("BEGIN")
 
     def commit_transaction(self):
@@ -174,7 +178,12 @@ class SqliteAsyncConnection(AsyncConnection, EntityAsyncMixin):
         
         After calling this method, subsequent queries will be part of the transaction
         until either commit_transaction_async() or rollback_transaction_async() is called.
+        
+        Safety: skips BEGIN if already in a transaction (defense-in-depth against
+        nested transaction errors when @auto_transaction check races with execution).
         """
+        if self._conn.in_transaction:
+            return
         await self._conn.execute("BEGIN")
 
     @async_method
