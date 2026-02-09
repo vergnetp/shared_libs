@@ -165,27 +165,20 @@ async def _run_embedded_admin_worker(
         logger.warning(f"Could not connect to admin_db: {e}")
         return
     
-    # Initialize schemas
-    try:
-        from .audit.schema import init_audit_schema
-        from .metering.schema import init_metering_schema
-        await init_audit_schema(admin_db)
-        await init_metering_schema(admin_db)
-    except Exception as e:
-        logger.warning(f"Could not init admin schemas: {e}")
+    # Tables are created by AutoMigrator at app startup (kernel_audit_logs, kernel_usage_events etc.)
+    # No separate schema init needed.
     
     def _now_iso():
         return datetime.now(timezone.utc).isoformat()
     
     async def process_audit_event(event: dict):
         await admin_db.execute(
-            """INSERT INTO audit_logs (id, app, entity, entity_id, action, changes, 
+            """INSERT INTO kernel_audit_logs (id, entity, entity_id, action, changes, 
                old_snapshot, new_snapshot, user_id, request_id, timestamp, created_at)
-               VALUES (:id, :app, :entity, :entity_id, :action, :changes,
+               VALUES (:id, :entity, :entity_id, :action, :changes,
                :old_snapshot, :new_snapshot, :user_id, :request_id, :timestamp, :created_at)""",
             {
                 "id": str(uuid.uuid4()),
-                "app": event.get("app"),
                 "entity": event.get("entity"),
                 "entity_id": event.get("entity_id"),
                 "action": event.get("action"),
@@ -202,15 +195,14 @@ async def _run_embedded_admin_worker(
     async def process_metering_event(event: dict):
         # Simplified: just insert raw events, aggregation done at query time
         await admin_db.execute(
-            """INSERT INTO usage_events (id, app, workspace_id, user_id, event_type,
+            """INSERT INTO kernel_usage_events (id, workspace_id, user_id, event_type,
                endpoint, method, status_code, latency_ms, bytes_in, bytes_out, 
                period, timestamp)
-               VALUES (:id, :app, :workspace_id, :user_id, :event_type,
+               VALUES (:id, :workspace_id, :user_id, :event_type,
                :endpoint, :method, :status_code, :latency_ms, :bytes_in, :bytes_out,
                :period, :timestamp)""",
             {
                 "id": str(uuid.uuid4()),
-                "app": event.get("app"),
                 "workspace_id": event.get("workspace_id"),
                 "user_id": event.get("user_id"),
                 "event_type": event.get("type", "request"),
@@ -466,7 +458,7 @@ def create_service(
         
         # Initialize database if configured
         if resolved_database_url:
-            from .db import init_db_session, init_schema, get_db_connection
+            from .db.session import init_db_session, init_schema, get_db_connection
             
             # Parse database URL
             db_config = _parse_database_url(resolved_database_url)
@@ -493,10 +485,17 @@ def create_service(
                 "database": db_config["name"],
             })
             
+            # Register auto-connection provider for entity methods
+            # This lets entity classmethods (get, find, save, etc.) work without
+            # an explicit db parameter — each call auto-acquires from the pool.
+            from .db.session import db_context
+            from shared_libs.backend.databases import set_connection_provider
+            set_connection_provider(db_context)
+            
             # Run automated backup and migration (schema-first)
             try:
                 from .db.lifecycle import run_database_lifecycle, get_lifecycle_config
-                from .db import get_db_connection
+                from .db.session import get_db_connection
                 
                 lifecycle_config = get_lifecycle_config()
                 
@@ -528,7 +527,7 @@ def create_service(
                 logger.info("Audit logging enabled (Redis → admin_worker)")
             
             # Initialize ALL kernel schemas at once
-            from .db.schema import init_all_schemas
+            from .schema import init_all_schemas
             await init_schema(lambda db: init_all_schemas(
                 db, 
                 saas_enabled=cfg.saas_enabled,
@@ -598,9 +597,16 @@ def create_service(
         
         # Close database
         if cfg.database_url:
-            from .db import close_db
+            from .db.session import close_db
             await close_db()
             logger.info("Database closed")
+        
+        # Teardown tracing
+        try:
+            from .observability.tracing import teardown_tracing
+            teardown_tracing()
+        except Exception:
+            pass
         
         logger.info(f"{name} shutting down")
     
@@ -619,7 +625,7 @@ def create_service(
     
     # Auto-create user store if DB + auth enabled and no store provided
     if _user_store is None and cfg.database_url and cfg.auth_enabled:
-        from .db import get_db_connection
+        from .db.session import get_db_connection
         from .auth.stores import create_kernel_user_store
         _user_store = create_kernel_user_store(get_db_connection)
     
@@ -683,11 +689,9 @@ def create_service(
     if cfg.database_url:
         from .audit import create_audit_router
         from .auth.deps import get_current_user
-        from .db import db_dependency
         
         audit_router = create_audit_router(
             get_current_user=get_current_user,
-            db_dependency=db_dependency,
             app_name=name,
             prefix="/audit",
             require_admin=True,
@@ -699,11 +703,9 @@ def create_service(
     if cfg.database_url:
         from .metering import create_metering_router
         from .auth.deps import get_current_user
-        from .db import db_dependency
         
         metering_router = create_metering_router(
             get_current_user=get_current_user,
-            db_dependency=db_dependency,
             app_name=name,
             prefix="/usage",
             is_admin=is_admin or _default_is_admin,
@@ -738,7 +740,7 @@ def create_service(
         from .auth.deps import get_current_user, get_current_user_optional
         from .auth.utils import create_access_token
         from .auth.stores import create_kernel_user_store
-        from .db import get_db_connection
+        from .db.session import get_db_connection
         
         # Configure providers
         configure_providers(cfg.oauth_providers)

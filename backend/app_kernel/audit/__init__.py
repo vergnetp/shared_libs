@@ -24,13 +24,11 @@ Usage:
 
 from .publisher import push_audit_event
 from .queries import get_audit_logs, get_entity_audit_history
-from .schema import init_audit_schema
 from .router import create_audit_router
 
 __all__ = [
     "push_audit_event",
     "get_audit_logs",
     "get_entity_audit_history",
-    "init_audit_schema",
     "create_audit_router",
 ]

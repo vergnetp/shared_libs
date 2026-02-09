@@ -371,7 +371,7 @@ def create_service(
         try:
             from billing import BillingConfig, BillingService, StripeSync, WebhookHandler
             from .integrations.billing import create_billing_router
-            from .db import db_context
+            from .db.session import db_context
             from .auth import get_current_user, require_admin as _require_admin
             
             billing_config = BillingConfig(

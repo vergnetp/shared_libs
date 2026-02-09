@@ -30,16 +30,10 @@ logger = logging.getLogger("app_kernel")
 
 
 # =============================================================================
-# Tracing Store (lazy loaded, accessed by admin routes)
+# Tracing
 # =============================================================================
 
-_trace_store = None
 _service_name = None
-
-
-def get_trace_store():
-    """Get the global trace store instance (for admin routes)."""
-    return _trace_store
 
 
 def get_traced_service_name():
@@ -51,23 +45,23 @@ def setup_tracing_middleware(
     app: FastAPI, 
     settings: TracingSettings,
     service_name: str = "unknown",
-    db_path: Optional[str] = None,
+    **kwargs,  # Ignore legacy args (db_path etc.)
 ) -> None:
     """
-    Configure tracing middleware for request profiling.
+    Configure tracing for request profiling.
     
-    When enabled, traces every request with timing spans for:
-    - The request itself
-    - All outgoing HTTP calls (via http_client)
-    - Any custom spans added with @traced decorator
+    Registers the tracing callback (saves spans to app DB) and adds
+    a lightweight middleware that creates root spans for each request.
+    
+    Shared libs (databases, http_client, ai) create child spans automatically
+    via the tracing library's context propagation.
     
     Args:
         app: FastAPI application
         settings: TracingSettings configuration
-        service_name: Name of this service (for multi-service filtering)
-        db_path: Path to trace database. If None, uses data/{service_name}_traces.db
+        service_name: Name of this service
     """
-    global _trace_store, _service_name
+    global _service_name
     
     if not settings.enabled:
         logger.debug("Tracing: disabled")
@@ -76,37 +70,49 @@ def setup_tracing_middleware(
     _service_name = service_name
     
     try:
-        from ..tracing import TracingMiddleware
-        from ..tracing.store import SQLiteTraceStore
+        from tracing import trace_span, set_span_filter
+        from .observability.tracing import setup_tracing
         
-        # Use shared traces.db - services on same server will share traces
-        # This allows the admin dashboard to view all services' traces
-        if db_path is None:
-            db_path = "data/traces.db"
+        # Register callback to save spans to app DB
+        setup_tracing()
         
-        # Ensure data directory exists
-        import os
-        db_dir = os.path.dirname(db_path)
-        if db_dir:
-            os.makedirs(db_dir, exist_ok=True)
+        # Optional: filter to only save slow/error spans
+        if settings.save_threshold_ms and settings.save_threshold_ms > 0:
+            def _filter(span):
+                # Always save root spans (no parent) and errors
+                if span.parent_id is None or span.status == "error":
+                    return True
+                # Save child spans only if slow
+                return span.duration_ms >= settings.save_threshold_ms
+            set_span_filter(_filter)
         
-        # Create store with service name
-        _trace_store = SQLiteTraceStore(db_path, service_name=service_name)
+        # Build exclude set
+        exclude = set(settings.exclude_paths) if settings.exclude_paths else set()
         
-        # Add middleware
-        app.add_middleware(
-            TracingMiddleware,
-            store=_trace_store,
-            exclude_paths=set(settings.exclude_paths),
-            sample_rate=settings.sample_rate,
-            save_threshold_ms=settings.save_threshold_ms,
-            save_errors=settings.save_errors,
-        )
+        # Add middleware that creates root span per request
+        @app.middleware("http")
+        async def tracing_middleware(request, call_next):
+            path = request.url.path
+            if path in exclude:
+                return await call_next(request)
+            
+            with trace_span(
+                f"{request.method} {path}",
+                method=request.method,
+                path=path,
+                service=service_name,
+            ) as span:
+                response = await call_next(request)
+                # Enrich root span with response info
+                span.metadata["status_code"] = response.status_code
+                if response.status_code >= 400:
+                    span.status = "error"
+                return response
         
-        logger.info(f"Tracing: enabled for '{service_name}', db={db_path}, sample_rate={settings.sample_rate}")
+        logger.info(f"Tracing: enabled for '{service_name}', saving to app DB")
         
     except ImportError as e:
-        logger.warning(f"Tracing: could not import tracing module: {e}")
+        logger.debug(f"Tracing: tracing library not available: {e}")
     except Exception as e:
         logger.error(f"Tracing: failed to initialize: {e}")
 

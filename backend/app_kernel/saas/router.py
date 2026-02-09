@@ -14,7 +14,7 @@ from pydantic import BaseModel, EmailStr
 
 from ..auth.deps import get_current_user
 from ..auth.models import UserIdentity
-from ..db import get_db_connection
+from ..db.session import get_db_connection
 from .stores import WorkspaceStore, MemberStore, InviteStore, ProjectStore
 from .deps import require_workspace_member, require_workspace_admin, require_workspace_owner
 

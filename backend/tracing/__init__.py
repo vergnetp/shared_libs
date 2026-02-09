@@ -1,104 +1,62 @@
 """
-Tracing Module - Request-scoped distributed tracing.
+tracing - Lightweight, storage-agnostic span tracing.
 
-Provides lightweight tracing for correlating operations within a request.
-All external HTTP calls, database queries, and internal operations can be
-traced and correlated.
+Provides structured span tracking with automatic parent/child relationships
+via contextvars. Any module can create spans; storage is handled by a
+registered callback (typically wired by app_kernel to save to the app DB).
 
-Quick Start:
-    # In middleware (automatic with app_kernel):
-    from tracing import RequestContext, set_context, clear_context
-    
-    ctx = RequestContext.create(request_id=request.state.request_id)
-    set_context(ctx)
-    try:
-        response = await call_next(request)
-    finally:
-        ctx.end()
-        if ctx.has_errors or ctx.duration_ms > 1000:
-            save_traces(ctx)
-        clear_context()
-    
-    # In your code - option 1: context manager
-    from tracing import get_context, SpanKind
-    
-    ctx = get_context()
-    with ctx.span("fetch_user", SpanKind.DATABASE) as span:
-        span.set_attribute("user_id", user_id)
-        user = await db.get_user(user_id)
-    
-    # Option 2: decorator
-    from tracing import traced, SpanKind
-    
-    @traced("external_api", SpanKind.HTTP_CLIENT)
-    async def call_stripe(customer_id: str):
+Usage in shared_libs modules (databases, http_client, ai, etc.):
+
+    from tracing import trace_span
+
+    async def fetch_all(self, query, params=None):
+        with trace_span("db.fetch_all", query=query[:100]):
+            return await self._execute(query, params)
+
+Usage in app code:
+
+    from tracing import trace_span, trace_async
+
+    with trace_span("process_payment", amount=99.99):
+        charge = await stripe.charge(amount)
+
+    # Or as decorator
+    @trace_async("send_email")
+    async def send_email(to, subject):
         ...
 
-Key Concepts:
-    - RequestContext: Created per request, holds all spans
-    - Span: A single traced operation with timing and attributes
-    - SpanKind: Type of operation (HTTP, DB, internal, etc.)
-    - Context vars: Thread/async-safe storage of current context
+Wiring (done by app_kernel at startup):
 
-Integration Points:
-    - http_client module: Auto-creates spans for HTTP calls
-    - databases/ module: Can add spans for queries
-    - TracingMiddleware: Creates RequestContext per request
-    - SQLiteTraceStore: Persists traces for telemetry dashboard
+    from tracing import set_span_callback
+
+    async def save_span(span_data: dict):
+        await db.save_entity("kernel_traces", span_data)
+
+    set_span_callback(save_span)
 """
 
-from .types import (
-    SpanKind,
-    SpanStatus,
-    SpanAttributes,
+from .core import (
+    trace_span,
+    trace_async,
+    trace_sync,
+    start_span,
+    end_span,
+    get_current_span,
+    get_current_trace_id,
+    set_span_callback,
+    set_span_filter,
+    SpanData,
 )
-
-from .context import (
-    Span,
-    RequestContext,
-    get_context,
-    set_context,
-    clear_context,
-)
-
-from .decorators import (
-    traced,
-    TracedOperation,
-)
-
-
-# Lazy imports for optional dependencies
-def __getattr__(name):
-    """Lazy load middleware and store (require starlette/sqlite)."""
-    if name == "TracingMiddleware":
-        from .middleware import TracingMiddleware
-        return TracingMiddleware
-    if name == "SQLiteTraceStore":
-        from .store import SQLiteTraceStore
-        return SQLiteTraceStore
-    if name == "TraceStore":
-        from .store import TraceStore
-        return TraceStore
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
 
 __all__ = [
-    # Types
-    "SpanKind",
-    "SpanStatus", 
-    "SpanAttributes",
-    # Context
-    "Span",
-    "RequestContext",
-    "get_context",
-    "set_context",
-    "clear_context",
-    # Decorators
-    "traced",
-    "TracedOperation",
-    # Middleware (lazy)
-    "TracingMiddleware",
-    # Storage (lazy)
-    "TraceStore",
-    "SQLiteTraceStore",
+    "trace_span",
+    "trace_async",
+    "trace_sync",
+    "start_span",
+    "end_span",
+    "get_current_span",
+    "get_current_trace_id",
+    "set_span_callback",
+    "set_span_filter",
+    "SpanData",
 ]

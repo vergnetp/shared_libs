@@ -150,11 +150,7 @@ async def run_worker(
     admin_db = Database(admin_db_url)
     await admin_db.connect()
     
-    # Initialize schemas
-    from .audit.schema import init_audit_schema
-    from .metering.schema import init_metering_schema
-    await init_audit_schema(admin_db)
-    await init_metering_schema(admin_db)
+    # Tables are created by AutoMigrator at app startup (kernel_audit_logs, kernel_usage_events etc.)
     
     logger.info(f"Admin worker started - Redis: {redis_url}, DB: {admin_db_url}")
     

@@ -12,7 +12,7 @@ from fastapi import Depends, HTTPException, status, Request
 
 from ..auth.deps import get_current_user
 from ..auth.models import UserIdentity
-from ..db import get_db_connection
+from ..db.session import get_db_connection
 from .stores import MemberStore, WorkspaceStore
 
 

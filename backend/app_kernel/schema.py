@@ -4,7 +4,7 @@ Kernel infrastructure schema using @entity decorators.
 All kernel-owned tables defined here. AutoMigrator creates/updates at startup.
 
 Usage:
-    from app_kernel.db.schema import init_all_schemas
+    from app_kernel.schema import init_all_schemas
     
     async with db as conn:
         await init_all_schemas(conn, saas_enabled=True)
@@ -13,7 +13,7 @@ Usage:
 from dataclasses import dataclass
 from typing import Optional
 
-from ...databases import entity, entity_field
+from ..databases import entity, entity_field
 
 
 # =============================================================================
@@ -215,12 +215,14 @@ class OAuthAccount:
 class AuditLog:
     """Audit log entries."""
     action: str = entity_field(default="", index=True)
-    workspace_id: Optional[str] = entity_field(default=None, index=True)
-    user_id: Optional[str] = entity_field(default=None, index=True)
     entity: Optional[str] = entity_field(default=None, index=True)
     entity_id: Optional[str] = entity_field(default=None, index=True)
     changes: Optional[str] = None
-    metadata: Optional[str] = None
+    old_snapshot: Optional[str] = None
+    new_snapshot: Optional[str] = None
+    user_id: Optional[str] = entity_field(default=None, index=True)
+    request_id: Optional[str] = None
+    workspace_id: Optional[str] = entity_field(default=None, index=True)
     ip: Optional[str] = None
     user_agent: Optional[str] = None
     timestamp: Optional[str] = entity_field(default=None, index=True)
@@ -242,6 +244,23 @@ class UsageRequest:
     latency_ms: Optional[int] = None
     bytes_in: Optional[int] = None
     bytes_out: Optional[int] = None
+    timestamp: Optional[str] = entity_field(default=None, index=True)
+
+
+@entity(table="kernel_usage_events", history=False)
+@dataclass
+class UsageEvent:
+    """Raw usage events from admin worker."""
+    workspace_id: Optional[str] = entity_field(default=None, index=True)
+    user_id: Optional[str] = entity_field(default=None, index=True)
+    event_type: str = entity_field(default="request")
+    endpoint: Optional[str] = None
+    method: Optional[str] = None
+    status_code: Optional[int] = None
+    latency_ms: Optional[int] = None
+    bytes_in: Optional[int] = None
+    bytes_out: Optional[int] = None
+    period: Optional[str] = entity_field(default=None, index=True)
     timestamp: Optional[str] = entity_field(default=None, index=True)
 
 
@@ -340,6 +359,23 @@ class RequestMetric:
     metadata: Optional[str] = None
 
 
+@entity(table="kernel_traces", history=False)
+@dataclass
+class Trace:
+    """Span traces for observability (from tracing library)."""
+    trace_id: str = entity_field(default="", index=True)
+    span_id: str = entity_field(default="", index=True)
+    parent_id: Optional[str] = entity_field(default=None, index=True)
+    name: str = entity_field(default="", index=True)
+    duration_ms: float = 0.0
+    started_at: Optional[str] = entity_field(default=None, index=True)
+    ended_at: Optional[str] = None
+    status: str = entity_field(default="ok", index=True)
+    error: Optional[str] = None
+    error_type: Optional[str] = None
+    metadata: Optional[str] = None
+
+
 # =============================================================================
 # Schema Initialization
 # =============================================================================
@@ -353,7 +389,7 @@ async def init_all_schemas(conn, saas_enabled: bool = False, request_metrics_ena
         saas_enabled: Include SaaS tables
         request_metrics_enabled: Include request_metrics table
     """
-    from ...databases.migrations import AutoMigrator
+    from ..databases.migrations import AutoMigrator
     
     # AutoMigrator reads from ENTITY_SCHEMAS registry (populated by @entity decorators)
     migrator = AutoMigrator(conn)

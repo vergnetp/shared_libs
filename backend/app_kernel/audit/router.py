@@ -4,6 +4,8 @@ from typing import Dict, List, Optional, Any, Callable
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
+from ..db.session import raw_db_context
+
 
 class AuditLogEntry(BaseModel):
     id: str
@@ -24,7 +26,6 @@ class AuditLogResponse(BaseModel):
 
 def create_audit_router(
     get_current_user: Callable,
-    db_dependency: Callable,
     app_name: str,
     prefix: str = "/audit",
     tags: List[str] = None,
@@ -58,7 +59,6 @@ def create_audit_router(
         offset: int = Query(0, ge=0),
         include_count: bool = False,
         user=Depends(get_current_user),
-        db=Depends(db_dependency),
     ):
         """Query audit logs for this app."""
         from .queries import get_audit_logs, count_audit_logs
@@ -66,22 +66,23 @@ def create_audit_router(
         if require_admin and not _check_admin(user):
             raise HTTPException(403, "Admin access required")
         
-        logs = await get_audit_logs(
-            db,
-            app=app_name,
-            entity=entity,
-            entity_id=entity_id,
-            user_id=user_id,
-            action=action,
-            since=since,
-            until=until,
-            limit=limit,
-            offset=offset,
-        )
-        
-        total = None
-        if include_count:
-            total = await count_audit_logs(db, app=app_name, since=since, until=until)
+        async with raw_db_context() as db:
+            logs = await get_audit_logs(
+                db,
+                app=app_name,
+                entity=entity,
+                entity_id=entity_id,
+                user_id=user_id,
+                action=action,
+                since=since,
+                until=until,
+                limit=limit,
+                offset=offset,
+            )
+            
+            total = None
+            if include_count:
+                total = await count_audit_logs(db, app=app_name, since=since, until=until)
         
         return AuditLogResponse(logs=logs, total=total)
     
@@ -91,7 +92,6 @@ def create_audit_router(
         entity_id: str,
         limit: int = Query(50, le=200),
         user=Depends(get_current_user),
-        db=Depends(db_dependency),
     ):
         """Get complete audit history for a specific entity."""
         from .queries import get_entity_audit_history
@@ -99,13 +99,14 @@ def create_audit_router(
         if require_admin and not _check_admin(user):
             raise HTTPException(403, "Admin access required")
         
-        logs = await get_entity_audit_history(
-            db, 
-            entity, 
-            entity_id, 
-            app=app_name,
-            limit=limit,
-        )
+        async with raw_db_context() as db:
+            logs = await get_entity_audit_history(
+                db, 
+                entity, 
+                entity_id, 
+                app=app_name,
+                limit=limit,
+            )
         
         return {"entity": entity, "entity_id": entity_id, "history": logs}
     

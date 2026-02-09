@@ -466,7 +466,7 @@ class RequestMetricsStore:
         Returns:
             Generated ID
         """
-        from ..db import get_db_connection
+        from ..db.session import get_db_connection
         import json
         
         metric_id = str(uuid.uuid4())
@@ -541,7 +541,7 @@ class RequestMetricsStore:
         Returns:
             List of metric dictionaries
         """
-        from ..db import get_db_connection
+        from ..db.session import get_db_connection
         
         conditions = []
         params = []
@@ -596,7 +596,7 @@ class RequestMetricsStore:
         Returns:
             Dict with aggregated stats
         """
-        from ..db import get_db_connection
+        from ..db.session import get_db_connection
         
         # Calculate cutoff time
         cutoff = datetime.now(timezone.utc)
@@ -679,7 +679,7 @@ class RequestMetricsStore:
         Returns:
             Number of deleted rows
         """
-        from ..db import get_db_connection
+        from ..db.session import get_db_connection
         
         cutoff = datetime.now(timezone.utc)
         cutoff = cutoff.replace(day=cutoff.day - days)
@@ -781,7 +781,7 @@ def create_request_metrics_router(
     """
     router = APIRouter(prefix=prefix, tags=["Request Metrics"])
     
-    async def check_admin(request):
+    async def check_admin(request: Request):
         """Admin check dependency."""
         if protect == "none":
             return True

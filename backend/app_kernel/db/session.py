@@ -5,35 +5,35 @@ Kernel manages the connection pool via DatabaseManager.
 Apps provide config (in ServiceConfig) and schema (via schema_init).
 
 Two connection modes:
-    db_dependency / db_context         - strict (default for app code)
-    raw_db_dependency / raw_db_context - no guard (kernel internals)
+    db_context       - strict (default for app code)
+    raw_db_context   - no guard (kernel internals)
 
 Strict mode enforces that all operations go through entity classes
 (e.g. User.find(db, ...)) not raw db.find_entities(). This ensures
 proper type coercion and prevents backend-specific bugs (e.g. SQLite
 string comparison on integer fields).
 
+Entity methods auto-acquire connections when db is omitted:
+    project = await Project.get(id="abc")       # auto-acquires + releases
+    projects = await Project.find(where="x=?")  # auto-acquires + releases
+
+For batching multiple ops on one connection:
+    async with db_context() as db:
+        project = await Project.get(db, id="abc")
+        service = await Service.get(db, id="xyz")
+
 When REDIS_URL is configured, audit logging is automatically enabled:
 - Every save_entity() and delete_entity() pushes an audit event to Redis
 - The admin_worker consumes these events and writes to admin_db
-
-Usage:
-    # In routes (FastAPI dependency) - strict by default
-    from app_kernel.db import db_dependency
-    
-    @app.get("/deployments")
-    async def list_deps(db=Depends(db_dependency)):
-        return await Deployment.find(db, where="env = ?", params=("prod",))
-    
-    # In workers (context manager) - strict by default
-    from app_kernel.db import db_context
-    
-    async with db_context() as db:
-        deploys = await Deployment.find(db)
 """
+import os
+import sys
+import time
+import logging
 from typing import Optional, Callable, Awaitable
 from contextlib import asynccontextmanager
 
+logger = logging.getLogger("app_kernel")
 
 # Module-level state
 _db_manager = None
@@ -209,6 +209,32 @@ class AuditWrappedConnection:
 # Connection providers
 # =============================================================================
 
+def _get_caller() -> str:
+    """Walk up frames to find the first caller outside session.py/contextlib/FastAPI internals."""
+    _SKIP = ('session.py', 'contextlib', 'decorators.py', 'utils.py', 'routing.py', 'dependencies')
+    try:
+        for i in range(1, 15):
+            f = sys._getframe(i)
+            fn = f.f_code.co_filename
+            if not any(s in fn for s in _SKIP):
+                short = os.path.basename(fn)
+                return f"{short}:{f.f_lineno} {f.f_code.co_name}"
+    except (ValueError, AttributeError):
+        pass
+    return "unknown"
+
+
+def _pool_stats() -> str:
+    """Get pool stats string. Returns empty string if pool not accessible."""
+    try:
+        pool = _db_manager._db.pool_manager._pool
+        if pool:
+            return f"pool: {pool.idle} idle, {pool.in_use} in_use, {pool.size}/{pool.max_size} total"
+    except (AttributeError, TypeError):
+        pass
+    return ""
+
+
 @asynccontextmanager
 async def _base_connection():
     """
@@ -221,11 +247,21 @@ async def _base_connection():
     if _db_manager is None:
         raise RuntimeError("Database not initialized. Set database_url in ServiceConfig.")
     
+    caller = _get_caller()
+    stats = _pool_stats()
+    logger.info(f"DB acquire [{caller}] {stats}")
+    t0 = time.monotonic()
+    
     async with _db_manager.connection() as conn:
         if _audit_redis_url and _audit_app_name:
             yield AuditWrappedConnection(conn, _audit_redis_url, _audit_app_name)
         else:
             yield conn
+    
+    held = time.monotonic() - t0
+    stats = _pool_stats()
+    level = logging.WARNING if held > 5 else logging.INFO
+    logger.log(level, f"DB release [{caller}] held {held:.2f}s {stats}")
 
 
 # --- Strict (default for app code) ---
@@ -247,26 +283,7 @@ async def db_context():
         conn._block_raw_execute = True
         yield conn
 
-
-async def db_dependency():
-    """
-    FastAPI dependency for database connections (strict, default for app code).
-    
-    Enforces entity class usage: db.find_entities() etc will raise RuntimeError.
-    Use MyEntity.find(db, ...) instead.
-    
-    Usage:
-        from app_kernel.db import db_dependency
-        
-        @app.get("/deployments")
-        async def list_deployments(db=Depends(db_dependency)):
-            return await Deployment.find(db, where="env = ?", params=("prod",))
-    """
-    async with db_context() as conn:
-        yield conn
-
-
-# --- Raw (kernel internals, power users) ---
+# --- Raw (kernel internals) ---
 
 @asynccontextmanager
 async def raw_db_context():
@@ -277,17 +294,6 @@ async def raw_db_context():
     App code should use db_context() instead.
     """
     async with _base_connection() as conn:
-        yield conn
-
-
-async def raw_db_dependency():
-    """
-    FastAPI dependency for database connections WITHOUT strict entity access.
-    
-    Used by kernel internal stores that don't have @entity schemas.
-    App code should use db_dependency() instead.
-    """
-    async with raw_db_context() as conn:
         yield conn
 
 
@@ -310,12 +316,5 @@ async def close_db():
         _db_manager = None
 
 
-# =============================================================================
-# Backward compatibility aliases (kernel code uses old names)
-# =============================================================================
-
-# Old name -> new name:
-#   get_db_connection -> raw_db_context   (context manager, no guard)
-#   db_connection     -> db_dependency    (FastAPI dep, strict)
+# Backward compat alias (kernel code uses old name)
 get_db_connection = raw_db_context
-db_connection = db_dependency

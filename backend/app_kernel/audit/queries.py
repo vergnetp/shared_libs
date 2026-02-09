@@ -1,11 +1,11 @@
-"""Audit queries - read from admin_db."""
+"""Audit queries - read from kernel_audit_logs."""
 
 import json
 from typing import Optional, Dict, Any, List
 
 
 async def get_audit_logs(
-    admin_db,
+    db,
     app: Optional[str] = None,
     entity: Optional[str] = None,
     entity_id: Optional[str] = None,
@@ -17,10 +17,10 @@ async def get_audit_logs(
     offset: int = 0,
 ) -> List[Dict[str, Any]]:
     """
-    Query audit logs from admin_db.
+    Query audit logs.
     
     Args:
-        app: Filter by app name
+        app: Ignored (kept for API compat, each app has own DB)
         entity: Filter by entity type (table name)
         entity_id: Filter by specific entity ID
         user_id: Filter by user who made change
@@ -32,10 +32,6 @@ async def get_audit_logs(
     """
     conditions = []
     params = []
-    
-    if app:
-        conditions.append("[app] = ?")
-        params.append(app)
     
     if entity:
         conditions.append("[entity] = ?")
@@ -63,7 +59,7 @@ async def get_audit_logs(
     
     where_clause = " AND ".join(conditions) if conditions else None
     
-    results = await admin_db.find_entities(
+    results = await db.find_entities(
         "kernel_audit_logs",
         where_clause=where_clause,
         params=tuple(params) if params else None,
@@ -88,7 +84,7 @@ async def get_audit_logs(
 
 
 async def get_entity_audit_history(
-    admin_db,
+    db,
     entity: str,
     entity_id: str,
     app: Optional[str] = None,
@@ -96,8 +92,7 @@ async def get_entity_audit_history(
 ) -> List[Dict[str, Any]]:
     """Get complete audit history for a specific entity."""
     return await get_audit_logs(
-        admin_db,
-        app=app,
+        db,
         entity=entity,
         entity_id=entity_id,
         limit=limit,
@@ -105,7 +100,7 @@ async def get_entity_audit_history(
 
 
 async def count_audit_logs(
-    admin_db,
+    db,
     app: Optional[str] = None,
     since: Optional[str] = None,
     until: Optional[str] = None,
@@ -113,10 +108,6 @@ async def count_audit_logs(
     """Count audit logs matching filters."""
     conditions = []
     params = []
-    
-    if app:
-        conditions.append("[app] = ?")
-        params.append(app)
     
     if since:
         conditions.append("[timestamp] >= ?")
@@ -128,7 +119,7 @@ async def count_audit_logs(
     
     where_clause = " AND ".join(conditions) if conditions else None
     
-    return await admin_db.count_entities(
+    return await db.count_entities(
         "kernel_audit_logs",
         where_clause=where_clause,
         params=tuple(params) if params else None,

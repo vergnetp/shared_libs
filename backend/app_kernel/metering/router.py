@@ -4,6 +4,8 @@ from typing import Dict, List, Optional, Callable
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
+from ..db.session import raw_db_context
+
 
 class UsageResponse(BaseModel):
     period: str
@@ -29,7 +31,6 @@ class QuotaResponse(BaseModel):
 
 def create_metering_router(
     get_current_user: Callable,
-    db_dependency: Callable,
     app_name: str,
     prefix: str = "/usage",
     tags: List[str] = None,
@@ -61,25 +62,20 @@ def create_metering_router(
         period: str = Query("month", description="Period: 'day', 'month', 'year', or specific like '2025-01'"),
         user_id: Optional[str] = Query(None, description="User ID (admin only, defaults to current user)"),
         user=Depends(get_current_user),
-        db=Depends(db_dependency),
     ):
         """Get usage summary. Admins can query any user by passing user_id."""
         from .queries import get_usage
         
-        # Determine target user
         target_user_id = user.id
         if user_id and user_id != user.id:
-            # Trying to query another user - must be admin
             if not _check_admin(user):
                 raise HTTPException(403, "Admin access required to view other users' usage")
             target_user_id = user_id
         
-        metrics = await get_usage(
-            db,
-            app=app_name,
-            user_id=target_user_id,
-            period=period,
-        )
+        async with raw_db_context() as db:
+            metrics = await get_usage(
+                db, app=app_name, user_id=target_user_id, period=period,
+            )
         
         return UsageResponse(
             period=_get_period_key(period) if period in ("day", "month", "year") else period,
@@ -93,7 +89,6 @@ def create_metering_router(
         user_id: str,
         period: str = Query("month"),
         user=Depends(get_current_user),
-        db=Depends(db_dependency),
     ):
         """Get usage summary for a specific user (admin only)."""
         from .queries import get_usage
@@ -101,12 +96,8 @@ def create_metering_router(
         if not _check_admin(user):
             raise HTTPException(403, "Admin access required")
         
-        metrics = await get_usage(
-            db,
-            app=app_name,
-            user_id=user_id,
-            period=period,
-        )
+        async with raw_db_context() as db:
+            metrics = await get_usage(db, app=app_name, user_id=user_id, period=period)
         
         return UsageResponse(
             period=_get_period_key(period) if period in ("day", "month", "year") else period,
@@ -120,22 +111,16 @@ def create_metering_router(
         workspace_id: str,
         period: str = Query("month"),
         user=Depends(get_current_user),
-        db=Depends(db_dependency),
     ):
         """Get usage summary for a workspace."""
         from .queries import get_usage
         
-        # Check access (admin or workspace member)
         user_workspace = getattr(user, "workspace_id", None)
         if user_workspace != workspace_id and not _check_admin(user):
             raise HTTPException(403, "Access denied")
         
-        metrics = await get_usage(
-            db,
-            app=app_name,
-            workspace_id=workspace_id,
-            period=period,
-        )
+        async with raw_db_context() as db:
+            metrics = await get_usage(db, app=app_name, workspace_id=workspace_id, period=period)
         
         return UsageResponse(
             period=_get_period_key(period) if period in ("day", "month", "year") else period,
@@ -149,25 +134,20 @@ def create_metering_router(
         period: str = Query("month"),
         workspace_id: Optional[str] = None,
         user=Depends(get_current_user),
-        db=Depends(db_dependency),
     ):
         """Get usage breakdown by endpoint."""
         from .queries import get_usage_by_endpoint
         
-        # Use user's workspace if not specified
         ws_id = workspace_id or getattr(user, "workspace_id", None)
         
-        # Check access
         if workspace_id and workspace_id != getattr(user, "workspace_id", None):
             if not _check_admin(user):
                 raise HTTPException(403, "Access denied")
         
-        endpoints = await get_usage_by_endpoint(
-            db,
-            app=app_name,
-            workspace_id=ws_id,
-            period=period,
-        )
+        async with raw_db_context() as db:
+            endpoints = await get_usage_by_endpoint(
+                db, app=app_name, workspace_id=ws_id, period=period,
+            )
         
         return UsageByEndpointResponse(
             period=_get_period_key(period) if period in ("day", "month", "year") else period,
@@ -183,14 +163,14 @@ def create_metering_router(
         period: str = Query("month"),
         workspace_id: Optional[str] = None,
         user=Depends(get_current_user),
-        db=Depends(db_dependency),
     ):
         """Check quota status for a specific metric."""
         from .queries import get_usage
         
         ws_id = workspace_id or getattr(user, "workspace_id", None)
         
-        usage = await get_usage(db, app=app_name, workspace_id=ws_id, period=period)
+        async with raw_db_context() as db:
+            usage = await get_usage(db, app=app_name, workspace_id=ws_id, period=period)
         
         used = usage.get(metric, 0)
         remaining = max(0, limit - used)

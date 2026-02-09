@@ -31,7 +31,6 @@ Usage:
 
 from .publisher import track_request, track_usage
 from .queries import get_usage, get_usage_by_endpoint, check_quota, get_quota_remaining
-from .schema import init_metering_schema
 from .middleware import UsageMeteringMiddleware
 from .router import create_metering_router
 
@@ -44,8 +43,6 @@ __all__ = [
     "get_usage_by_endpoint",
     "check_quota",
     "get_quota_remaining",
-    # Schema
-    "init_metering_schema",
     # Middleware
     "UsageMeteringMiddleware",
     # Router

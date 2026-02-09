@@ -281,7 +281,7 @@ def _create_json_deserializing_wrapper(task_name: str, processor):
         data = payload
         
         # Call the processor with db connection
-        from ..db import db_context
+        from ..db.session import db_context
         
         async with db_context() as db:
             if asyncio.iscoroutinefunction(processor):

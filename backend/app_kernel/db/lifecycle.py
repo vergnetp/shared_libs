@@ -97,7 +97,7 @@ async def run_database_lifecycle(
         dict with backup and migration results
     
     Example:
-        from .db import get_db_connection
+        from .session import get_db_connection
         from .db.lifecycle import run_database_lifecycle
         
         db = await get_db_connection()
