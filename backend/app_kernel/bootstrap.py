@@ -138,8 +138,8 @@ async def _run_embedded_admin_worker(
     """
     Run admin worker as background task (consumes audit/metering from Redis).
     
-    With multiple uvicorn workers, Redis RPOP is atomic so events get
-    distributed across workers automatically - each event processed exactly once.
+    Uses the app's own DB connection pool (raw_db_context) — no external
+    databases library needed.
     """
     import json
     import uuid
@@ -153,106 +153,81 @@ async def _run_embedded_admin_worker(
     
     redis_client = aioredis.from_url(redis_url)
     
-    # Use databases library for admin_db (same as admin_worker.py)
-    try:
-        from databases import Database
-        admin_db = Database(admin_db_url)
-        await admin_db.connect()
-    except ImportError:
-        logger.warning("databases library not installed, admin worker disabled")
-        return
-    except Exception as e:
-        logger.warning(f"Could not connect to admin_db: {e}")
-        return
-    
-    # Tables are created by AutoMigrator at app startup (kernel_audit_logs, kernel_usage_events etc.)
-    # No separate schema init needed.
+    from .db.session import raw_db_context
     
     def _now_iso():
         return datetime.now(timezone.utc).isoformat()
     
-    async def process_audit_event(event: dict):
-        await admin_db.execute(
-            """INSERT INTO kernel_audit_logs (id, entity, entity_id, action, changes, 
-               old_snapshot, new_snapshot, user_id, request_id, timestamp, created_at)
-               VALUES (:id, :entity, :entity_id, :action, :changes,
-               :old_snapshot, :new_snapshot, :user_id, :request_id, :timestamp, :created_at)""",
-            {
-                "id": str(uuid.uuid4()),
-                "entity": event.get("entity"),
-                "entity_id": event.get("entity_id"),
-                "action": event.get("action"),
-                "changes": json.dumps(event.get("changes")) if event.get("changes") else None,
-                "old_snapshot": json.dumps(event.get("old_snapshot")) if event.get("old_snapshot") else None,
-                "new_snapshot": json.dumps(event.get("new_snapshot")) if event.get("new_snapshot") else None,
-                "user_id": event.get("user_id"),
-                "request_id": event.get("request_id"),
-                "timestamp": event.get("timestamp", _now_iso()),
-                "created_at": _now_iso(),
-            }
-        )
+    def _build_audit_entity(event: dict) -> dict:
+        return {
+            "id": str(uuid.uuid4()),
+            "entity": event.get("entity"),
+            "entity_id": event.get("entity_id"),
+            "action": event.get("action"),
+            "changes": json.dumps(event.get("changes")) if event.get("changes") else None,
+            "old_snapshot": json.dumps(event.get("old_snapshot")) if event.get("old_snapshot") else None,
+            "new_snapshot": json.dumps(event.get("new_snapshot")) if event.get("new_snapshot") else None,
+            "user_id": event.get("user_id"),
+            "request_id": event.get("request_id"),
+            "timestamp": event.get("timestamp", _now_iso()),
+        }
     
-    async def process_metering_event(event: dict):
-        # Simplified: just insert raw events, aggregation done at query time
-        await admin_db.execute(
-            """INSERT INTO kernel_usage_events (id, workspace_id, user_id, event_type,
-               endpoint, method, status_code, latency_ms, bytes_in, bytes_out, 
-               period, timestamp)
-               VALUES (:id, :workspace_id, :user_id, :event_type,
-               :endpoint, :method, :status_code, :latency_ms, :bytes_in, :bytes_out,
-               :period, :timestamp)""",
-            {
-                "id": str(uuid.uuid4()),
-                "workspace_id": event.get("workspace_id"),
-                "user_id": event.get("user_id"),
-                "event_type": event.get("type", "request"),
-                "endpoint": event.get("endpoint"),
-                "method": event.get("method"),
-                "status_code": event.get("status_code"),
-                "latency_ms": event.get("latency_ms"),
-                "bytes_in": event.get("bytes_in"),
-                "bytes_out": event.get("bytes_out"),
-                "period": event.get("period"),
-                "timestamp": event.get("timestamp", _now_iso()),
-            }
-        )
+    def _build_metering_entity(event: dict) -> dict:
+        return {
+            "id": str(uuid.uuid4()),
+            "workspace_id": event.get("workspace_id"),
+            "user_id": event.get("user_id"),
+            "event_type": event.get("type", "request"),
+            "endpoint": event.get("endpoint"),
+            "method": event.get("method"),
+            "status_code": event.get("status_code"),
+            "latency_ms": event.get("latency_ms"),
+            "bytes_in": event.get("bytes_in"),
+            "bytes_out": event.get("bytes_out"),
+            "period": event.get("period"),
+            "timestamp": event.get("timestamp", _now_iso()),
+        }
     
     try:
         while True:
-            processed = 0
+            # Drain both queues
+            audit_events = []
+            metering_events = []
             
-            # Process audit events
             for _ in range(batch_size):
-                event_data = await redis_client.rpop("admin:audit_events")
-                if not event_data:
+                data = await redis_client.rpop("admin:audit_events")
+                if not data:
                     break
                 try:
-                    event = json.loads(event_data)
-                    await process_audit_event(event)
-                    processed += 1
+                    audit_events.append(_build_audit_entity(json.loads(data)))
                 except Exception as e:
-                    logger.debug(f"Audit event error: {e}")
+                    logger.debug(f"Audit event parse error: {e}")
             
-            # Process metering events
             for _ in range(batch_size):
-                event_data = await redis_client.rpop("admin:metering_events")
-                if not event_data:
+                data = await redis_client.rpop("admin:metering_events")
+                if not data:
                     break
                 try:
-                    event = json.loads(event_data)
-                    await process_metering_event(event)
-                    processed += 1
+                    metering_events.append(_build_metering_entity(json.loads(data)))
                 except Exception as e:
-                    logger.debug(f"Metering event error: {e}")
+                    logger.debug(f"Metering event parse error: {e}")
             
-            # Sleep if no events
-            if processed == 0:
+            # Write batch in single connection
+            if audit_events or metering_events:
+                try:
+                    async with raw_db_context() as db:
+                        for entity in audit_events:
+                            await db.save_entity("kernel_audit_logs", entity)
+                        for entity in metering_events:
+                            await db.save_entity("kernel_usage_events", entity)
+                except Exception as e:
+                    logger.debug(f"Admin worker DB error: {e}")
+            else:
                 await asyncio.sleep(poll_interval)
     
     except asyncio.CancelledError:
         pass
     finally:
-        await admin_db.disconnect()
         await redis_client.close()
 
 

@@ -34,7 +34,7 @@ Usage:
 import time
 import uuid
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any, List, Callable
 from dataclasses import dataclass, field, asdict
 
@@ -457,64 +457,20 @@ class RequestMetricsStore:
             await db.execute(index)
     
     async def save(self, metric: Dict[str, Any]) -> str:
-        """
-        Save a request metric to the database.
-        
-        Args:
-            metric: Metric dictionary (from RequestMetric.to_dict())
-            
-        Returns:
-            Generated ID
-        """
-        from ..db.session import get_db_connection
+        """Save a request metric to the database."""
+        from ..db.session import raw_db_context
         import json
         
         metric_id = str(uuid.uuid4())
         
         # Serialize metadata to JSON if present
-        metadata_json = None
-        if metric.get("metadata"):
-            metadata_json = json.dumps(metric["metadata"])
+        if metric.get("metadata") and isinstance(metric["metadata"], dict):
+            metric["metadata"] = json.dumps(metric["metadata"])
         
-        async with get_db_connection() as db:
-            await db.execute(
-                f"""
-                INSERT INTO {self.TABLE_NAME} (
-                    id, request_id, method, path, query_params,
-                    status_code, error, error_type, server_latency_ms,
-                    client_ip, user_agent, referer,
-                    user_id, workspace_id,
-                    country, city, continent,
-                    timestamp, year, month, day, hour,
-                    metadata
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    metric_id,
-                    metric.get("request_id"),
-                    metric.get("method"),
-                    metric.get("path"),
-                    metric.get("query_params"),
-                    metric.get("status_code", 0),
-                    metric.get("error"),
-                    metric.get("error_type"),
-                    metric.get("server_latency_ms", 0.0),
-                    metric.get("client_ip"),
-                    metric.get("user_agent"),
-                    metric.get("referer"),
-                    metric.get("user_id"),
-                    metric.get("workspace_id"),
-                    metric.get("country"),
-                    metric.get("city"),
-                    metric.get("continent"),
-                    metric.get("timestamp"),
-                    metric.get("year", 0),
-                    metric.get("month", 0),
-                    metric.get("day", 0),
-                    metric.get("hour", 0),
-                    metadata_json,
-                )
-            )
+        metric["id"] = metric_id
+        
+        async with raw_db_context() as db:
+            await db.save_entity(self.TABLE_NAME, metric)
         
         return metric_id
     
@@ -527,130 +483,102 @@ class RequestMetricsStore:
         user_id: Optional[str] = None,
         min_latency_ms: Optional[float] = None,
     ) -> List[Dict[str, Any]]:
-        """
-        Get recent request metrics.
-        
-        Args:
-            limit: Maximum number of results
-            offset: Offset for pagination
-            path_prefix: Filter by path prefix (e.g., "/api/v1/infra")
-            status_code: Filter by exact status code
-            user_id: Filter by user ID
-            min_latency_ms: Filter by minimum latency (find slow requests)
-            
-        Returns:
-            List of metric dictionaries
-        """
-        from ..db.session import get_db_connection
+        """Get recent request metrics with optional filters."""
+        from ..db.session import raw_db_context
         
         conditions = []
         params = []
         
         if path_prefix:
-            conditions.append("path LIKE ?")
+            conditions.append("[path] LIKE ?")
             params.append(f"{path_prefix}%")
         
         if status_code is not None:
-            conditions.append("status_code = ?")
+            conditions.append("[status_code] = ?")
             params.append(status_code)
         
         if user_id:
-            conditions.append("user_id = ?")
+            conditions.append("[user_id] = ?")
             params.append(user_id)
         
         if min_latency_ms is not None:
-            conditions.append("server_latency_ms >= ?")
+            conditions.append("[server_latency_ms] >= ?")
             params.append(min_latency_ms)
         
-        where_clause = ""
-        if conditions:
-            where_clause = "WHERE " + " AND ".join(conditions)
+        where_clause = " AND ".join(conditions) if conditions else None
         
-        params.extend([limit, offset])
-        
-        async with get_db_connection() as db:
-            rows = await db.fetch_all(
-                f"""
-                SELECT * FROM {self.TABLE_NAME}
-                {where_clause}
-                ORDER BY timestamp DESC
-                LIMIT ? OFFSET ?
-                """,
-                tuple(params)
+        async with raw_db_context() as db:
+            rows = await db.find_entities(
+                self.TABLE_NAME,
+                where_clause=where_clause,
+                params=tuple(params) if params else None,
+                order_by="timestamp DESC",
+                limit=limit,
+                offset=offset,
             )
         
-        return [dict(row) for row in rows]
+        return rows
     
     async def get_stats(
         self,
         hours: int = 24,
         path_prefix: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """
-        Get aggregated statistics for recent requests.
-        
-        Args:
-            hours: Number of hours to look back
-            path_prefix: Optional path prefix filter
-            
-        Returns:
-            Dict with aggregated stats
-        """
-        from ..db.session import get_db_connection
+        """Get aggregated statistics for recent requests."""
+        from ..db.session import raw_db_context
         
         # Calculate cutoff time
-        cutoff = datetime.now(timezone.utc)
-        cutoff = cutoff.replace(hour=cutoff.hour - hours)
-        cutoff_str = cutoff.isoformat()
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
         
-        conditions = ["timestamp >= ?"]
-        params = [cutoff_str]
+        conditions = ["[timestamp] >= ?"]
+        params: list = [cutoff]
         
         if path_prefix:
-            conditions.append("path LIKE ?")
+            conditions.append("[path] LIKE ?")
             params.append(f"{path_prefix}%")
         
         where_clause = "WHERE " + " AND ".join(conditions)
         
-        async with get_db_connection() as db:
-            # Total counts
-            row = await db.fetch_one(
+        async with raw_db_context() as db:
+            # Total counts (raw SQL for aggregation)
+            rows = await db.execute(
                 f"""
                 SELECT 
-                    COUNT(*) as total_requests,
-                    AVG(server_latency_ms) as avg_latency_ms,
-                    MAX(server_latency_ms) as max_latency_ms,
-                    MIN(server_latency_ms) as min_latency_ms,
-                    SUM(CASE WHEN status_code >= 500 THEN 1 ELSE 0 END) as error_5xx,
-                    SUM(CASE WHEN status_code >= 400 AND status_code < 500 THEN 1 ELSE 0 END) as error_4xx,
-                    SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 1 ELSE 0 END) as success_2xx
+                    COUNT(*) ,
+                    AVG([server_latency_ms]) ,
+                    MAX([server_latency_ms]) ,
+                    MIN([server_latency_ms]) ,
+                    SUM(CASE WHEN [status_code] >= 500 THEN 1 ELSE 0 END) ,
+                    SUM(CASE WHEN [status_code] >= 400 AND [status_code] < 500 THEN 1 ELSE 0 END) ,
+                    SUM(CASE WHEN [status_code] >= 200 AND [status_code] < 300 THEN 1 ELSE 0 END) 
                 FROM {self.TABLE_NAME}
                 {where_clause}
                 """,
                 tuple(params)
             )
+            row = rows[0] if rows else None
             
             # Top slow endpoints
-            slow_rows = await db.fetch_all(
+            slow_rows = await db.execute(
                 f"""
-                SELECT path, AVG(server_latency_ms) as avg_latency, COUNT(*) as count
+                SELECT [path], AVG([server_latency_ms]), COUNT(*)
                 FROM {self.TABLE_NAME}
                 {where_clause}
-                GROUP BY path
-                ORDER BY avg_latency DESC
+                GROUP BY [path]
+                ORDER BY AVG([server_latency_ms]) DESC
                 LIMIT 10
                 """,
                 tuple(params)
             )
             
             # Top error endpoints
-            error_rows = await db.fetch_all(
+            error_rows = await db.execute(
                 f"""
-                SELECT path, status_code, COUNT(*) as count
+                SELECT [path], [status_code], COUNT(*)
                 FROM {self.TABLE_NAME}
-                {where_clause} AND status_code >= 400
-                GROUP BY path, status_code
-                ORDER BY count DESC
+                {where_clause} AND [status_code] >= 400
+                GROUP BY [path], [status_code]
+                ORDER BY COUNT(*) DESC
                 LIMIT 10
                 """,
                 tuple(params)
@@ -658,40 +586,36 @@ class RequestMetricsStore:
         
         return {
             "period_hours": hours,
-            "total_requests": row["total_requests"] if row else 0,
-            "avg_latency_ms": round(row["avg_latency_ms"] or 0, 2) if row else 0,
-            "max_latency_ms": round(row["max_latency_ms"] or 0, 2) if row else 0,
-            "min_latency_ms": round(row["min_latency_ms"] or 0, 2) if row else 0,
-            "error_5xx": row["error_5xx"] if row else 0,
-            "error_4xx": row["error_4xx"] if row else 0,
-            "success_2xx": row["success_2xx"] if row else 0,
-            "slow_endpoints": [dict(r) for r in slow_rows],
-            "error_endpoints": [dict(r) for r in error_rows],
+            "total_requests": row[0] if row else 0,
+            "avg_latency_ms": round(row[1] or 0, 2) if row else 0,
+            "max_latency_ms": round(row[2] or 0, 2) if row else 0,
+            "min_latency_ms": round(row[3] or 0, 2) if row else 0,
+            "error_5xx": row[4] if row else 0,
+            "error_4xx": row[5] if row else 0,
+            "success_2xx": row[6] if row else 0,
+            "slow_endpoints": [
+                {"path": r[0], "avg_latency_ms": round(r[1] or 0, 2), "count": r[2]}
+                for r in slow_rows
+            ],
+            "error_endpoints": [
+                {"path": r[0], "status_code": r[1], "count": r[2]}
+                for r in error_rows
+            ],
         }
     
     async def cleanup_old(self, days: int = 30) -> int:
-        """
-        Delete metrics older than N days.
+        """Delete metrics older than N days."""
+        from ..db.session import raw_db_context
         
-        Args:
-            days: Delete metrics older than this many days
-            
-        Returns:
-            Number of deleted rows
-        """
-        from ..db.session import get_db_connection
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
         
-        cutoff = datetime.now(timezone.utc)
-        cutoff = cutoff.replace(day=cutoff.day - days)
-        cutoff_str = cutoff.isoformat()
-        
-        async with get_db_connection() as db:
+        async with raw_db_context() as db:
             result = await db.execute(
-                f"DELETE FROM {self.TABLE_NAME} WHERE timestamp < ?",
-                (cutoff_str,)
+                f"DELETE FROM {self.TABLE_NAME} WHERE [timestamp] < ?",
+                (cutoff,)
             )
         
-        return result.rowcount if hasattr(result, 'rowcount') else 0
+        return len(result) if result else 0
 
 
 # =============================================================================

@@ -8,15 +8,17 @@ from ..db.session import raw_db_context
 
 
 class AuditLogEntry(BaseModel):
+    model_config = {"extra": "ignore"}
     id: str
-    app: str
-    entity: str
-    entity_id: str
-    action: str
-    changes: Optional[Dict[str, Any]]
-    user_id: Optional[str]
-    request_id: Optional[str]
-    timestamp: str
+    entity: str = ""
+    entity_id: str = ""
+    action: str = ""
+    changes: Optional[Dict[str, Any]] = None
+    old_snapshot: Optional[Dict[str, Any]] = None
+    new_snapshot: Optional[Dict[str, Any]] = None
+    user_id: Optional[str] = None
+    request_id: Optional[str] = None
+    timestamp: Optional[str] = None
 
 
 class AuditLogResponse(BaseModel):
