@@ -141,11 +141,8 @@ from .db import (
     init_all_schemas,
     cleanup_expired_idempotency_keys,
     cleanup_old_rate_limits,
-    db_dependency,
     db_context,
-    raw_db_dependency,
     raw_db_context,
-    db_connection,       # backward compat -> db_dependency
     get_db_connection,   # backward compat -> raw_db_context
     init_db_session,
     get_db_manager,
@@ -322,11 +319,8 @@ __all__ = [
     
     # Database
     "init_db_session",
-    "db_dependency",
     "db_context",
-    "raw_db_dependency",
     "raw_db_context",
-    "db_connection",       # backward compat
     "get_db_connection",   # backward compat
     "get_db_manager",
     "init_schema",

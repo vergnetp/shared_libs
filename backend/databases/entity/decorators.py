@@ -20,6 +20,7 @@ No separate store layer needed - the entity class IS the store.
 
 import json
 import uuid
+import functools
 from dataclasses import field, Field, fields as dataclass_fields
 from datetime import datetime, timezone
 from typing import Any, Optional, Dict, List, get_type_hints, get_origin, get_args, TYPE_CHECKING
@@ -30,6 +31,52 @@ from typing import Any, Optional, Dict, List, get_type_hints, get_origin, get_ar
 # will raise unless this sentinel is passed as _caller. This prevents app code from
 # bypassing entity classes (e.g. calling db.find_entities() instead of MyEntity.find()).
 _ENTITY_CALLER = object()
+
+
+# --- Auto-connection: lets entity methods work without an explicit db parameter ---
+# Set via set_connection_provider() at app startup (typically by app_kernel bootstrap).
+# When set, any entity classmethod (get, find, save, etc.) can be called with db=None
+# and will auto-acquire a connection from the pool for just that single operation.
+_connection_provider = None
+
+
+def set_connection_provider(provider):
+    """
+    Register an async context manager that yields a db connection.
+    
+    Called once at startup by app_kernel. After this, entity methods
+    can be called without a db parameter:
+    
+        project = await Project.get(id="abc")          # auto-acquires connection
+        project = await Project.get(db, id="abc")      # explicit connection (batching)
+    
+    Args:
+        provider: An async context manager factory, e.g. db_context from app_kernel.
+    """
+    global _connection_provider
+    _connection_provider = provider
+
+
+def _auto_db(fn):
+    """
+    Wrap an entity classmethod so db is optional.
+    
+    If db is None (or omitted), auto-acquires a connection from the pool
+    for just this single call. If db is provided, uses it directly
+    (allowing callers to batch multiple ops on one connection).
+    """
+    @functools.wraps(fn.__func__ if isinstance(fn, classmethod) else fn)
+    async def wrapper(cls_or_self, db=None, *args, **kwargs):
+        if db is not None:
+            return await (fn.__func__ if isinstance(fn, classmethod) else fn)(cls_or_self, db, *args, **kwargs)
+        if _connection_provider is None:
+            raise RuntimeError(
+                "No connection provider registered. Call set_connection_provider() at startup, "
+                "or pass db explicitly."
+            )
+        async with _connection_provider() as auto_db:
+            return await (fn.__func__ if isinstance(fn, classmethod) else fn)(cls_or_self, auto_db, *args, **kwargs)
+    return classmethod(wrapper)
 
 
 class EntityField:
@@ -326,19 +373,25 @@ def _make_find(table_name: str, cls):
 def _make_save(table_name: str, cls):
     """Create save classmethod."""
     @classmethod
-    async def save(cls, db, data: Dict[str, Any]):
+    async def save(cls, db, data: Dict[str, Any], match_by=None):
         """
         Create or update entity.
         
         Auto-generates id and timestamps if not provided.
         Returns the saved entity.
+        
+        Args:
+            db: Database connection (optional — auto-acquires if None)
+            data: Entity data dict
+            match_by: Field name(s) to match existing entity by (for upsert without id).
+                      E.g. match_by="name" or match_by=["workspace_id", "name"]
         """
         data = dict(data)  # Don't mutate original
         data['id'] = data.get('id') or _generate_id()
         data['created_at'] = data.get('created_at') or _now_iso()
         data['updated_at'] = _now_iso()
         
-        await db.save_entity(table_name, data, _caller=_ENTITY_CALLER)
+        await db.save_entity(table_name, data, match_by=match_by, _caller=_ENTITY_CALLER)
         return cls.from_dict(data)
     return save
 
@@ -408,6 +461,42 @@ def _make_count(table_name: str):
     return count
 
 
+def _make_history(table_name: str, cls):
+    """Create history classmethod — returns all versions of an entity."""
+    @classmethod
+    async def history(cls, db, id: str):
+        """
+        Get all historical versions of an entity.
+        
+        Returns list of entity instances, newest first.
+        Requires history=True on @entity (default).
+        """
+        results = await db.get_entity_history(
+            table_name, id, deserialize=False, _caller=_ENTITY_CALLER,
+        )
+        return [cls.from_dict(r) for r in results]
+    return history
+
+
+def _make_get_version(table_name: str, cls):
+    """Create get_version classmethod — returns a specific version of an entity."""
+    @classmethod
+    async def get_version(cls, db, id: str, version: int):
+        """
+        Get a specific version of an entity.
+        
+        Args:
+            db: Database connection (optional — auto-acquires if None)
+            id: Entity ID
+            version: Version number (1 = original, 2 = first update, etc.)
+        """
+        result = await db.get_entity_by_version(
+            table_name, id, version, deserialize=False, _caller=_ENTITY_CALLER,
+        )
+        return cls.from_dict(result) if result else None
+    return get_version
+
+
 def entity(table: str = None, history: bool = True):
     """
     Decorator to mark a dataclass as a database entity.
@@ -445,19 +534,24 @@ def entity(table: str = None, history: bool = True):
             cls.from_dict = _make_from_dict(cls)
         
         # Always set CRUD classmethods (override dict-like .get if present)
-        cls.get = _make_get(tbl, cls)
-        cls.get_many = _make_get_many(tbl, cls)
-        cls.find = _make_find(tbl, cls)
-        cls.save = _make_save(tbl, cls)
+        cls.get = _auto_db(_make_get(tbl, cls))
+        cls.get_many = _auto_db(_make_get_many(tbl, cls))
+        cls.find = _auto_db(_make_find(tbl, cls))
+        cls.save = _auto_db(_make_save(tbl, cls))
         
         # Alias create -> save for backward compatibility
         if not hasattr(cls, 'create'):
             cls.create = cls.save
         
-        cls.soft_delete = _make_soft_delete(tbl)
-        cls.hard_delete = _make_hard_delete(tbl)
-        cls.update = _make_update(tbl, cls)
-        cls.count = _make_count(tbl)
+        cls.soft_delete = _auto_db(_make_soft_delete(tbl))
+        cls.hard_delete = _auto_db(_make_hard_delete(tbl))
+        cls.update = _auto_db(_make_update(tbl, cls))
+        cls.count = _auto_db(_make_count(tbl))
+        
+        # History methods (only if history tracking enabled)
+        if history:
+            cls.history = _auto_db(_make_history(tbl, cls))
+            cls.get_version = _auto_db(_make_get_version(tbl, cls))
         
         # Register in global schemas
         ENTITY_SCHEMAS[tbl] = cls

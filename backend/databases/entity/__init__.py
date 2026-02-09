@@ -7,4 +7,5 @@ from .decorators import (
     ENTITY_SCHEMAS,
     get_entity_schema,
     clear_entity_schemas,
+    set_connection_provider,
 )

@@ -24,7 +24,6 @@ You get: Auth, SaaS (workspaces/teams), background jobs, rate limiting, caching,
 ```python
 from fastapi import APIRouter, Depends
 from app_kernel import (
-    db_dependency,
     get_current_user,
     get_current_user_optional,
     require_admin,
@@ -32,66 +31,138 @@ from app_kernel import (
     rate_limit,
     UserIdentity,
 )
+from app_kernel.db import db_context
 
 router = APIRouter()
 
 # Public endpoint - no auth required
 @router.get("/products")
-async def list_products(db=Depends(db_dependency)):
-    return await db.find_entities("products")
+async def list_products():
+    return await Product.find()
 
 # Authenticated endpoint - user required
 @router.get("/me")
 async def get_profile(
     user: UserIdentity = Depends(get_current_user),
-    db=Depends(db_dependency),
 ):
-    return await db.find_entity("users", user.id)
+    return await User.get(id=user.id)
 
 # Optional auth - user may or may not be logged in
 @router.get("/feed")
 async def get_feed(
     user: UserIdentity = Depends(get_current_user_optional),
-    db=Depends(db_dependency),
 ):
     if user:
-        return await get_personalized_feed(db, user.id)
-    return await get_public_feed(db)
+        return await get_personalized_feed(user.id)
+    return await get_public_feed()
 
 # Admin only endpoint
 @router.delete("/users/{user_id}")
 async def delete_user(
     user_id: str,
     admin: UserIdentity = Depends(require_admin),
-    db=Depends(db_dependency),
 ):
-    await db.delete_entity("users", user_id)
+    await User.soft_delete(id=user_id)
     return {"deleted": True}
 
 # With caching
 @router.get("/stats")
 @cached(ttl=60, key="stats:global")
-async def get_stats(db=Depends(db_dependency)):
-    return await compute_expensive_stats(db)
+async def get_stats():
+    return await compute_expensive_stats()
 
-# With custom rate limit
+# With custom rate limit + batching (explicit db_context)
 @router.post("/export")
 @rate_limit(5)  # Only 5 requests/minute
 async def export_data(
     user: UserIdentity = Depends(get_current_user),
-    db=Depends(db_dependency),
 ):
-    return await generate_export(db, user.id)
+    async with db_context() as db:
+        return await generate_export(db, user.id)
 ```
 
 ### Key Dependencies
 
 | Dependency | Description |
 |------------|-------------|
-| `db_dependency` | Database connection - use in all routes that need DB |
 | `get_current_user` | Requires auth, returns `UserIdentity`, raises 401 if not logged in |
 | `get_current_user_optional` | Returns `UserIdentity` or `None` |
 | `require_admin` | Requires admin user, raises 401/403 if not authorized |
+
+## Database & Entities
+
+The approach is code-first: define your data models as dataclasses with the `@entity` decorator, and the database schema is created and maintained automatically. No SQL migrations to write, no store layer, no repository pattern.
+
+On startup, the kernel compares your `@entity` classes against the actual database schema. New tables and columns are created automatically. Renames and deletions are flagged with warnings — the migrator won't drop data without explicit opt-in. Migration scripts are persisted in `.data/migrations_audit/` for traceability. In production, a full backup (native + CSV) is taken before any migration runs, stored in `.data/backups/`.
+
+Connections are handled automatically: each entity call acquires a short-lived connection from the pool and releases it immediately. The pool is backed by the database you pass to `create_service` via `database_url` (or SQLite in `./data/{app_name}.db` if none specified). Every entity also gets free history tracking — every change is versioned automatically.
+
+```python
+from dataclasses import dataclass
+from typing import Optional, List
+from databases import entity, entity_field
+
+@entity(table="products")
+@dataclass
+class Product:
+    name: str = entity_field(nullable=False)
+    price: int = entity_field(default=0)
+    tags: List[str] = entity_field(default=None)  # JSON auto-serialized
+    workspace_id: str = entity_field(index=True)
+    id: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    deleted_at: Optional[str] = None
+
+# Just use it — no db parameter needed:
+product = await Product.save(data={"name": "Widget", "price": 999, "workspace_id": "ws1"})
+product = await Product.get(id="abc-123")
+products = await Product.find(where="workspace_id = ?", params=("ws1",))
+await Product.update(id="abc-123", data={"price": 1299})
+await Product.soft_delete(id="abc-123")
+count = await Product.count(where="price > ?", params=(500,))
+
+# Upsert by matching on fields instead of id:
+await Product.save(
+    data={"name": "Widget", "workspace_id": "ws1", "price": 1499},
+    match_by=["workspace_id", "name"],  # updates if exists, creates if not
+)
+
+# History — every change is versioned automatically:
+versions = await Product.history(id="abc-123")       # all versions, newest first
+original = await Product.get_version(id="abc-123", version=1)  # first version
+```
+
+If you want to batch multiple operations on one connection (for performance or atomicity), group them in a `db_context` block:
+
+```python
+from app_kernel.db import db_context
+
+async with db_context() as db:
+    product = await Product.get(db, id="abc-123")
+    await Order.save(db, data={"product_id": product.id, "qty": 2})
+    await Product.update(db, id=product.id, data={"stock": product.stock - 2})
+```
+
+Operations are retried 3 times with exponential backoff, with circuit breaker protection against cascading failures.
+
+### Seeding
+
+Use `db_seed` to populate initial data. `match_by` makes seeding idempotent — safe to run on every restart:
+
+```python
+async def seed_data(db):
+    await Product.save(db, data={
+        "slug": "pro",
+        "name": "Pro Plan",
+        "price": 1999,
+    }, match_by="slug")  # won't duplicate on restart
+
+app = create_service(
+    ...
+    db_seed=seed_data,
+)
+```
 
 ## Configuration
 
@@ -261,7 +332,6 @@ app = create_service(
 @router.post("/notify")
 async def notify(
     user: UserIdentity = Depends(get_current_user),
-    db=Depends(db_dependency),
 ):
     client = get_job_client()
     await client.enqueue("send_email", {
@@ -414,75 +484,6 @@ app = create_service(
 - All pass → `200 OK`
 - Any fail → `503 Service Unavailable`
 
-## Database Schema & Seeding
-
-```python
-async def init_tables(db):
-    """Create app tables. Kernel tables auto-created."""
-    await db.execute("""
-        CREATE TABLE IF NOT EXISTS products (...)
-    """)
-
-async def seed_data(db):
-    """Seed initial data (runs after schema_init).
-    
-    Use match_by for idempotent seeding - won't duplicate on restart.
-    """
-    # Idempotent: matches by slug, creates if not exists, updates if exists
-    await db.save_entity("products", {
-        "slug": "pro",
-        "name": "Pro Plan",
-        "price": 1999,
-    }, match_by="slug")
-    
-    # Composite key matching
-    await db.save_entity("workspace_members", {
-        "workspace_id": "default",
-        "user_id": "admin",
-        "role": "owner",
-    }, match_by=["workspace_id", "user_id"])
-
-app = create_service(
-    ...
-    schema_init=init_tables,
-    db_seed=seed_data,
-)
-```
-
-### `save_entity` with `match_by`
-
-The `match_by` parameter enables upsert by any field(s), not just `id`:
-
-```python
-# Without match_by (default): always creates new if no id
-await db.save_entity("users", {"email": "bob@x.com", "name": "Bob"})  # New record
-
-# With match_by: find by field, update or create
-await db.save_entity("users", {
-    "email": "bob@x.com",
-    "name": "Bob Smith",  # Updates name if user exists
-    "role": "admin",
-}, match_by="email")
-
-# Behavior:
-# 1. Find where email="bob@x.com"
-# 2. Found → merge and update
-# 3. Not found → insert with new id
-```
-
-This also simplifies update-by-field patterns:
-
-```python
-# Before (3 calls)
-users = await db.find_entities("users", filters={"email": email}, limit=1)
-user = users[0]
-user["last_login"] = now
-await db.save_entity("users", user)
-
-# After (1 call)
-await db.save_entity("users", {"email": email, "last_login": now}, match_by="email")
-```
-
 ## Admin Worker
 
 Processes audit logs and usage metrics asynchronously. Runs embedded in your FastAPI processes.
@@ -539,8 +540,7 @@ python -m app_kernel.admin_worker \
 |--------|-------------|
 | `create_service(...)` | Create FastAPI app |
 | `get_job_client()` | Background job client |
-| `db_dependency` | FastAPI DB dependency |
-| `db_context()` | Context manager for DB |
+| `db_context()` | Context manager for DB (batching) |
 | `get_cache()` | Cache client |
 
 ### Auth
@@ -581,8 +581,8 @@ from app_kernel.flags import flag_enabled, set_flag
 
 # Check flag in route
 @router.get("/dashboard")
-async def dashboard(user = Depends(get_current_user), db = Depends(db_dependency)):
-    if await flag_enabled(db, "new_dashboard", user_id=user.id):
+async def dashboard(user = Depends(get_current_user)):
+    if await flag_enabled("new_dashboard", user_id=user.id):
         return new_dashboard()
     return old_dashboard()
 
@@ -916,7 +916,6 @@ from app_kernel.access import require_workspace_member, require_scope, check_sco
 async def get_workspace_data(
     workspace_id: str,
     member = Depends(require_workspace_member),
-    db = Depends(db_dependency),
 ):
     # member.role = "owner" | "admin" | "member"
     ...

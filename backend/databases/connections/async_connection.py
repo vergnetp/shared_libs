@@ -66,7 +66,7 @@ class AsyncConnection(Connection):
         
         Note:
             Automatically prepares and caches statements for repeated executions.
-            When _block_raw_execute is True (set by db_context/db_dependency),
+            When _block_raw_execute is True (set by db_context),
             only entity framework internals can call this method.
 
         Args:
@@ -80,9 +80,9 @@ class AsyncConnection(Connection):
         """
         if getattr(self, '_block_raw_execute', False) and getattr(self, '_entity_op_depth', 0) == 0:
             raise RuntimeError(
-                "Direct db.execute() is not allowed when using db_context/db_dependency. "
+                "Direct db.execute() is not allowed when using db_context. "
                 "Use entity class methods (MyEntity.find(), .save(), .soft_delete(), etc.) instead. "
-                "If you need raw SQL, use raw_db_context/raw_db_dependency."
+                "If you need raw SQL, use raw_db_context."
             )
         timeout = timeout or self.config.query_execution_timeout
         self._mark_active()        
@@ -111,7 +111,7 @@ class AsyncConnection(Connection):
         Note:
             This runs on a single connection sequentially. For parallel execution,
             you would need multiple connections from a connection pool.
-            When _block_raw_execute is True (set by db_context/db_dependency),
+            When _block_raw_execute is True (set by db_context),
             only entity framework internals can call this method.
             
         Args:
@@ -125,9 +125,9 @@ class AsyncConnection(Connection):
         """        
         if getattr(self, '_block_raw_execute', False) and getattr(self, '_entity_op_depth', 0) == 0:
             raise RuntimeError(
-                "Direct db.executemany() is not allowed when using db_context/db_dependency. "
+                "Direct db.executemany() is not allowed when using db_context. "
                 "Use entity class methods instead. "
-                "If you need raw SQL, use raw_db_context/raw_db_dependency."
+                "If you need raw SQL, use raw_db_context."
             )
         timeout = timeout or self.config.query_execution_timeout
         self._mark_active()

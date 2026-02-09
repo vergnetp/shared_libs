@@ -493,6 +493,13 @@ def create_service(
                 "database": db_config["name"],
             })
             
+            # Register auto-connection provider for entity methods
+            # This lets entity classmethods (get, find, save, etc.) work without
+            # an explicit db parameter — each call auto-acquires from the pool.
+            from .db import db_context
+            from shared_libs.backend.databases import set_connection_provider
+            set_connection_provider(db_context)
+            
             # Run automated backup and migration (schema-first)
             try:
                 from .db.lifecycle import run_database_lifecycle, get_lifecycle_config
@@ -683,11 +690,9 @@ def create_service(
     if cfg.database_url:
         from .audit import create_audit_router
         from .auth.deps import get_current_user
-        from .db import db_dependency
         
         audit_router = create_audit_router(
             get_current_user=get_current_user,
-            db_dependency=db_dependency,
             app_name=name,
             prefix="/audit",
             require_admin=True,
@@ -699,11 +704,9 @@ def create_service(
     if cfg.database_url:
         from .metering import create_metering_router
         from .auth.deps import get_current_user
-        from .db import db_dependency
         
         metering_router = create_metering_router(
             get_current_user=get_current_user,
-            db_dependency=db_dependency,
             app_name=name,
             prefix="/usage",
             is_admin=is_admin or _default_is_admin,

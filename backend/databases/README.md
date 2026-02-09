@@ -29,17 +29,24 @@ class Project:
 ```python
 import schemas  # Registers @entity classes
 
-# CRUD is built into the entity class:
-project = await Project.get(db, "123")
-project = await Project.create(db, {"name": "test", "workspace_id": "ws1"})
-project = await Project.update(db, "123", {"name": "new name"})
-projects = await Project.find(db, where="workspace_id = ?", params=("ws1",))
-await Project.delete(db, "123", permanent=True)
-await Project.soft_delete(db, "123")
+# CRUD is built into the entity class — no db parameter needed:
+project = await Project.get(id="123")
+project = await Project.save(data={"name": "test", "workspace_id": "ws1"})
+project = await Project.update(id="123", data={"name": "new name"})
+projects = await Project.find(where="workspace_id = ?", params=("ws1",))
+await Project.hard_delete(id="123")
+await Project.soft_delete(id="123")
 
 # Dict-like access works:
 print(project["name"])  # or project.name
 print(project.tags)     # List - auto-deserialized from JSON
+
+# For batching multiple ops on one connection:
+from app_kernel.db import db_context
+
+async with db_context() as db:
+    project = await Project.get(db, id="123")
+    service = await Service.get(db, id=project.service_id)
 ```
 
 ### 3. Auto-Migrate on Startup
@@ -60,18 +67,21 @@ async def startup():
 
 ## What @entity Provides
 
-The `@entity` decorator auto-adds these methods to your dataclass:
+The `@entity` decorator auto-adds these methods to your dataclass.
+`db` is optional — when omitted, a connection is auto-acquired from the pool for that single call.
 
 | Method | Description |
 |--------|-------------|
-| `Entity.get(db, id)` | Fetch by ID |
-| `Entity.create(db, data)` | Insert with auto id/timestamps |
-| `Entity.save(db, data)` | Alias for create |
-| `Entity.update(db, id, data)` | Merge and save |
-| `Entity.delete(db, id, permanent=False)` | Hard or soft delete |
-| `Entity.soft_delete(db, id)` | Set deleted_at |
-| `Entity.find(db, where=, params=, ...)` | Query with filters |
-| `Entity.count(db, where=, params=)` | Count matching |
+| `Entity.get(db=None, id=)` | Fetch by ID |
+| `Entity.create(db=None, data=)` | Insert with auto id/timestamps |
+| `Entity.save(db=None, data=, match_by=None)` | Create/update. `match_by` for upsert by field(s) |
+| `Entity.update(db=None, id=, data=)` | Merge and save |
+| `Entity.soft_delete(db=None, id=)` | Set deleted_at |
+| `Entity.hard_delete(db=None, id=)` | Permanently remove row |
+| `Entity.find(db=None, where=, params=, ...)` | Query with filters |
+| `Entity.count(db=None, where=, params=)` | Count matching |
+| `Entity.history(db=None, id=)` | All versions, newest first |
+| `Entity.get_version(db=None, id=, version=)` | Get specific version |
 | `Entity.from_dict(data)` | Create instance from dict |
 
 **Plus dict-like access:**
@@ -96,7 +106,7 @@ class Deployment:
 # In DB: '["drop1","drop2"]' (JSON string)
 # In Python: ['drop1', 'drop2'] (list)
 
-deployment = await Deployment.get(db, "123")
+deployment = await Deployment.get(id="123")
 print(deployment.droplet_ids)  # ['drop1', 'drop2'] - already a list!
 ```
 
@@ -243,14 +253,16 @@ Decorator to mark a dataclass as a database entity with auto-generated CRUD meth
 
 | Decorators | Method | Args | Returns | Description |
 |------------|--------|------|---------|-------------|
-| `@classmethod` | `get` | `db`, `id: str` | `Entity \| None` | Fetch entity by ID |
-| `@classmethod` | `create` | `db`, `data: dict` | `Entity` | Insert with auto id/timestamps |
-| `@classmethod` | `save` | `db`, `data: dict` | `Entity` | Alias for create |
-| `@classmethod` | `update` | `db`, `id: str`, `data: dict` | `Entity \| None` | Merge with existing and save |
-| `@classmethod` | `delete` | `db`, `id: str`, `permanent: bool=False` | `bool` | Hard or soft delete |
-| `@classmethod` | `soft_delete` | `db`, `id: str` | `bool` | Set deleted_at timestamp |
-| `@classmethod` | `find` | `db`, `where: str=None`, `params: tuple=None`, `order_by: str=None`, `limit: int=None`, `offset: int=None`, `include_deleted: bool=False` | `List[Entity]` | Query with filters |
-| `@classmethod` | `count` | `db`, `where: str=None`, `params: tuple=None`, `include_deleted: bool=False` | `int` | Count matching entities |
+| `@classmethod` | `get` | `db=None`, `id: str` | `Entity \| None` | Fetch entity by ID |
+| `@classmethod` | `create` | `db=None`, `data: dict` | `Entity` | Insert with auto id/timestamps |
+| `@classmethod` | `save` | `db=None`, `data: dict`, `match_by=None` | `Entity` | Create/update. `match_by` for upsert by field(s) |
+| `@classmethod` | `update` | `db=None`, `id: str`, `data: dict` | `Entity \| None` | Merge with existing and save |
+| `@classmethod` | `soft_delete` | `db=None`, `id: str` | `bool` | Set deleted_at timestamp |
+| `@classmethod` | `hard_delete` | `db=None`, `id: str` | `bool` | Permanently remove row |
+| `@classmethod` | `find` | `db=None`, `where: str=None`, `params: tuple=None`, `order_by: str=None`, `limit: int=None`, `offset: int=None`, `include_deleted: bool=False` | `List[Entity]` | Query with filters |
+| `@classmethod` | `count` | `db=None`, `where: str=None`, `params: tuple=None`, `include_deleted: bool=False` | `int` | Count matching entities |
+| `@classmethod` | `history` | `db=None`, `id: str` | `List[Entity]` | All historical versions, newest first |
+| `@classmethod` | `get_version` | `db=None`, `id: str`, `version: int` | `Entity \| None` | Get specific version (1 = original) |
 | `@classmethod` | `from_dict` | `data: dict` | `Entity` | Create instance, deserializing JSON fields by type hints |
 
 </details>
