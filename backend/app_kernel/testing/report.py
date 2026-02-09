@@ -95,40 +95,23 @@ class TestReport:
         
     def to_dict(self) -> Dict:
         """Full report as JSON-serializable dict."""
-        summary = {
-            "total_tests": self.total,
-            "passed": self.passed,
-            "failed": self.failed,
-            "skipped": self.skipped,
-            "success_rate": f"{self.success_rate:.1f}%",
-            "total_duration": f"{self.duration:.2f}s",
-        }
-        if self.failed > 0:
-            error_map = {e["test"]: e["error"] for e in self.errors}
-            summary["failed_tests"] = [
-                {
-                    "test": r["test"],
-                    "error": error_map.get(r["test"]) or r.get("details", {}).get("error", "unknown"),
-                }
-                for r in self.results if r["success"] is False
-            ]
         return {
-            "summary": summary,
+            "summary": {
+                "total_tests": self.total,
+                "passed": self.passed,
+                "failed": self.failed,
+                "skipped": self.skipped,
+                "success_rate": f"{self.success_rate:.1f}%",
+                "total_duration": f"{self.duration:.2f}s",
+            },
             "results": self.results,
             "errors": self.errors,
         }
     
     def summary_line(self) -> str:
         """One-line summary for logging."""
-        line = (
+        return (
             f"Tests: {self.total} | Passed: {self.passed} | Failed: {self.failed} | "
             f"Skipped: {self.skipped} | Rate: {self.success_rate:.1f}% | "
             f"Duration: {self.duration:.2f}s"
         )
-        if self.failed > 0:
-            error_map = {e["test"]: e["error"] for e in self.errors}
-            for r in self.results:
-                if r["success"] is False:
-                    reason = error_map.get(r["test"]) or r.get("details", {}).get("error", "unknown")
-                    line += f"\n  ✗ {r['test']}: {reason}"
-        return line
