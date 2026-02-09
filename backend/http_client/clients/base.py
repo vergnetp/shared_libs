@@ -204,25 +204,18 @@ class BaseHttpClient(ABC):
         """
         Create tracing span for HTTP request.
         
-        Returns span context manager or None if tracing disabled.
+        Returns trace_span context manager or DummySpanContext if tracing unavailable.
         """
         if not self.config.tracing_enabled:
             return None
         
         try:
-            from ...tracing import get_context, SpanKind
+            from tracing import trace_span
             
-            ctx = get_context()
-            if ctx is None:
-                return None
-            
-            return ctx.span(
-                name=f"HTTP {method}",
-                kind=SpanKind.HTTP_CLIENT,
-                attributes={
-                    "http_method": method,
-                    "http_url": url,
-                },
+            return trace_span(
+                f"http.{method}",
+                http_method=method,
+                http_url=url,
             )
         except ImportError:
             return None
@@ -239,13 +232,17 @@ class BaseHttpClient(ABC):
         
         try:
             if response:
-                span.set_attribute("http_status_code", response.status_code)
-                span.set_attribute("http_response_body_size", len(response.body))
-                span.set_attribute("http_version", response.http_version)
-                span.set_attribute("elapsed_ms", response.elapsed_ms)
+                span.metadata["http_status_code"] = response.status_code
+                span.metadata["http_response_body_size"] = len(response.body)
+                span.metadata["http_version"] = response.http_version
+                span.metadata["elapsed_ms"] = response.elapsed_ms
+                if response.status_code >= 400:
+                    span.status = "error"
             
             if error:
-                span.record_error(error)
+                span.status = "error"
+                span.error = str(error)
+                span.error_type = type(error).__name__
         except Exception:
             pass  # Don't let tracing errors break the request
     
@@ -294,8 +291,10 @@ class DummySpanContext:
     
     def __init__(self):
         self.span = type('DummySpan', (), {
-            'set_attribute': lambda self, k, v: None,
-            'record_error': lambda self, e: None,
+            'metadata': {},
+            'status': 'ok',
+            'error': None,
+            'error_type': None,
         })()
     
     def __enter__(self):
