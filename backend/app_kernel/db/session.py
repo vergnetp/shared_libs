@@ -31,9 +31,14 @@ Usage:
     async with db_context() as db:
         deploys = await Deployment.find(db)
 """
+import os
+import sys
+import time
+import logging
 from typing import Optional, Callable, Awaitable
 from contextlib import asynccontextmanager
 
+logger = logging.getLogger("app_kernel.db")
 
 # Module-level state
 _db_manager = None
@@ -209,6 +214,32 @@ class AuditWrappedConnection:
 # Connection providers
 # =============================================================================
 
+def _get_caller() -> str:
+    """Walk up frames to find the first caller outside session.py/contextlib."""
+    try:
+        for i in range(1, 15):
+            f = sys._getframe(i)
+            fn = f.f_code.co_filename
+            if ('session.py' not in fn and 'contextlib' not in fn 
+                and 'decorators.py' not in fn):
+                short = os.path.basename(fn)
+                return f"{short}:{f.f_lineno} {f.f_code.co_name}"
+    except (ValueError, AttributeError):
+        pass
+    return "unknown"
+
+
+def _pool_stats() -> str:
+    """Get pool stats string. Returns empty string if pool not accessible."""
+    try:
+        pool = _db_manager._db.pool_manager._pool
+        if pool:
+            return f"pool: {pool.idle} idle, {pool.in_use} in_use, {pool.size}/{pool.max_size} total"
+    except (AttributeError, TypeError):
+        pass
+    return ""
+
+
 @asynccontextmanager
 async def _base_connection():
     """
@@ -221,11 +252,21 @@ async def _base_connection():
     if _db_manager is None:
         raise RuntimeError("Database not initialized. Set database_url in ServiceConfig.")
     
+    caller = _get_caller()
+    stats = _pool_stats()
+    logger.debug(f"DB acquire [{caller}] {stats}")
+    t0 = time.monotonic()
+    
     async with _db_manager.connection() as conn:
         if _audit_redis_url and _audit_app_name:
             yield AuditWrappedConnection(conn, _audit_redis_url, _audit_app_name)
         else:
             yield conn
+    
+    held = time.monotonic() - t0
+    stats = _pool_stats()
+    level = logging.WARNING if held > 30 else logging.DEBUG
+    logger.log(level, f"DB release [{caller}] held {held:.2f}s {stats}")
 
 
 # --- Strict (default for app code) ---
