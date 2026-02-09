@@ -398,7 +398,7 @@ def create_service(
     integration_routers = []
     
     # Setup request metrics task if enabled (requires Redis)
-    request_metrics_enabled = cfg.request_metrics_enabled and cfg.redis_url
+    request_metrics_enabled = cfg.request_metrics_enabled
     if request_metrics_enabled:
         from .observability.request_metrics import store_request_metrics
         integration_tasks["store_request_metrics"] = store_request_metrics
@@ -519,9 +519,8 @@ def create_service(
                 # Fail startup if lifecycle fails (especially migrations)
                 raise
             
-            # Auto-enable audit logging if Redis is configured (and not fakeredis)
-            from .dev_deps import is_fake_redis_url
-            if resolved_redis_url and not is_fake_redis_url(resolved_redis_url):
+            # Auto-enable audit logging if Redis is available
+            if resolved_redis_url:
                 from .db.session import enable_auto_audit
                 enable_auto_audit(resolved_redis_url, name)
                 logger.info("Audit logging enabled (Redis → admin_worker)")
@@ -562,11 +561,11 @@ def create_service(
         
         # Start embedded admin worker if enabled
         admin_worker_task = None
-        if cfg.redis_url and cfg.admin_worker_embedded:
-            admin_db_url = cfg.admin_db_url or cfg.database_url
-            if admin_db_url:
+        if cfg.admin_worker_embedded:
+            admin_db_url = cfg.admin_db_url or resolved_database_url
+            if admin_db_url and resolved_redis_url:
                 admin_worker_task = asyncio.create_task(
-                    _run_embedded_admin_worker(cfg.redis_url, admin_db_url, name, logger)
+                    _run_embedded_admin_worker(resolved_redis_url, admin_db_url, name, logger)
                 )
                 logger.info("Embedded admin worker started")
         

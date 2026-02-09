@@ -19,6 +19,12 @@ import json
 import logging
 from typing import Optional
 
+try:
+    from tracing import set_span_callback, set_span_filter
+    TRACING_AVAILABLE = True
+except ImportError:
+    TRACING_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 _enabled = False
@@ -34,29 +40,24 @@ def setup_tracing(filter_fn=None):
                    Default: save all spans.
     """
     global _enabled
-    try:
-        from tracing import set_span_callback, set_span_filter
-
-        set_span_callback(_save_span)
-        if filter_fn is not None:
-            set_span_filter(filter_fn)
-        _enabled = True
-        logger.info("Tracing: enabled, saving to kernel_traces")
-    except ImportError:
+    if not TRACING_AVAILABLE:
         logger.debug("Tracing: tracing library not available")
-        _enabled = False
+        return
+    
+    set_span_callback(_save_span)
+    if filter_fn is not None:
+        set_span_filter(filter_fn)
+    _enabled = True
+    logger.info("Tracing: enabled, saving to kernel_traces")
 
 
 def teardown_tracing():
     """Clear the span callback (shutdown)."""
     global _enabled
-    try:
-        from tracing import set_span_callback, set_span_filter
+    if TRACING_AVAILABLE:
         set_span_callback(None)
         set_span_filter(None)
-        _enabled = False
-    except ImportError:
-        pass
+    _enabled = False
 
 
 async def _save_span(span_dict: dict):

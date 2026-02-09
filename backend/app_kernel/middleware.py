@@ -25,6 +25,11 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .settings import CorsSettings, SecuritySettings, TracingSettings
 
+try:
+    from tracing import trace_span, set_span_filter
+    TRACING_AVAILABLE = True
+except ImportError:
+    TRACING_AVAILABLE = False
 
 logger = logging.getLogger("app_kernel")
 

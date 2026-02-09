@@ -769,42 +769,28 @@ def create_request_metrics_router(
     - GET /metrics/requests/stats - Aggregated statistics
     - GET /metrics/requests/slow - Slow requests
     - GET /metrics/requests/errors - Error requests
-    
-    Args:
-        prefix: URL prefix for routes
-        protect: Protection level ("admin" or "none")
-        get_current_user: Dependency to get current user
-        is_admin: Function to check if user is admin
-        
-    Returns:
-        FastAPI router
     """
     router = APIRouter(prefix=prefix, tags=["Request Metrics"])
     
-    async def check_admin(request: Request):
-        """Admin check dependency."""
+    def _check_admin(user):
+        if is_admin:
+            return is_admin(user)
+        role = getattr(user, "role", None)
+        return role == "admin"
+    
+    def _require_admin(user):
         if protect == "none":
-            return True
-        
-        if protect == "admin":
-            if is_admin is None or get_current_user is None:
-                raise HTTPException(
-                    status_code=403,
-                    detail="Metrics endpoint requires admin configuration"
-                )
-            
-            try:
-                user = await get_current_user(request)
-                if not is_admin(user):
-                    raise HTTPException(status_code=403, detail="Admin access required")
-                return True
-            except HTTPException:
-                raise
-            except Exception as e:
-                logger.warning(f"Metrics auth failed: {e}")
-                raise HTTPException(status_code=403, detail="Admin access required")
-        
-        return True
+            return
+        if not _check_admin(user):
+            raise HTTPException(status_code=403, detail="Admin access required")
+    
+    if protect == "none" or get_current_user is None:
+        # No auth - use a dummy dependency
+        async def _no_auth():
+            return None
+        auth_dep = _no_auth
+    else:
+        auth_dep = get_current_user
     
     @router.get("")
     async def list_request_metrics(
@@ -814,13 +800,10 @@ def create_request_metrics_router(
         status: Optional[int] = Query(None, description="Filter by status code"),
         user_id: Optional[str] = Query(None, description="Filter by user ID"),
         min_latency: Optional[float] = Query(None, description="Min latency in ms"),
-        _: bool = Depends(check_admin),
+        user=Depends(auth_dep),
     ):
-        """
-        List recent request metrics.
-        
-        Returns paginated list of request metrics with optional filters.
-        """
+        """List recent request metrics with optional filters."""
+        _require_admin(user)
         store = RequestMetricsStore()
         metrics = await store.get_recent(
             limit=limit,
@@ -841,13 +824,10 @@ def create_request_metrics_router(
     async def get_request_stats(
         hours: int = Query(24, ge=1, le=168, description="Hours to look back"),
         path: Optional[str] = Query(None, description="Filter by path prefix"),
-        _: bool = Depends(check_admin),
+        user=Depends(auth_dep),
     ):
-        """
-        Get aggregated request statistics.
-        
-        Returns counts, latency stats, slow endpoints, and error endpoints.
-        """
+        """Get aggregated request statistics."""
+        _require_admin(user)
         store = RequestMetricsStore()
         return await store.get_stats(hours=hours, path_prefix=path)
     
@@ -856,11 +836,10 @@ def create_request_metrics_router(
         limit: int = Query(50, ge=1, le=500),
         min_latency: float = Query(1000, description="Min latency in ms"),
         path: Optional[str] = Query(None, description="Filter by path prefix"),
-        _: bool = Depends(check_admin),
+        user=Depends(auth_dep),
     ):
-        """
-        Get slow requests (above latency threshold).
-        """
+        """Get slow requests (above latency threshold)."""
+        _require_admin(user)
         store = RequestMetricsStore()
         metrics = await store.get_recent(
             limit=limit,
@@ -874,27 +853,23 @@ def create_request_metrics_router(
         limit: int = Query(100, ge=1, le=500),
         status: int = Query(500, ge=400, le=599, description="Min status code"),
         path: Optional[str] = Query(None, description="Filter by path prefix"),
-        _: bool = Depends(check_admin),
+        user=Depends(auth_dep),
     ):
-        """
-        Get error requests (4xx and 5xx).
-        """
+        """Get error requests (4xx and 5xx)."""
+        _require_admin(user)
         store = RequestMetricsStore()
-        # Get 5xx errors
         errors_5xx = await store.get_recent(
             limit=limit,
             path_prefix=path,
             status_code=500,
         ) if status >= 500 else []
         
-        # Get 4xx errors
         errors_4xx = await store.get_recent(
             limit=limit,
             path_prefix=path,
             status_code=400,
         ) if status >= 400 and status < 500 else []
         
-        # Combine and sort by timestamp
         all_errors = errors_5xx + errors_4xx
         all_errors.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
         
