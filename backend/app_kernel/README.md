@@ -95,6 +95,27 @@ The approach is code-first: define your data models as dataclasses with the `@en
 
 On startup, the kernel compares your `@entity` classes against the actual database schema. New tables and columns are created automatically. Renames and deletions are flagged with warnings — the migrator won't drop data without explicit opt-in. Migration scripts are persisted in `.data/migrations_audit/` for traceability. In production, a full backup (native + CSV) is taken before any migration runs, stored in `.data/backups/`.
 
+Migrations are **forward-only**. There is no `migrate down` command. To rollback: redeploy the previous version of your code (with the old `@entity` classes) and restore from backup if needed. The pre-migration backup exists precisely for this — but be aware that data written between the migration and the rollback will be lost.
+
+<!--
+TODO: Migration rollback brainstorming
+
+Current gap: rollback is manual (redeploy old code + restore backup). Problems:
+- Old code on restart sees "extra" columns (added by new code) and warns but doesn't drop them → OK, harmless
+- But if new code renamed a column, old code creates the old name again → now you have both → messy
+- No way to rollback just the schema change without restoring data too
+- deploy_api has its own backup/restore layer for user services — different concern, but could conflict if kernel migration + deploy rollback happen together
+
+Ideas to explore:
+1. Generate reversible migrations: for each "add column X", store "drop column X" as the down step. On rollback, apply downs in reverse. Risk: data loss on column drops.
+2. Schema version pinning: tag each migration with app version. On startup, if app version < last migration version, refuse to start and log "rollback detected, restore backup first". At least prevents silent corruption.
+3. Shadow columns: instead of dropping on rollback, mark columns as "orphaned" and ignore them. Old code works fine, new code can reclaim them later. Zero data loss but schema grows.
+4. Point-in-time restore: combine CSV backup + entity history to reconstruct state at any timestamp. Heavy but complete.
+5. Migration lock: prevent concurrent startups from racing on migrations (already partially handled by SQLite's write lock, but Postgres needs advisory locks).
+6. Dry-run on deploy: before deploying new code, diff @entity classes against live schema and show what would change. Block deploy if destructive.
+-->
+
+
 Connections are handled automatically: each entity call acquires a short-lived connection from the pool and releases it immediately. The pool is backed by the database you pass to `create_service` via `database_url` (or SQLite in `./data/{app_name}.db` if none specified). Every entity also gets free history tracking — every change is versioned automatically.
 
 ```python
