@@ -66,7 +66,9 @@ async def push_audit_event(
         }
         
         await redis_client.lpush("admin:audit_events", json.dumps(event))
-    except Exception:
+    except Exception as e:
+        import logging
+        logging.getLogger("app_kernel").debug(f"Audit push failed: {e}")
         pass  # Fire and forget
 
 

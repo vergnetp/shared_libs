@@ -146,10 +146,16 @@ REDIS_CONTAINER_NAME = "appkernel-redis"
 # Special URL indicating fakeredis mode
 REDIS_FAKE_URL = "fakeredis://"
 
+# Singleton fakeredis instance (all callers share one in-memory store, like real Redis)
+_fakeredis_instance = None
+
 
 def get_async_redis_client(url: str = None):
     """
     Get an async Redis client for the given URL.
+    
+    For fakeredis, returns a singleton so all callers share the same
+    in-memory store — matching real Redis behavior.
     
     Args:
         url: Redis URL, or None/fakeredis:// for in-memory fakeredis
@@ -157,9 +163,12 @@ def get_async_redis_client(url: str = None):
     Returns:
         Async Redis client (real or fakeredis.aioredis)
     """
+    global _fakeredis_instance
     if url is None or is_fake_redis_url(url):
-        import fakeredis.aioredis
-        return fakeredis.aioredis.FakeRedis(decode_responses=False)
+        if _fakeredis_instance is None:
+            import fakeredis.aioredis
+            _fakeredis_instance = fakeredis.aioredis.FakeRedis(decode_responses=False)
+        return _fakeredis_instance
     else:
         import redis.asyncio as aioredis
         return aioredis.from_url(url)

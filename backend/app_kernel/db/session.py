@@ -37,7 +37,7 @@ logger = logging.getLogger("app_kernel")
 
 # Module-level state
 _db_manager = None
-_audit_redis_url: Optional[str] = None
+_audit_redis_client = None
 _audit_app_name: Optional[str] = None
 
 
@@ -72,13 +72,13 @@ def init_db_session(
     return _db_manager
 
 
-def enable_auto_audit(redis_url: str, app_name: str):
+def enable_auto_audit(redis_client, app_name: str):
     """
     Enable automatic audit logging for all database operations.
-    Called by bootstrap when both DATABASE_URL and REDIS_URL are configured.
+    Called by bootstrap. Accepts a shared Redis client instance.
     """
-    global _audit_redis_url, _audit_app_name
-    _audit_redis_url = redis_url
+    global _audit_redis_client, _audit_app_name
+    _audit_redis_client = redis_client
     _audit_app_name = app_name
 
 
@@ -92,24 +92,13 @@ def get_db_manager():
 class AuditWrappedConnection:
     """Wraps a database connection to automatically log audit events to Redis."""
     
-    def __init__(self, conn, redis_url: str, app_name: str):
+    def __init__(self, conn, redis_client, app_name: str):
         self._conn = conn
-        self._redis_url = redis_url
+        self._redis = redis_client
         self._app = app_name
-        self._redis = None
         # Import sentinel for strict entity access bypass
         from ...databases.entity.decorators import _ENTITY_CALLER
         self._entity_caller = _ENTITY_CALLER
-    
-    async def _get_redis(self):
-        """Lazy-init Redis connection."""
-        if self._redis is None:
-            try:
-                import redis.asyncio as aioredis
-                self._redis = aioredis.from_url(self._redis_url)
-            except ImportError:
-                pass  # No redis library
-        return self._redis
     
     def __getattr__(self, name):
         return getattr(self._conn, name)
@@ -151,13 +140,12 @@ class AuditWrappedConnection:
                 pass
         
         # Push audit event (fire and forget)
-        redis = await self._get_redis()
-        if redis:
+        if self._redis:
             try:
                 from ..audit.publisher import push_audit_event
                 action = "update" if old else "create"
                 await push_audit_event(
-                    redis,
+                    self._redis,
                     action=action,
                     entity=table,
                     entity_id=result.get("id", entity_id),
@@ -186,12 +174,11 @@ class AuditWrappedConnection:
         result = await self._conn.delete_entity(table, entity_id, _caller=self._entity_caller, **kwargs)
         
         # Push audit event
-        redis = await self._get_redis()
-        if redis and old:
+        if self._redis and old:
             try:
                 from ..audit.publisher import push_audit_event
                 await push_audit_event(
-                    redis,
+                    self._redis,
                     action="delete",
                     entity=table,
                     entity_id=entity_id,
@@ -253,8 +240,8 @@ async def _base_connection():
     t0 = time.monotonic()
     
     async with _db_manager.connection() as conn:
-        if _audit_redis_url and _audit_app_name:
-            yield AuditWrappedConnection(conn, _audit_redis_url, _audit_app_name)
+        if _audit_redis_client and _audit_app_name:
+            yield AuditWrappedConnection(conn, _audit_redis_client, _audit_app_name)
         else:
             yield conn
     

@@ -128,8 +128,7 @@ def _parse_database_url(url: str) -> dict:
 
 
 async def _run_embedded_admin_worker(
-    redis_url: str,
-    admin_db_url: str,
+    redis_client,
     app_name: str,
     logger,
     batch_size: int = 100,
@@ -138,20 +137,12 @@ async def _run_embedded_admin_worker(
     """
     Run admin worker as background task (consumes audit/metering from Redis).
     
-    Uses the app's own DB connection pool (raw_db_context) — no external
-    databases library needed.
+    Uses the app's own DB connection pool (raw_db_context) and a shared
+    Redis client (same instance as the audit publisher).
     """
     import json
     import uuid
     from datetime import datetime, timezone
-    
-    try:
-        import redis.asyncio as aioredis
-    except ImportError:
-        logger.warning("redis library not installed, admin worker disabled")
-        return
-    
-    redis_client = aioredis.from_url(redis_url)
     
     from .db.session import raw_db_context
     
@@ -189,31 +180,38 @@ async def _run_embedded_admin_worker(
         }
     
     try:
+        logger.info("Admin worker: polling started")
         while True:
             # Drain both queues
             audit_events = []
             metering_events = []
             
-            for _ in range(batch_size):
-                data = await redis_client.rpop("admin:audit_events")
-                if not data:
-                    break
-                try:
-                    audit_events.append(_build_audit_entity(json.loads(data)))
-                except Exception as e:
-                    logger.debug(f"Audit event parse error: {e}")
-            
-            for _ in range(batch_size):
-                data = await redis_client.rpop("admin:metering_events")
-                if not data:
-                    break
-                try:
-                    metering_events.append(_build_metering_entity(json.loads(data)))
-                except Exception as e:
-                    logger.debug(f"Metering event parse error: {e}")
+            try:
+                for _ in range(batch_size):
+                    data = await redis_client.rpop("admin:audit_events")
+                    if not data:
+                        break
+                    try:
+                        audit_events.append(_build_audit_entity(json.loads(data)))
+                    except Exception as e:
+                        logger.debug(f"Audit event parse error: {e}")
+                
+                for _ in range(batch_size):
+                    data = await redis_client.rpop("admin:metering_events")
+                    if not data:
+                        break
+                    try:
+                        metering_events.append(_build_metering_entity(json.loads(data)))
+                    except Exception as e:
+                        logger.debug(f"Metering event parse error: {e}")
+            except Exception as e:
+                logger.warning(f"Admin worker Redis error: {e}")
+                await asyncio.sleep(poll_interval * 4)
+                continue
             
             # Write batch in single connection
             if audit_events or metering_events:
+                logger.info(f"Admin worker: processing {len(audit_events)} audit, {len(metering_events)} metering events")
                 try:
                     async with raw_db_context() as db:
                         for entity in audit_events:
@@ -221,14 +219,12 @@ async def _run_embedded_admin_worker(
                         for entity in metering_events:
                             await db.save_entity("kernel_usage_events", entity)
                 except Exception as e:
-                    logger.debug(f"Admin worker DB error: {e}")
+                    logger.warning(f"Admin worker DB error: {e}")
             else:
                 await asyncio.sleep(poll_interval)
     
     except asyncio.CancelledError:
         pass
-    finally:
-        await redis_client.close()
 
 
 @dataclass
@@ -431,6 +427,9 @@ def create_service(
         except Exception as e:
             logger.debug(f"Dev deps: {e}")
         
+        # Shared Redis client for audit + admin worker
+        shared_redis_client = None
+        
         # Initialize database if configured
         if resolved_database_url:
             from .db.session import init_db_session, init_schema, get_db_connection
@@ -494,10 +493,13 @@ def create_service(
                 # Fail startup if lifecycle fails (especially migrations)
                 raise
             
-            # Auto-enable audit logging if Redis is available
+            # Create shared Redis client for audit + admin worker
             if resolved_redis_url:
+                from .dev_deps import get_async_redis_client
+                shared_redis_client = get_async_redis_client(resolved_redis_url)
+                
                 from .db.session import enable_auto_audit
-                enable_auto_audit(resolved_redis_url, name)
+                enable_auto_audit(shared_redis_client, name)
                 logger.info("Audit logging enabled (Redis → admin_worker)")
             
             # Initialize ALL kernel schemas at once
@@ -536,13 +538,11 @@ def create_service(
         
         # Start embedded admin worker if enabled
         admin_worker_task = None
-        if cfg.admin_worker_embedded:
-            admin_db_url = cfg.admin_db_url or resolved_database_url
-            if admin_db_url and resolved_redis_url:
-                admin_worker_task = asyncio.create_task(
-                    _run_embedded_admin_worker(resolved_redis_url, admin_db_url, name, logger)
-                )
-                logger.info("Embedded admin worker started")
+        if cfg.admin_worker_embedded and shared_redis_client:
+            admin_worker_task = asyncio.create_task(
+                _run_embedded_admin_worker(shared_redis_client, name, logger)
+            )
+            logger.info("Embedded admin worker started")
         
         yield
         
