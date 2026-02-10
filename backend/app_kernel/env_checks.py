@@ -23,9 +23,12 @@ NON_PROD_ENVS = {"dev", "uat", "staging", "test", "local", "development"}
 
 
 def get_env() -> str:
-    """Get current environment. Defaults to 'prod' if not set."""
-    return os.environ.get("ENV", "prod").lower()
-
+    """Get current environment (APP_ENV or ENV). Defaults to 'prod' if not set."""
+    return (
+        os.getenv("APP_ENV")
+        or os.getenv("ENV")
+        or "prod"
+    ).lower()
 
 def is_prod() -> bool:
     """Check if running in production."""

@@ -187,7 +187,7 @@ app = create_service(
 
 ## Configuration
 
-All configuration is explicit - pass it to `create_service()`. Only `ENV` is read from environment (defaults to `prod`).
+All configuration is explicit - pass it to `create_service()`. Only `APP_ENV` (fallback: `ENV`) is read from the environment (defaults to `prod`).
 
 ### .env loading (optional)
 
