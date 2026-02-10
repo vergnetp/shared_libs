@@ -203,6 +203,17 @@ Within each directory, `.env.{ENV}` overrides `.env`.
 
 So you can put shared defaults higher up, and override per-app/service closer to your `main.py` file (or via real environment variables in prod).
 
+### Production Checks
+
+When environemnt is prod, enforced at startup:
+
+1. `database_url` set and not SQLite
+2. `redis_url` set
+3. `jwt_secret` 32+ characters
+4. `cors_origins` explicit (not wildcard)
+5. If `smtp_url` set, `email_from` required
+
+Anything not compliant raises an Exception.
 
 ### Minimal (Development)
 
@@ -288,25 +299,6 @@ app = create_service(
 | `test_runners` | `list` | `None` | Self-test runner functions |
 | `debug` | `bool` | `False` | Debug mode (forced False in prod) |
 
-## Environment Detection
-
-The only environment variable read is `ENV`:
-
-| ENV Value | Behavior |
-|-----------|----------|
-| `prod` (or not set) | Production checks enforced |
-| `dev`, `development`, `local` | Relaxed validation |
-| `uat`, `staging`, `test` | Relaxed validation |
-
-## Production Checks
-
-When `ENV=prod` (or not set), enforced at startup:
-
-1. `database_url` set and not SQLite
-2. `redis_url` set
-3. `jwt_secret` 32+ characters
-4. `cors_origins` explicit (not wildcard)
-5. If `smtp_url` set, `email_from` required
 
 ## Redis Architecture
 

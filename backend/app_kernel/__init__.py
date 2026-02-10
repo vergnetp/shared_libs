@@ -193,7 +193,8 @@ from .env_checks import (
 # Tasks - cancellable SSE-streamed operations
 from .tasks import (
     TaskStream,
-    Cancelled,
+    TaskCancelled,
+    Cancelled,  # Backwards compat alias
     create_tasks_router,
     sse_event,
     sse_task_id,
@@ -330,7 +331,8 @@ __all__ = [
     
     # Tasks
     "TaskStream",
-    "Cancelled",
+    "TaskCancelled",
+    "Cancelled",  # Backwards compat alias
     "create_tasks_router",
     "sse_event",
     "sse_task_id",
