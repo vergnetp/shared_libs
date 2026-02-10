@@ -187,7 +187,22 @@ app = create_service(
 
 ## Configuration
 
-All configuration is explicit - pass it to `create_service()`. Only `ENV` is read from environment.
+All configuration is explicit - pass it to `create_service()`. Only `ENV` is read from environment (defaults to `prod`).
+
+### .env loading (optional)
+
+If `python-dotenv` is installed, the kernel auto-loads `.env` files **and** `.env.{ENV}` files (when present), with inheritance.
+
+Search locations (defaults → overrides):
+1. **Grandparent** directory: `.env`, then `.env.{ENV}`
+2. **Parent** directory: `.env`, then `.env.{ENV}`
+3. **Sibling** (next to the file that called `create_service`, usually your `main.py`): `.env`, then `.env.{ENV}`
+
+**Priority:** `os.environ` always wins, then sibling, then parent, then grandparent.  
+Within each directory, `.env.{ENV}` overrides `.env`.
+
+So you can put shared defaults higher up, and override per-app/service closer to your `main.py` file (or via real environment variables in prod).
+
 
 ### Minimal (Development)
 

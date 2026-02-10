@@ -17,6 +17,8 @@ Example:
     )
 """
 
+import sys
+from pathlib import Path
 import logging
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -31,6 +33,7 @@ from fastapi import FastAPI, APIRouter
 from .env_checks import run_env_checks, get_env, is_prod, EnvCheck
 from .bootstrap import ServiceConfig, create_service as _create_service_internal
 from .saas.deps import get_or_create_personal_workspace
+from .env import load_env_hierarchy
 
 
 logger = logging.getLogger(__name__)
@@ -295,6 +298,9 @@ def create_service(
             ],
         )
     """
+    app_file = sys._getframe(1).f_code.co_filename  # file that called create_service
+    load_env_hierarchy(root_dir=Path(app_file).resolve().parent)
+
     # Build settings namespace for env checks
     settings = SimpleNamespace(
         name=name,
