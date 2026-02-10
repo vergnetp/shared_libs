@@ -93,27 +93,9 @@ async def export_data(
 
 The approach is code-first: define your data models as dataclasses with the `@entity` decorator, and the database schema is created and maintained automatically. No SQL migrations to write, no store layer, no repository pattern.
 
-On startup, the kernel compares your `@entity` classes against the actual database schema. New tables and columns are created automatically. Renames and deletions are flagged with warnings — the migrator won't drop data without explicit opt-in. Migration scripts are persisted in `.data/migrations_audit/` for traceability. In production, a full backup (native + CSV) is taken before any migration runs, stored in `.data/backups/`.
+On startup, the kernel compares your `@entity` classes against the actual database schema. New tables and columns are created automatically. Renames and deletions are flagged with warnings — the migrator won't drop data without explicit opt-in. Migration scripts are persisted in `.data/migrations_audit/` for traceability. A full backup (native + CSV) is taken before any migration runs, stored in `.data/backups/`.
 
-Migrations are **forward-only**. There is no `migrate down` command. To rollback: redeploy the previous version of your code (with the old `@entity` classes) and restore from backup if needed. The pre-migration backup exists precisely for this — but be aware that data written between the migration and the rollback will be lost.
-
-<!--
-TODO: Migration rollback brainstorming
-
-Current gap: rollback is manual (redeploy old code + restore backup). Problems:
-- Old code on restart sees "extra" columns (added by new code) and warns but doesn't drop them → OK, harmless
-- But if new code renamed a column, old code creates the old name again → now you have both → messy
-- No way to rollback just the schema change without restoring data too
-- deploy_api has its own backup/restore layer for user services — different concern, but could conflict if kernel migration + deploy rollback happen together
-
-Ideas to explore:
-1. Generate reversible migrations: for each "add column X", store "drop column X" as the down step. On rollback, apply downs in reverse. Risk: data loss on column drops.
-2. Schema version pinning: tag each migration with app version. On startup, if app version < last migration version, refuse to start and log "rollback detected, restore backup first". At least prevents silent corruption.
-3. Shadow columns: instead of dropping on rollback, mark columns as "orphaned" and ignore them. Old code works fine, new code can reclaim them later. Zero data loss but schema grows.
-4. Point-in-time restore: combine CSV backup + entity history to reconstruct state at any timestamp. Heavy but complete.
-5. Migration lock: prevent concurrent startups from racing on migrations (already partially handled by SQLite's write lock, but Postgres needs advisory locks).
-6. Dry-run on deploy: before deploying new code, diff @entity classes against live schema and show what would change. Block deploy if destructive.
--->
+Migrations are **forward-only**. There is no `migrate down` command. To rollback: redeploy the previous version of your code and restore from backup or history (see [Backup & Restore](#backup--restore)). The pre-migration backup exists precisely for this. For finer control, the admin endpoints let you restore individual tables or use the built-in history tables for point-in-time recovery without any backup files.
 
 
 Connections are handled automatically: each entity call acquires a short-lived connection from the pool and releases it immediately. The pool is backed by the database you pass to `create_service` via `database_url` (or SQLite in `./data/{app_name}.db` if none specified). Every entity also gets free history tracking — every change is versioned automatically.
@@ -167,6 +149,30 @@ async with db_context() as db:
 
 Operations are retried 3 times with exponential backoff, with circuit breaker protection against cascading failures.
 
+### entity_field Options
+
+All options are enforced at the database level (as column constraints in the DDL), not just in application code.
+
+```python
+name: str = entity_field(
+    default="untitled",                             # DEFAULT clause
+    nullable=False,                                 # NOT NULL
+    unique=True,                                    # UNIQUE constraint
+    index=True,                                     # CREATE INDEX
+    check="[status] IN ('draft', 'published')",     # CHECK constraint (use [col] for column refs)
+    renamed_from="old_name",                        # Safe column rename (copies data, keeps old column)
+)
+```
+
+| Option | Type | Default | Effect |
+|--------|------|---------|--------|
+| `default` | any | `None` | `DEFAULT` clause on the column |
+| `nullable` | `bool` | `True` | `NOT NULL` when `False` |
+| `unique` | `bool` | `False` | `UNIQUE` constraint |
+| `index` | `bool` | `False` | Creates a standalone index |
+| `check` | `str` | `None` | `CHECK (...)` constraint. Reference columns with bracket syntax `[col_name]` — brackets are converted to the correct quoting for each backend. |
+| `renamed_from` | `str` | `None` | Previous column name. Migrator adds the new column and copies data from the old one. Old column is kept for safe rollback. Remove this parameter once the rename is fully deployed. |
+
 ### Seeding
 
 Use `db_seed` to populate initial data. `match_by` makes seeding idempotent — safe to run on every restart:
@@ -203,17 +209,6 @@ Within each directory, `.env.{ENV}` overrides `.env`.
 
 So you can put shared defaults higher up, and override per-app/service closer to your `main.py` file (or via real environment variables in prod).
 
-### Production Checks
-
-When environemnt is prod, enforced at startup:
-
-1. `database_url` set and not SQLite
-2. `redis_url` set
-3. `jwt_secret` 32+ characters
-4. `cors_origins` explicit (not wildcard)
-5. If `smtp_url` set, `email_from` required
-
-Anything not compliant raises an Exception.
 
 ### Minimal (Development)
 
@@ -296,9 +291,29 @@ app = create_service(
 | `health_checks` | `list` | `[]` | Custom health checks |
 | `on_startup` | `callable` | `None` | Startup hook |
 | `on_shutdown` | `callable` | `None` | Shutdown hook |
+| `backup_schedule` | `str` | `"0 15 * * *"` | Cron schedule for periodic backups (5-field cron, UTC). `None` to disable. |
 | `test_runners` | `list` | `None` | Self-test runner functions |
 | `debug` | `bool` | `False` | Debug mode (forced False in prod) |
 
+## Environment Detection
+
+The only environment variable read is `ENV`:
+
+| ENV Value | Behavior |
+|-----------|----------|
+| `prod` (or not set) | Production checks enforced |
+| `dev`, `development`, `local` | Relaxed validation |
+| `uat`, `staging`, `test` | Relaxed validation |
+
+## Production Checks
+
+When `ENV=prod` (or not set), enforced at startup:
+
+1. `database_url` set and not SQLite
+2. `redis_url` set
+3. `jwt_secret` 32+ characters
+4. `cors_origins` explicit (not wildcard)
+5. If `smtp_url` set, `email_from` required
 
 ## Redis Architecture
 
@@ -601,6 +616,112 @@ python -m app_kernel.admin_worker \
     --database-url postgresql://...
 ```
 
+## Backup & Restore
+
+The kernel provides automatic backups, scheduled backups, and multiple restore strategies — from full database snapshots to single-table point-in-time recovery using entity history.
+
+### When Backups Happen
+
+Backups are triggered automatically in two situations:
+
+**On startup (before migrations)** — every time your app starts, the database lifecycle creates a full backup (CSV + native) before running any schema migrations. This means you always have a snapshot of the pre-migration state. In a blue-green deployment, the new container starts → backup runs → migrations run → health check passes → nginx switches. The backup captures the exact state before any schema change.
+
+**On schedule** — a background worker runs periodic backups on a cron schedule. The default is daily at 3pm UTC. Configure it via `create_service`:
+
+```python
+app = create_service(
+    ...
+    backup_schedule="0 15 * * *",   # default: daily 3pm UTC
+    # backup_schedule="0 */6 * * *",  # every 6 hours
+    # backup_schedule="30 2 * * 1",   # Mondays at 2:30am UTC
+    # backup_schedule=None,           # disable scheduled backups
+)
+```
+
+Standard 5-field cron format (minute, hour, day, month, weekday), evaluated in UTC. Supports `*`, `*/N`, comma-separated values, and ranges.
+
+### Backup Contents
+
+Each backup creates two things in `.data/backups/`:
+
+- **CSV export** (`csv_YYYYMMDD_HHMMSS_<hash>/`) — one `.csv` per table, human-readable, portable across database backends. Used for selective table restores.
+- **Native dump** — pg_dump for Postgres, mysqldump for MySQL, file copy for SQLite. Used for full database recovery.
+
+### Restore Options
+
+There are three ways to restore data, each suited to different scenarios.
+
+**1. History-based restore (no backup needed)**
+
+Every `@entity` has automatic history tracking. The `_history` tables contain every version of every row, timestamped. You can restore to any point in time by querying these tables — no backup files required.
+
+```
+POST /api/v1/admin/db/restore/history
+{
+    "target_time": "2026-02-10T14:30:00Z",
+    "tables": ["products", "orders"],
+    "confirm": false
+}
+```
+
+With `confirm: false` (the default), this returns a dry-run preview showing how many rows would be affected. Set `confirm: true` to execute. If `tables` is omitted, all entity tables are restored.
+
+How it works: for each table, the endpoint queries the history table for the latest version of each row at or before `target_time`, upserts those rows into the main table, and soft-deletes any rows that were created after the target time. History tables are never modified — you can restore forward again.
+
+Best for: accidental data changes, "undo" scenarios, narrow time windows between backups.
+
+**2. CSV restore (from backup)**
+
+Restore one or more tables from a CSV backup snapshot.
+
+```
+POST /api/v1/admin/db/restore/csv
+{
+    "backup_name": "csv_20260210_140000_a1b2c3d4",
+    "table_names": ["products"],
+    "confirm": true
+}
+```
+
+If `table_names` is omitted, all CSVs in the backup directory are restored. The endpoint validates that all requested CSV files exist before starting, and reports per-table success/failure.
+
+Best for: full table recovery, restoring after a bad migration, moving data between environments.
+
+**3. Native restore (manual)**
+
+For Postgres and MySQL, restore the native dump using `pg_restore` or `mysql` CLI tools. For SQLite, stop the app and replace the database file. This is a full database replacement — use it when the other options aren't sufficient.
+
+### Admin Endpoints
+
+All admin database endpoints require admin authentication and live under `/api/v1/admin/db/`. All destructive operations require `confirm: true`.
+
+**Visibility:**
+
+- `GET /migrations` — list applied migrations with timestamps, hashes, and operation counts
+- `GET /migrations/{hash}` — full migration detail (operations JSON, audit file path)
+- `GET /backups` — list available CSV restore points on disk
+- `GET /schema/orphans` — columns and tables in the database that don't correspond to any `@entity` class (cleanup candidates after removing or renaming fields)
+
+**Actions:**
+
+- `POST /backup` — trigger a backup immediately
+- `POST /backfill` — manually run rename backfills (same logic that runs on startup, useful after restoring data)
+- `POST /restore/history` — point-in-time restore from history tables
+- `POST /restore/table` — convenience wrapper for single-table history restore
+- `POST /restore/csv` — restore from a CSV backup
+
+### Rollback Workflow
+
+If a deployment introduces a bad migration or corrupts data:
+
+1. **Redeploy the previous version** — the old code starts, its `@entity` classes match the pre-migration schema. Extra columns from the new code are left in place (harmless).
+2. **Check what happened** — use `GET /admin/db/migrations` to see what changed, `GET /admin/db/schema/orphans` to spot leftover columns.
+3. **Restore data** — pick the right strategy:
+   - Recent accidental change → `POST /restore/history` with a target time just before the incident
+   - Full table recovery → `POST /restore/csv` from the pre-migration backup
+   - Entire database → native restore from dump
+4. **Run backfills** — if the old code has `renamed_from` fields, hit `POST /backfill` to re-copy data into the expected columns.
+
 ## Auto-Mounted Routes
 
 | Route | Description |
@@ -624,6 +745,15 @@ python -m app_kernel.admin_worker \
 | `GET /api/v1/metrics/requests/slow` | Slow requests (admin) |
 | `GET /api/v1/metrics/requests/errors` | Error requests (admin) |
 | `POST /api/v1/tasks/{id}/cancel` | Cancel SSE task |
+| `GET /api/v1/admin/db/migrations` | List applied schema migrations (admin) |
+| `GET /api/v1/admin/db/migrations/{hash}` | Migration detail (admin) |
+| `GET /api/v1/admin/db/backups` | List CSV restore points (admin) |
+| `GET /api/v1/admin/db/schema/orphans` | Orphaned columns/tables in DB (admin) |
+| `POST /api/v1/admin/db/backup` | Trigger backup now (admin) |
+| `POST /api/v1/admin/db/backfill` | Run rename backfills (admin) |
+| `POST /api/v1/admin/db/restore/history` | Point-in-time restore from history (admin) |
+| `POST /api/v1/admin/db/restore/table` | Single table restore from history (admin) |
+| `POST /api/v1/admin/db/restore/csv` | Restore tables from CSV backup (admin) |
 
 ## API Reference
 
