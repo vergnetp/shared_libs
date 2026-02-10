@@ -110,8 +110,8 @@ class PostgresSqlGenerator(SqlGenerator, SqlEntityGenerator):
         """Get SQL to list all tables in PostgreSQL."""
         return (
             "SELECT table_name FROM information_schema.tables "
-            "WHERE table_schema='public' AND table_name LIKE ?",
-            ('%_meta',)
+            "WHERE table_schema='public'",
+            ()
         )
     
     def get_list_columns_sql(self, table_name: str) -> Tuple[str, tuple]:
@@ -126,6 +126,11 @@ class PostgresSqlGenerator(SqlGenerator, SqlEntityGenerator):
     def get_meta_upsert_sql(self, entity_name: str) -> str:
         """Generate PostgreSQL-specific upsert SQL for a metadata table."""
         return f"INSERT INTO [{entity_name}_meta] VALUES (?, ?) ON CONFLICT([name]) DO UPDATE SET [type]=EXCLUDED.[type]"
+    
+    def get_insert_ignore_sql(self, target_table: str, columns: List[str], source_sql: str) -> str:
+        """Generate PostgreSQL INSERT ... ON CONFLICT DO NOTHING."""
+        cols_str = ", ".join(f"[{c}]" for c in columns)
+        return f"INSERT INTO [{target_table}] ({cols_str}) {source_sql} ON CONFLICT DO NOTHING"
     
     def get_add_column_sql(self, table_name: str, column_name: str, col_type: str = "TEXT") -> str:
         """Generate SQL to add a column to an existing PostgreSQL table."""

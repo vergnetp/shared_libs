@@ -7,7 +7,7 @@ Handles:
 - Table deletions (new)
 """
 
-from dataclasses import fields
+from dataclasses import fields, MISSING
 from datetime import datetime
 import hashlib
 import json
@@ -130,7 +130,7 @@ class AutoMigrator:
             if table_name not in db_tables:
                 continue
             
-            # Column renames
+            # Column renames — backfill both main and history tables
             for f in fields(entity_class):
                 old_col = (f.metadata or {}).get("renamed_from")
                 if not old_col:
@@ -140,15 +140,25 @@ class AutoMigrator:
                 if old_col.lower() not in db_cols:
                     continue
                 
+                # Main table
                 sql = f"UPDATE [{table_name}] SET [{f.name}] = [{old_col}] WHERE [{f.name}] IS NULL AND [{old_col}] IS NOT NULL"
                 native_sql, params = self.sql_gen.convert_query_to_native(sql, ())
                 try:
                     result = await self.db.execute(native_sql, params)
-                    # Log only if rows were actually backfilled
                     if result and isinstance(result, int) and result > 0:
                         logger.info(f"Backfilled {result} rows: {table_name}.{f.name} ← {old_col}")
                 except Exception:
                     pass  # Column might not exist yet on first boot
+                
+                # History table
+                history_sql = f"UPDATE [{table_name}_history] SET [{f.name}] = [{old_col}] WHERE [{f.name}] IS NULL AND [{old_col}] IS NOT NULL"
+                native_sql, params = self.sql_gen.convert_query_to_native(history_sql, ())
+                try:
+                    result = await self.db.execute(native_sql, params)
+                    if result and isinstance(result, int) and result > 0:
+                        logger.info(f"Backfilled {result} history rows: {table_name}_history.{f.name} ← {old_col}")
+                except Exception:
+                    pass
             
             # Table renames
             old_table = getattr(entity_class, '__entity_renamed_from__', None)
@@ -161,11 +171,11 @@ class AutoMigrator:
             shared = sorted(old_cols & new_cols)
             if shared:
                 cols_str = ", ".join(f"[{c}]" for c in shared)
-                sql = (
-                    f"INSERT OR IGNORE INTO [{table_name}] ({cols_str}) "
+                source_sql = (
                     f"SELECT {cols_str} FROM [{old_table}] "
                     f"WHERE [{old_table}].[id] NOT IN (SELECT [id] FROM [{table_name}])"
                 )
+                sql = self.sql_gen.get_insert_ignore_sql(table_name, shared, source_sql)
                 native_sql, params = self.sql_gen.convert_query_to_native(sql, ())
                 try:
                     result = await self.db.execute(native_sql, params)
@@ -202,9 +212,10 @@ class AutoMigrator:
         field_defs = {}
         
         for f in fields(entity_class):
+            default_val = f.default if f.default is not MISSING else None
             field_defs[f.name] = {
                 "type": str(f.type),
-                "default": str(f.default) if f.default is not None else None,
+                "default": str(default_val) if default_val is not None else None,
                 "metadata": dict(f.metadata or {}),
             }
         
@@ -360,7 +371,7 @@ class AutoMigrator:
             
             result[f.name] = {
                 "type": self._python_to_sql_type(f.type),
-                "default": f.default if f.default is not None else None,
+                "default": f.default if f.default is not None and f.default is not MISSING else None,
                 "nullable": meta.get("nullable", True),
                 "index": meta.get("index", False),
                 "unique": meta.get("unique", False),
@@ -372,26 +383,14 @@ class AutoMigrator:
         return result
     
     def _python_to_sql_type(self, py_type) -> str:
-        """Convert Python type hint to SQL type"""
-        type_str = str(py_type)
+        """Convert Python type hint to SQL type.
         
-        # Handle Optional[X] -> X
-        if "Optional" in type_str or "Union" in type_str:
-            if hasattr(py_type, "__args__"):
-                py_type = py_type.__args__[0]
-        
-        type_map = {
-            str: "TEXT",
-            int: "INTEGER",
-            float: "REAL",
-            bool: "INTEGER",
-            "str": "TEXT",
-            "int": "INTEGER",
-            "float": "REAL",
-            "bool": "INTEGER",
-        }
-        
-        return type_map.get(py_type, "TEXT")
+        Always returns TEXT — all values are serialized to strings by
+        _serialize_entity before INSERT, so typed columns add no benefit
+        and break on strict backends (Postgres rejects string→INTEGER
+        in some edge cases).
+        """
+        return "TEXT"
     
     async def _get_db_columns(self, table_name: str) -> set:
         """Get existing column names from database table"""
@@ -560,22 +559,21 @@ class AutoMigrator:
         shared_cols = sorted(new_columns & old_columns)
         
         if shared_cols:
-            cols_str = ", ".join(f"[{c}]" for c in shared_cols)
-            
-            copy_sql = (
-                f"INSERT OR IGNORE INTO [{new_table}] ({cols_str}) "
-                f"SELECT {cols_str} FROM [{old_table}]"
+            source_sql = (
+                f"SELECT {', '.join(f'[{c}]' for c in shared_cols)} FROM [{old_table}]"
             )
+            copy_sql = self.sql_gen.get_insert_ignore_sql(new_table, shared_cols, source_sql)
             operations.append((copy_sql, (), f"Copy data from {old_table} to {new_table} ({len(shared_cols)} columns)"))
             
             # Step 3: Copy history table (shared cols + history-specific cols)
             history_extra = ["version", "history_timestamp", "history_user_id", "history_comment"]
             history_cols = shared_cols + history_extra
-            history_cols_str = ", ".join(f"[{c}]" for c in history_cols)
             
-            history_copy_sql = (
-                f"INSERT OR IGNORE INTO [{new_table}_history] ({history_cols_str}) "
-                f"SELECT {history_cols_str} FROM [{old_table}_history]"
+            history_source_sql = (
+                f"SELECT {', '.join(f'[{c}]' for c in history_cols)} FROM [{old_table}_history]"
+            )
+            history_copy_sql = self.sql_gen.get_insert_ignore_sql(
+                f"{new_table}_history", history_cols, history_source_sql
             )
             operations.append((history_copy_sql, (), f"Copy history from {old_table} to {new_table}"))
         

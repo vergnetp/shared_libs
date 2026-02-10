@@ -120,9 +120,11 @@ class BackupStrategy:
     
     async def _csv_backup(self, output_dir: Path):
         """
-        Export all entity tables to CSV files.
+        Export all entity tables, history tables, and meta tables to CSV files.
         
-        This creates portable, human-readable backups.
+        History is needed for point-in-time restore.
+        Meta is needed for correct deserialization on restore.
+        Only internal system tables (_schema_migrations etc.) are excluded.
         """
         output_dir.mkdir(parents=True, exist_ok=True)
         
@@ -133,13 +135,11 @@ class BackupStrategy:
         for table_row in tables:
             table_name = table_row[0]
             
-            # Skip meta/history/system tables
-            if (table_name.endswith('_meta') or 
-                table_name.endswith('_history') or 
-                table_name.startswith('_')):
+            # Skip internal system tables only (migrations tracker etc.)
+            if table_name.startswith('_'):
                 continue
             
-            # Export to CSV
+            # Export to CSV (entity, history, and meta tables)
             await self._export_table_csv(table_name, output_dir)
     
     async def _export_table_csv(self, table_name: str, output_dir: Path):

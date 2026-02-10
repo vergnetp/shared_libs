@@ -1,4 +1,3 @@
-
 from typing import Tuple, List, Any, Optional
 from ...generators import SqlGenerator
 from ...entity.generators import SqlEntityGenerator
@@ -101,8 +100,8 @@ class MySqlSqlGenerator(SqlGenerator, SqlEntityGenerator):
         """Get SQL to list all tables in MySQL."""
         return (
             "SELECT table_name FROM information_schema.tables "
-            "WHERE table_schema=DATABASE() AND table_name LIKE ?",
-            ('%_meta',)
+            "WHERE table_schema=DATABASE()",
+            ()
         )
     
     def get_list_columns_sql(self, table_name: str) -> Tuple[str, tuple]:
@@ -117,6 +116,11 @@ class MySqlSqlGenerator(SqlGenerator, SqlEntityGenerator):
     def get_meta_upsert_sql(self, entity_name: str) -> str:
         """Generate MySQL-specific upsert SQL for a metadata table."""
         return f"INSERT INTO [{entity_name}_meta] VALUES (?, ?) AS new ON DUPLICATE KEY UPDATE [type]=new.[type]"
+    
+    def get_insert_ignore_sql(self, target_table: str, columns: List[str], source_sql: str) -> str:
+        """Generate MySQL INSERT IGNORE."""
+        cols_str = ", ".join(f"[{c}]" for c in columns)
+        return f"INSERT IGNORE INTO [{target_table}] ({cols_str}) {source_sql}"
     
     def get_add_column_sql(self, table_name: str, column_name: str, col_type: str = "TEXT") -> str:
         """Generate SQL to add a column to an existing MySQL table."""

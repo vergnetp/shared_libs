@@ -94,8 +94,8 @@ class SqliteSqlGenerator(SqlGenerator, SqlEntityGenerator):
     def get_list_tables_sql(self) -> Tuple[str, tuple]:
         """Get SQL to list all tables in SQLite."""
         return (
-            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE ?",
-            ('%_meta',)
+            "SELECT name FROM sqlite_master WHERE type='table'",
+            ()
         )
     
     def get_list_columns_sql(self, table_name: str) -> Tuple[str, tuple]:
@@ -110,6 +110,11 @@ class SqliteSqlGenerator(SqlGenerator, SqlEntityGenerator):
     def get_meta_upsert_sql(self, entity_name: str) -> str:
         """Generate SQLite-specific upsert SQL for a metadata table."""
         return f"INSERT OR REPLACE INTO [{entity_name}_meta] VALUES (?, ?)"
+    
+    def get_insert_ignore_sql(self, target_table: str, columns: List[str], source_sql: str) -> str:
+        """Generate SQLite INSERT OR IGNORE."""
+        cols_str = ", ".join(f"[{c}]" for c in columns)
+        return f"INSERT OR IGNORE INTO [{target_table}] ({cols_str}) {source_sql}"
     
     def get_add_column_sql(self, table_name: str, column_name: str, col_type: str = "TEXT") -> str:
         """Generate SQL to add a column to an existing SQLite table."""
