@@ -240,12 +240,16 @@ def init_app_kernel(
     redis_config = None
     
     if JOB_QUEUE_AVAILABLE and settings.redis.url:
+        from .dev_deps import get_sync_redis_client
+        sync_redis_client = get_sync_redis_client(settings.redis.url)
+        
         redis_config = QueueRedisConfig(
             url=settings.redis.url,
             key_prefix=settings.redis.key_prefix,
             max_connections=settings.redis.max_connections,
             socket_timeout=settings.redis.socket_timeout,
             socket_connect_timeout=settings.redis.socket_connect_timeout,
+            client=sync_redis_client,
         )
     elif settings.redis.url:
         logger.warning("Redis URL configured but job_queue not installed - using in-memory fallbacks")

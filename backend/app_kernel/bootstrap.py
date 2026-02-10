@@ -135,10 +135,15 @@ async def _run_embedded_admin_worker(
     poll_interval: float = 0.5,
 ):
     """
-    Run admin worker as background task (consumes audit/metering from Redis).
+    Run admin worker as background task.
+    
+    Drains three Redis queues and batch-saves to DB:
+    - admin:audit_events     → kernel_audit_logs
+    - admin:metering_events  → kernel_usage_events
+    - admin:request_metrics  → kernel_request_metrics
     
     Uses the app's own DB connection pool (raw_db_context) and a shared
-    Redis client (same instance as the audit publisher).
+    Redis client (same instance as all publishers).
     """
     import json
     import uuid
@@ -179,45 +184,73 @@ async def _run_embedded_admin_worker(
             "timestamp": event.get("timestamp", _now_iso()),
         }
     
+    def _build_request_metric_entity(event: dict) -> dict:
+        return {
+            "id": str(uuid.uuid4()),
+            "request_id": event.get("request_id"),
+            "method": event.get("method"),
+            "path": event.get("path"),
+            "query_params": event.get("query_params"),
+            "status_code": event.get("status_code"),
+            "server_latency_ms": event.get("server_latency_ms"),
+            "client_ip": event.get("client_ip"),
+            "user_agent": event.get("user_agent"),
+            "referer": event.get("referer"),
+            "user_id": event.get("user_id"),
+            "workspace_id": event.get("workspace_id"),
+            "country": event.get("country"),
+            "city": event.get("city"),
+            "continent": event.get("continent"),
+            "error": event.get("error"),
+            "error_type": event.get("error_type"),
+            "timestamp": event.get("timestamp", _now_iso()),
+            "year": event.get("year"),
+            "month": event.get("month"),
+            "day": event.get("day"),
+            "hour": event.get("hour"),
+        }
+    
+    # Queue definitions: (redis_key, table_name, builder_func)
+    queues = [
+        ("admin:audit_events", "kernel_audit_logs", _build_audit_entity),
+        ("admin:metering_events", "kernel_usage_events", _build_metering_entity),
+        ("admin:request_metrics", "kernel_request_metrics", _build_request_metric_entity),
+    ]
+    
     try:
         logger.info("Admin worker: polling started")
         while True:
-            # Drain both queues
-            audit_events = []
-            metering_events = []
+            # Drain all queues
+            all_batches = []  # [(table, entity_dict), ...]
             
             try:
-                for _ in range(batch_size):
-                    data = await redis_client.rpop("admin:audit_events")
-                    if not data:
-                        break
-                    try:
-                        audit_events.append(_build_audit_entity(json.loads(data)))
-                    except Exception as e:
-                        logger.debug(f"Audit event parse error: {e}")
-                
-                for _ in range(batch_size):
-                    data = await redis_client.rpop("admin:metering_events")
-                    if not data:
-                        break
-                    try:
-                        metering_events.append(_build_metering_entity(json.loads(data)))
-                    except Exception as e:
-                        logger.debug(f"Metering event parse error: {e}")
+                for redis_key, table, builder in queues:
+                    for _ in range(batch_size):
+                        data = await redis_client.rpop(redis_key)
+                        if not data:
+                            break
+                        try:
+                            all_batches.append((table, builder(json.loads(data))))
+                        except Exception as e:
+                            logger.debug(f"Event parse error ({redis_key}): {e}")
             except Exception as e:
                 logger.warning(f"Admin worker Redis error: {e}")
                 await asyncio.sleep(poll_interval * 4)
                 continue
             
             # Write batch in single connection
-            if audit_events or metering_events:
-                logger.info(f"Admin worker: processing {len(audit_events)} audit, {len(metering_events)} metering events")
+            if all_batches:
+                # Count per type for logging
+                counts = {}
+                for table, _ in all_batches:
+                    counts[table] = counts.get(table, 0) + 1
+                summary = ", ".join(f"{v} {k.replace('kernel_', '')}" for k, v in counts.items())
+                logger.info(f"Admin worker: processing {summary}")
+                
                 try:
                     async with raw_db_context() as db:
-                        for entity in audit_events:
-                            await db.save_entity("kernel_audit_logs", entity)
-                        for entity in metering_events:
-                            await db.save_entity("kernel_usage_events", entity)
+                        for table, entity in all_batches:
+                            await db.save_entity(table, entity)
                 except Exception as e:
                     logger.warning(f"Admin worker DB error: {e}")
             else:
@@ -368,11 +401,8 @@ def create_service(
     integration_tasks = {}
     integration_routers = []
     
-    # Setup request metrics task if enabled (requires Redis)
+    # Request metrics are handled by admin worker (no job_queue needed)
     request_metrics_enabled = cfg.request_metrics_enabled
-    if request_metrics_enabled:
-        from .observability.request_metrics import store_request_metrics
-        integration_tasks["store_request_metrics"] = store_request_metrics
     
     # Build job registry - merge app tasks with integration tasks
     all_tasks = {**(tasks or {}), **integration_tasks}
@@ -495,12 +525,27 @@ def create_service(
             
             # Create shared Redis client for audit + admin worker
             if resolved_redis_url:
-                from .dev_deps import get_async_redis_client
+                from .dev_deps import get_async_redis_client, is_fake_redis_url
                 shared_redis_client = get_async_redis_client(resolved_redis_url)
+                is_fake = is_fake_redis_url(resolved_redis_url)
                 
                 from .db.session import enable_auto_audit
                 enable_auto_audit(shared_redis_client, name)
                 logger.info("Audit logging enabled (Redis → admin_worker)")
+            else:
+                shared_redis_client = None
+                is_fake = True
+            
+            # Initialize cache (Redis if real, in-memory if dev, disabled if prod without Redis)
+            from .cache import init_cache
+            from .env_checks import get_env
+            is_prod = get_env().lower() in ("prod", "production")
+            cache = init_cache(
+                redis_client=shared_redis_client,
+                is_fake=is_fake,
+                is_prod=is_prod,
+            )
+            logger.info(f"Cache: {cache.backend_type}")
             
             # Initialize ALL kernel schemas at once
             from .schema import init_all_schemas
@@ -616,35 +661,29 @@ def create_service(
         api_prefix=api_prefix,
     )
     
-    # Add request metrics middleware if enabled
-    if request_metrics_enabled:
+    # Add request metrics middleware if enabled (uses shared Redis → admin worker)
+    if request_metrics_enabled and cfg.redis_url:
+        from .dev_deps import get_async_redis_client
         from .observability.request_metrics import RequestMetricsMiddleware
-        from .jobs import get_job_client
         
-        # Middleware is added AFTER kernel init so job_client is available
+        _metrics_redis = get_async_redis_client(cfg.redis_url)
         app.add_middleware(
             RequestMetricsMiddleware,
-            job_client=get_job_client(),
+            redis_client=_metrics_redis,
             exclude_paths=set(cfg.request_metrics_exclude_paths),
         )
     
-    # Add usage metering middleware when Redis is configured (auto-enabled)
+    # Add usage metering middleware (uses shared Redis → admin worker)
     if cfg.redis_url:
+        from .dev_deps import get_async_redis_client as _get_redis
         from .metering.middleware import UsageMeteringMiddleware
-        import redis.asyncio as aioredis
         
-        try:
-            metering_redis = aioredis.from_url(cfg.redis_url)
-            app.add_middleware(
-                UsageMeteringMiddleware,
-                redis_client=metering_redis,
-                app_name=name,
-            )
-            # Note: metering data is NOT purged - it's usage data for billing
-        except Exception as e:
-            # Don't fail app startup if metering can't be set up
-            from .observability import get_logger
-            get_logger().warning(f"Could not enable usage metering: {e}")
+        _metering_redis = _get_redis(cfg.redis_url)
+        app.add_middleware(
+            UsageMeteringMiddleware,
+            redis_client=_metering_redis,
+            app_name=name,
+        )
     
     # Mount request metrics API routes if enabled
     if request_metrics_enabled:

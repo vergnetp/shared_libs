@@ -120,74 +120,95 @@ class RedisCache:
             return False
 
 
+class NoOpCache:
+    """
+    Cache that does nothing — used in prod when real Redis is unavailable.
+    
+    Safer than InMemoryCache in multi-droplet prod: no stale data, no
+    cross-instance invalidation issues. Every call hits the DB.
+    """
+    
+    async def get(self, key: str) -> Optional[Any]:
+        return None
+    
+    async def set(self, key: str, value: Any, ttl: Optional[int] = None) -> None:
+        pass
+    
+    async def delete(self, key: str) -> bool:
+        return False
+    
+    async def delete_pattern(self, pattern: str) -> int:
+        return 0
+    
+    async def clear(self) -> None:
+        pass
+    
+    async def exists(self, key: str) -> bool:
+        return False
+
+
 class Cache:
     """
-    Cache facade - uses Redis if available, falls back to in-memory.
+    Cache facade with environment-aware backend selection.
     
-    In-memory cache doesn't share across processes, but still helps
-    reduce repeated expensive operations within a single process.
+    - Real Redis available → RedisCache (shared across droplets)
+    - Dev without Redis → InMemoryCache (single process, good enough)
+    - Prod without Redis → NoOpCache (disabled, no stale data risk)
     """
     
-    def __init__(self, redis_url: Optional[str] = None, prefix: str = "cache:"):
-        self._redis_url = redis_url
+    def __init__(
+        self,
+        redis_client=None,
+        prefix: str = "cache:",
+        is_fake: bool = False,
+        is_prod: bool = False,
+    ):
         self._prefix = prefix
         self._backend: Optional[Any] = None
-        self._initialized = False
-    
-    async def _ensure_backend(self) -> Any:
-        if self._backend is not None:
-            return self._backend
         
-        if self._redis_url:
-            try:
-                from ..dev_deps import get_async_redis_client, is_fake_redis_url
-                client = get_async_redis_client(self._redis_url)
-                
-                # Test connection (skip for fakeredis)
-                if not is_fake_redis_url(self._redis_url):
-                    await client.ping()
-                
-                self._backend = RedisCache(client, self._prefix)
-            except Exception as e:
-                # Fall back to in-memory
-                import logging
-                logging.warning(f"Redis cache unavailable, using in-memory: {e}")
-                self._backend = InMemoryCache()
+        if redis_client and not is_fake:
+            # Real Redis — shared cache across all droplets
+            self._backend = RedisCache(redis_client, prefix)
+        elif is_prod:
+            # Prod without real Redis — disable caching entirely
+            self._backend = NoOpCache()
         else:
+            # Dev without Redis — in-memory is fine
             self._backend = InMemoryCache()
-        
-        self._initialized = True
-        return self._backend
+    
+    @property
+    def backend_type(self) -> str:
+        """Return the backend type for logging."""
+        if isinstance(self._backend, RedisCache):
+            return "redis"
+        elif isinstance(self._backend, NoOpCache):
+            return "disabled"
+        else:
+            return "in-memory"
     
     async def get(self, key: str) -> Optional[Any]:
         """Get value from cache."""
-        backend = await self._ensure_backend()
-        return await backend.get(key)
+        return await self._backend.get(key)
     
     async def set(self, key: str, value: Any, ttl: Optional[int] = None) -> None:
         """Set value in cache with optional TTL (seconds)."""
-        backend = await self._ensure_backend()
-        await backend.set(key, value, ttl)
+        await self._backend.set(key, value, ttl)
     
     async def delete(self, key: str) -> bool:
         """Delete a key from cache."""
-        backend = await self._ensure_backend()
-        return await backend.delete(key)
+        return await self._backend.delete(key)
     
     async def delete_pattern(self, pattern: str) -> int:
         """Delete keys matching pattern (e.g., 'projects:*')."""
-        backend = await self._ensure_backend()
-        return await backend.delete_pattern(pattern)
+        return await self._backend.delete_pattern(pattern)
     
     async def clear(self) -> None:
         """Clear entire cache."""
-        backend = await self._ensure_backend()
-        await backend.clear()
+        await self._backend.clear()
     
     async def exists(self, key: str) -> bool:
         """Check if key exists."""
-        backend = await self._ensure_backend()
-        return await backend.exists(key)
+        return await self._backend.exists(key)
     
     async def get_or_set(
         self,
@@ -200,7 +221,6 @@ class Cache:
         if value is not None:
             return value
         
-        # Call factory (can be sync or async)
         import asyncio
         if asyncio.iscoroutinefunction(factory):
             value = await factory()
@@ -215,10 +235,28 @@ class Cache:
 _cache: Optional[Cache] = None
 
 
-def init_cache(redis_url: Optional[str] = None, prefix: str = "cache:") -> Cache:
-    """Initialize the global cache instance."""
+def init_cache(
+    redis_client=None,
+    prefix: str = "cache:",
+    is_fake: bool = False,
+    is_prod: bool = False,
+) -> Cache:
+    """
+    Initialize the global cache instance.
+    
+    Args:
+        redis_client: Async Redis client (real or fakeredis)
+        prefix: Key prefix for cache entries
+        is_fake: Whether the client is fakeredis
+        is_prod: Whether running in production
+    """
     global _cache
-    _cache = Cache(redis_url=redis_url, prefix=prefix)
+    _cache = Cache(
+        redis_client=redis_client,
+        prefix=prefix,
+        is_fake=is_fake,
+        is_prod=is_prod,
+    )
     return _cache
 
 
@@ -226,9 +264,6 @@ def get_cache() -> Cache:
     """Get the global cache instance."""
     global _cache
     if _cache is None:
-        _cache = Cache()  # Default to in-memory
+        # Not initialized by bootstrap — default to in-memory (dev)
+        _cache = Cache()
     return _cache
-
-
-# Convenience - module-level cache
-cache = get_cache()

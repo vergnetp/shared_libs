@@ -118,7 +118,6 @@ from .observability import (
     get_real_ip,
     get_geo_from_headers,
     setup_request_metrics,
-    store_request_metrics,
     create_request_metrics_router,
 )
 
@@ -288,7 +287,6 @@ __all__ = [
     "get_real_ip",
     "get_geo_from_headers",
     "setup_request_metrics",
-    "store_request_metrics",
     "create_request_metrics_router",
     
     # Reliability

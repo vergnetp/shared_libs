@@ -9,6 +9,10 @@ class QueueRedisConfig:
     
     Manages Redis connection parameters including URL, connection pooling,
     and retry behavior for the queue system.
+    
+    Supports two modes:
+    1. URL-based: creates its own client from URL (standalone usage)
+    2. Injected client: uses a pre-created client (kernel injects fakeredis or shared real client)
     """
     def __init__(
         self,
@@ -18,7 +22,8 @@ class QueueRedisConfig:
         socket_timeout: float = 5.0,
         socket_connect_timeout: float = 5.0,
         retry_on_timeout: bool = True,
-        health_check_interval: int = 30
+        health_check_interval: int = 30,
+        client=None,
     ):
         """
         Initialize Redis configuration.
@@ -31,6 +36,7 @@ class QueueRedisConfig:
             socket_connect_timeout: Connection timeout in seconds
             retry_on_timeout: Whether to retry on timeout
             health_check_interval: Seconds between health checks
+            client: Pre-created Redis client (if provided, URL is ignored for connections)
         """
         self._url = url
         self._key_prefix = key_prefix
@@ -39,7 +45,7 @@ class QueueRedisConfig:
         self._socket_connect_timeout = socket_connect_timeout
         self._retry_on_timeout = retry_on_timeout
         self._health_check_interval = health_check_interval
-        self._client = None
+        self._client = client
         self._validate_config()
     
     @property

@@ -31,6 +31,7 @@ Usage:
     store = RequestMetricsStore()
     metrics = await store.get_recent(limit=100, path_prefix="/api/v1/infra")
 """
+import json
 import time
 import uuid
 import logging
@@ -244,20 +245,19 @@ class RequestMetric:
 
 class RequestMetricsMiddleware(BaseHTTPMiddleware):
     """
-    Middleware that captures request metrics and enqueues for async storage.
+    Middleware that captures request metrics and pushes to Redis for async storage.
     
-    Non-blocking: Metrics are enqueued to job queue immediately,
-    processed by worker in background.
+    Non-blocking: Metrics are pushed to Redis list, drained by admin worker
+    in batches and saved to DB. Same pattern as audit and metering.
     
     Args:
         app: ASGI application
-        job_client: JobClient instance for enqueueing
-        task_name: Name of the storage task (default: "store_request_metrics")
+        redis_client: Async Redis client for pushing events
         exclude_paths: Paths to exclude from metrics (e.g., health checks)
         sensitive_params: Param name substrings to mask (default: tokens, keys, passwords)
-        include_request_body: Whether to capture request body (default: False)
-        include_response_body: Whether to capture response body (default: False)
     """
+    
+    REDIS_KEY = "admin:request_metrics"
     
     DEFAULT_EXCLUDE_PATHS = {
         "/health", "/healthz", "/readyz",
@@ -267,27 +267,17 @@ class RequestMetricsMiddleware(BaseHTTPMiddleware):
     def __init__(
         self,
         app: ASGIApp,
-        job_client = None,
-        task_name: str = "store_request_metrics",
+        redis_client = None,
         exclude_paths: Optional[set] = None,
         sensitive_params: Optional[set] = None,
-        include_request_body: bool = False,
-        include_response_body: bool = False,
     ):
         super().__init__(app)
-        self._job_client = job_client
-        self._task_name = task_name
+        self._redis = redis_client
         self._exclude_paths = exclude_paths or self.DEFAULT_EXCLUDE_PATHS
-        self._sensitive_params = sensitive_params  # None = use defaults
-        self._include_request_body = include_request_body
-        self._include_response_body = include_response_body
-    
-    def set_job_client(self, job_client):
-        """Set job client after initialization (for late binding)."""
-        self._job_client = job_client
+        self._sensitive_params = sensitive_params
     
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        """Capture metrics and enqueue for storage."""
+        """Capture metrics and push to Redis."""
         path = request.url.path
         
         # Skip excluded paths
@@ -327,46 +317,30 @@ class RequestMetricsMiddleware(BaseHTTPMiddleware):
         )
         
         # Process request
-        error_info = None
         try:
             response = await call_next(request)
             metric.status_code = response.status_code
         except Exception as e:
-            # Capture error details
             metric.status_code = 500
             metric.error = str(e)
             metric.error_type = type(e).__name__
-            error_info = e
             raise
         finally:
-            # Calculate duration
             metric.server_latency_ms = (time.perf_counter() - start_time) * 1000
-            
-            # Get user/workspace from request state (set by auth middleware)
             metric.user_id = getattr(request.state, "user_id", None)
             metric.workspace_id = getattr(request.state, "workspace_id", None)
             
-            # Enqueue for async storage (non-blocking)
-            await self._enqueue_metric(metric)
+            # Push to Redis (fire and forget)
+            if self._redis:
+                try:
+                    await self._redis.lpush(
+                        self.REDIS_KEY,
+                        json.dumps(metric.to_dict()),
+                    )
+                except Exception:
+                    pass  # Never fail the request
         
         return response
-    
-    async def _enqueue_metric(self, metric: RequestMetric):
-        """Enqueue metric for async storage."""
-        if not self._job_client:
-            # No job client - log and skip
-            logger.debug(f"Request metric not stored (no job client): {metric.path}")
-            return
-        
-        try:
-            await self._job_client.enqueue(
-                self._task_name,
-                metric.to_dict(),
-                priority="low",  # Don't block important jobs
-            )
-        except Exception as e:
-            # Don't fail the request if metrics storage fails
-            logger.warning(f"Failed to enqueue request metric: {e}")
 
 
 # =============================================================================
@@ -619,36 +593,12 @@ class RequestMetricsStore:
 
 
 # =============================================================================
-# Worker Task
-# =============================================================================
-
-async def store_request_metrics(payload: Dict[str, Any], ctx) -> Dict[str, Any]:
-    """
-    Worker task to store request metrics to database.
-    
-    Args:
-        payload: RequestMetric.to_dict() data
-        ctx: JobContext
-        
-    Returns:
-        Storage result
-    """
-    try:
-        store = RequestMetricsStore()
-        metric_id = await store.save(payload)
-        return {"status": "success", "id": metric_id}
-    except Exception as e:
-        logger.error(f"Failed to store metric in DB: {e}")
-        return {"status": "error", "error": str(e)}
-
-
-# =============================================================================
 # Setup Helper
 # =============================================================================
 
 def setup_request_metrics(
     app,
-    job_client = None,
+    redis_client = None,
     exclude_paths: Optional[set] = None,
 ) -> RequestMetricsMiddleware:
     """
@@ -656,19 +606,17 @@ def setup_request_metrics(
     
     Args:
         app: FastAPI application
-        job_client: JobClient for async storage (can be set later)
+        redis_client: Async Redis client for pushing events
         exclude_paths: Paths to exclude from metrics
         
     Returns:
-        The middleware instance (for later configuration)
+        The middleware instance
     """
-    middleware = RequestMetricsMiddleware(
-        app,
-        job_client=job_client,
+    app.add_middleware(
+        RequestMetricsMiddleware,
+        redis_client=redis_client,
         exclude_paths=exclude_paths,
     )
-    app.add_middleware(RequestMetricsMiddleware, job_client=job_client, exclude_paths=exclude_paths)
-    return middleware
 
 
 # =============================================================================

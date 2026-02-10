@@ -22,14 +22,23 @@ Usage:
 
 from .client import (
     Cache,
+    NoOpCache,
     get_cache,
     init_cache,
-    cache,
 )
 from .decorator import cached, CACHE_ENABLED
 
+
+def __getattr__(name):
+    """Lazy access to cache singleton via `from app_kernel.cache import cache`."""
+    if name == "cache":
+        return get_cache()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 __all__ = [
     "Cache",
+    "NoOpCache",
     "get_cache",
     "init_cache",
     "cache",

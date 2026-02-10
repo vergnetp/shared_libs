@@ -146,16 +146,20 @@ REDIS_CONTAINER_NAME = "appkernel-redis"
 # Special URL indicating fakeredis mode
 REDIS_FAKE_URL = "fakeredis://"
 
-# Singleton fakeredis instance (all callers share one in-memory store, like real Redis)
-_fakeredis_instance = None
+# Singleton fakeredis instances (all callers share one in-memory store, like real Redis)
+_fakeredis_async_instance = None
+_fakeredis_sync_instance = None
 
 
 def get_async_redis_client(url: str = None):
     """
     Get an async Redis client for the given URL.
     
-    For fakeredis, returns a singleton so all callers share the same
+    For fakeredis URLs, returns a singleton so all callers share the same
     in-memory store — matching real Redis behavior.
+    
+    For real URLs, checks if port is reachable and falls back to fakeredis
+    if not (dev-friendly behavior).
     
     Args:
         url: Redis URL, or None/fakeredis:// for in-memory fakeredis
@@ -163,15 +167,73 @@ def get_async_redis_client(url: str = None):
     Returns:
         Async Redis client (real or fakeredis.aioredis)
     """
-    global _fakeredis_instance
+    global _fakeredis_async_instance
     if url is None or is_fake_redis_url(url):
-        if _fakeredis_instance is None:
+        if _fakeredis_async_instance is None:
             import fakeredis.aioredis
-            _fakeredis_instance = fakeredis.aioredis.FakeRedis(decode_responses=False)
-        return _fakeredis_instance
-    else:
-        import redis.asyncio as aioredis
-        return aioredis.from_url(url)
+            _fakeredis_async_instance = fakeredis.aioredis.FakeRedis(decode_responses=False)
+        return _fakeredis_async_instance
+    
+    # Real URL — check port reachability, fallback to fakeredis
+    try:
+        config = _parse_redis_url(url)
+        if _is_port_open(config["host"], config["port"]):
+            import redis.asyncio as aioredis
+            return aioredis.from_url(url)
+    except Exception:
+        pass
+    
+    # Fallback to fakeredis singleton
+    logger.info(f"Redis not reachable, using async fakeredis")
+    if _fakeredis_async_instance is None:
+        import fakeredis.aioredis
+        _fakeredis_async_instance = fakeredis.aioredis.FakeRedis(decode_responses=False)
+    return _fakeredis_async_instance
+
+
+def get_sync_redis_client(url: str = None, decode_responses: bool = True):
+    """
+    Get a sync Redis client for the given URL.
+    
+    For fakeredis URLs, returns a singleton so all callers share the same
+    in-memory store — matching real Redis behavior.
+    
+    For real URLs, tests the connection and falls back to fakeredis if
+    the server is unreachable (dev-friendly behavior).
+    
+    Used by job_queue (QueueManager/QueueWorker use sync Redis).
+    
+    Args:
+        url: Redis URL, or None/fakeredis:// for in-memory fakeredis
+        decode_responses: Whether to decode responses (default True, matching job_queue)
+    
+    Returns:
+        Sync Redis client (real or fakeredis.FakeRedis)
+    """
+    global _fakeredis_sync_instance
+    if url is None or is_fake_redis_url(url):
+        if _fakeredis_sync_instance is None:
+            import fakeredis as _fakeredis
+            _fakeredis_sync_instance = _fakeredis.FakeRedis(decode_responses=decode_responses)
+        return _fakeredis_sync_instance
+    
+    # Real URL — try to connect, fallback to fakeredis
+    try:
+        config = _parse_redis_url(url)
+        if _is_port_open(config["host"], config["port"]):
+            import redis as sync_redis
+            client = sync_redis.from_url(url, decode_responses=decode_responses)
+            client.ping()
+            return client
+    except Exception:
+        pass
+    
+    # Fallback to fakeredis singleton
+    logger.info(f"Redis not reachable, using sync fakeredis")
+    if _fakeredis_sync_instance is None:
+        import fakeredis as _fakeredis
+        _fakeredis_sync_instance = _fakeredis.FakeRedis(decode_responses=decode_responses)
+    return _fakeredis_sync_instance
 
 
 def is_fake_redis_url(url: str) -> bool:

@@ -440,12 +440,8 @@ async def run_worker(
                     manifest = yaml.safe_load(f)
                 
                 # Check if request_metrics is enabled
-                observability = manifest.get("observability", {})
-                request_metrics = observability.get("request_metrics", {})
-                if request_metrics.get("enabled", False):
-                    from ..observability.request_metrics import store_request_metrics
-                    all_tasks["store_request_metrics"] = store_request_metrics
-                    logger.info("Added kernel task: store_request_metrics")
+                # (request_metrics now handled by admin worker, not job_queue)
+                pass
         except Exception as e:
             logger.warning(f"Could not load manifest for integration tasks: {e}")
     

@@ -293,6 +293,59 @@ When `ENV=prod` (or not set), enforced at startup:
 4. `cors_origins` explicit (not wildcard)
 5. If `smtp_url` set, `email_from` required
 
+## Redis Architecture
+
+The kernel uses Redis for two distinct purposes with two separate client types:
+
+### Kernel Internals (async Redis)
+
+All kernel observability flows through one unified pattern: **push to Redis list → admin worker drains in batches → save to DB**. A single shared async Redis client is created at startup and injected into all publishers.
+
+| Publisher | Redis Key | DB Table |
+|-----------|-----------|----------|
+| Audit (`AuditWrappedConnection`) | `admin:audit_events` | `kernel_audit_logs` |
+| Usage Metering (`UsageMeteringMiddleware`) | `admin:metering_events` | `kernel_usage_events` |
+| Request Metrics (`RequestMetricsMiddleware`) | `admin:request_metrics` | `kernel_request_metrics` |
+
+Other kernel consumers of the shared async client:
+- **Rate limiter** — sliding window counters
+- **Idempotency** — request deduplication keys with TTL
+- **Cache** — `RedisCache` backend for `@cached` decorator
+
+### App-Level Jobs (sync Redis)
+
+The `job_queue` library uses sync Redis for background task processing (deploy services, send emails, process documents). The kernel creates a sync Redis client and injects it into `QueueRedisConfig(client=...)` — the job_queue never creates its own connection.
+
+### Fakeredis Fallback
+
+Both client types use singleton fakeredis instances when real Redis is unavailable. All Redis clients are created through `dev_deps.py`:
+
+| Function | Type | Singleton |
+|----------|------|-----------|
+| `get_async_redis_client(url)` | `redis.asyncio` / `fakeredis.aioredis` | `_fakeredis_async_instance` |
+| `get_sync_redis_client(url)` | `redis.Redis` / `fakeredis.FakeRedis` | `_fakeredis_sync_instance` |
+
+Both functions: try real Redis → test connection → fall back to fakeredis if unreachable.
+
+### Multi-Droplet Behavior
+
+| Component | Real Redis | Fakeredis (per-droplet) |
+|-----------|-----------|------------------------|
+| Audit/Metering/Metrics | Shared queue, one consumer | Per-droplet queue + worker, all save to same DB ✅ |
+| Rate limiter | Global limits | Per-droplet limits (N× more lenient) |
+| Idempotency | Global dedup | Per-droplet dedup (duplicates possible across droplets) |
+| Cache | Shared, invalidation propagates | **Disabled in prod** (`NoOpCache`) — no stale data risk |
+| Job queue | Shared, exactly-once delivery | Per-droplet, possible duplicates |
+
+### Cache Behavior by Environment
+
+| Environment | Real Redis | Cache Backend |
+|-------------|-----------|---------------|
+| Dev | ✅ | `RedisCache` — shared, full features |
+| Dev | ❌ | `InMemoryCache` — per-process, good enough |
+| Prod | ✅ | `RedisCache` — shared, invalidation across droplets |
+| Prod | ❌ | `NoOpCache` — **disabled**, every call hits DB |
+
 ## Background Jobs
 
 Jobs are enqueued to Redis and processed by workers in your FastAPI processes.
@@ -447,6 +500,8 @@ User buys 5 candles Monday, tries to buy 5 more Friday → gets Monday's cached 
 
 ## Caching
 
+Cache is environment-aware: uses Redis in prod (shared across droplets with proper invalidation), in-memory in dev, and **disabled** in prod when Redis is unavailable (to avoid stale data across droplets). See [Cache Behavior by Environment](#cache-behavior-by-environment).
+
 ```python
 from app_kernel import cached
 
@@ -464,6 +519,16 @@ await get_user.invalidate(user_id="123")
 # Or use cache client directly
 from app_kernel import get_cache
 await get_cache().delete("user:123")
+
+# Pattern delete (e.g., after bulk update)
+await get_cache().delete_pattern("user:*")
+
+# Get or compute
+result = await get_cache().get_or_set(
+    "expensive:key",
+    factory=compute_expensive_thing,
+    ttl=300,
+)
 ```
 
 ## Custom Environment Checks
@@ -827,7 +892,7 @@ history = await get_entity_audit_history(db, "deployments", deployment_id)
 
 ### Request Metrics (Telemetry)
 
-Every request is automatically tracked with timing, status, user, and geo data. Routes auto-mounted at `/api/v1/metrics/requests` (admin only).
+Every request is automatically tracked with timing, status, user, and geo data. Metrics are pushed to Redis and batch-saved by the admin worker (same pattern as audit and metering). Routes auto-mounted at `/api/v1/metrics/requests` (admin only).
 
 ```
 # Query via API:

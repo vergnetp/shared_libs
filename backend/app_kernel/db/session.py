@@ -92,6 +92,16 @@ def get_db_manager():
 class AuditWrappedConnection:
     """Wraps a database connection to automatically log audit events to Redis."""
     
+    # Kernel internal tables - never audit these (prevents recursive audit-of-audit)
+    _SKIP_AUDIT_TABLES = frozenset({
+        "kernel_audit_logs",
+        "kernel_audit_logs_history",
+        "kernel_usage_events",
+        "kernel_usage_events_history",
+        "kernel_request_metrics",
+        "kernel_request_metrics_history",
+    })
+    
     def __init__(self, conn, redis_client, app_name: str):
         self._conn = conn
         self._redis = redis_client
@@ -139,8 +149,8 @@ class AuditWrappedConnection:
             except:
                 pass
         
-        # Push audit event (fire and forget)
-        if self._redis:
+        # Push audit event (fire and forget) — skip kernel internal tables
+        if self._redis and table not in self._SKIP_AUDIT_TABLES:
             try:
                 from ..audit.publisher import push_audit_event
                 action = "update" if old else "create"
@@ -173,8 +183,8 @@ class AuditWrappedConnection:
         # Actual delete
         result = await self._conn.delete_entity(table, entity_id, _caller=self._entity_caller, **kwargs)
         
-        # Push audit event
-        if self._redis and old:
+        # Push audit event — skip kernel internal tables
+        if self._redis and old and table not in self._SKIP_AUDIT_TABLES:
             try:
                 from ..audit.publisher import push_audit_event
                 await push_audit_event(
@@ -275,13 +285,27 @@ async def db_context():
 @asynccontextmanager
 async def raw_db_context():
     """
-    Context manager for database connections WITHOUT strict entity access.
+    Context manager for database connections WITHOUT strict entity access
+    and WITHOUT audit wrapping.
     
-    Used by kernel internal stores that don't have @entity schemas.
+    Used by kernel internal stores (admin_worker, audit stores, metrics stores).
     App code should use db_context() instead.
     """
-    async with _base_connection() as conn:
-        yield conn
+    if _db_manager is None:
+        raise RuntimeError("Database not initialized. Set database_url in ServiceConfig.")
+    
+    caller = _get_caller()
+    stats = _pool_stats()
+    logger.info(f"DB acquire [{caller}] {stats}")
+    t0 = time.monotonic()
+    
+    async with _db_manager.connection() as conn:
+        yield conn  # Raw connection, no audit wrapper
+    
+    held = time.monotonic() - t0
+    stats = _pool_stats()
+    level = logging.WARNING if held > 5 else logging.INFO
+    logger.log(level, f"DB release [{caller}] held {held:.2f}s {stats}")
 
 
 # =============================================================================
