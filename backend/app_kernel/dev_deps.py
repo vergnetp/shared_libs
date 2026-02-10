@@ -33,9 +33,23 @@ from urllib.parse import urlparse
 logger = logging.getLogger(__name__)
 
 
+_docker_running_cache = None
+
 def _is_docker_available() -> bool:
-    """Check if Docker is available."""
+    """Check if Docker is available (binary exists)."""
     return shutil.which("docker") is not None
+
+
+def _is_docker_running_cached() -> bool:
+    """
+    Check if Docker daemon is responding. Cached for the process lifetime
+    to avoid repeated slow subprocess calls on Windows when Docker Desktop is off.
+    """
+    global _docker_running_cache
+    if _docker_running_cache is not None:
+        return _docker_running_cache
+    _docker_running_cache = _is_docker_available() and _is_docker_running()
+    return _docker_running_cache
 
 
 def _is_port_open(host: str, port: int, timeout: float = 1.0) -> bool:
@@ -267,17 +281,23 @@ async def ensure_redis(redis_url: Optional[str] = None) -> Tuple[bool, str, str]
         if _is_port_open(host, port):
             return True, f"Redis connected at {host}:{port}", redis_url
         
-        # URL provided but not reachable - only try Docker for localhost
+        # URL provided but not reachable
         if host not in ("localhost", "127.0.0.1"):
-            # Remote URL not reachable - fall through to fakeredis
+            # Remote host — can't help, fall to fakeredis
             logger.warning(f"Redis at {host}:{port} not reachable, using fakeredis")
+            return True, "Using fakeredis (in-memory, single-instance)", REDIS_FAKE_URL
+        
+        if port != 6379:
+            # Localhost but non-standard port — Docker won't help (it uses 6379)
+            logger.info(f"Redis at localhost:{port} not reachable, using fakeredis")
+            return True, "Using fakeredis (in-memory, single-instance)", REDIS_FAKE_URL
     
     # 2. Check localhost:6379 (default)
     if _is_port_open("localhost", 6379):
         return True, "Redis found on localhost:6379", "redis://localhost:6379"
     
-    # 3. Try Docker
-    if _is_docker_available():
+    # 3. Try Docker (only if daemon is actually responding)
+    if _is_docker_running_cached():
         if _container_exists(REDIS_CONTAINER_NAME):
             if not _container_running(REDIS_CONTAINER_NAME):
                 logger.info(f"Starting existing Redis container: {REDIS_CONTAINER_NAME}")
@@ -383,10 +403,10 @@ async def _ensure_docker() -> bool:
     2. Binary exists but daemon not running → try to start it
     3. Not installed → return False
     """
-    if _is_docker_running():
+    if _is_docker_running_cached():
         return True
     
-    if not _is_docker_available():
+    if not _is_docker_running_cached():
         return False
     
     # Binary exists, daemon not running — try to start
@@ -396,6 +416,8 @@ async def _ensure_docker() -> bool:
         for i in range(30):
             await asyncio.sleep(2)
             if _is_docker_running():
+                global _docker_running_cache
+                _docker_running_cache = True
                 logger.info("Docker daemon started successfully")
                 return True
         logger.warning("Docker daemon did not start within 60s")
@@ -689,7 +711,7 @@ async def ensure_postgres(db_url: str) -> Tuple[bool, str]:
     if host not in ("localhost", "127.0.0.1"):
         return False, f"PostgreSQL at {host}:{port} not reachable (not localhost, won't auto-start)"
     
-    if not _is_docker_available():
+    if not _is_docker_running_cached():
         return False, "PostgreSQL not reachable and Docker not available"
     
     # Check if container exists
@@ -753,7 +775,7 @@ async def ensure_mysql(db_url: str) -> Tuple[bool, str]:
     if host not in ("localhost", "127.0.0.1"):
         return False, f"MySQL at {host}:{port} not reachable (not localhost, won't auto-start)"
     
-    if not _is_docker_available():
+    if not _is_docker_running_cached():
         return False, "MySQL not reachable and Docker not available"
     
     # Check if container exists
