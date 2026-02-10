@@ -103,13 +103,14 @@ class SqlEntityGenerator(ABC):
         pass
     
     @abstractmethod
-    def get_add_column_sql(self, table_name: str, column_name: str) -> str:
+    def get_add_column_sql(self, table_name: str, column_name: str, col_type: str = "TEXT") -> str:
         """
         Generate SQL to add a column to an existing table.
         
         Args:
             table_name: Name of the table to alter
             column_name: Name of the column to add
+            col_type: Full column type definition (e.g. "TEXT NOT NULL DEFAULT 'x' CHECK (...)")
             
         Returns:
             SQL string for adding the column

@@ -15,6 +15,8 @@ from .migrate import (
 from .restore import (
     rollback_to_date,
     rollback_to_backup,
+    restore_from_history,
+    restore_single_table,
     list_restore_points,
     find_restore_point,
     RestorePoint,
@@ -32,6 +34,8 @@ __all__ = [
     "export_database_to_csv",
     "rollback_to_date",
     "rollback_to_backup",
+    "restore_from_history",
+    "restore_single_table",
     "list_restore_points",
     "find_restore_point",
     "RestorePoint",

@@ -65,7 +65,7 @@ class PostgresSqlGenerator(SqlGenerator, SqlEntityGenerator):
             if name == 'id':
                 column_defs.append(f"[id] TEXT PRIMARY KEY")
             else:
-                column_defs.append(f"[{name}] TEXT")
+                column_defs.append(f"[{name}] {type_name}")
         
         return f"""
             CREATE TABLE IF NOT EXISTS [{entity_name}] (
@@ -127,9 +127,9 @@ class PostgresSqlGenerator(SqlGenerator, SqlEntityGenerator):
         """Generate PostgreSQL-specific upsert SQL for a metadata table."""
         return f"INSERT INTO [{entity_name}_meta] VALUES (?, ?) ON CONFLICT([name]) DO UPDATE SET [type]=EXCLUDED.[type]"
     
-    def get_add_column_sql(self, table_name: str, column_name: str) -> str:
+    def get_add_column_sql(self, table_name: str, column_name: str, col_type: str = "TEXT") -> str:
         """Generate SQL to add a column to an existing PostgreSQL table."""
-        return f"ALTER TABLE [{table_name}] ADD COLUMN IF NOT EXISTS [{column_name}] TEXT"
+        return f"ALTER TABLE [{table_name}] ADD COLUMN IF NOT EXISTS [{column_name}] {col_type}"
     
     def get_check_table_exists_sql(self, table_name: str) -> Tuple[str, tuple]:
         """Generate SQL to check if a table exists in PostgreSQL."""

@@ -260,6 +260,116 @@ async def _run_embedded_admin_worker(
         pass
 
 
+def _next_cron_run(cron_str: str) -> float:
+    """
+    Calculate seconds until the next cron match.
+    
+    Supports standard 5-field cron: minute hour day month weekday
+    Each field supports: number, *, */N, comma-separated values.
+    
+    Examples:
+        "0 15 * * *"    → daily at 15:00 UTC
+        "0 */6 * * *"   → every 6 hours on the hour
+        "30 2 * * 1"    → Monday at 02:30 UTC
+        "0 3 1 * *"     → 1st of month at 03:00 UTC
+        "0 9,17 * * *"  → 9am and 5pm daily
+    """
+    from datetime import datetime, timezone, timedelta
+    
+    fields = cron_str.strip().split()
+    if len(fields) != 5:
+        raise ValueError(f"Invalid cron string: {cron_str!r} (need 5 fields: min hour day month weekday)")
+    
+    def _parse_field(field: str, min_val: int, max_val: int) -> set:
+        values = set()
+        for part in field.split(','):
+            part = part.strip()
+            if part == '*':
+                values.update(range(min_val, max_val + 1))
+            elif part.startswith('*/'):
+                step = int(part[2:])
+                values.update(range(min_val, max_val + 1, step))
+            elif '-' in part:
+                lo, hi = part.split('-', 1)
+                values.update(range(int(lo), int(hi) + 1))
+            else:
+                values.add(int(part))
+        return values
+    
+    minutes = _parse_field(fields[0], 0, 59)
+    hours = _parse_field(fields[1], 0, 23)
+    days = _parse_field(fields[2], 1, 31)
+    months = _parse_field(fields[3], 1, 12)
+    weekdays = _parse_field(fields[4], 0, 6)  # 0=Monday in Python (cron: 0=Sunday)
+    
+    # Convert cron weekday (0=Sun) to Python weekday (0=Mon)
+    py_weekdays = set()
+    for wd in weekdays:
+        py_weekdays.add((wd - 1) % 7)  # Sun(0)->6, Mon(1)->0, ...
+    
+    now = datetime.now(timezone.utc)
+    candidate = now.replace(second=0, microsecond=0) + timedelta(minutes=1)
+    
+    # Search up to 400 days ahead (covers any monthly/yearly pattern)
+    for _ in range(400 * 24 * 60):
+        if (candidate.minute in minutes and
+            candidate.hour in hours and
+            candidate.day in days and
+            candidate.month in months and
+            candidate.weekday() in py_weekdays):
+            return (candidate - now).total_seconds()
+        candidate += timedelta(minutes=1)
+    
+    raise ValueError(f"No matching time found for cron: {cron_str!r}")
+
+
+async def _run_backup_loop(backup_dir: str, cron_str: str, logger):
+    """
+    Cron-scheduled database backup as a background task.
+    
+    Args:
+        backup_dir: Directory for backup files
+        cron_str: Cron schedule string (5-field)
+        logger: Logger instance
+    """
+    from .db.session import raw_db_context
+    from pathlib import Path
+    
+    Path(backup_dir).mkdir(parents=True, exist_ok=True)
+    
+    while True:
+        try:
+            wait = _next_cron_run(cron_str)
+            logger.info(f"Backup worker: next run in {wait/3600:.1f}h ({cron_str})")
+            await asyncio.sleep(wait)
+        except asyncio.CancelledError:
+            raise
+        
+        try:
+            async with raw_db_context() as db:
+                tables = await db.list_tables()
+                user_tables = [t for t in tables if not t.startswith('_')]
+                
+                if not user_tables:
+                    logger.debug("Backup skipped — no user tables")
+                else:
+                    from ..databases.backup import BackupStrategy
+                    strategy = BackupStrategy(db)
+                    result = await strategy.backup_database(
+                        backup_dir,
+                        include_native=True,
+                        include_csv=True,
+                    )
+                    logger.info(f"Periodic backup complete: {len(user_tables)} tables", extra={
+                        "csv_dir": result.get("csv_dir"),
+                        "tables": len(user_tables),
+                    })
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"Backup error: {e}")
+
+
 @dataclass
 class ServiceConfig:
     """
@@ -373,6 +483,9 @@ def create_service(
     # Lifecycle
     on_startup: Optional[LifecycleHook] = None,
     on_shutdown: Optional[LifecycleHook] = None,
+    
+    # Background backup (cron string, None to disable, default daily 3pm UTC)
+    backup_schedule: Optional[str] = "0 15 * * *",
     
     # Health & Auth
     health_checks: Sequence[HealthCheck] = (),
@@ -589,7 +702,26 @@ def create_service(
             )
             logger.info("Embedded admin worker started")
         
+        # Start periodic backup worker
+        backup_task = None
+        if backup_schedule and resolved_database_url:
+            from .db.lifecycle import get_lifecycle_config
+            _backup_dir = get_lifecycle_config().get("data_dir", ".data") + "/backups"
+            backup_task = asyncio.create_task(
+                _run_backup_loop(_backup_dir, backup_schedule, logger)
+            )
+            logger.info(f"Periodic backup worker started ({backup_schedule})")
+        
         yield
+        
+        # Stop backup worker
+        if backup_task:
+            backup_task.cancel()
+            try:
+                await backup_task
+            except asyncio.CancelledError:
+                pass
+            logger.info("Backup worker stopped")
         
         # Stop embedded admin worker
         if admin_worker_task:
@@ -711,6 +843,21 @@ def create_service(
             is_admin=is_admin or _default_is_admin,
         )
         app.include_router(audit_router, prefix=api_prefix)
+    
+    # Mount database admin routes (admin only)
+    if cfg.database_url:
+        from .db.lifecycle import get_lifecycle_config
+        from ..databases.migrations.admin import create_db_admin_router
+        from .auth.deps import get_current_user
+        
+        lifecycle_cfg = get_lifecycle_config()
+        db_admin_router = create_db_admin_router(
+            get_current_user=get_current_user,
+            data_dir=lifecycle_cfg.get("data_dir", ".data"),
+            prefix="/admin/db",
+            is_admin=is_admin or _default_is_admin,
+        )
+        app.include_router(db_admin_router, prefix=api_prefix)
     
     # Mount usage metering routes
     if cfg.database_url:

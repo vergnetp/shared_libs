@@ -52,7 +52,7 @@ class MySqlSqlGenerator(SqlGenerator, SqlEntityGenerator):
             if name == 'id':
                 column_defs.append(f"[id] VARCHAR(36) PRIMARY KEY")
             else:
-                column_defs.append(f"[{name}] TEXT")
+                column_defs.append(f"[{name}] {type_name}")
         
         return f"""
             CREATE TABLE IF NOT EXISTS [{entity_name}] (
@@ -118,10 +118,10 @@ class MySqlSqlGenerator(SqlGenerator, SqlEntityGenerator):
         """Generate MySQL-specific upsert SQL for a metadata table."""
         return f"INSERT INTO [{entity_name}_meta] VALUES (?, ?) AS new ON DUPLICATE KEY UPDATE [type]=new.[type]"
     
-    def get_add_column_sql(self, table_name: str, column_name: str) -> str:
+    def get_add_column_sql(self, table_name: str, column_name: str, col_type: str = "TEXT") -> str:
         """Generate SQL to add a column to an existing MySQL table."""
         # MySQL doesn't support IF NOT EXISTS for columns, so the caller must check first
-        return f"ALTER TABLE [{table_name}] ADD COLUMN [{column_name}] TEXT"
+        return f"ALTER TABLE [{table_name}] ADD COLUMN [{column_name}] {col_type}"
     
     def get_check_table_exists_sql(self, table_name: str) -> Tuple[str, tuple]:
         """Generate SQL to check if a table exists in MySQL."""

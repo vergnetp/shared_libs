@@ -58,45 +58,121 @@ class AutoMigrator:
         
         code_hash = self._compute_schema_hash()
         
-        if await self._is_schema_applied(code_hash):
-            return
+        if not await self._is_schema_applied(code_hash):
+            changes = await self._detect_changes()
+            
+            if not changes:
+                await self._record_migration(code_hash, [])
+            else:
+                # Check for dangerous operations
+                has_deletions = any(
+                    c["type"] in ["drop_column", "drop_table"]
+                    for c in changes
+                )
+                has_renames = any(
+                    c["type"] == "rename_table" or c.get("renamed_from")
+                    for c in changes
+                )
+                
+                if (has_deletions or has_renames) and not dry_run:
+                    if has_deletions:
+                        print("⚠️  WARNING: Migration includes deletions (data loss!)")
+                    if has_renames:
+                        print("📋 Migration includes renames (data will be copied, old tables/columns kept)")
+                    for change in changes:
+                        if change["type"] == "drop_column":
+                            print(f"   - DROP COLUMN {change['table']}.{change['field']}")
+                        elif change["type"] == "drop_table":
+                            print(f"   - DROP TABLE {change['table']}")
+                        elif change["type"] == "rename_table":
+                            print(f"   - RENAME TABLE {change['old_table']} → {change['table']}")
+                        elif change.get("renamed_from"):
+                            print(f"   - RENAME COLUMN {change['table']}.{change['renamed_from']} → {change['field']}")
+                
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                migration_id = f"{timestamp}_{code_hash[:8]}"
+                operations = self._generate_sql(changes)
+                
+                self._save_audit(migration_id, changes, operations)
+                
+                if dry_run:
+                    print(f"[DRY RUN] Would apply migration {migration_id}")
+                    for sql, params, description in operations:
+                        print(f"  - {description}")
+                    return
+                
+                await self._apply_migration(operations)
+                await self._record_migration(code_hash, operations)
+                
+                print(f"✓ Applied migration {migration_id}")
         
-        changes = await self._detect_changes()
+        # Always run rename backfills — catches rows written by old containers
+        # during blue-green switchover. No-op when nothing to backfill.
+        if not dry_run:
+            await self._run_rename_backfills()
+    
+    async def _run_rename_backfills(self):
+        """
+        Backfill renamed columns/tables on every startup.
         
-        if not changes:
-            await self._record_migration(code_hash, [])
-            return
+        During blue-green deployments, the old container may write rows AFTER
+        the migration's initial UPDATE ran. This catches those stragglers.
         
-        # Check for dangerous operations
-        has_deletions = any(
-            c["type"] in ["drop_column", "drop_table"]
-            for c in changes
-        )
+        Only runs for fields with renamed_from set. Each UPDATE is idempotent
+        (WHERE new IS NULL) so it's a no-op when fully backfilled.
+        """
+        import logging
+        logger = logging.getLogger(__name__)
         
-        if has_deletions and not dry_run:
-            print("⚠️  WARNING: Migration includes deletions (data loss!)")
-            for change in changes:
-                if change["type"] == "drop_column":
-                    print(f"   - DROP COLUMN {change['table']}.{change['field']}")
-                elif change["type"] == "drop_table":
-                    print(f"   - DROP TABLE {change['table']}")
+        db_tables = await self._get_db_tables()
         
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        migration_id = f"{timestamp}_{code_hash[:8]}"
-        operations = self._generate_sql(changes)
-        
-        self._save_audit(migration_id, changes, operations)
-        
-        if dry_run:
-            print(f"[DRY RUN] Would apply migration {migration_id}")
-            for sql, params, description in operations:
-                print(f"  - {description}")
-            return
-        
-        await self._apply_migration(operations)
-        await self._record_migration(code_hash, operations)
-        
-        print(f"✓ Applied migration {migration_id}")
+        for table_name, entity_class in ENTITY_SCHEMAS.items():
+            if table_name not in db_tables:
+                continue
+            
+            # Column renames
+            for f in fields(entity_class):
+                old_col = (f.metadata or {}).get("renamed_from")
+                if not old_col:
+                    continue
+                
+                db_cols = await self._get_db_columns(table_name)
+                if old_col.lower() not in db_cols:
+                    continue
+                
+                sql = f"UPDATE [{table_name}] SET [{f.name}] = [{old_col}] WHERE [{f.name}] IS NULL AND [{old_col}] IS NOT NULL"
+                native_sql, params = self.sql_gen.convert_query_to_native(sql, ())
+                try:
+                    result = await self.db.execute(native_sql, params)
+                    # Log only if rows were actually backfilled
+                    if result and isinstance(result, int) and result > 0:
+                        logger.info(f"Backfilled {result} rows: {table_name}.{f.name} ← {old_col}")
+                except Exception:
+                    pass  # Column might not exist yet on first boot
+            
+            # Table renames
+            old_table = getattr(entity_class, '__entity_renamed_from__', None)
+            if not old_table or old_table not in db_tables:
+                continue
+            
+            # Copy any new rows from old table that aren't in new table yet
+            old_cols = await self._get_db_columns(old_table)
+            new_cols = await self._get_db_columns(table_name)
+            shared = sorted(old_cols & new_cols)
+            if shared:
+                cols_str = ", ".join(f"[{c}]" for c in shared)
+                sql = (
+                    f"INSERT OR IGNORE INTO [{table_name}] ({cols_str}) "
+                    f"SELECT {cols_str} FROM [{old_table}] "
+                    f"WHERE [{old_table}].[id] NOT IN (SELECT [id] FROM [{table_name}])"
+                )
+                native_sql, params = self.sql_gen.convert_query_to_native(sql, ())
+                try:
+                    result = await self.db.execute(native_sql, params)
+                    if result and isinstance(result, int) and result > 0:
+                        logger.info(f"Backfilled {result} rows from {old_table} → {table_name}")
+                except Exception:
+                    pass
     
     async def _ensure_migrations_table(self):
         """Create migrations tracking table if it doesn't exist"""
@@ -153,14 +229,29 @@ class AutoMigrator:
         db_tables = await self._get_db_tables()
         code_tables = set(ENTITY_SCHEMAS.keys())
         
-        # Detect new tables
+        # Detect new tables (or renamed tables)
         for table_name, entity_class in ENTITY_SCHEMAS.items():
             if table_name not in db_tables:
-                changes.append({
-                    "type": "create_table",
-                    "table": table_name,
-                    "entity": entity_class,
-                })
+                old_table = getattr(entity_class, '__entity_renamed_from__', None)
+                if old_table and old_table in db_tables:
+                    # Table rename: old table exists in DB, new one doesn't
+                    old_columns = await self._get_db_columns(old_table)
+                    changes.append({
+                        "type": "rename_table",
+                        "table": table_name,
+                        "old_table": old_table,
+                        "old_columns": old_columns,
+                        "entity": entity_class,
+                    })
+                else:
+                    if old_table and old_table not in db_tables:
+                        print(f"⚠️  renamed_from='{old_table}' on table '{table_name}' "
+                              f"but '{old_table}' not found in DB — treating as new table")
+                    changes.append({
+                        "type": "create_table",
+                        "table": table_name,
+                        "entity": entity_class,
+                    })
             else:
                 # Table exists - check for column changes
                 code_fields = self._get_entity_fields(entity_class)
@@ -176,12 +267,29 @@ class AutoMigrator:
                     if field_name.lower() in system_columns:
                         continue
                     if field_name.lower() not in db_fields:
-                        changes.append({
+                        change = {
                             "type": "add_column",
                             "table": table_name,
                             "field": field_name,
                             "field_info": field_info,
-                        })
+                        }
+                        # Track rename source for data copy
+                        if field_info.get("renamed_from"):
+                            old_col = field_info["renamed_from"].lower()
+                            if old_col in db_fields:
+                                change["renamed_from"] = field_info["renamed_from"]
+                            else:
+                                print(f"⚠️  renamed_from='{field_info['renamed_from']}' on {table_name}.{field_name} "
+                                      f"but column '{field_info['renamed_from']}' not found in DB — treating as new column")
+                        changes.append(change)
+                    else:
+                        # Column exists — check for metadata changes (new index, new unique)
+                        if field_info.get("index"):
+                            changes.append({
+                                "type": "add_index",
+                                "table": table_name,
+                                "field": field_name,
+                            })
                 
                 # Detect removed columns
                 if self.allow_column_deletion:
@@ -202,10 +310,20 @@ class AutoMigrator:
         
         # Detect removed tables
         if self.allow_table_deletion:
+            # Protect old tables that are sources of a rename (still needed for rollback)
+            rename_sources = {
+                getattr(ec, '__entity_renamed_from__', None)
+                for ec in ENTITY_SCHEMAS.values()
+            } - {None}
+            
             for table_name in db_tables:
                 # Skip system tables
                 if table_name.startswith('_') or table_name.endswith('_meta') or \
                    table_name.endswith('_history'):
+                    continue
+                
+                # Skip tables that are the source of a rename
+                if table_name in rename_sources:
                     continue
                 
                 if table_name not in code_tables:
@@ -248,6 +366,7 @@ class AutoMigrator:
                 "unique": meta.get("unique", False),
                 "foreign_key": meta.get("foreign_key"),
                 "check": meta.get("check"),
+                "renamed_from": meta.get("renamed_from"),
             }
         
         return result
@@ -295,8 +414,12 @@ class AutoMigrator:
         for change in changes:
             if change["type"] == "create_table":
                 operations.extend(self._generate_create_table_sql(change))
+            elif change["type"] == "rename_table":
+                operations.extend(self._generate_rename_table_sql(change))
             elif change["type"] == "add_column":
                 operations.extend(self._generate_add_column_sql(change))
+            elif change["type"] == "add_index":
+                operations.extend(self._generate_add_index_sql(change))
             elif change["type"] == "drop_column":
                 operations.extend(self._generate_drop_column_sql(change))
             elif change["type"] == "drop_table":
@@ -304,6 +427,39 @@ class AutoMigrator:
         
         return operations
     
+    def _build_col_type(self, field_info: Dict, for_history: bool = False) -> str:
+        """
+        Build full column type definition from field metadata.
+        
+        Args:
+            field_info: Field metadata dict with type, unique, nullable, default, check
+            for_history: If True, only include DEFAULT (history tables don't need constraints)
+        
+        Returns:
+            Column type string, e.g. "TEXT NOT NULL DEFAULT 'x' CHECK ([status] IN (...))"
+        """
+        col_type = field_info['type']
+        
+        if not for_history:
+            if field_info.get("unique"):
+                col_type += " UNIQUE"
+            if not field_info.get("nullable", True):
+                col_type += " NOT NULL"
+        
+        if field_info.get("default") is not None:
+            default = field_info["default"]
+            if isinstance(default, str):
+                col_type += f" DEFAULT '{default}'"
+            elif isinstance(default, bool):
+                col_type += f" DEFAULT {1 if default else 0}"
+            else:
+                col_type += f" DEFAULT {default}"
+        
+        if not for_history and field_info.get("check"):
+            col_type += f" CHECK ({field_info['check']})"
+        
+        return col_type
+
     def _generate_create_table_sql(self, change: Dict) -> List[Tuple]:
         """Generate CREATE TABLE and related SQL operations"""
         entity_class = change["entity"]
@@ -325,22 +481,7 @@ class AutoMigrator:
             if field_name.lower() in system_columns:
                 continue
                 
-            col_type = field_info['type']
-            
-            if field_info.get("unique"):
-                col_type += " UNIQUE"
-            if not field_info.get("nullable", True):
-                col_type += " NOT NULL"
-            if field_info.get("default") is not None:
-                default = field_info["default"]
-                if isinstance(default, str):
-                    col_type += f" DEFAULT '{default}'"
-                elif isinstance(default, bool):
-                    col_type += f" DEFAULT {1 if default else 0}"
-                else:
-                    col_type += f" DEFAULT {default}"
-            if field_info.get("check"):
-                col_type += f" CHECK ({field_info['check']})"
+            col_type = self._build_col_type(field_info)
             
             columns.append((field_name, col_type))
             
@@ -392,6 +533,66 @@ class AutoMigrator:
         
         return operations
     
+    def _generate_rename_table_sql(self, change: Dict) -> List[Tuple]:
+        """
+        Generate table rename operations: create new table, copy data, keep old.
+        
+        Strategy:
+        1. Create new table (full schema from entity class)
+        2. Copy rows from old table (only matching columns)
+        3. Same for history table
+        4. Old table is NOT dropped (rollback safe)
+        """
+        # Step 1: Create new table with full schema (reuse create_table logic)
+        operations = self._generate_create_table_sql(change)
+        
+        old_table = change["old_table"]
+        new_table = change["table"]
+        entity_class = change["entity"]
+        old_columns = change["old_columns"]  # Set of lowercase column names from DB
+        
+        # Step 2: Find columns that exist in BOTH old and new tables
+        system_columns = {'id', 'created_at', 'updated_at', 'deleted_at',
+                          'created_by', 'updated_by'}
+        code_fields = self._get_entity_fields(entity_class)
+        new_columns = {f.lower() for f in code_fields.keys()} | system_columns
+        
+        shared_cols = sorted(new_columns & old_columns)
+        
+        if shared_cols:
+            cols_str = ", ".join(f"[{c}]" for c in shared_cols)
+            
+            copy_sql = (
+                f"INSERT OR IGNORE INTO [{new_table}] ({cols_str}) "
+                f"SELECT {cols_str} FROM [{old_table}]"
+            )
+            operations.append((copy_sql, (), f"Copy data from {old_table} to {new_table} ({len(shared_cols)} columns)"))
+            
+            # Step 3: Copy history table (shared cols + history-specific cols)
+            history_extra = ["version", "history_timestamp", "history_user_id", "history_comment"]
+            history_cols = shared_cols + history_extra
+            history_cols_str = ", ".join(f"[{c}]" for c in history_cols)
+            
+            history_copy_sql = (
+                f"INSERT OR IGNORE INTO [{new_table}_history] ({history_cols_str}) "
+                f"SELECT {history_cols_str} FROM [{old_table}_history]"
+            )
+            operations.append((history_copy_sql, (), f"Copy history from {old_table} to {new_table}"))
+        
+        return operations
+    
+    def _generate_add_index_sql(self, change: Dict) -> List[Tuple]:
+        """
+        Generate CREATE INDEX for an existing column.
+        
+        Uses IF NOT EXISTS — idempotent, safe to run even if index already present.
+        """
+        table_name = change["table"]
+        field_name = change["field"]
+        
+        idx_sql = self._get_create_index_sql(table_name, field_name)
+        return [(idx_sql, (), f"Create index on {table_name}.{field_name}")]
+    
     def _generate_add_column_sql(self, change: Dict) -> List[Tuple]:
         """Generate ALTER TABLE ADD COLUMN operations"""
         table_name = change["table"]
@@ -400,31 +601,14 @@ class AutoMigrator:
         
         operations = []
         
-        # Build column definition
-        col_sql = self.sql_gen.get_add_column_sql(table_name, field_name)
-        
-        if field_info.get("default") is not None:
-            default = field_info["default"]
-            if isinstance(default, str):
-                col_sql += f" DEFAULT '{default}'"
-            elif isinstance(default, bool):
-                col_sql += f" DEFAULT {1 if default else 0}"
-            else:
-                col_sql += f" DEFAULT {default}"
-        
+        # Build full column type (UNIQUE, NOT NULL, DEFAULT, CHECK)
+        col_type = self._build_col_type(field_info)
+        col_sql = self.sql_gen.get_add_column_sql(table_name, field_name, col_type)
         operations.append((col_sql, (), f"Add column {field_name} to {table_name}"))
         
-        # Add to history table
-        history_sql = self.sql_gen.get_add_column_sql(f"{table_name}_history", field_name)
-        if field_info.get("default") is not None:
-            default = field_info["default"]
-            if isinstance(default, str):
-                history_sql += f" DEFAULT '{default}'"
-            elif isinstance(default, bool):
-                history_sql += f" DEFAULT {1 if default else 0}"
-            else:
-                history_sql += f" DEFAULT {default}"
-        
+        # Add to history table (DEFAULT only — no constraints on history)
+        history_col_type = self._build_col_type(field_info, for_history=True)
+        history_sql = self.sql_gen.get_add_column_sql(f"{table_name}_history", field_name, history_col_type)
         operations.append((history_sql, (), f"Add column {field_name} to {table_name}_history"))
         
         # Update meta table
@@ -439,6 +623,16 @@ class AutoMigrator:
         if field_info.get("index"):
             idx_sql = self._get_create_index_sql(table_name, field_name)
             operations.append((idx_sql, (), f"Create index on {table_name}.{field_name}"))
+        
+        # Copy data from old column if this is a rename
+        if change.get("renamed_from"):
+            old_col = change["renamed_from"]
+            copy_sql = f"UPDATE [{table_name}] SET [{field_name}] = [{old_col}] WHERE [{field_name}] IS NULL"
+            operations.append((copy_sql, (), f"Copy data from {old_col} to {field_name} (rename)"))
+            
+            # Copy in history table too
+            history_copy_sql = f"UPDATE [{table_name}_history] SET [{field_name}] = [{old_col}] WHERE [{field_name}] IS NULL"
+            operations.append((history_copy_sql, (), f"Copy data from {old_col} to {field_name} in history (rename)"))
         
         return operations
     

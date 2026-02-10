@@ -234,40 +234,34 @@ async def run_database_lifecycle(
         # Store backend (first run or same backend)
         _store_backend(data_dir, new_backend)
         
-        # Step 1: Create backup (skip in non-prod, skip if empty)
+        # Step 1: Create backup (skip if empty)
         if backup_enabled:
-            from ..env_checks import is_prod
-            
-            if not is_prod():
-                logger.info("Skipping backup in non-prod environment")
-            else:
-                # Check if database has any user tables
-                try:
-                    tables = await db_connection.list_tables()
-                    user_tables = [t for t in tables if not t.startswith('_')]
+            try:
+                tables = await db_connection.list_tables()
+                user_tables = [t for t in tables if not t.startswith('_')]
+                
+                if not user_tables:
+                    logger.info("Skipping backup - database is empty")
+                else:
+                    logger.info("Creating database backup...")
+                    strategy = BackupStrategy(db_connection)
                     
-                    if not user_tables:
-                        logger.info("Skipping backup - database is empty")
-                    else:
-                        logger.info("Creating database backup...")
-                        strategy = BackupStrategy(db_connection)
-                        
-                        result = await strategy.backup_database(
-                            backup_dir,
-                            include_native=True,
-                            include_csv=True
-                        )
-                        
-                        results["backup_created"] = True
-                        results["backup_path"] = result.get("csv_dir")
-                        
-                        logger.info("Database backup created", extra={
-                            "backup_dir": backup_dir,
-                            "tables": len(user_tables),
-                        })
-                except Exception as e:
-                    logger.error(f"Backup failed: {e}", extra={"error": str(e)})
-                    # Continue even if backup fails
+                    result = await strategy.backup_database(
+                        backup_dir,
+                        include_native=True,
+                        include_csv=True
+                    )
+                    
+                    results["backup_created"] = True
+                    results["backup_path"] = result.get("csv_dir")
+                    
+                    logger.info("Database backup created", extra={
+                        "backup_dir": backup_dir,
+                        "tables": len(user_tables),
+                    })
+            except Exception as e:
+                logger.error(f"Backup failed: {e}", extra={"error": str(e)})
+                # Continue even if backup fails
         
         # Step 2: Run migrations (only if @entity schemas detected)
         if migration_enabled:
@@ -314,7 +308,7 @@ async def run_database_lifecycle(
 
 
 def get_lifecycle_config(
-    backup_enabled: bool = None,
+    backup_enabled: bool = True,
     migration_enabled: bool = True,
     data_dir: str = ".data",
 ) -> dict:
@@ -322,19 +316,13 @@ def get_lifecycle_config(
     Get lifecycle configuration.
     
     Args:
-        backup_enabled: Enable/disable backups. Default: False in dev/uat/staging, True in prod.
+        backup_enabled: Enable/disable startup backups (default: True)
         migration_enabled: Enable/disable migrations (default: True)
         data_dir: Base data directory (default: .data)
     
     Returns:
         dict with configuration
     """
-    from ..env_checks import is_prod
-    
-    # Default backup to false in non-prod (too slow), true in prod
-    if backup_enabled is None:
-        backup_enabled = is_prod()
-    
     return {
         "backup_enabled": backup_enabled,
         "migration_enabled": migration_enabled,

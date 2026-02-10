@@ -323,6 +323,173 @@ async def rollback_to_backup(
     return True
 
 
+async def restore_from_history(
+    db,
+    target_time: str,  # ISO format: "2026-02-10T14:30:00Z"
+    tables: list = None,  # None = all entity tables with history
+    confirm: bool = False,
+) -> dict:
+    """
+    Point-in-time restore using history tables — no CSV backup needed.
+    
+    For each entity table with history tracking:
+    1. Find each row's state at target_time (latest version before cutoff)
+    2. Overwrite main table rows with that state
+    3. Soft-delete rows that didn't exist at target_time
+    
+    History tables are NEVER modified — you can always roll forward again.
+    
+    Args:
+        db: Database connection
+        target_time: Restore to this point (ISO format)
+        tables: Specific tables to restore, or None for all
+        confirm: Must be True to execute
+    
+    Returns:
+        dict with per-table restore stats
+    
+    Example:
+        # Restore everything to 2 hours ago
+        result = await restore_from_history(db, "2026-02-10T14:30:00Z", confirm=True)
+        
+        # Restore just the services table
+        result = await restore_from_history(db, "2026-02-10T14:30:00Z", tables=["services"], confirm=True)
+    """
+    from ..entity import ENTITY_SCHEMAS
+    
+    if not confirm:
+        return {"error": "Pass confirm=True to execute. This overwrites current data."}
+    
+    # Validate target time
+    try:
+        from datetime import datetime, timezone
+        target_dt = datetime.fromisoformat(target_time.replace('Z', '+00:00'))
+    except ValueError:
+        return {"error": f"Invalid time format: {target_time}. Use ISO format."}
+    
+    results = {}
+    sql_gen = db.sql_generator
+    
+    # Determine which tables to restore
+    for table_name, entity_class in ENTITY_SCHEMAS.items():
+        if not getattr(entity_class, '__entity_history__', False):
+            continue
+        if tables and table_name not in tables:
+            continue
+        
+        history_table = f"{table_name}_history"
+        
+        # Check history table exists
+        if not await db._table_exists(history_table):
+            results[table_name] = {"skipped": "no history table"}
+            continue
+        
+        # Get column names from history table
+        col_sql, col_params = sql_gen.get_list_columns_sql(history_table)
+        col_result = await db.execute(col_sql, col_params)
+        if col_result and len(col_result[0]) > 1 and isinstance(col_result[0][0], int):
+            history_fields = [row[1] for row in col_result]
+        else:
+            history_fields = [row[0] for row in col_result]
+        
+        if not history_fields:
+            results[table_name] = {"skipped": "empty schema"}
+            continue
+        
+        history_meta_cols = {'version', 'history_timestamp', 'history_user_id', 'history_comment'}
+        
+        # Step 1: Get the latest history version of each row before cutoff
+        snapshot_sql = (
+            f"SELECT * FROM [{history_table}] "
+            f"WHERE ([id], [version]) IN ("
+            f"  SELECT [id], MAX([version]) FROM [{history_table}] "
+            f"  WHERE [history_timestamp] <= ? "
+            f"  GROUP BY [id]"
+            f") "
+        )
+        native_sql, native_params = sql_gen.convert_query_to_native(snapshot_sql, (target_time,))
+        rows = await db.execute(native_sql, native_params)
+        
+        if not rows:
+            results[table_name] = {"skipped": "no history before target time"}
+            continue
+        
+        # Build entity dicts from history rows (strip history-specific columns)
+        snapshot_entities = []
+        snapshot_ids = set()
+        for row in rows:
+            row_dict = dict(zip(history_fields, row))
+            # Remove history-specific fields
+            for hc in history_meta_cols:
+                row_dict.pop(hc, None)
+            snapshot_entities.append(row_dict)
+            snapshot_ids.add(row_dict['id'])
+        
+        # Step 2: Upsert snapshot rows into main table
+        restored = 0
+        batch_size = 100
+        for i in range(0, len(snapshot_entities), batch_size):
+            batch = snapshot_entities[i:i + batch_size]
+            await db.save_entities(
+                table_name, batch,
+                user_id="system:history_restore",
+                comment=f"Restored to {target_time}",
+            )
+            restored += len(batch)
+        
+        # Step 3: Soft-delete rows that didn't exist at target_time
+        # These are rows created after the cutoff
+        soft_deleted = 0
+        all_ids_sql = f"SELECT [id] FROM [{table_name}] WHERE [deleted_at] IS NULL"
+        native_sql, native_params = sql_gen.convert_query_to_native(all_ids_sql, ())
+        current_rows = await db.execute(native_sql, native_params)
+        
+        orphan_ids = [row[0] for row in current_rows if row[0] not in snapshot_ids]
+        
+        if orphan_ids:
+            now = datetime.now(timezone.utc).isoformat()
+            placeholders = ", ".join(["?"] * len(orphan_ids))
+            delete_sql = (
+                f"UPDATE [{table_name}] SET [deleted_at] = ? "
+                f"WHERE [id] IN ({placeholders}) AND [deleted_at] IS NULL"
+            )
+            native_sql, native_params = sql_gen.convert_query_to_native(
+                delete_sql, (now, *orphan_ids)
+            )
+            await db.execute(native_sql, native_params)
+            soft_deleted = len(orphan_ids)
+        
+        results[table_name] = {
+            "restored": restored,
+            "soft_deleted": soft_deleted,
+            "target_time": target_time,
+        }
+    
+    return results
+
+
+async def restore_single_table(
+    db,
+    table_name: str,
+    target_time: str,
+    confirm: bool = False,
+) -> dict:
+    """
+    Convenience wrapper: restore a single table from history.
+    
+    Args:
+        db: Database connection
+        table_name: Table to restore
+        target_time: Restore to this point (ISO format)
+        confirm: Must be True to execute
+    
+    Returns:
+        dict with restore stats for the table
+    """
+    result = await restore_from_history(db, target_time, tables=[table_name], confirm=confirm)
+    return result.get(table_name, result)
+
+
 def list_restore_points(
     migration_dir: str = "./migrations_audit",
     backup_dir: str = "./backups",
