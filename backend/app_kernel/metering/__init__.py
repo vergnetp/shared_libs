@@ -23,16 +23,17 @@ Usage:
         raise HTTPException(402, "Token limit reached")
     
     # Auto-mounted routes:
-    #   GET /api/v1/usage                - Get usage for current user
-    #   GET /api/v1/usage/workspace/{id} - Get workspace usage
-    #   GET /api/v1/usage/endpoints      - Get usage by endpoint
-    #   GET /api/v1/usage/quota/{metric} - Check quota status
+    #   GET /api/v1/usage                       - Get usage for current user
+    #   GET /api/v1/usage/workspace/{id}        - Get workspace usage
+    #   GET /api/v1/usage/quota/{metric}        - Check quota status
+    #   GET /api/v1/admin/usage/user/{id}       - Get specific user's usage (admin)
+    #   GET /api/v1/admin/usage/endpoints       - Get usage by endpoint (admin)
 """
 
 from .publisher import track_request, track_usage
 from .queries import get_usage, get_usage_by_endpoint, check_quota, get_quota_remaining
 from .middleware import UsageMeteringMiddleware
-from .router import create_metering_router
+from .router import create_metering_router, create_metering_admin_router
 
 __all__ = [
     # Publishers (write to Redis)
@@ -45,6 +46,7 @@ __all__ = [
     "get_quota_remaining",
     # Middleware
     "UsageMeteringMiddleware",
-    # Router
+    # Routers
     "create_metering_router",
+    "create_metering_admin_router",
 ]

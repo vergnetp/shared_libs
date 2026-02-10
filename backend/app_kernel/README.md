@@ -624,7 +624,9 @@ The kernel provides automatic backups, scheduled backups, and multiple restore s
 
 Backups are triggered automatically in two situations:
 
-**On startup (before migrations)** — every time your app starts, the database lifecycle creates a full backup (CSV + native) before running any schema migrations. This means you always have a snapshot of the pre-migration state. In a blue-green deployment, the new container starts → backup runs → migrations run → health check passes → nginx switches. The backup captures the exact state before any schema change.
+**On startup (before migrations)** — every time your app starts, the database lifecycle creates a full backup (CSV + native) before running any schema migrations. In a blue-green deployment, the new container starts → backup runs → migrations run → health check passes → nginx switches. The backup captures the exact state before any schema change.
+
+Note that the old container keeps serving traffic (and writing to the database) while the new container is starting up. Writes that land between the backup and the nginx switch are **not in the CSV backup** — but they are recorded in the entity history tables. This is why history-based restore exists: it covers the gap that backup-based restore cannot. If you need to rollback and there were writes during the switchover window, use `POST /admin/db/restore/history` with a target time just before the incident rather than restoring from CSV.
 
 **On schedule** — a background worker runs periodic backups on a cron schedule. The default is daily at 3pm UTC. Configure it via `create_service`:
 
@@ -733,18 +735,19 @@ If a deployment introduces a bad migration or corrupts data:
 | `POST /api/v1/auth/login` | Login |
 | `GET /api/v1/auth/me` | Current user |
 | `* /api/v1/workspaces/*` | Workspace CRUD |
-| `GET /api/v1/audit` | Query audit logs (admin) |
-| `GET /api/v1/audit/entity/{type}/{id}` | Entity history (admin) |
-| `GET /api/v1/usage` | Current user's usage (or any user for admin) |
-| `GET /api/v1/usage/user/{id}` | Specific user's usage (admin) |
-| `GET /api/v1/usage/workspace/{id}` | Workspace usage |
-| `GET /api/v1/usage/endpoints` | Usage by endpoint |
+| `GET /api/v1/usage` | Current user's usage (or any user for admin via `?user_id=`) |
+| `GET /api/v1/usage/workspace/{id}` | Workspace usage (own workspace, or any if admin) |
 | `GET /api/v1/usage/quota/{metric}` | Check quota status |
-| `GET /api/v1/metrics/requests` | Request metrics list (admin) |
-| `GET /api/v1/metrics/requests/stats` | Aggregated stats (admin) |
-| `GET /api/v1/metrics/requests/slow` | Slow requests (admin) |
-| `GET /api/v1/metrics/requests/errors` | Error requests (admin) |
+| `GET /api/v1/tasks/{id}/status` | Check task status |
 | `POST /api/v1/tasks/{id}/cancel` | Cancel SSE task |
+| `GET /api/v1/admin/audit` | Query audit logs (admin) |
+| `GET /api/v1/admin/audit/entity/{type}/{id}` | Entity audit history (admin) |
+| `GET /api/v1/admin/usage/user/{id}` | Specific user's usage (admin) |
+| `GET /api/v1/admin/usage/endpoints` | Usage by endpoint (admin) |
+| `GET /api/v1/admin/metrics` | Request metrics list (admin) |
+| `GET /api/v1/admin/metrics/stats` | Aggregated request stats (admin) |
+| `GET /api/v1/admin/metrics/slow` | Slow requests (admin) |
+| `GET /api/v1/admin/metrics/errors` | Error requests (admin) |
 | `GET /api/v1/admin/db/migrations` | List applied schema migrations (admin) |
 | `GET /api/v1/admin/db/migrations/{hash}` | Migration detail (admin) |
 | `GET /api/v1/admin/db/backups` | List CSV restore points (admin) |
@@ -970,20 +973,22 @@ GET  /billing/admin/revenue           - Revenue stats (MRR, counts)
 
 ### Usage Metering
 
-Track API calls, tokens, or any metric for billing/quotas. Routes auto-mounted at `/api/v1/usage`.
+Track API calls, tokens, or any metric for billing/quotas. User routes at `/api/v1/usage`, admin routes at `/api/v1/admin/usage`.
 
 ```python
 from app_kernel.metering import track_usage, get_usage, check_quota
 
 # Auto-tracked: every request is counted automatically via middleware
 
-# Query via API:
+# User-facing routes:
 #   GET /api/v1/usage                     - Current user's usage
-#   GET /api/v1/usage?user_id=xyz         - Any user's usage (admin)
-#   GET /api/v1/usage/user/{id}           - Specific user (admin)
+#   GET /api/v1/usage?user_id=xyz         - Any user's usage (admin override)
 #   GET /api/v1/usage/workspace/{id}      - Workspace usage
-#   GET /api/v1/usage/endpoints           - By endpoint
 #   GET /api/v1/usage/quota/tokens?limit=100000  - Check quota
+
+# Admin routes:
+#   GET /api/v1/admin/usage/user/{id}     - Specific user's usage
+#   GET /api/v1/admin/usage/endpoints     - Usage by endpoint
 
 # Manual tracking (e.g., AI tokens)
 await track_usage(redis, app="my-api",
@@ -1004,7 +1009,7 @@ if not await check_quota(db, app="my-api", workspace_id=ws_id,
 
 ### Audit Logging
 
-Automatic tracking of who changed what, when. Routes auto-mounted at `/api/v1/audit` (admin only).
+Automatic tracking of who changed what, when. Routes auto-mounted at `/api/v1/admin/audit` (admin only).
 
 ```python
 from app_kernel.audit import get_audit_logs, get_entity_audit_history
@@ -1012,8 +1017,8 @@ from app_kernel.audit import get_audit_logs, get_entity_audit_history
 # Auto-audit: save_entity/delete_entity calls are logged automatically
 
 # Query via API:
-#   GET /api/v1/audit?entity=deployments&since=2025-01-01
-#   GET /api/v1/audit/entity/deployments/{id}
+#   GET /api/v1/admin/audit?entity=deployments&since=2025-01-01
+#   GET /api/v1/admin/audit/entity/deployments/{id}
 
 # Or query programmatically:
 logs = await get_audit_logs(db,
@@ -1029,20 +1034,20 @@ history = await get_entity_audit_history(db, "deployments", deployment_id)
 
 ### Request Metrics (Telemetry)
 
-Every request is automatically tracked with timing, status, user, and geo data. Metrics are pushed to Redis and batch-saved by the admin worker (same pattern as audit and metering). Routes auto-mounted at `/api/v1/metrics/requests` (admin only).
+Every request is automatically tracked with timing, status, user, and geo data. Metrics are pushed to Redis and batch-saved by the admin worker (same pattern as audit and metering). Routes auto-mounted at `/api/v1/admin/metrics` (admin only).
 
 ```
 # Query via API:
-GET /api/v1/metrics/requests              - List recent requests
-GET /api/v1/metrics/requests/stats        - Aggregated statistics  
-GET /api/v1/metrics/requests/slow         - Slow requests (>1s)
-GET /api/v1/metrics/requests/errors       - Error requests (4xx/5xx)
+GET /api/v1/admin/metrics              - List recent requests
+GET /api/v1/admin/metrics/stats        - Aggregated statistics  
+GET /api/v1/admin/metrics/slow         - Slow requests (>1s)
+GET /api/v1/admin/metrics/errors       - Error requests (4xx/5xx)
 
 # Example: Get stats for last 24 hours
-GET /api/v1/metrics/requests/stats?hours=24
+GET /api/v1/admin/metrics/stats?hours=24
 
 # Example: Get slow requests on /api/v1/deploy
-GET /api/v1/metrics/requests/slow?path=/api/v1/deploy&min_latency=500
+GET /api/v1/admin/metrics/slow?path=/api/v1/deploy&min_latency=500
 ```
 
 Data collected per request:

@@ -817,13 +817,13 @@ def create_service(
             app_name=name,
         )
     
-    # Mount request metrics API routes if enabled
+    # Mount request metrics API routes if enabled (admin only)
     if request_metrics_enabled:
         from .observability.request_metrics import create_request_metrics_router
         from .auth.deps import get_current_user
         
         metrics_router = create_request_metrics_router(
-            prefix="/metrics/requests",
+            prefix="/admin/metrics",
             protect="admin",
             get_current_user=get_current_user,
             is_admin=is_admin or _default_is_admin,
@@ -838,7 +838,7 @@ def create_service(
         audit_router = create_audit_router(
             get_current_user=get_current_user,
             app_name=name,
-            prefix="/audit",
+            prefix="/admin/audit",
             require_admin=True,
             is_admin=is_admin or _default_is_admin,
         )
@@ -859,11 +859,12 @@ def create_service(
         )
         app.include_router(db_admin_router, prefix=api_prefix)
     
-    # Mount usage metering routes
+    # Mount usage metering routes (user-facing + admin)
     if cfg.database_url:
-        from .metering import create_metering_router
+        from .metering import create_metering_router, create_metering_admin_router
         from .auth.deps import get_current_user
         
+        # User-facing: own usage, own workspace, quota checks
         metering_router = create_metering_router(
             get_current_user=get_current_user,
             app_name=name,
@@ -871,6 +872,15 @@ def create_service(
             is_admin=is_admin or _default_is_admin,
         )
         app.include_router(metering_router, prefix=api_prefix)
+        
+        # Admin: cross-user and cross-workspace queries
+        metering_admin_router = create_metering_admin_router(
+            get_current_user=get_current_user,
+            app_name=name,
+            prefix="/admin/usage",
+            is_admin=is_admin or _default_is_admin,
+        )
+        app.include_router(metering_admin_router, prefix=api_prefix)
     
     # Mount job routes if tasks defined and Redis available
     if tasks and cfg.redis_url:
