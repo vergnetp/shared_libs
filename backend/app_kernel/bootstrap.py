@@ -847,7 +847,7 @@ def create_service(
     # Mount database admin routes (admin only)
     if cfg.database_url:
         from .db.lifecycle import get_lifecycle_config
-        from ..databases.migrations.admin import create_db_admin_router
+        from .db.router import create_db_admin_router
         from .auth.deps import get_current_user
         
         lifecycle_cfg = get_lifecycle_config()

@@ -95,7 +95,7 @@ The approach is code-first: define your data models as dataclasses with the `@en
 
 On startup, the kernel compares your `@entity` classes against the actual database schema. New tables and columns are created automatically. Renames and deletions are flagged with warnings — the migrator won't drop data without explicit opt-in. Migration scripts are persisted in `.data/migrations_audit/` for traceability. A full backup (native + CSV) is taken before any migration runs, stored in `.data/backups/`.
 
-Migrations are **forward-only**. There is no `migrate down` command. To rollback: redeploy the previous version of your code and restore from backup or history (see [Backup & Restore](#backup--restore)). The pre-migration backup exists precisely for this. For finer control, the admin endpoints let you restore individual tables or use the built-in history tables for point-in-time recovery without any backup files.
+Migrations are **forward-only**. There is no `migrate down` command. To rollback: redeploy the previous version of your code and restore from backup (see [Backup & Restore](#backup--restore)). The pre-migration backup exists precisely for this. Use `POST /admin/db/restore/full` for full rollback, or `POST /admin/db/restore/revert` for quick single-table undo via history tables.
 
 
 Connections are handled automatically: each entity call acquires a short-lived connection from the pool and releases it immediately. The pool is backed by the database you pass to `create_service` via `database_url` (or SQLite in `./data/{app_name}.db` if none specified). Every entity also gets free history tracking — every change is versioned automatically.
@@ -618,15 +618,13 @@ python -m app_kernel.admin_worker \
 
 ## Backup & Restore
 
-The kernel provides automatic backups, scheduled backups, and multiple restore strategies — from full database snapshots to single-table point-in-time recovery using entity history.
+The kernel provides automatic backups and two restore strategies: **full CSV rollback** (primary) and **history-based revert** (lightweight undo).
 
 ### When Backups Happen
 
 Backups are triggered automatically in two situations:
 
 **On startup (before migrations)** — every time your app starts, the database lifecycle creates a full backup (CSV + native) before running any schema migrations. In a blue-green deployment, the new container starts → backup runs → migrations run → health check passes → nginx switches. The backup captures the exact state before any schema change.
-
-Note that the old container keeps serving traffic (and writing to the database) while the new container is starting up. Writes that land between the backup and the nginx switch are **not in the CSV backup** — but they are recorded in the entity history tables. This is why history-based restore exists: it covers the gap that backup-based restore cannot. If you need to rollback and there were writes during the switchover window, use `POST /admin/db/restore/history` with a target time just before the incident rather than restoring from CSV.
 
 **On schedule** — a background worker runs periodic backups on a cron schedule. The default is daily at 3pm UTC. Configure it via `create_service`:
 
@@ -646,50 +644,64 @@ Standard 5-field cron format (minute, hour, day, month, weekday), evaluated in U
 
 Each backup creates two things in `.data/backups/`:
 
-- **CSV export** (`csv_YYYYMMDD_HHMMSS_<hash>/`) — one `.csv` per table, human-readable, portable across database backends. Used for selective table restores.
-- **Native dump** — pg_dump for Postgres, mysqldump for MySQL, file copy for SQLite. Used for full database recovery.
+- **CSV export** (`csv_YYYYMMDD_HHMMSS_<hash>/`) — one `.csv` per table (entity, history, and meta), human-readable, portable across database backends. Schema hash in the directory name links back to the migration that produced it.
+- **Native dump** — pg_dump for Postgres, mysqldump for MySQL, file copy for SQLite. Used for full database recovery via CLI tools.
 
 ### Restore Options
 
-There are three ways to restore data, each suited to different scenarios.
+**1. Full CSV rollback (recommended)**
 
-**1. History-based restore (no backup needed)**
-
-Every `@entity` has automatic history tracking. The `_history` tables contain every version of every row, timestamped. You can restore to any point in time by querying these tables — no backup files required.
+The primary restore path. Drops everything, replays migrations up to the backup's schema hash, then imports CSV data. Works across table renames, schema changes, and even backend switches.
 
 ```
-POST /api/v1/admin/db/restore/history
+POST /api/v1/admin/db/restore/full
 {
-    "target_time": "2026-02-10T14:30:00Z",
-    "tables": ["products", "orders"],
+    "backup_name": "csv_20260210_140000_a1b2c3d4",
     "confirm": false
 }
 ```
 
-With `confirm: false` (the default), this returns a dry-run preview showing how many rows would be affected. Set `confirm: true` to execute. If `tables` is omitted, all entity tables are restored.
+With `confirm: false` (the default), returns backup metadata and table list for review. Set `confirm: true` to execute. This is **destructive** — all current data is dropped before restore.
 
-How it works: for each table, the endpoint queries the history table for the latest version of each row at or before `target_time`, upserts those rows into the main table, and soft-deletes any rows that were created after the target time. History tables are never modified — you can restore forward again.
+Best for: disaster recovery, rolling back bad migrations, restoring to a known-good state.
 
-Best for: accidental data changes, "undo" scenarios, narrow time windows between backups.
+**2. CSV table import (additive)**
 
-**2. CSV restore (from backup)**
-
-Restore one or more tables from a CSV backup snapshot.
+Import specific tables from a CSV backup into the current schema without dropping anything. Rows with matching IDs are overwritten; rows created after the backup are kept.
 
 ```
 POST /api/v1/admin/db/restore/csv
 {
     "backup_name": "csv_20260210_140000_a1b2c3d4",
-    "table_names": ["products"],
+    "table_names": ["products", "products_history"],
     "confirm": true
 }
 ```
 
-If `table_names` is omitted, all CSVs in the backup directory are restored. The endpoint validates that all requested CSV files exist before starting, and reports per-table success/failure.
+If `table_names` is omitted, all CSVs in the backup directory are imported. The schema must already match — this does not replay migrations.
 
-Best for: full table recovery, restoring after a bad migration, moving data between environments.
+Best for: selective table recovery when the schema hasn't changed.
 
-**3. Native restore (manual)**
+**3. History-based revert (lightweight undo)**
+
+Revert a single table to a point in time using its history table. No backup file needed.
+
+```
+POST /api/v1/admin/db/restore/revert
+{
+    "table_name": "products",
+    "target_time": "2026-02-10T14:30:00Z",
+    "confirm": false
+}
+```
+
+Queries the history table for each row's state at `target_time`, upserts those values (preserving original timestamps), and soft-deletes rows created after the cutoff. History tables are never modified — a new version is appended as audit trail.
+
+Limitations: only works on tables in the current `@entity` code, cannot cross table renames, and new columns added after `target_time` get their DEFAULT value or NULL.
+
+Best for: quick undo of recent accidental changes on a single table.
+
+**4. Native restore (manual)**
 
 For Postgres and MySQL, restore the native dump using `pg_restore` or `mysql` CLI tools. For SQLite, stop the app and replace the database file. This is a full database replacement — use it when the other options aren't sufficient.
 
@@ -708,9 +720,9 @@ All admin database endpoints require admin authentication and live under `/api/v
 
 - `POST /backup` — trigger a backup immediately
 - `POST /backfill` — manually run rename backfills (same logic that runs on startup, useful after restoring data)
-- `POST /restore/history` — point-in-time restore from history tables
-- `POST /restore/table` — convenience wrapper for single-table history restore
-- `POST /restore/csv` — restore from a CSV backup
+- `POST /restore/full` — ⚠️ destructive full rollback: clear DB → replay migrations → import CSV
+- `POST /restore/csv` — additive CSV import into current schema
+- `POST /restore/revert` — lightweight single-table undo via history tables
 
 ### Rollback Workflow
 
@@ -718,45 +730,153 @@ If a deployment introduces a bad migration or corrupts data:
 
 1. **Redeploy the previous version** — the old code starts, its `@entity` classes match the pre-migration schema. Extra columns from the new code are left in place (harmless).
 2. **Check what happened** — use `GET /admin/db/migrations` to see what changed, `GET /admin/db/schema/orphans` to spot leftover columns.
-3. **Restore data** — pick the right strategy:
-   - Recent accidental change → `POST /restore/history` with a target time just before the incident
-   - Full table recovery → `POST /restore/csv` from the pre-migration backup
-   - Entire database → native restore from dump
+3. **Restore data** — use `POST /restore/full` with the pre-migration backup name. This is the safest path — it replays migrations from scratch and imports the exact CSV snapshot.
 4. **Run backfills** — if the old code has `renamed_from` fields, hit `POST /backfill` to re-copy data into the expected columns.
 
 ## Auto-Mounted Routes
+
+### Health & Metrics
 
 | Route | Description |
 |-------|-------------|
 | `GET /healthz` | Liveness probe |
 | `GET /readyz` | Readiness (runs health_checks) |
 | `GET /metrics` | Prometheus metrics |
-| `POST /api/v1/auth/register` | Register (if allow_self_signup) |
-| `POST /api/v1/auth/login` | Login |
-| `GET /api/v1/auth/me` | Current user |
-| `* /api/v1/workspaces/*` | Workspace CRUD |
-| `GET /api/v1/usage` | Current user's usage (or any user for admin via `?user_id=`) |
-| `GET /api/v1/usage/workspace/{id}` | Workspace usage (own workspace, or any if admin) |
-| `GET /api/v1/usage/quota/{metric}` | Check quota status |
-| `GET /api/v1/tasks/{id}/status` | Check task status |
-| `POST /api/v1/tasks/{id}/cancel` | Cancel SSE task |
-| `GET /api/v1/admin/audit` | Query audit logs (admin) |
-| `GET /api/v1/admin/audit/entity/{type}/{id}` | Entity audit history (admin) |
-| `GET /api/v1/admin/usage/user/{id}` | Specific user's usage (admin) |
-| `GET /api/v1/admin/usage/endpoints` | Usage by endpoint (admin) |
-| `GET /api/v1/admin/metrics` | Request metrics list (admin) |
-| `GET /api/v1/admin/metrics/stats` | Aggregated request stats (admin) |
-| `GET /api/v1/admin/metrics/slow` | Slow requests (admin) |
-| `GET /api/v1/admin/metrics/errors` | Error requests (admin) |
-| `GET /api/v1/admin/db/migrations` | List applied schema migrations (admin) |
-| `GET /api/v1/admin/db/migrations/{hash}` | Migration detail (admin) |
-| `GET /api/v1/admin/db/backups` | List CSV restore points (admin) |
-| `GET /api/v1/admin/db/schema/orphans` | Orphaned columns/tables in DB (admin) |
-| `POST /api/v1/admin/db/backup` | Trigger backup now (admin) |
-| `POST /api/v1/admin/db/backfill` | Run rename backfills (admin) |
-| `POST /api/v1/admin/db/restore/history` | Point-in-time restore from history (admin) |
-| `POST /api/v1/admin/db/restore/table` | Single table restore from history (admin) |
-| `POST /api/v1/admin/db/restore/csv` | Restore tables from CSV backup (admin) |
+
+### Auth (`/api/v1/auth`)
+
+| Route | Description |
+|-------|-------------|
+| `POST /register` | Register new user (if allow_self_signup) |
+| `POST /login` | Login, returns JWT |
+| `POST /refresh` | Refresh access token |
+| `GET /me` | Current user profile |
+| `POST /change-password` | Change password |
+| `POST /logout` | Logout (invalidate token) |
+
+### OAuth (`/api/v1/auth/oauth`) — if `oauth_providers` configured
+
+| Route | Description |
+|-------|-------------|
+| `GET /{provider}` | Start OAuth flow (redirect to provider) |
+| `GET /{provider}/callback` | OAuth callback (exchange code for token) |
+| `GET /accounts` | List linked OAuth accounts |
+| `DELETE /{provider}` | Unlink OAuth provider |
+
+### Workspaces & SaaS (`/api/v1`)
+
+| Route | Description |
+|-------|-------------|
+| `POST /workspaces` | Create workspace |
+| `GET /workspaces` | List user's workspaces |
+| `GET /workspaces/{id}` | Get workspace |
+| `PATCH /workspaces/{id}` | Update workspace |
+| `DELETE /workspaces/{id}` | Delete workspace |
+| `GET /workspaces/{id}/members` | List members |
+| `PATCH /workspaces/{id}/members/{user_id}` | Update member role |
+| `DELETE /workspaces/{id}/members/{user_id}` | Remove member |
+| `DELETE /workspaces/{id}/leave` | Leave workspace |
+| `POST /workspaces/{id}/invites` | Create invite |
+| `GET /workspaces/{id}/invites` | List invites |
+| `DELETE /workspaces/{id}/invites/{invite_id}` | Revoke invite |
+| `POST /invites/accept` | Accept invite |
+| `GET /invites/pending` | List pending invites |
+| `POST /workspaces/{id}/projects` | Create project |
+| `GET /workspaces/{id}/projects` | List projects |
+| `GET /workspaces/{id}/projects/{project_id}` | Get project |
+| `PATCH /workspaces/{id}/projects/{project_id}` | Update project |
+| `DELETE /workspaces/{id}/projects/{project_id}` | Delete project |
+
+### API Keys (`/api/v1/api-keys`)
+
+| Route | Description |
+|-------|-------------|
+| `POST /` | Create API key |
+| `GET /` | List API keys |
+| `GET /{key_id}` | Get API key |
+| `DELETE /{key_id}` | Revoke API key |
+
+### Webhooks (`/api/v1/webhooks`)
+
+| Route | Description |
+|-------|-------------|
+| `POST /` | Create webhook |
+| `GET /` | List webhooks |
+| `GET /{webhook_id}` | Get webhook (with secret) |
+| `PATCH /{webhook_id}` | Update webhook |
+| `DELETE /{webhook_id}` | Delete webhook |
+| `GET /{webhook_id}/deliveries` | Delivery log |
+| `POST /{webhook_id}/test` | Send test event |
+
+### Feature Flags (`/api/v1/flags`)
+
+| Route | Description |
+|-------|-------------|
+| `POST /` | Create flag |
+| `GET /` | List flags |
+| `GET /{name}` | Get flag |
+| `DELETE /{name}` | Delete flag |
+| `GET /{name}/check` | Evaluate flag for current user |
+
+### Usage Metering (`/api/v1/usage`)
+
+| Route | Description |
+|-------|-------------|
+| `GET /` | Current user's usage (or any user for admin via `?user_id=`) |
+| `GET /workspace/{id}` | Workspace usage |
+| `GET /quota/{metric}` | Check quota status |
+
+### Tasks (`/api/v1`)
+
+| Route | Description |
+|-------|-------------|
+| `GET /tasks/{id}/status` | Check task status |
+| `POST /tasks/{id}/cancel` | Cancel SSE task |
+
+### Jobs (`/api/v1/jobs`)
+
+| Route | Description |
+|-------|-------------|
+| `GET /` | List jobs |
+| `GET /{job_id}` | Get job status |
+| `POST /{job_id}/cancel` | Cancel job |
+
+### Admin — Audit (`/api/v1/admin/audit`)
+
+| Route | Description |
+|-------|-------------|
+| `GET /` | Query audit logs |
+| `GET /entity/{type}/{id}` | Entity audit history |
+
+### Admin — Usage (`/api/v1/admin/usage`)
+
+| Route | Description |
+|-------|-------------|
+| `GET /user/{id}` | Specific user's usage |
+| `GET /endpoints` | Usage by endpoint |
+
+### Admin — Request Metrics (`/api/v1/admin/metrics`)
+
+| Route | Description |
+|-------|-------------|
+| `GET /` | Request metrics list |
+| `GET /stats` | Aggregated request stats |
+| `GET /slow` | Slow requests (>1s) |
+| `GET /errors` | Error requests (4xx/5xx) |
+
+### Admin — Database (`/api/v1/admin/db`)
+
+| Route | Description |
+|-------|-------------|
+| `GET /migrations` | List applied schema migrations |
+| `GET /migrations/{hash}` | Migration detail (operations, audit file) |
+| `GET /backups` | List CSV restore points on disk |
+| `GET /schema/orphans` | Orphaned columns/tables in DB |
+| `POST /backup` | Trigger backup now |
+| `POST /backfill` | Run rename backfills |
+| `POST /restore/full` | ⚠️ Full rollback: clear DB → replay migrations → import CSV |
+| `POST /restore/csv` | Additive CSV import into current schema |
+| `POST /restore/revert` | Single-table undo via history tables |
 
 ## API Reference
 

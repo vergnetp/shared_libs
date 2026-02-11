@@ -10,9 +10,9 @@ Endpoints:
     GET  /schema/orphans       — columns/tables in DB but not in code
     POST /backup               — trigger backup now
     POST /backfill             — manually run rename backfills
-    POST /restore/history      — point-in-time restore from history tables
-    POST /restore/table        — restore a single table from history
-    POST /restore/csv          — restore a single table from CSV backup
+    POST /restore/full         — ⚠️ DESTRUCTIVE full rollback: clear DB → replay migrations → import CSV
+    POST /restore/csv          — upsert tables from CSV backup (additive, no schema change)
+    POST /restore/revert       — lightweight single-table undo via history tables
 """
 
 import logging
@@ -27,14 +27,13 @@ logger = logging.getLogger(__name__)
 
 # ── Request models ──────────────────────────────────────────────────────────
 
-class HistoryRestoreRequest(BaseModel):
-    target_time: str  # ISO format: "2026-02-10T14:30:00Z"
-    tables: Optional[List[str]] = None  # None = all tables
+class FullRestoreRequest(BaseModel):
+    backup_name: str  # e.g. "csv_20260210_140000_a1b2c3d4"
     confirm: bool = False
 
-class TableRestoreRequest(BaseModel):
+class RevertTableRequest(BaseModel):
     table_name: str
-    target_time: str
+    target_time: str  # ISO format
     confirm: bool = False
 
 class CsvTableRestoreRequest(BaseModel):
@@ -82,7 +81,7 @@ def create_db_admin_router(
     async def list_migrations(user=Depends(get_current_user)):
         """List all applied schema migrations."""
         _require_admin(user)
-        from ..db.session import raw_db_context
+        from .session import raw_db_context
         
         async with raw_db_context() as db:
             sql = "SELECT [id], [schema_hash], [applied_at], [operations] FROM [_schema_migrations] ORDER BY [id] DESC"
@@ -116,7 +115,7 @@ def create_db_admin_router(
     async def get_migration(schema_hash: str, user=Depends(get_current_user)):
         """Get operations for a specific migration."""
         _require_admin(user)
-        from ..db.session import raw_db_context
+        from .session import raw_db_context
         
         async with raw_db_context() as db:
             sql = "SELECT [operations], [applied_at] FROM [_schema_migrations] WHERE [schema_hash] = ?"
@@ -176,7 +175,7 @@ def create_db_admin_router(
         additive-only migrations (renamed columns, old tables).
         """
         _require_admin(user)
-        from ..db.session import raw_db_context
+        from .session import raw_db_context
         from ...databases.entity import ENTITY_SCHEMAS
         from dataclasses import fields
         
@@ -231,7 +230,7 @@ def create_db_admin_router(
     async def create_backup(user=Depends(get_current_user)):
         """Create a CSV + native backup right now."""
         _require_admin(user)
-        from ..db.session import raw_db_context
+        from .session import raw_db_context
         from ...databases.backup import BackupStrategy
         
         async with raw_db_context() as db:
@@ -257,7 +256,7 @@ def create_db_admin_router(
         containers after migration. Safe to run anytime (idempotent).
         """
         _require_admin(user)
-        from ..db.session import raw_db_context
+        from .session import raw_db_context
         from ...databases.migrations import AutoMigrator
         
         async with raw_db_context() as db:
@@ -265,104 +264,86 @@ def create_db_admin_router(
             await migrator._run_rename_backfills()
             return {"status": "ok", "message": "Backfills completed"}
     
-    @router.post("/restore/history", summary="Point-in-time restore from history")
-    async def restore_history(req: HistoryRestoreRequest, user=Depends(get_current_user)):
+    @router.post("/restore/full", summary="⚠️ Full rollback from CSV backup")
+    async def restore_full(req: FullRestoreRequest, user=Depends(get_current_user)):
         """
-        Restore tables to a point in time using history tables.
+        DESTRUCTIVE full rollback: clear database → replay migrations → import CSV.
         
-        No CSV backup needed — uses the built-in version history.
-        History tables are never modified; you can roll forward again.
+        This is the **primary restore path**. It restores the database to the exact
+        state captured by a CSV backup, including schema, data, history, and metadata.
         
-        Set confirm=true to execute. Without it, returns a dry-run preview.
+        Works across table renames and schema changes (migrations are replayed from
+        scratch up to the backup's schema hash).
+        
+        Steps:
+        1. DROP all tables (everything is destroyed)
+        2. Replay migration SQL files up to the backup's schema hash
+        3. Import CSV files: meta → entity → history (using import_raw, no timestamp mangling)
+        
+        Requires confirm=true. Without it, returns backup info for review.
         """
         _require_admin(user)
-        from ..db.session import raw_db_context
-        from ...databases.backup import restore_from_history
+        
+        # Validate backup exists
+        backup_path = Path(backup_dir) / req.backup_name
+        if not backup_path.exists():
+            raise HTTPException(404, f"Backup not found: {req.backup_name}")
+        
+        csv_files = sorted(f.stem for f in backup_path.glob("*.csv"))
+        if not csv_files:
+            raise HTTPException(404, f"No CSV files in {req.backup_name}")
         
         if not req.confirm:
-            # Dry run: show what would be affected
-            from ...databases.entity import ENTITY_SCHEMAS
-            
-            preview = {}
-            async with raw_db_context() as db:
-                for table_name, entity_class in ENTITY_SCHEMAS.items():
-                    if not getattr(entity_class, '__entity_history__', False):
-                        continue
-                    if req.tables and table_name not in req.tables:
-                        continue
-                    
-                    history_table = f"{table_name}_history"
-                    if not await db._table_exists(history_table):
-                        preview[table_name] = {"status": "no history table"}
-                        continue
-                    
-                    # Count rows that would be restored
-                    count_sql = (
-                        f"SELECT COUNT(DISTINCT [id]) FROM [{history_table}] "
-                        f"WHERE [history_timestamp] <= ?"
-                    )
-                    native_sql, params = db.sql_generator.convert_query_to_native(count_sql, (req.target_time,))
-                    result = await db.execute(native_sql, params)
-                    history_count = result[0][0] if result else 0
-                    
-                    # Count current rows
-                    current_sql = f"SELECT COUNT(*) FROM [{table_name}] WHERE [deleted_at] IS NULL"
-                    native_sql, params = db.sql_generator.convert_query_to_native(current_sql, ())
-                    result = await db.execute(native_sql, params)
-                    current_count = result[0][0] if result else 0
-                    
-                    preview[table_name] = {
-                        "rows_in_history": history_count,
-                        "current_rows": current_count,
-                        "rows_created_after": max(0, current_count - history_count),
-                    }
+            # Parse backup name for metadata
+            import re
+            match = re.match(r'csv_(\d{8}_\d{6})_([a-f0-9]+)', req.backup_name)
+            timestamp = match.group(1) if match else "unknown"
+            schema_hash = match.group(2) if match else "unknown"
             
             return {
                 "dry_run": True,
-                "target_time": req.target_time,
-                "preview": preview,
-                "message": "Set confirm=true to execute",
+                "backup": req.backup_name,
+                "timestamp": timestamp,
+                "schema_hash": schema_hash,
+                "tables": csv_files,
+                "warning": "This will DESTROY ALL CURRENT DATA. Set confirm=true to execute.",
             }
         
-        async with raw_db_context() as db:
-            result = await restore_from_history(
-                db, req.target_time, tables=req.tables, confirm=True
-            )
-            
-            logger.warning(
-                f"History restore executed by {getattr(user, 'id', 'unknown')}",
-                extra={"target_time": req.target_time, "tables": req.tables, "result": result}
-            )
-            
-            return {"status": "ok", "result": result}
-    
-    @router.post("/restore/table", summary="Restore single table from history")
-    async def restore_table(req: TableRestoreRequest, user=Depends(get_current_user)):
-        """Restore a single table to a point in time using history."""
-        _require_admin(user)
-        from ..db.session import raw_db_context
-        from ...databases.backup import restore_single_table
+        from .session import raw_db_context
+        from ...databases.backup import rollback_to_backup
         
         async with raw_db_context() as db:
-            result = await restore_single_table(
-                db, req.table_name, req.target_time, confirm=req.confirm
+            success = await rollback_to_backup(
+                db,
+                req.backup_name,
+                migration_dir=migrations_dir,
+                backup_dir=backup_dir,
+                confirm=True,
             )
-            
-            if req.confirm:
-                logger.warning(
-                    f"Table restore: {req.table_name} by {getattr(user, 'id', 'unknown')}",
-                    extra={"table": req.table_name, "target_time": req.target_time, "result": result}
-                )
-            
-            return result
+        
+        if not success:
+            raise HTTPException(500, "Rollback failed — check server logs")
+        
+        logger.warning(
+            f"Full rollback executed by {getattr(user, 'id', 'unknown')}",
+            extra={"backup": req.backup_name}
+        )
+        
+        return {"status": "ok", "restored_from": req.backup_name, "tables": csv_files}
     
-    @router.post("/restore/csv", summary="Restore tables from CSV backup")
-    async def restore_table_csv(req: CsvTableRestoreRequest, user=Depends(get_current_user)):
+    @router.post("/restore/csv", summary="Import tables from CSV backup")
+    async def restore_csv(req: CsvTableRestoreRequest, user=Depends(get_current_user)):
         """
-        Restore one or more tables from a CSV backup.
+        Additive CSV import: upsert rows from a CSV backup into the current schema.
         
-        Upserts rows from the backup — existing rows get overwritten,
-        rows created after the backup are kept (not deleted).
+        Unlike /restore/full, this does NOT clear the database or replay migrations.
+        It imports CSV data into tables that already exist. Rows with matching IDs
+        are overwritten; rows created after the backup are kept.
+        
+        Use this for selective table recovery when the schema hasn't changed.
+        For full rollback (including schema changes), use POST /restore/full.
+        
+        If table_names is omitted, all CSVs in the backup are imported.
         """
         _require_admin(user)
         
@@ -391,7 +372,7 @@ def create_db_admin_router(
                 "message": "Set confirm=true to execute.",
             }
         
-        from ..db.session import raw_db_context
+        from .session import raw_db_context
         from ...databases.backup import import_table_from_csv
         
         results = {}
@@ -405,10 +386,81 @@ def create_db_admin_router(
                     results[table_name] = f"error: {e}"
         
         logger.warning(
-            f"CSV restore: {table_names} by {getattr(user, 'id', 'unknown')}",
+            f"CSV import: {table_names} by {getattr(user, 'id', 'unknown')}",
             extra={"tables": table_names, "backup": req.backup_name, "results": results}
         )
         
         return {"status": "ok", "results": results, "source": req.backup_name}
+    
+    @router.post("/restore/revert", summary="Revert a table to a point in time")
+    async def revert_table(req: RevertTableRequest, user=Depends(get_current_user)):
+        """
+        Lightweight single-table undo using history tables. No backup file needed.
+        
+        Queries the history table for each row's state at target_time, upserts
+        those values into the main table (preserving original timestamps), and
+        soft-deletes rows that didn't exist at target_time.
+        
+        History tables are never modified — a new version is appended as audit trail.
+        You can revert forward again to undo the undo.
+        
+        Limitations:
+        - Only works on tables registered in current @entity code
+        - Cannot cross table renames (use /restore/full for that)
+        - New columns added after target_time get history DEFAULT or NULL
+        
+        Best for: quick undo of recent accidental changes on a single table.
+        For full disaster recovery, use POST /restore/full.
+        """
+        _require_admin(user)
+        from .session import raw_db_context
+        from ...databases.backup import restore_single_table
+        
+        if not req.confirm:
+            from ...databases.entity import ENTITY_SCHEMAS
+            
+            if req.table_name not in ENTITY_SCHEMAS:
+                return {"error": f"Table '{req.table_name}' not in current @entity schemas. "
+                        f"Available: {sorted(ENTITY_SCHEMAS.keys())}"}
+            
+            async with raw_db_context() as db:
+                history_table = f"{req.table_name}_history"
+                if not await db._table_exists(history_table):
+                    return {"error": f"No history table for '{req.table_name}'"}
+                
+                count_sql = (
+                    f"SELECT COUNT(DISTINCT [id]) FROM [{history_table}] "
+                    f"WHERE [history_timestamp] <= ?"
+                )
+                native_sql, params = db.sql_generator.convert_query_to_native(count_sql, (req.target_time,))
+                result = await db.execute(native_sql, params)
+                history_count = result[0][0] if result else 0
+                
+                current_sql = f"SELECT COUNT(*) FROM [{req.table_name}] WHERE [deleted_at] IS NULL"
+                native_sql, params = db.sql_generator.convert_query_to_native(current_sql, ())
+                result = await db.execute(native_sql, params)
+                current_count = result[0][0] if result else 0
+            
+            return {
+                "dry_run": True,
+                "table": req.table_name,
+                "target_time": req.target_time,
+                "rows_in_history_at_target": history_count,
+                "current_rows": current_count,
+                "rows_created_after": max(0, current_count - history_count),
+                "message": "Set confirm=true to execute.",
+            }
+        
+        async with raw_db_context() as db:
+            result = await restore_single_table(
+                db, req.table_name, req.target_time, confirm=True
+            )
+        
+        logger.warning(
+            f"Table revert: {req.table_name} by {getattr(user, 'id', 'unknown')}",
+            extra={"table": req.table_name, "target_time": req.target_time, "result": result}
+        )
+        
+        return {"status": "ok", "result": result}
     
     return router
