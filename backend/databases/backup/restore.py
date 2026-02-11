@@ -425,19 +425,22 @@ async def restore_from_history(
             snapshot_entities.append(row_dict)
             snapshot_ids.add(row_dict['id'])
         
-        # Step 2: Upsert snapshot rows into main table
-        restored = 0
-        batch_size = 100
-        for i in range(0, len(snapshot_entities), batch_size):
-            batch = snapshot_entities[i:i + batch_size]
-            await db.save_entities(
-                table_name, batch,
-                user_id="system:history_restore",
-                comment=f"Restored to {target_time}",
-            )
-            restored += len(batch)
+        # Step 2: Upsert snapshot rows into main table using import_raw
+        # This preserves original timestamps (no _prepare_entity mangling)
+        restored = await db.import_raw(table_name, snapshot_entities)
         
-        # Step 3: Soft-delete rows that didn't exist at target_time
+        # Step 3: Record restore in history (audit trail)
+        for entity in snapshot_entities:
+            try:
+                await db._add_to_history(
+                    table_name, entity,
+                    user_id="system:history_restore",
+                    comment=f"Restored to {target_time}",
+                )
+            except Exception:
+                pass  # History table might not exist for all entity types
+        
+        # Step 4: Soft-delete rows that didn't exist at target_time
         # These are rows created after the cutoff
         soft_deleted = 0
         all_ids_sql = f"SELECT [id] FROM [{table_name}] WHERE [deleted_at] IS NULL"
@@ -626,20 +629,33 @@ async def clear_database(db):
 
 
 async def import_csv_backup(db, csv_dir: Path):
-    """Import all CSV files from backup directory."""
+    """
+    Import all CSV files from backup directory.
+    
+    Import order matters:
+    1. Meta tables first (*_meta.csv) — needed for deserialization
+    2. Entity tables (no suffix) — main data
+    3. History tables last (*_history.csv) — audit trail
+    """
     csv_files = sorted(csv_dir.glob("*.csv"))
     
     if not csv_files:
         print("   No CSV files found")
         return
     
-    for i, csv_file in enumerate(csv_files, 1):
+    # Partition into ordered groups
+    meta_files = [f for f in csv_files if f.stem.endswith('_meta')]
+    history_files = [f for f in csv_files if f.stem.endswith('_history')]
+    entity_files = [f for f in csv_files if f not in meta_files and f not in history_files]
+    
+    ordered = meta_files + entity_files + history_files
+    
+    for i, csv_file in enumerate(ordered, 1):
         table_name = csv_file.stem
-        print(f"   [{i}/{len(csv_files)}] Importing {table_name}...", end=" ")
+        print(f"   [{i}/{len(ordered)}] Importing {table_name}...", end=" ")
         
         try:
             await import_table_from_csv(db, table_name, str(csv_file))
-            print("✓")
         except Exception as e:
             print(f"✗ ({e})")
 

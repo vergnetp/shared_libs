@@ -62,7 +62,12 @@ class SqliteSqlGenerator(SqlGenerator, SqlEntityGenerator):
         """
     
     def get_create_history_table_sql(self, entity_name: str, columns: List[Tuple[str, str]]) -> str:
-        """Generate SQLite-specific history table SQL."""
+        """Generate SQLite-specific history table SQL.
+        
+        History columns are TEXT (matching serialization) with DEFAULT values
+        preserved from the main table. Constraints (UNIQUE, NOT NULL, CHECK)
+        are stripped — history is append-only and doesn't enforce business rules.
+        """
         # History-specific fields that we'll add - filter these from main columns
         history_fields = {'version', 'history_timestamp', 'history_user_id', 'history_comment'}
         
@@ -72,10 +77,24 @@ class SqliteSqlGenerator(SqlGenerator, SqlEntityGenerator):
         if not has_id:
             column_defs.append("[id] TEXT")
         
-        # Add main table columns, excluding history-specific ones
-        for name, _ in columns:
+        # Add main table columns, preserving DEFAULT but stripping constraints
+        for name, col_type in columns:
             if name not in history_fields:
-                column_defs.append(f"[{name}] TEXT")
+                # Extract DEFAULT clause if present (e.g. "TEXT DEFAULT 'free'" → "DEFAULT 'free'")
+                default_part = ""
+                upper = col_type.upper()
+                idx = upper.find("DEFAULT ")
+                if idx != -1:
+                    # Grab from DEFAULT to the next constraint keyword or end
+                    rest = col_type[idx:]
+                    # Stop at UNIQUE, NOT NULL, CHECK, or end
+                    for keyword in [" UNIQUE", " NOT NULL", " CHECK"]:
+                        kw_pos = rest.upper().find(keyword)
+                        if kw_pos != -1:
+                            rest = rest[:kw_pos]
+                    default_part = f" {rest.strip()}"
+                
+                column_defs.append(f"[{name}] TEXT{default_part}")
         
         # Add history-specific columns
         column_defs.append("[version] INTEGER")

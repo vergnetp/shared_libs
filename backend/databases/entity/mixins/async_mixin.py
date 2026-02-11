@@ -1120,3 +1120,48 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
         # Execute insert
         params = tuple(filtered_entry[field] for field in fields)
         await self.execute(history_sql, params)
+
+    async def import_raw(self, table_name: str, rows: List[Dict[str, Any]],
+                         batch_size: int = 100) -> int:
+        """
+        Raw table import — no timestamp mangling, no history creation.
+        
+        Unlike save_entities, this method:
+        - Does NOT call _prepare_entity (no updated_at overwrite)
+        - Does NOT create history entries
+        - Converts empty strings to None (CSV compatibility)
+        - Works on ANY table (entity, history, meta)
+        
+        Used exclusively for backup restore operations.
+        
+        Args:
+            table_name: Target table name (can be entity, history, or meta)
+            rows: List of row dicts (keys = column names)
+            batch_size: Rows per batch for executemany
+            
+        Returns:
+            Number of rows imported
+        """
+        if not rows:
+            return 0
+        
+        # Use column names from first row
+        fields = list(rows[0].keys())
+        sql = self.sql_generator.get_upsert_sql(table_name, fields)
+        
+        count = 0
+        for i in range(0, len(rows), batch_size):
+            batch = rows[i:i + batch_size]
+            batch_params = []
+            for row in batch:
+                # Convert empty strings to None (CSV reader returns "" for NULLs)
+                params = tuple(
+                    row.get(f) if row.get(f) != '' else None
+                    for f in fields
+                )
+                batch_params.append(params)
+            
+            await self.executemany(sql, batch_params)
+            count += len(batch)
+        
+        return count

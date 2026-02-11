@@ -83,15 +83,27 @@ class PostgresSqlGenerator(SqlGenerator, SqlEntityGenerator):
         """
     
     def get_create_history_table_sql(self, entity_name: str, columns: List[Tuple[str, str]]) -> str:
-        """Generate PostgreSQL-specific history table SQL."""
-        # History-specific fields that we'll add - filter these from main columns
+        """Generate PostgreSQL-specific history table SQL.
+        
+        Preserves DEFAULT values from main table columns, strips constraints.
+        """
         history_fields = {'version', 'history_timestamp', 'history_user_id', 'history_comment'}
         
         column_defs = []
-        # Add main table columns, excluding history-specific ones
-        for name, _ in columns:
+        for name, col_type in columns:
             if name not in history_fields:
-                column_defs.append(f"[{name}] TEXT")
+                # Extract DEFAULT clause, strip constraints
+                default_part = ""
+                upper = col_type.upper()
+                idx = upper.find("DEFAULT ")
+                if idx != -1:
+                    rest = col_type[idx:]
+                    for keyword in [" UNIQUE", " NOT NULL", " CHECK"]:
+                        kw_pos = rest.upper().find(keyword)
+                        if kw_pos != -1:
+                            rest = rest[:kw_pos]
+                    default_part = f" {rest.strip()}"
+                column_defs.append(f"[{name}] TEXT{default_part}")
         
         # Add history-specific columns
         column_defs.append("[version] INTEGER")

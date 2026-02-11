@@ -256,7 +256,13 @@ async def export_table_to_csv(db, table_name: str, output_file: str):
 
 async def import_table_from_csv(db, table_name: str, csv_file: str, batch_size: int = 100):
     """
-    Import entities from CSV file into a table.
+    Import rows from CSV file into a table using raw import.
+    
+    Uses import_raw which:
+    - Does NOT mangle timestamps (no _prepare_entity)
+    - Does NOT create history entries
+    - Converts empty strings to None
+    - Works on any table (entity, history, meta)
     
     Args:
         db: Database connection
@@ -265,28 +271,19 @@ async def import_table_from_csv(db, table_name: str, csv_file: str, batch_size: 
         batch_size: Number of rows to import per batch
     
     Example:
-        await import_table_from_csv(db, "snapshots", "./backups/snapshots.csv")
+        await import_table_from_csv(db, "person", "./backups/person.csv")
+        await import_table_from_csv(db, "person_history", "./backups/person_history.csv")
     """
     with open(csv_file, newline='', encoding='utf-8') as f:
         reader = csv.DictReader(f)
-        
-        count = 0
-        batch = []
-        
-        for row in reader:
-            batch.append(dict(row))
-            count += 1
-            
-            # Save in batches
-            if len(batch) >= batch_size:
-                await db.save_entities(table_name, batch)
-                batch = []
-        
-        # Save remaining
-        if batch:
-            await db.save_entities(table_name, batch)
-        
-        print(f"✓ Imported {count} rows into {table_name}")
+        rows = [dict(row) for row in reader]
+    
+    if not rows:
+        print(f"  Skipped {table_name} (empty CSV)")
+        return
+    
+    count = await db.import_raw(table_name, rows, batch_size=batch_size)
+    print(f"✓ Imported {count} rows into {table_name}")
 
 
 async def restore_native_backup(db, backup_file: str):
