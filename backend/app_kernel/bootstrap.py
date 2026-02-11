@@ -510,6 +510,16 @@ def create_service(
     
     cfg = config
     
+    # In dev mode, resolve database_url early so database-dependent routes get mounted.
+    # ensure_database() does the same during lifespan, but routers are registered before that.
+    if not cfg.database_url:
+        from .env_checks import is_prod
+        if not is_prod():
+            from pathlib import Path
+            data_dir = Path("./data")
+            data_dir.mkdir(parents=True, exist_ok=True)
+            cfg.database_url = f"sqlite:///{data_dir / f'{name}.db'}"
+    
     # Collect integration tasks and routers
     integration_tasks = {}
     integration_routers = []
