@@ -23,6 +23,8 @@ export function createFetchStore(key, fetcher, options = {}) {
     revalidateOnMount = true,   // Fetch on first subscriber
     dedupingInterval = 2000,    // Dedupe requests within this window
     initialData = null,
+    retryCount = 3,             // Max retries on failure (0 = no retry)
+    retryBaseDelay = 1000,      // Base delay in ms (doubles each retry: 1s, 2s, 4s)
   } = options
 
   // Internal state
@@ -42,11 +44,16 @@ export function createFetchStore(key, fetcher, options = {}) {
 
   // Fetch with deduplication and backoff
   async function doFetch(force = false) {
-    const now = Date.now()
-    
-    // Dedupe: return existing promise if within window
-    if (!force && fetchPromise && (now - lastFetchTime) < dedupingInterval) {
+    // Already fetching (possibly mid-retry) — return existing promise
+    if (!force && fetchPromise) {
       return fetchPromise
+    }
+
+    const now = Date.now()
+
+    // Dedupe: don't re-fetch if last fetch completed/started recently
+    if (!force && (now - lastFetchTime) < dedupingInterval) {
+      return
     }
 
     // Back off after repeated failures (manual refresh / tab focus resets)
@@ -60,23 +67,32 @@ export function createFetchStore(key, fetcher, options = {}) {
 
     fetchPromise = (async () => {
       try {
-        const data = await fetcher()
-        consecutiveErrors = 0
-        store.set({
-          data,
-          error: null,
-          loading: false,
-          lastFetched: new Date(),
-        })
-        return data
-      } catch (error) {
-        consecutiveErrors++
-        store.update(s => ({
-          ...s,
-          error: error.message || 'Fetch failed',
-          loading: false,
-        }))
-        throw error
+        for (let attempt = 0; attempt <= retryCount; attempt++) {
+          try {
+            const data = await fetcher()
+            consecutiveErrors = 0
+            store.set({
+              data,
+              error: null,
+              loading: false,
+              lastFetched: new Date(),
+            })
+            return data
+          } catch (error) {
+            // Last attempt — surface the error
+            if (attempt >= retryCount) {
+              consecutiveErrors++
+              store.update(s => ({
+                ...s,
+                error: error.message || 'Fetch failed',
+                loading: false,
+              }))
+              throw error
+            }
+            // Wait with exponential backoff before next retry
+            await new Promise(r => setTimeout(r, retryBaseDelay * (2 ** attempt)))
+          }
+        }
       } finally {
         fetchPromise = null
       }
