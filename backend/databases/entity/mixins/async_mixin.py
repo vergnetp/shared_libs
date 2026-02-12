@@ -53,6 +53,12 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
         except Exception:
             return False
     
+    async def list_tables(self) -> List[str]:
+        """List all tables in the database."""
+        sql, params = self.sql_generator.get_list_tables_sql()
+        rows = await self.execute(sql, params)
+        return [row[0] for row in rows]
+    
     # Cache for field names derived from entity schemas (class-level, never changes)
     _field_names_cache: Dict[str, List[str]] = {}
     
