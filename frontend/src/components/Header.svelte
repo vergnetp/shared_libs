@@ -48,12 +48,8 @@
 
 <header class="header glass">
   <div class="header-brand">
-    {#if showLogo}
-      {#if logo}
-        <img src={logo} alt={title} class="header-logo" />
-      {:else}
-        <span class="brand-dot"></span>
-      {/if}
+    {#if showLogo && logo}
+      <img src={logo} alt={title} class="header-logo" />
     {/if}
     <h1>{title}</h1>
     

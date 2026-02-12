@@ -10,6 +10,11 @@
  *   // Make requests
  *   const data = await api('GET', '/users')
  *   const data = await api('POST', '/users', { name: 'John' })
+ *   
+ *   // Auth flows (tied to app_kernel endpoints)
+ *   const user = await login('user@example.com', 'pass')
+ *   const user = await register('user@example.com', 'pass')
+ *   const ok = await initAuth()
  */
 import { get } from 'svelte/store'
 import { authStore, getAuthToken } from '../stores/auth.js'
@@ -44,17 +49,32 @@ export function createApiClient(customConfig = {}) {
 // Request Builder
 // =============================================================================
 
+/**
+ * Validate JWT format (must have 3 dot-separated parts)
+ * @private
+ */
+function isValidJwtFormat(token) {
+  if (!token || typeof token !== 'string') return false
+  return token.split('.').length === 3
+}
+
 function buildRequest(path, options = {}) {
   const cfg = options.config || config
-  const authState = get(authStore)
+  const auth = get(authStore)
   
   const headers = { 'Content-Type': 'application/json' }
   
   // Add auth header unless skipped
   const isAuthEndpoint = path.startsWith('/auth/login') || path.startsWith('/auth/register')
   
-  if (authState.token && !isAuthEndpoint && !options.skipAuth) {
-    headers['Authorization'] = `Bearer ${authState.token}`
+  if (auth.token && !isAuthEndpoint && !options.skipAuth) {
+    // Validate token format before sending
+    if (!isValidJwtFormat(auth.token)) {
+      console.error('Invalid JWT format detected - token may be corrupted')
+      authStore.logout()
+      return { error: 'Session corrupted - please login again', url: null, headers: null }
+    }
+    headers['Authorization'] = `Bearer ${auth.token}`
   }
   
   // Add custom headers
@@ -64,7 +84,7 @@ function buildRequest(path, options = {}) {
   
   const url = cfg.baseUrl + path
   
-  return { url, headers }
+  return { url, headers, error: null }
 }
 
 // =============================================================================
@@ -81,8 +101,8 @@ async function handleErrorResponse(res, options = {}) {
       errorMsg = errBody.detail || errBody.error || errBody.message || errorMsg
     } catch {}
     
-    const authState = get(authStore)
-    if (authState.token) {
+    const auth = get(authStore)
+    if (auth.token) {
       authStore.logout()
       errorMsg = 'Session expired - please login again'
     }
@@ -101,11 +121,43 @@ async function handleErrorResponse(res, options = {}) {
 }
 
 // =============================================================================
+// SSE Stream Reader (shared by apiStream and apiStreamMultipart)
+// =============================================================================
+
+async function readSSE(res, onMessage) {
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+
+    buffer += decoder.decode(value, { stream: true })
+    const lines = buffer.split('\n')
+    buffer = lines.pop() || ''
+
+    for (const line of lines) {
+      if (line.startsWith('data: ')) {
+        try {
+          onMessage(JSON.parse(line.slice(6)))
+        } catch {}
+      }
+    }
+  }
+}
+
+// =============================================================================
 // Main API Function
 // =============================================================================
 
 async function apiRequest(method, path, data = null, options = {}) {
-  const { url, headers } = buildRequest(path, options)
+  const { url, headers, error } = buildRequest(path, options)
+  
+  if (error) {
+    console.debug(`Skipping ${path} - ${error}`)
+    return null
+  }
   
   const opts = { method, headers }
   if (data) opts.body = JSON.stringify(data)
@@ -131,39 +183,43 @@ async function apiRequest(method, path, data = null, options = {}) {
 // =============================================================================
 
 async function apiStreamRequest(method, path, data, onMessage, options = {}) {
-  const { url, headers } = buildRequest(path, options)
+  const { url, headers, error } = buildRequest(path, options)
+  
+  if (error) throw new Error(error)
   
   const opts = { method, headers }
   if (data) opts.body = JSON.stringify(data)
   
   const res = await fetch(url, opts)
-  
   await handleErrorResponse(res, options)
-  
-  // Read SSE stream
-  const reader = res.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
-  
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    
-    buffer += decoder.decode(value, { stream: true })
-    const lines = buffer.split('\n')
-    buffer = lines.pop() || ''
-    
-    for (const line of lines) {
-      if (line.startsWith('data: ')) {
-        try {
-          const msg = JSON.parse(line.slice(6))
-          onMessage(msg)
-        } catch (e) {
-          // Ignore parse errors
-        }
-      }
-    }
+  await readSSE(res, onMessage)
+}
+
+// =============================================================================
+// Streaming Multipart (SSE + file upload)
+// =============================================================================
+
+async function apiStreamMultipartRequest(path, formData, onMessage, options = {}) {
+  const cfg = options.config || config
+  const auth = get(authStore)
+
+  // Validate token format before sending
+  if (auth.token && !isValidJwtFormat(auth.token)) {
+    console.error('Invalid JWT format detected - token may be corrupted')
+    authStore.logout()
+    throw new Error('Session corrupted - please login again')
   }
+
+  const url = cfg.baseUrl + path
+
+  // Headers — NO Content-Type (browser sets multipart boundary)
+  const headers = {}
+  if (options.headers) Object.assign(headers, options.headers)
+  if (auth.token) headers['Authorization'] = `Bearer ${auth.token}`
+
+  const res = await fetch(url, { method: 'POST', headers, body: formData })
+  await handleErrorResponse(res, options)
+  await readSSE(res, onMessage)
 }
 
 // =============================================================================
@@ -178,8 +234,74 @@ export async function apiStream(method, path, data, onMessage, options = {}) {
   return apiStreamRequest(method, path, data, onMessage, options)
 }
 
+export async function apiStreamMultipart(path, formData, onMessage, options = {}) {
+  return apiStreamMultipartRequest(path, formData, onMessage, options)
+}
+
 // Convenience methods
 export const get_ = (path, options) => api('GET', path, null, options)
 export const post = (path, data, options) => api('POST', path, data, options)
 export const put = (path, data, options) => api('PUT', path, data, options)
 export const del = (path, options) => api('DELETE', path, null, options)
+
+// =============================================================================
+// Auth Flows (app_kernel standard endpoints)
+// =============================================================================
+
+/**
+ * Login user via /auth/login → /auth/me
+ */
+export async function login(email, password) {
+  authStore.setLoading(true)
+  authStore.clearError()
+  
+  try {
+    const res = await api('POST', '/auth/login', { username: email, password })
+    authStore.setToken(res.access_token)
+    
+    const user = await api('GET', '/auth/me')
+    authStore.setUser(user)
+    authStore.setLoading(false)
+    
+    return user
+  } catch (err) {
+    authStore.setError(err.message)
+    throw err
+  }
+}
+
+/**
+ * Register + auto-login via /auth/register
+ */
+export async function register(email, password) {
+  authStore.setLoading(true)
+  authStore.clearError()
+  
+  try {
+    await api('POST', '/auth/register', { username: email, email, password })
+    return await login(email, password)
+  } catch (err) {
+    authStore.setError(err.message)
+    throw err
+  }
+}
+
+/**
+ * Check existing token, load user if valid
+ */
+export async function initAuth() {
+  const auth = get(authStore)
+  
+  if (!auth.token || auth.token.trim() === '') {
+    return false
+  }
+  
+  try {
+    const user = await api('GET', '/auth/me')
+    authStore.setUser(user)
+    return true
+  } catch (err) {
+    authStore.logout()
+    return false
+  }
+}
