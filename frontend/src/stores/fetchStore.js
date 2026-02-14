@@ -56,8 +56,8 @@ export function createFetchStore(key, fetcher, options = {}) {
       return;
     }
 
-    // Back off after repeated failures (manual refresh / tab focus resets)
-    if (!force && consecutiveErrors >= MAX_ERRORS_BEFORE_PAUSE) {
+    // Back off after repeated failures (reset by tab focus or explicit refresh())
+    if (consecutiveErrors >= MAX_ERRORS_BEFORE_PAUSE) {
       return;
     }
 
@@ -172,7 +172,10 @@ export function createFetchStore(key, fetcher, options = {}) {
 
   return {
     subscribe,
-    refresh: () => doFetch(true),
+    refresh: () => {
+      consecutiveErrors = 0;
+      return doFetch(true);
+    },
     mutate: (data) => store.update((s) => ({ ...s, data })),
     get: () => get(store),
   };
