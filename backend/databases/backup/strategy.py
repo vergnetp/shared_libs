@@ -93,11 +93,19 @@ class BackupStrategy:
         backend_type = type(self.sql_gen).__name__
         
         if "Sqlite" in backend_type:
-            # SQLite: Use VACUUM INTO
-            sql = f"VACUUM INTO ?"
-            native_sql, _ = self.sql_gen.convert_query_to_native(sql, ())
-            # For SQLite, we need to use the raw SQL with string parameter
-            await self.db.execute(f"VACUUM INTO '{output_file}'", ())
+            # SQLite: copy the database file directly.
+            # VACUUM INTO can't run inside a transaction (aiosqlite auto-starts them),
+            # and file copy is simpler, faster, and equally safe with WAL mode.
+            import shutil
+            db_path = self.db.config.database
+            if db_path and Path(db_path).exists():
+                shutil.copy2(db_path, output_file)
+                # Also copy WAL file if present (for consistency)
+                wal_path = Path(f"{db_path}-wal")
+                if wal_path.exists():
+                    shutil.copy2(wal_path, Path(f"{output_file}-wal"))
+            else:
+                raise FileNotFoundError(f"SQLite database file not found: {db_path}")
         
         elif "Postgres" in backend_type:
             # PostgreSQL: Use pg_dump
