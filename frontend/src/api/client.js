@@ -223,11 +223,53 @@ async function apiStreamMultipartRequest(path, formData, onMessage, options = {}
 }
 
 // =============================================================================
+// Raw API (returns raw Response — for blob downloads, file uploads, etc.)
+// =============================================================================
+
+async function apiRawRequest(method, path, data = null, options = {}) {
+  const cfg = options.config || config
+  const auth = get(authStore)
+
+  // Validate token format before sending
+  if (auth.token && !options.skipAuth && !isValidJwtFormat(auth.token)) {
+    console.error('Invalid JWT format detected - token may be corrupted')
+    authStore.logout()
+    throw new Error('Session corrupted - please login again')
+  }
+
+  const url = cfg.baseUrl + path
+
+  const headers = {}
+  if (options.headers) Object.assign(headers, options.headers)
+  if (auth.token && !options.skipAuth) {
+    headers['Authorization'] = `Bearer ${auth.token}`
+  }
+
+  // Only set Content-Type for JSON data (not FormData)
+  if (data && !(data instanceof FormData)) {
+    headers['Content-Type'] = 'application/json'
+  }
+
+  const opts = { method, headers }
+  if (data) {
+    opts.body = data instanceof FormData ? data : JSON.stringify(data)
+  }
+
+  const res = await fetch(url, opts)
+  await handleErrorResponse(res, options)
+  return res
+}
+
+// =============================================================================
 // Export Main Functions
 // =============================================================================
 
 export async function api(method, path, data = null, options = {}) {
   return apiRequest(method, path, data, options)
+}
+
+export async function apiRaw(method, path, data = null, options = {}) {
+  return apiRawRequest(method, path, data, options)
 }
 
 export async function apiStream(method, path, data, onMessage, options = {}) {
