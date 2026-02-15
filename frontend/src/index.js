@@ -5,7 +5,7 @@
  *   import { Auth, Header, Button } from '@myorg/ui'
  *   import { authStore, toasts } from '@myorg/ui'
  *   import { api, login, initAuth } from '@myorg/ui'
- *   import { createApiStore, createParamStore } from '@myorg/ui'
+ *   import { SWR } from '@myorg/ui'
  *   import { presets, withPreset } from '@myorg/ui/presets'
  *   import '@myorg/ui/styles/base.css'
  */
@@ -52,11 +52,7 @@ export {
   toggleTheme,
 } from './stores/theme.js'
 
-export {
-  createFetchStore,
-  createApiStore,
-  createParamStore,
-} from './stores/fetchStore.js'
+export { SWR } from './swr.js'
 
 // =============================================================================
 // API
