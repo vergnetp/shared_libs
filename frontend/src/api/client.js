@@ -1,13 +1,20 @@
 /**
  * client.js - Shared API client
- * 
+ *
+ * Architecture: ONE core function (coreFetch) calls fetch().
+ * All safeguards live there: auth, JWT validation, requestModifier,
+ * retry with exponential backoff, error handling.
+ *
+ * Everything else is a thin wrapper over coreFetch:
+ *   api()               → coreFetch + JSON parse
+ *   apiRaw()            → coreFetch (returns raw Response)
+ *   apiStream()         → coreFetch + SSE reader (no retry)
+ *   apiStreamMultipart()→ coreFetch + SSE reader (FormData, no retry)
+ *
  * Usage:
  *   import { api, apiStream, setApiConfig } from '@myorg/ui'
- *   
- *   // Configure once at app startup
- *   setApiConfig({ baseUrl: '/api/v1' })
  *
- *   // Add app-specific request modification (custom tokens, path rewrites)
+ *   setApiConfig({ baseUrl: '/api/v1' })
  *   setApiConfig({
  *     requestModifier(url, path, headers, options) {
  *       if (path.startsWith('/infra/')) {
@@ -18,15 +25,9 @@
  *       return { url, headers }
  *     }
  *   })
- *   
- *   // Make requests
+ *
  *   const data = await api('GET', '/users')
  *   const data = await api('POST', '/users', { name: 'John' })
- *   
- *   // Auth flows (tied to app_kernel endpoints)
- *   const user = await login('user@example.com', 'pass')
- *   const user = await register('user@example.com', 'pass')
- *   const ok = await initAuth()
  */
 import { get } from 'svelte/store'
 import { authStore, getAuthToken } from '../stores/auth.js'
@@ -47,76 +48,35 @@ export function setApiConfig(newConfig) {
 
 export function createApiClient(customConfig = {}) {
   const clientConfig = { ...config, ...customConfig }
-  
+
   return {
-    get: (path, options) => apiRequest('GET', path, null, { ...options, config: clientConfig }),
-    post: (path, data, options) => apiRequest('POST', path, data, { ...options, config: clientConfig }),
-    put: (path, data, options) => apiRequest('PUT', path, data, { ...options, config: clientConfig }),
-    delete: (path, options) => apiRequest('DELETE', path, null, { ...options, config: clientConfig }),
-    stream: (method, path, data, onMessage, options) => 
-      apiStreamRequest(method, path, data, onMessage, { ...options, config: clientConfig }),
+    get: (path, options) => api('GET', path, null, { ...options, config: clientConfig }),
+    post: (path, data, options) => api('POST', path, data, { ...options, config: clientConfig }),
+    put: (path, data, options) => api('PUT', path, data, { ...options, config: clientConfig }),
+    delete: (path, options) => api('DELETE', path, null, { ...options, config: clientConfig }),
+    stream: (method, path, data, onMessage, options) =>
+      apiStream(method, path, data, onMessage, { ...options, config: clientConfig }),
   }
 }
 
 // =============================================================================
-// Request Builder
+// Helpers
 // =============================================================================
 
-/**
- * Validate JWT format (must have 3 dot-separated parts)
- * @private
- */
 function isValidJwtFormat(token) {
   if (!token || typeof token !== 'string') return false
   return token.split('.').length === 3
 }
-
-function buildRequest(path, options = {}) {
-  const cfg = options.config || config
-  const auth = get(authStore)
-  
-  const headers = { 'Content-Type': 'application/json' }
-  
-  // Add auth header unless skipped
-  const isAuthEndpoint = path.startsWith('/auth/login') || path.startsWith('/auth/register')
-  
-  if (auth.token && !isAuthEndpoint && !options.skipAuth) {
-    // Validate token format before sending
-    if (!isValidJwtFormat(auth.token)) {
-      console.error('Invalid JWT format detected - token may be corrupted')
-      authStore.logout()
-      return { error: 'Session corrupted - please login again', url: null, headers: null }
-    }
-    headers['Authorization'] = `Bearer ${auth.token}`
-  }
-  
-  // Add custom headers
-  if (options.headers) {
-    Object.assign(headers, options.headers)
-  }
-  
-  let url = cfg.baseUrl + path
-
-  // Let app modify request (add custom tokens, rewrite paths, etc.)
-  if (cfg.requestModifier) {
-    const modified = cfg.requestModifier(url, path, headers, options)
-    if (modified?.error) return { error: modified.error, url: null, headers: null }
-    if (modified?.url) url = modified.url
-    if (modified?.headers) Object.assign(headers, modified.headers)
-  }
-
-  return { url, headers, error: null }
-}
-
-// =============================================================================
-// Error Handler
-// =============================================================================
 
 function apiError(message, status) {
   const err = new Error(message)
   err.status = status
   return err
 }
+
+// =============================================================================
+// Error Handler
+// =============================================================================
 
 async function handleErrorResponse(res, options = {}) {
   const cfg = options.config || config
@@ -151,7 +111,6 @@ async function handleErrorResponse(res, options = {}) {
 // Retry Logic
 // =============================================================================
 
-/** Returns true if the error is transient (network or 5xx) and worth retrying */
 function isRetryable(error) {
   if (error.name === 'TypeError') return true          // network error
   if (error.status && error.status >= 500) return true  // server error
@@ -160,7 +119,6 @@ function isRetryable(error) {
 
 const RETRY_DEFAULTS = { GET: 3, POST: 1, PUT: 1, DELETE: 1 }
 
-/** Run fn() with retries and exponential backoff (1s, 2s, 4s…) */
 async function withRetry(fn, method, options = {}) {
   const maxRetries = options.retries ?? RETRY_DEFAULTS[method] ?? 1
   const baseDelay = 1000
@@ -177,7 +135,7 @@ async function withRetry(fn, method, options = {}) {
 }
 
 // =============================================================================
-// SSE Stream Reader (shared by apiStream and apiStreamMultipart)
+// SSE Stream Reader
 // =============================================================================
 
 async function readSSE(res, onMessage) {
@@ -204,155 +162,119 @@ async function readSSE(res, onMessage) {
 }
 
 // =============================================================================
-// Main API Function
+// coreFetch — the ONE function that calls fetch(). All safeguards live here.
+//
+// Every request in this client goes through this function. It handles:
+//   1. Auth (JWT validation + Bearer header)
+//   2. requestModifier (app-specific URL/header rewriting)
+//   3. Retry with exponential backoff (unless noRetry)
+//   4. Error handling (4xx/5xx → thrown errors with .status)
 // =============================================================================
 
-async function apiRequest(method, path, data = null, options = {}) {
-  const { url, headers, error } = buildRequest(path, options)
+async function coreFetch(method, path, {
+  data = null,
+  noRetry = false,        // true for streaming (don't retry mid-stream)
+  throwOnSkip = false,    // true for stream/raw (throw vs return null on skip)
+  config: cfg,
+  ...options
+} = {}) {
+  cfg = cfg || config
+  const auth = get(authStore)
 
-  if (error) {
-    console.debug(`Skipping ${path} - ${error}`)
-    return null
-  }
+  // --- Auth + JWT validation ---
+  const isAuthEndpoint = path.startsWith('/auth/login') || path.startsWith('/auth/register')
 
-  const opts = { method, headers }
-  if (data) opts.body = JSON.stringify(data)
-
-  return withRetry(async () => {
-    const res = await fetch(url, opts)
-    await handleErrorResponse(res, options)
-
-    if (res.status === 204) return null
-
-    const result = await res.json()
-
-    // Unwrap common response formats
-    if (result && result.success === true && result.data !== undefined) {
-      return result.data
+  if (auth.token && !isAuthEndpoint && !options.skipAuth) {
+    if (!isValidJwtFormat(auth.token)) {
+      console.error('Invalid JWT format detected - token may be corrupted')
+      authStore.logout()
+      const msg = 'Session corrupted - please login again'
+      if (throwOnSkip) throw new Error(msg)
+      console.debug(`Skipping ${path} - ${msg}`)
+      return null
     }
-
-    return result
-  }, method, options)
-}
-
-// =============================================================================
-// Streaming API (SSE)
-// =============================================================================
-
-async function apiStreamRequest(method, path, data, onMessage, options = {}) {
-  const { url, headers, error } = buildRequest(path, options)
-  
-  if (error) throw new Error(error)
-  
-  const opts = { method, headers }
-  if (data) opts.body = JSON.stringify(data)
-  
-  const res = await fetch(url, opts)
-  await handleErrorResponse(res, options)
-  await readSSE(res, onMessage)
-}
-
-// =============================================================================
-// Streaming Multipart (SSE + file upload)
-// =============================================================================
-
-async function apiStreamMultipartRequest(path, formData, onMessage, options = {}) {
-  const cfg = options.config || config
-  const auth = get(authStore)
-
-  // Validate token format before sending
-  if (auth.token && !isValidJwtFormat(auth.token)) {
-    console.error('Invalid JWT format detected - token may be corrupted')
-    authStore.logout()
-    throw new Error('Session corrupted - please login again')
   }
 
-  let url = cfg.baseUrl + path
-
-  // Headers — NO Content-Type (browser sets multipart boundary)
+  // --- Headers ---
   const headers = {}
-  if (options.headers) Object.assign(headers, options.headers)
-  if (auth.token) headers['Authorization'] = `Bearer ${auth.token}`
-
-  // Let app modify request
-  if (cfg.requestModifier) {
-    const modified = cfg.requestModifier(url, path, headers, options)
-    if (modified?.error) throw new Error(modified.error)
-    if (modified?.url) url = modified.url
-    if (modified?.headers) Object.assign(headers, modified.headers)
-  }
-
-  const res = await fetch(url, { method: 'POST', headers, body: formData })
-  await handleErrorResponse(res, options)
-  await readSSE(res, onMessage)
-}
-
-// =============================================================================
-// Raw API (returns raw Response — for blob downloads, file uploads, etc.)
-// =============================================================================
-
-async function apiRawRequest(method, path, data = null, options = {}) {
-  const cfg = options.config || config
-  const auth = get(authStore)
-
-  // Validate token format before sending
-  if (auth.token && !options.skipAuth && !isValidJwtFormat(auth.token)) {
-    console.error('Invalid JWT format detected - token may be corrupted')
-    authStore.logout()
-    throw new Error('Session corrupted - please login again')
-  }
-
-  let url = cfg.baseUrl + path
-
-  const headers = {}
-  if (options.headers) Object.assign(headers, options.headers)
-  if (auth.token && !options.skipAuth) {
-    headers['Authorization'] = `Bearer ${auth.token}`
-  }
-
-  // Only set Content-Type for JSON data (not FormData)
-  if (data && !(data instanceof FormData)) {
+  if (data instanceof FormData) {
+    // Don't set Content-Type — browser sets multipart boundary
+  } else {
     headers['Content-Type'] = 'application/json'
   }
+  if (auth.token && !isAuthEndpoint && !options.skipAuth) {
+    headers['Authorization'] = `Bearer ${auth.token}`
+  }
+  if (options.headers) Object.assign(headers, options.headers)
 
-  // Let app modify request
+  // --- URL + requestModifier ---
+  let url = cfg.baseUrl + path
+
   if (cfg.requestModifier) {
     const modified = cfg.requestModifier(url, path, headers, options)
-    if (modified?.error) throw new Error(modified.error)
+    if (modified?.error) {
+      if (throwOnSkip) throw new Error(modified.error)
+      console.debug(`Skipping ${path} - ${modified.error}`)
+      return null
+    }
     if (modified?.url) url = modified.url
     if (modified?.headers) Object.assign(headers, modified.headers)
   }
 
-  const opts = { method, headers }
+  // --- Body ---
+  const fetchOpts = { method, headers }
   if (data) {
-    opts.body = data instanceof FormData ? data : JSON.stringify(data)
+    fetchOpts.body = data instanceof FormData ? data : JSON.stringify(data)
+  }
+
+  // --- Fetch (with or without retry) ---
+  if (noRetry) {
+    const res = await fetch(url, fetchOpts)
+    await handleErrorResponse(res, { ...options, config: cfg })
+    return res
   }
 
   return withRetry(async () => {
-    const res = await fetch(url, opts)
-    await handleErrorResponse(res, options)
+    const res = await fetch(url, fetchOpts)
+    await handleErrorResponse(res, { ...options, config: cfg })
     return res
   }, method, options)
 }
 
 // =============================================================================
-// Export Main Functions
+// Public API — thin wrappers over coreFetch
 // =============================================================================
 
+/** JSON API call. Returns parsed JSON (or unwrapped .data). */
 export async function api(method, path, data = null, options = {}) {
-  return apiRequest(method, path, data, options)
+  const res = await coreFetch(method, path, { data, ...options })
+  if (res === null) return null
+  if (res.status === 204) return null
+
+  const result = await res.json()
+
+  // Unwrap common response formats
+  if (result && result.success === true && result.data !== undefined) {
+    return result.data
+  }
+  return result
 }
 
+/** Raw API call. Returns the raw Response (for blobs, file downloads, etc.). */
 export async function apiRaw(method, path, data = null, options = {}) {
-  return apiRawRequest(method, path, data, options)
+  return coreFetch(method, path, { data, throwOnSkip: true, ...options })
 }
 
+/** SSE streaming call. Reads the stream and calls onMessage for each event. */
 export async function apiStream(method, path, data, onMessage, options = {}) {
-  return apiStreamRequest(method, path, data, onMessage, options)
+  const res = await coreFetch(method, path, { data, noRetry: true, throwOnSkip: true, ...options })
+  await readSSE(res, onMessage)
 }
 
+/** Multipart SSE streaming (file upload + SSE response). */
 export async function apiStreamMultipart(path, formData, onMessage, options = {}) {
-  return apiStreamMultipartRequest(path, formData, onMessage, options)
+  const res = await coreFetch('POST', path, { data: formData, noRetry: true, throwOnSkip: true, ...options })
+  await readSSE(res, onMessage)
 }
 
 // Convenience methods
@@ -365,21 +287,18 @@ export const del = (path, options) => api('DELETE', path, null, options)
 // Auth Flows (app_kernel standard endpoints)
 // =============================================================================
 
-/**
- * Login user via /auth/login → /auth/me
- */
 export async function login(email, password) {
   authStore.setLoading(true)
   authStore.clearError()
-  
+
   try {
     const res = await api('POST', '/auth/login', { username: email, password })
     authStore.setToken(res.access_token)
-    
+
     const user = await api('GET', '/auth/me')
     authStore.setUser(user)
     authStore.setLoading(false)
-    
+
     return user
   } catch (err) {
     authStore.setError(err.message)
@@ -387,13 +306,10 @@ export async function login(email, password) {
   }
 }
 
-/**
- * Register + auto-login via /auth/register
- */
 export async function register(email, password) {
   authStore.setLoading(true)
   authStore.clearError()
-  
+
   try {
     await api('POST', '/auth/register', { username: email, email, password })
     return await login(email, password)
@@ -403,16 +319,13 @@ export async function register(email, password) {
   }
 }
 
-/**
- * Check existing token, load user if valid
- */
 export async function initAuth() {
   const auth = get(authStore)
-  
+
   if (!auth.token || auth.token.trim() === '') {
     return false
   }
-  
+
   try {
     const user = await api('GET', '/auth/me')
     authStore.setUser(user)
