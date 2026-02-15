@@ -2,8 +2,11 @@
 
 import json
 import time
+import logging
 from typing import Any, Optional
 from collections import OrderedDict
+
+logger = logging.getLogger(__name__)
 
 
 class InMemoryCache:
@@ -76,9 +79,10 @@ class RedisCache:
             if value is None:
                 return None
             return json.loads(value)
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Cache get failed for {key}: {e}")
             return None
-    
+
     async def set(self, key: str, value: Any, ttl: Optional[int] = None) -> None:
         try:
             serialized = json.dumps(value)
@@ -86,27 +90,29 @@ class RedisCache:
                 await self._redis.setex(self._key(key), ttl, serialized)
             else:
                 await self._redis.set(self._key(key), serialized)
-        except Exception:
-            pass  # Fail silently
-    
+        except Exception as e:
+            logger.debug(f"Cache set failed for {key}: {e}")
+
     async def delete(self, key: str) -> bool:
         try:
             result = await self._redis.delete(self._key(key))
             return result > 0
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Cache delete failed for {key}: {e}")
             return False
-    
+
     async def delete_pattern(self, pattern: str) -> int:
         """Delete keys matching pattern."""
         try:
             keys = []
             async for key in self._redis.scan_iter(self._key(pattern)):
                 keys.append(key)
-            
+
             if keys:
                 return await self._redis.delete(*keys)
             return 0
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Cache delete_pattern failed for {pattern}: {e}")
             return 0
     
     async def clear(self) -> None:
@@ -116,7 +122,8 @@ class RedisCache:
     async def exists(self, key: str) -> bool:
         try:
             return await self._redis.exists(self._key(key)) > 0
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Cache exists failed for {key}: {e}")
             return False
 
 

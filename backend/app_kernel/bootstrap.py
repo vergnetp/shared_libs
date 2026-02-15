@@ -253,6 +253,14 @@ async def _run_embedded_admin_worker(
                             await db.save_entity(table, entity)
                 except Exception as e:
                     logger.warning(f"Admin worker DB error: {e}")
+                    # Push failed events to dead-letter queue for later retry
+                    try:
+                        for table, entity in all_batches:
+                            dlq_entry = json.dumps({"table": table, "entity": entity})
+                            await redis_client.lpush("admin:dead_letter", dlq_entry)
+                        logger.info(f"Admin worker: {len(all_batches)} events moved to dead-letter queue")
+                    except Exception as dlq_err:
+                        logger.error(f"Admin worker: failed to write to dead-letter queue: {dlq_err}")
             else:
                 await asyncio.sleep(poll_interval)
     

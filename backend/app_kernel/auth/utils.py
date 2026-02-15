@@ -3,6 +3,7 @@ Auth utilities - Token creation/verification and password hashing.
 
 These are low-level primitives used by auth dependencies and services.
 """
+import asyncio
 import hashlib
 import secrets
 from datetime import datetime, timedelta, timezone
@@ -23,45 +24,73 @@ class AuthError(Exception):
 # Password Hashing
 # =============================================================================
 
+# Current hashing parameters (OWASP 2024+ recommendation for PBKDF2)
+_HASH_ALGORITHM = 'sha512'
+_HASH_ITERATIONS = 600000
+
+
 def hash_password(password: str) -> str:
     """
-    Hash a password using PBKDF2-SHA256.
-    
-    Returns a string in format: salt$iterations$hash
+    Hash a password using PBKDF2-SHA512 with 600k iterations.
+
+    Returns a string in format: salt$iterations$algorithm$hash
     """
     salt = secrets.token_hex(16)
-    iterations = 100000
-    
+
     dk = hashlib.pbkdf2_hmac(
-        'sha256',
+        _HASH_ALGORITHM,
         password.encode('utf-8'),
         salt.encode('utf-8'),
-        iterations
+        _HASH_ITERATIONS
     )
-    
-    return f"{salt}${iterations}${dk.hex()}"
+
+    return f"{salt}${_HASH_ITERATIONS}${_HASH_ALGORITHM}${dk.hex()}"
+
+
+async def hash_password_async(password: str) -> str:
+    """Non-blocking hash_password for use in async request handlers."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, hash_password, password)
 
 
 def verify_password(password: str, password_hash: str) -> bool:
     """
     Verify a password against its hash.
-    
-    Returns True if password matches, False otherwise.
+
+    Backward-compatible: handles both old (salt$iter$hash with sha256)
+    and new (salt$iter$algo$hash) formats.
     """
     try:
-        salt, iterations_str, stored_hash = password_hash.split('$')
+        parts = password_hash.split('$')
+
+        if len(parts) == 4:
+            # New format: salt$iterations$algorithm$hash
+            salt, iterations_str, algorithm, stored_hash = parts
+        elif len(parts) == 3:
+            # Legacy format: salt$iterations$hash (always sha256)
+            salt, iterations_str, stored_hash = parts
+            algorithm = 'sha256'
+        else:
+            return False
+
         iterations = int(iterations_str)
-        
+
         dk = hashlib.pbkdf2_hmac(
-            'sha256',
+            algorithm,
             password.encode('utf-8'),
             salt.encode('utf-8'),
             iterations
         )
-        
+
         return secrets.compare_digest(dk.hex(), stored_hash)
     except (ValueError, AttributeError):
         return False
+
+
+async def verify_password_async(password: str, password_hash: str) -> bool:
+    """Non-blocking verify_password for use in async request handlers."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, verify_password, password, password_hash)
 
 
 # =============================================================================

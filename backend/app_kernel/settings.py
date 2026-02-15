@@ -145,6 +145,9 @@ class SecuritySettings:
     # Error handling middleware (catches unhandled exceptions)
     enable_error_handling: bool = True
     
+    # Max request body size in bytes (0 = unlimited)
+    max_body_size: int = 10 * 1024 * 1024  # 10 MB
+
     # Debug mode (shows full errors instead of generic 500)
     debug: bool = False
 

@@ -3,8 +3,11 @@ Email integration for app_kernel.
 
 Wraps the backend.emailing module and auto-configures it from ServiceConfig.
 Provides email capabilities to kernel features like SaaS invites.
+
+SMTP calls are offloaded to a thread executor to avoid blocking the event loop.
 """
 
+import asyncio
 from typing import Optional, TYPE_CHECKING
 import logging
 
@@ -81,13 +84,17 @@ def _setup_saas_email():
         from ..saas.email import set_email_sender
         
         async def send_email(to: str, subject: str, html: str, text: str = None) -> bool:
-            """Send email using configured emailer."""
+            """Send email using configured emailer (offloaded to thread)."""
             try:
-                _emailer.send_email(
-                    subject=subject,
-                    recipients=[to],
-                    html=html,
-                    text=text,
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(
+                    None,
+                    lambda: _emailer.send_email(
+                        subject=subject,
+                        recipients=[to],
+                        html=html,
+                        text=text,
+                    ),
                 )
                 return True
             except Exception as e:
@@ -139,13 +146,17 @@ async def send_email(
         return False
     
     try:
-        _emailer.send_email(
-            subject=subject,
-            recipients=[to],
-            html=html,
-            text=text,
-            from_address=from_address,
-            reply_to=reply_to,
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None,
+            lambda: _emailer.send_email(
+                subject=subject,
+                recipients=[to],
+                html=html,
+                text=text,
+                from_address=from_address,
+                reply_to=reply_to,
+            ),
         )
         return True
     except Exception as e:
@@ -175,11 +186,15 @@ async def send_email_batch(
         return {"sent": 0, "failed": len(recipients), "error": "Email not configured"}
     
     try:
-        _emailer.send_email(
-            subject=subject,
-            recipients=recipients,
-            html=html,
-            text=text,
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None,
+            lambda: _emailer.send_email(
+                subject=subject,
+                recipients=recipients,
+                html=html,
+                text=text,
+            ),
         )
         return {"sent": len(recipients), "failed": 0}
     except Exception as e:
