@@ -219,6 +219,76 @@ class CacheBustedStaticFiles(StaticFiles):
 
 
 # =============================================================================
+# Request Body Size Limit Middleware
+# =============================================================================
+
+class MaxBodySizeMiddleware:
+    """
+    Reject requests whose Content-Length exceeds a configurable limit.
+
+    Returns 413 Payload Too Large if the declared Content-Length is over the
+    limit. Also enforces the limit on chunked transfers by counting bytes.
+
+    Args:
+        app: ASGI application
+        max_bytes: Maximum allowed body size in bytes (default 10 MB)
+    """
+
+    def __init__(self, app: ASGIApp, max_bytes: int = 10 * 1024 * 1024):
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        # Check Content-Length header if present
+        headers = dict(
+            (k.lower(), v) for k, v in scope.get("headers", [])
+        )
+        content_length = headers.get(b"content-length")
+        if content_length is not None:
+            try:
+                if int(content_length) > self.max_bytes:
+                    response = JSONResponse(
+                        status_code=413,
+                        content={"detail": f"Request body too large (max {self.max_bytes // 1024 // 1024}MB)"},
+                    )
+                    await response(scope, receive, send)
+                    return
+            except (ValueError, TypeError):
+                pass
+
+        # For chunked transfers, count bytes as they arrive
+        bytes_received = 0
+        rejected = False
+
+        async def counting_receive():
+            nonlocal bytes_received, rejected
+            message = await receive()
+            if message.get("type") == "http.request":
+                body = message.get("body", b"")
+                bytes_received += len(body)
+                if bytes_received > self.max_bytes:
+                    rejected = True
+                    raise ValueError("Request body too large")
+            return message
+
+        try:
+            await self.app(scope, counting_receive, send)
+        except ValueError:
+            if rejected:
+                response = JSONResponse(
+                    status_code=413,
+                    content={"detail": f"Request body too large (max {self.max_bytes // 1024 // 1024}MB)"},
+                )
+                await response(scope, receive, send)
+            else:
+                raise
+
+
+# =============================================================================
 # Request ID Middleware
 # =============================================================================
 
@@ -532,20 +602,25 @@ def setup_security_middleware(app: FastAPI, settings: SecuritySettings) -> None:
     Order matters! Middleware executes in reverse order of addition.
     """
     # Add in reverse order of execution
-    
+
     # 1. Error handling (outermost - catches all)
     if settings.enable_error_handling:
         app.add_middleware(ErrorHandlingMiddleware, debug=settings.debug)
-    
-    # 2. Request logging (after error handling)
+
+    # 2. Body size limit (reject oversized requests early)
+    max_body = getattr(settings, 'max_body_size', 0)
+    if max_body and max_body > 0:
+        app.add_middleware(MaxBodySizeMiddleware, max_bytes=max_body)
+
+    # 3. Request logging (after error handling)
     if settings.enable_request_logging:
         app.add_middleware(RequestLoggingMiddleware)
-    
-    # 3. Security headers
+
+    # 4. Security headers
     if settings.enable_security_headers:
         app.add_middleware(SecurityHeadersMiddleware)
-    
-    # 4. Request ID (innermost - runs first)
+
+    # 5. Request ID (innermost - runs first)
     if settings.enable_request_id:
         app.add_middleware(RequestIdMiddleware)
     
