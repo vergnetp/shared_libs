@@ -63,6 +63,7 @@ export {
 // =============================================================================
 export {
   api,
+  apiRaw,
   apiStream,
   apiStreamMultipart,
   createApiClient,
