@@ -6,6 +6,18 @@
  *   
  *   // Configure once at app startup
  *   setApiConfig({ baseUrl: '/api/v1' })
+ *
+ *   // Add app-specific request modification (custom tokens, path rewrites)
+ *   setApiConfig({
+ *     requestModifier(url, path, headers, options) {
+ *       if (path.startsWith('/infra/')) {
+ *         const token = getMyToken()
+ *         if (!token) return { error: 'Token required' }
+ *         return { url: url + `?token=${token}`, headers }
+ *       }
+ *       return { url, headers }
+ *     }
+ *   })
  *   
  *   // Make requests
  *   const data = await api('GET', '/users')
@@ -25,7 +37,8 @@ import { authStore, getAuthToken } from '../stores/auth.js'
 
 let config = {
   baseUrl: '/api/v1',
-  onUnauthorized: null,  // Callback when 401 received
+  onUnauthorized: null,   // Callback when 401 received
+  requestModifier: null,  // (url, path, headers, options) => { url, headers } | { error }
 }
 
 export function setApiConfig(newConfig) {
@@ -82,8 +95,16 @@ function buildRequest(path, options = {}) {
     Object.assign(headers, options.headers)
   }
   
-  const url = cfg.baseUrl + path
-  
+  let url = cfg.baseUrl + path
+
+  // Let app modify request (add custom tokens, rewrite paths, etc.)
+  if (cfg.requestModifier) {
+    const modified = cfg.requestModifier(url, path, headers, options)
+    if (modified?.error) return { error: modified.error, url: null, headers: null }
+    if (modified?.url) url = modified.url
+    if (modified?.headers) Object.assign(headers, modified.headers)
+  }
+
   return { url, headers, error: null }
 }
 
@@ -210,12 +231,20 @@ async function apiStreamMultipartRequest(path, formData, onMessage, options = {}
     throw new Error('Session corrupted - please login again')
   }
 
-  const url = cfg.baseUrl + path
+  let url = cfg.baseUrl + path
 
   // Headers — NO Content-Type (browser sets multipart boundary)
   const headers = {}
   if (options.headers) Object.assign(headers, options.headers)
   if (auth.token) headers['Authorization'] = `Bearer ${auth.token}`
+
+  // Let app modify request
+  if (cfg.requestModifier) {
+    const modified = cfg.requestModifier(url, path, headers, options)
+    if (modified?.error) throw new Error(modified.error)
+    if (modified?.url) url = modified.url
+    if (modified?.headers) Object.assign(headers, modified.headers)
+  }
 
   const res = await fetch(url, { method: 'POST', headers, body: formData })
   await handleErrorResponse(res, options)
@@ -237,7 +266,7 @@ async function apiRawRequest(method, path, data = null, options = {}) {
     throw new Error('Session corrupted - please login again')
   }
 
-  const url = cfg.baseUrl + path
+  let url = cfg.baseUrl + path
 
   const headers = {}
   if (options.headers) Object.assign(headers, options.headers)
@@ -248,6 +277,14 @@ async function apiRawRequest(method, path, data = null, options = {}) {
   // Only set Content-Type for JSON data (not FormData)
   if (data && !(data instanceof FormData)) {
     headers['Content-Type'] = 'application/json'
+  }
+
+  // Let app modify request
+  if (cfg.requestModifier) {
+    const modified = cfg.requestModifier(url, path, headers, options)
+    if (modified?.error) throw new Error(modified.error)
+    if (modified?.url) url = modified.url
+    if (modified?.headers) Object.assign(headers, modified.headers)
   }
 
   const opts = { method, headers }
