@@ -3,7 +3,7 @@
  * 
  * Usage:
  *   import { Auth, Header, Button } from '@myorg/ui'
- *   import { authStore, toasts } from '@myorg/ui'
+ *   import { useAuth, toasts } from '@myorg/ui'
  *   import { api, login, initAuth } from '@myorg/ui'
  *   import { SWR } from '@myorg/ui'
  *   import { presets, withPreset } from '@myorg/ui/presets'
@@ -24,11 +24,11 @@ export { default as ToastContainer } from './components/ToastContainer.svelte'
 export { default as ThemeToggle } from './components/ThemeToggle.svelte'
 
 // =============================================================================
-// Stores
+// Hooks (reactive state)
 // =============================================================================
-export { 
-  authStore, 
-  isAuthenticated, 
+export {
+  useAuth,
+  isAuthenticated,
   currentUser,
   isAdmin,
   getAuthToken,
@@ -38,21 +38,21 @@ export {
   getCustomToken,
   setCustomToken,
   clearCustomToken,
-} from './stores/auth.js'
+} from './hooks/auth.js'
 
-export { 
+export {
   toasts,
   addToast,
   removeToast,
-} from './stores/toast.js'
+} from './hooks/toast.js'
 
 export {
   theme,
   setTheme,
   toggleTheme,
-} from './stores/theme.js'
+} from './hooks/theme.js'
 
-export { SWR } from './swr.js'
+export { SWR } from './api/swr.js'
 
 // =============================================================================
 // API

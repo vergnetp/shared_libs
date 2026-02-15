@@ -10,7 +10,7 @@
 -->
 <script>
   import { fly } from 'svelte/transition'
-  import { toasts } from '../stores/toast.js'
+  import { toasts } from '../hooks/toast.js'
 </script>
 
 <div class="toast-container">

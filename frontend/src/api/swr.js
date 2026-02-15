@@ -1,5 +1,5 @@
 import { writable, get } from "svelte/store";
-import { api } from "./api/client.js";
+import { api } from "./client.js";
 
 /**
  * Low-level SWR engine with caching and background refresh.

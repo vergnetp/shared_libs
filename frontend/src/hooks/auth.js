@@ -2,7 +2,7 @@
  * auth.js - Shared authentication store
  *
  * Usage:
- *   import { authStore, isAuthenticated, setAuthToken, clearAuth } from '@myorg/ui'
+ *   import { useAuth, isAuthenticated, setAuthToken, clearAuth } from '@myorg/ui'
  */
 import { writable, derived } from "svelte/store";
 
@@ -74,18 +74,18 @@ function createAuthStore() {
   };
 }
 
-export const authStore = createAuthStore();
+export const useAuth = createAuthStore();
 
 // =============================================================================
 // Derived Stores
 // =============================================================================
 
 export const isAuthenticated = derived(
-  authStore,
+  useAuth,
   ($auth) => !!$auth.token && !!$auth.user,
 );
 
-export const currentUser = derived(authStore, ($auth) => $auth.user);
+export const currentUser = derived(useAuth, ($auth) => $auth.user);
 
 // Admin check - can be customized per app via adminEmails config
 let adminEmails = [];
@@ -94,7 +94,7 @@ export function setAdminEmails(emails) {
   adminEmails = emails.map((e) => e.toLowerCase());
 }
 
-export const isAdmin = derived(authStore, ($auth) => {
+export const isAdmin = derived(useAuth, ($auth) => {
   if (!$auth.user?.email) return false;
   // Check role first, then email list
   if ($auth.user.role === "admin") return true;
@@ -110,11 +110,11 @@ export function getAuthToken() {
 }
 
 export function setAuthToken(token) {
-  authStore.setToken(token);
+  useAuth.setToken(token);
 }
 
 export function clearAuth() {
-  authStore.logout();
+  useAuth.logout();
 }
 
 // =============================================================================

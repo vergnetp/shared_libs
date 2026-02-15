@@ -30,7 +30,7 @@
  *   const data = await api('POST', '/users', { name: 'John' })
  */
 import { get } from 'svelte/store'
-import { authStore, getAuthToken } from '../stores/auth.js'
+import { useAuth, getAuthToken } from '../hooks/auth.js'
 
 // =============================================================================
 // Configuration
@@ -88,9 +88,9 @@ async function handleErrorResponse(res, options = {}) {
       errorMsg = errBody.detail || errBody.error || errBody.message || errorMsg
     } catch {}
 
-    const auth = get(authStore)
+    const auth = get(useAuth)
     if (auth.token) {
-      authStore.logout()
+      useAuth.logout()
       errorMsg = 'Session expired - please login again'
     }
 
@@ -179,7 +179,7 @@ async function coreFetch(method, path, {
   ...options
 } = {}) {
   cfg = cfg || config
-  const auth = get(authStore)
+  const auth = get(useAuth)
 
   // --- Auth + JWT validation ---
   const isAuthEndpoint = path.startsWith('/auth/login') || path.startsWith('/auth/register')
@@ -187,7 +187,7 @@ async function coreFetch(method, path, {
   if (auth.token && !isAuthEndpoint && !options.skipAuth) {
     if (!isValidJwtFormat(auth.token)) {
       console.error('Invalid JWT format detected - token may be corrupted')
-      authStore.logout()
+      useAuth.logout()
       const msg = 'Session corrupted - please login again'
       if (throwOnSkip) throw new Error(msg)
       console.debug(`Skipping ${path} - ${msg}`)
@@ -288,39 +288,39 @@ export const del = (path, options) => api('DELETE', path, null, options)
 // =============================================================================
 
 export async function login(email, password) {
-  authStore.setLoading(true)
-  authStore.clearError()
+  useAuth.setLoading(true)
+  useAuth.clearError()
 
   try {
     const res = await api('POST', '/auth/login', { username: email, password })
-    authStore.setToken(res.access_token)
+    useAuth.setToken(res.access_token)
 
     const user = await api('GET', '/auth/me')
-    authStore.setUser(user)
-    authStore.setLoading(false)
+    useAuth.setUser(user)
+    useAuth.setLoading(false)
 
     return user
   } catch (err) {
-    authStore.setError(err.message)
+    useAuth.setError(err.message)
     throw err
   }
 }
 
 export async function register(email, password) {
-  authStore.setLoading(true)
-  authStore.clearError()
+  useAuth.setLoading(true)
+  useAuth.clearError()
 
   try {
     await api('POST', '/auth/register', { username: email, email, password })
     return await login(email, password)
   } catch (err) {
-    authStore.setError(err.message)
+    useAuth.setError(err.message)
     throw err
   }
 }
 
 export async function initAuth() {
-  const auth = get(authStore)
+  const auth = get(useAuth)
 
   if (!auth.token || auth.token.trim() === '') {
     return false
@@ -328,10 +328,10 @@ export async function initAuth() {
 
   try {
     const user = await api('GET', '/auth/me')
-    authStore.setUser(user)
+    useAuth.setUser(user)
     return true
   } catch (err) {
-    authStore.logout()
+    useAuth.logout()
     return false
   }
 }

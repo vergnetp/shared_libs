@@ -11,7 +11,7 @@
 -->
 <script>
   import { createEventDispatcher } from 'svelte'
-  import { authStore, clearAuth } from '../stores/auth.js'
+  import { useAuth, clearAuth } from '../hooks/auth.js'
   import Button from './Button.svelte'
   import ThemeToggle from './ThemeToggle.svelte'
   
@@ -69,11 +69,11 @@
       <ThemeToggle />
     {/if}
     
-    {#if showUser && $authStore.user}
-      <span class="user-email">{$authStore.user.email || $authStore.user.username}</span>
+    {#if showUser && $useAuth.user}
+      <span class="user-email">{$useAuth.user.email || $useAuth.user.username}</span>
     {/if}
     
-    {#if showLogout && $authStore.token}
+    {#if showLogout && $useAuth.token}
       <Button variant="ghost" size="sm" on:click={logout}>{logoutText}</Button>
     {/if}
   </div>
