@@ -438,7 +438,7 @@ def create_service(
         all_routers.append(billing_router)
     
     # Call internal create_service
-    return _create_service_internal(
+    app = _create_service_internal(
         name=name,
         version=version,
         description=description,
@@ -452,6 +452,16 @@ def create_service(
         api_prefix=api_prefix,
         test_runners=test_runners,
     )
+
+    # Auto-mount static files if static/ directory exists next to the calling app
+    static_dir = Path(app_file).resolve().parent / "static"
+    if static_dir.is_dir():
+        from .middleware import CacheBustedStaticFiles
+        app.mount("/static", CacheBustedStaticFiles(directory=str(static_dir), html=False), name="static-assets")
+        app.mount("/", CacheBustedStaticFiles(directory=str(static_dir), html=True), name="static-spa")
+        logger.info(f"Static files mounted from {static_dir}")
+
+    return app
 
 
 def _parse_smtp_url(url: str) -> dict:
