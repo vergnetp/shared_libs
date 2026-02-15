@@ -5,7 +5,7 @@
     <ThemeToggle />
 -->
 <script>
-  import { theme, toggleTheme } from '../stores/theme.js'
+  import { theme, toggleTheme } from '../hooks/theme.js'
 </script>
 
 <button 

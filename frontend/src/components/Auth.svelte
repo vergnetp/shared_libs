@@ -17,7 +17,7 @@
 <script>
   import { createEventDispatcher } from 'svelte'
   import { api } from '../api/client.js'
-  import { authStore, setAuthToken } from '../stores/auth.js'
+  import { useAuth, setAuthToken } from '../hooks/auth.js'
   import Button from './Button.svelte'
   
   // =========================================================================
@@ -143,7 +143,7 @@
       
       if (!user) throw new Error('Login failed - no user info')
       
-      authStore.setUser(user)
+      useAuth.setUser(user)
       
       const result = { user, token }
       dispatch('success', result)
@@ -203,7 +203,7 @@
       
       if (!user) throw new Error('Signup failed - no user info')
       
-      authStore.setUser(user)
+      useAuth.setUser(user)
       
       const result = { user, token }
       dispatch('success', result)
