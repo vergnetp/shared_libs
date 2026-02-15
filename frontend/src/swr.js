@@ -1,8 +1,8 @@
 import { writable, get } from "svelte/store";
-import { api } from "../api/client.js";
+import { api } from "./api/client.js";
 
 /**
- * Creates an SWR-like store with caching and background refresh.
+ * Low-level SWR engine with caching and background refresh.
  *
  * Features:
  * - Returns cached data immediately (stale)
@@ -10,13 +10,8 @@ import { api } from "../api/client.js";
  * - Configurable refresh intervals
  * - Deduplication of concurrent requests
  * - Manual refresh support
- *
- * @param {string} key - Unique cache key
- * @param {Function} fetcher - Async function that returns data
- * @param {Object} options - Configuration options
- * @returns {Object} Store with subscribe, refresh, and state
  */
-export function createFetchStore(key, fetcher, options = {}) {
+function createFetchStore(key, fetcher, options = {}) {
   const {
     refreshInterval = 0, // Auto-refresh interval in ms (0 = disabled)
     revalidateOnFocus = true, // Refresh when tab becomes visible
@@ -152,12 +147,22 @@ export function createFetchStore(key, fetcher, options = {}) {
 }
 
 /**
- * Creates a fetch store for an API endpoint.
+ * SWR (Stale-While-Revalidate) for an API endpoint.
  *
- * @param {string} endpoint - API endpoint (e.g., '/infra/servers')
+ * String endpoint: fetches once, caches, revalidates in background.
+ *   const snapshots = SWR('/infra/snapshots', { refreshInterval: 60000 })
+ *
+ * Function endpoint: re-fetches when params change.
+ *   const containers = SWR(p => `/infra/agent/${p.server}/containers`)
+ *
+ * @param {string|Function} endpoint - API endpoint or function returning one
  * @param {Object} options - Fetch store options
  */
-export function createApiStore(endpoint, options = {}) {
+export function SWR(endpoint, options = {}) {
+  if (typeof endpoint === "function") {
+    return _swrParam(endpoint, options);
+  }
+
   const { transform = (d) => d, apiFn = api, ...storeOptions } = options;
 
   return createFetchStore(
@@ -170,13 +175,7 @@ export function createApiStore(endpoint, options = {}) {
   );
 }
 
-/**
- * Creates a parameterized fetch store (re-fetches when params change).
- *
- * @param {Function} endpointFn - Function that returns endpoint based on params
- * @param {Object} options - Fetch store options
- */
-export function createParamStore(endpointFn, options = {}) {
+function _swrParam(endpointFn, options = {}) {
   const { transform = (d) => d, apiFn = api, ...storeOptions } = options;
 
   const store = writable({
