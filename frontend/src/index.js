@@ -52,7 +52,7 @@ export {
   toggleTheme,
 } from './stores/theme.js'
 
-export { SWR } from './swr.js'
+export { SWR } from './api/swr.js'
 
 // =============================================================================
 // API
