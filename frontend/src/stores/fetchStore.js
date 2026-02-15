@@ -23,8 +23,6 @@ export function createFetchStore(key, fetcher, options = {}) {
     revalidateOnMount = true, // Fetch on first subscriber
     dedupingInterval = 2000, // Dedupe requests within this window
     initialData = null,
-    retryCount = 3, // Max retries on failure (0 = no retry)
-    retryBaseDelay = 1000, // Base delay in ms (doubles each retry: 1s, 2s, 4s)
   } = options;
 
   // Internal state
@@ -42,27 +40,19 @@ export function createFetchStore(key, fetcher, options = {}) {
   let consecutiveErrors = 0;
   const MAX_ERRORS_BEFORE_PAUSE = 3;
 
-  // Fetch with deduplication and backoff
+  // Fetch with deduplication and circuit breaker.
+  // Retries with backoff are handled by the API client (withRetry);
+  // this layer only tracks consecutive failures to pause polling.
   async function doFetch(force = false) {
-    // Already fetching (possibly mid-retry) — return existing promise
-    if (!force && fetchPromise) {
-      return fetchPromise;
-    }
+    if (!force && fetchPromise) return fetchPromise;
 
     const now = Date.now();
+    if (!force && now - lastFetchTime < dedupingInterval) return;
 
-    // Dedupe: don't re-fetch if last fetch completed/started recently
-    if (!force && now - lastFetchTime < dedupingInterval) {
-      return;
-    }
-
-    // Back off after repeated failures (reset by tab focus or explicit refresh())
-    if (consecutiveErrors >= MAX_ERRORS_BEFORE_PAUSE) {
-      return;
-    }
+    // Circuit breaker: stop polling after repeated failures
+    if (consecutiveErrors >= MAX_ERRORS_BEFORE_PAUSE) return;
 
     lastFetchTime = now;
-    // Only show loading if no data exists yet (stale-while-revalidate)
     store.update((s) => ({
       ...s,
       loading: s.data === null || s.data?.length === 0,
@@ -70,43 +60,23 @@ export function createFetchStore(key, fetcher, options = {}) {
 
     fetchPromise = (async () => {
       try {
-        for (let attempt = 0; attempt <= retryCount; attempt++) {
-          try {
-            const data = await fetcher();
-            consecutiveErrors = 0;
-            store.set({
-              data,
-              error: null,
-              loading: false,
-              lastFetched: new Date(),
-            });
-            return data;
-          } catch (error) {
-            consecutiveErrors++;
-            // Don't retry: client errors (4xx), non-retryable, last attempt, or circuit breaker tripped
-            const isRetryable =
-              !error.status ||
-              error.status >= 500 ||
-              error.name === "TypeError";
-
-            if (
-              !isRetryable ||
-              attempt >= retryCount ||
-              consecutiveErrors >= MAX_ERRORS_BEFORE_PAUSE
-            ) {
-              store.update((s) => ({
-                ...s,
-                error: error.message || "Fetch failed",
-                loading: false,
-              }));
-              throw error;
-            }
-            // Wait with exponential backoff before next retry
-            await new Promise((r) =>
-              setTimeout(r, retryBaseDelay * 2 ** attempt),
-            );
-          }
-        }
+        const data = await fetcher();
+        consecutiveErrors = 0;
+        store.set({
+          data,
+          error: null,
+          loading: false,
+          lastFetched: new Date(),
+        });
+        return data;
+      } catch (error) {
+        consecutiveErrors++;
+        store.update((s) => ({
+          ...s,
+          error: error.message || "Fetch failed",
+          loading: false,
+        }));
+        throw error;
       } finally {
         fetchPromise = null;
       }

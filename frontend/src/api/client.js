@@ -112,32 +112,67 @@ function buildRequest(path, options = {}) {
 // Error Handler
 // =============================================================================
 
+function apiError(message, status) {
+  const err = new Error(message)
+  err.status = status
+  return err
+}
+
 async function handleErrorResponse(res, options = {}) {
   const cfg = options.config || config
-  
+
   if (res.status === 401) {
     let errorMsg = 'Authentication failed'
     try {
       const errBody = await res.json()
       errorMsg = errBody.detail || errBody.error || errBody.message || errorMsg
     } catch {}
-    
+
     const auth = get(authStore)
     if (auth.token) {
       authStore.logout()
       errorMsg = 'Session expired - please login again'
     }
-    
+
     if (cfg.onUnauthorized) {
       cfg.onUnauthorized(errorMsg)
     }
-    
-    throw new Error(errorMsg)
+
+    throw apiError(errorMsg, 401)
   }
-  
+
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: 'Request failed' }))
-    throw new Error(err.detail || err.error || err.message || 'Request failed')
+    throw apiError(err.detail || err.error || err.message || 'Request failed', res.status)
+  }
+}
+
+// =============================================================================
+// Retry Logic
+// =============================================================================
+
+/** Returns true if the error is transient (network or 5xx) and worth retrying */
+function isRetryable(error) {
+  if (error.name === 'TypeError') return true          // network error
+  if (error.status && error.status >= 500) return true  // server error
+  return false
+}
+
+const RETRY_DEFAULTS = { GET: 3, POST: 1, PUT: 1, DELETE: 1 }
+
+/** Run fn() with retries and exponential backoff (1s, 2s, 4s…) */
+async function withRetry(fn, method, options = {}) {
+  const maxRetries = options.retries ?? RETRY_DEFAULTS[method] ?? 1
+  const baseDelay = 1000
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn()
+    } catch (err) {
+      const last = attempt >= maxRetries
+      if (last || !isRetryable(err)) throw err
+      await new Promise(r => setTimeout(r, baseDelay * 2 ** attempt))
+    }
   }
 }
 
@@ -174,29 +209,30 @@ async function readSSE(res, onMessage) {
 
 async function apiRequest(method, path, data = null, options = {}) {
   const { url, headers, error } = buildRequest(path, options)
-  
+
   if (error) {
     console.debug(`Skipping ${path} - ${error}`)
     return null
   }
-  
+
   const opts = { method, headers }
   if (data) opts.body = JSON.stringify(data)
-  
-  const res = await fetch(url, opts)
-  
-  await handleErrorResponse(res, options)
-  
-  if (res.status === 204) return null
-  
-  const result = await res.json()
-  
-  // Unwrap common response formats
-  if (result && result.success === true && result.data !== undefined) {
-    return result.data
-  }
-  
-  return result
+
+  return withRetry(async () => {
+    const res = await fetch(url, opts)
+    await handleErrorResponse(res, options)
+
+    if (res.status === 204) return null
+
+    const result = await res.json()
+
+    // Unwrap common response formats
+    if (result && result.success === true && result.data !== undefined) {
+      return result.data
+    }
+
+    return result
+  }, method, options)
 }
 
 // =============================================================================
@@ -292,9 +328,11 @@ async function apiRawRequest(method, path, data = null, options = {}) {
     opts.body = data instanceof FormData ? data : JSON.stringify(data)
   }
 
-  const res = await fetch(url, opts)
-  await handleErrorResponse(res, options)
-  return res
+  return withRetry(async () => {
+    const res = await fetch(url, opts)
+    await handleErrorResponse(res, options)
+    return res
+  }, method, options)
 }
 
 // =============================================================================
