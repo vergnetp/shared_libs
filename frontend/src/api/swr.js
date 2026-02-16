@@ -100,7 +100,10 @@ function createFetchStore(key, fetcher, options = {}) {
   // Start/stop background refresh
   function startInterval() {
     if (refreshInterval > 0 && !intervalId) {
-      intervalId = setInterval(() => doFetch(), refreshInterval);
+      intervalId = setInterval(() => {
+        if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+        doFetch();
+      }, refreshInterval);
     }
   }
 
@@ -150,7 +153,7 @@ function createFetchStore(key, fetcher, options = {}) {
       consecutiveErrors = 0;
       return doFetch(true);
     },
-    mutate: (data) => store.update((s) => ({ ...s, data })),
+    mutate: (data) => store.update((s) => ({ ...s, data, error: null })),
     get: () => get(store),
   };
 }
