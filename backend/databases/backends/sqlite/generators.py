@@ -34,8 +34,9 @@ class SqliteSqlGenerator(SqlGenerator, SqlEntityGenerator):
         """Generate SQLite-specific upsert SQL for an entity."""
         fields_str = ', '.join([f"[{field}]" for field in fields])
         placeholders = ', '.join(['?'] * len(fields))
+        update_clause = ', '.join([f"[{field}]=excluded.[{field}]" for field in fields if field != 'id'])
         
-        return f"INSERT OR REPLACE INTO [{entity_name}] ({fields_str}) VALUES ({placeholders})"
+        return f"INSERT INTO [{entity_name}] ({fields_str}) VALUES ({placeholders}) ON CONFLICT([id]) DO UPDATE SET {update_clause}"
     
     def get_create_table_sql(self, entity_name: str, columns: List[Tuple[str, str]]) -> str:
         """Generate SQLite-specific CREATE TABLE SQL."""
