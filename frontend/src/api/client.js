@@ -86,7 +86,12 @@ async function handleErrorResponse(res, options = {}) {
     try {
       const errBody = await res.json()
       errorMsg = errBody.detail || errBody.error || errBody.message || errorMsg
-    } catch {}
+    } catch {
+      try {
+        const text = await res.text()
+        if (text) errorMsg = text.slice(0, 200)
+      } catch {}
+    }
 
     const auth = get(useAuth)
     if (auth.token) {
@@ -102,8 +107,17 @@ async function handleErrorResponse(res, options = {}) {
   }
 
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: 'Request failed' }))
-    throw apiError(err.detail || err.error || err.message || 'Request failed', res.status)
+    let detail = 'Request failed'
+    try {
+      const err = await res.json()
+      detail = err.detail || err.error || err.message || detail
+    } catch {
+      try {
+        const text = await res.text()
+        if (text) detail = text.slice(0, 200)
+      } catch {}
+    }
+    throw apiError(detail, res.status)
   }
 }
 
@@ -135,7 +149,7 @@ async function withRetry(fn, method, options = {}) {
 }
 
 // =============================================================================
-// SSE Stream Reader
+// SSE Stream Reader (single-line data: only — no multi-line/event/id support)
 // =============================================================================
 
 async function readSSE(res, onMessage) {
