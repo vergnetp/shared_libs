@@ -100,16 +100,22 @@ function createFetchStore(key, fetcher, options = {}) {
   // Start/stop background refresh
   function startInterval() {
     if (refreshInterval > 0 && !intervalId) {
-      intervalId = setInterval(() => {
-        if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+      const tick = () => {
+        if (typeof document !== "undefined" && document.visibilityState !== "visible") {
+          intervalId = setTimeout(tick, refreshInterval);
+          return;
+        }
         doFetch();
-      }, refreshInterval);
+        const jitter = refreshInterval * (0.9 + Math.random() * 0.2); // ±10%
+        intervalId = setTimeout(tick, jitter);
+      };
+      intervalId = setTimeout(tick, refreshInterval);
     }
   }
 
   function stopInterval() {
     if (intervalId) {
-      clearInterval(intervalId);
+      clearTimeout(intervalId);
       intervalId = null;
     }
   }
