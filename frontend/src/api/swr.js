@@ -1,3 +1,39 @@
+/**
+ * swr.js — Stale-While-Revalidate data fetching for Svelte
+ *
+ * Returns cached data immediately (from memory or localStorage),
+ * then revalidates in background. Svelte store compatible.
+ *
+ * Features:
+ * - localStorage persistence (default on, survives page reloads)
+ * - Background refresh with jittered intervals (±10%, prevents thundering herd)
+ * - Deduplication of concurrent requests
+ * - AbortController (cancels stale requests on param change or cleanup)
+ * - Circuit breaker with auto-recovery cooldown
+ * - onSuccess / onError callbacks
+ * - Dependent fetching (wait for other stores before fetching)
+ *
+ * @example
+ *   // Basic — poll every 60s, cached in localStorage
+ *   const snapshots = SWR('/infra/snapshots', { refreshInterval: 60000 })
+ *
+ *   // Parameterised — refetches when params change, aborts stale requests
+ *   const containers = SWR(p => `/infra/agent/${p.server}/containers`)
+ *   containers.fetch({ server: 'web1' })
+ *
+ *   // Dependent — waits for server store before fetching
+ *   const details = SWR(
+ *     ($server) => `/servers/${$server.data.id}/details`,
+ *     { dependencies: [serverStore], enabled: ($s) => !!$s.data }
+ *   )
+ *
+ *   // In Svelte template
+ *   {#if $snapshots.loading}Loading...{/if}
+ *   {#if $snapshots.error}Error: {$snapshots.error}{/if}
+ *   {#each $snapshots.data ?? [] as snap}...{/each}
+ *
+ * @module swr
+ */
 import { writable, get } from "svelte/store";
 import { api } from "./client.js";
 
@@ -37,7 +73,14 @@ function cacheDelete(key) {
 
 /**
  * Clear all SWR cache entries from localStorage.
- * Useful on logout or when you want a clean slate.
+ * Call on logout or when you want a clean slate.
+ *
+ * @example
+ *   import { clearSWRCache } from './swr.js'
+ *   function handleLogout() {
+ *     useAuth.logout()
+ *     clearSWRCache()
+ *   }
  */
 export function clearSWRCache() {
   try {
@@ -51,35 +94,84 @@ export function clearSWRCache() {
 }
 
 // =============================================================================
+// Types
+// =============================================================================
+
+/**
+ * @typedef {Object} SWRState
+ * @property {*} data - The fetched data (or null if not yet loaded)
+ * @property {string|null} error - Error message from last failed fetch (null if ok)
+ * @property {boolean} loading - True only on first load with no cached data
+ * @property {Date|null} lastFetched - Timestamp of last successful fetch (null if never)
+ */
+
+/**
+ * @typedef {Object} SWROptions
+ * @property {number} [refreshInterval=0] - Auto-refresh interval in ms (0 = disabled)
+ * @property {boolean} [revalidateOnFocus=true] - Refetch when browser tab becomes visible
+ * @property {boolean} [revalidateOnMount=true] - Fetch on first subscriber
+ * @property {number} [dedupingInterval=2000] - Dedupe requests within this window (ms)
+ * @property {*} [initialData=null] - Initial data before first fetch (overrides cache)
+ * @property {number} [errorCooldown=30000] - Circuit breaker: resume polling after this many ms of consecutive errors
+ * @property {boolean} [persist=true] - Persist responses in localStorage
+ * @property {number} [persistTTL=0] - Max cache age in ms (0 = no expiry)
+ * @property {(data: *) => void} [onSuccess] - Called after each successful fetch
+ * @property {(error: Error) => void} [onError] - Called after each failed fetch
+ * @property {(data: *) => *} [transform] - Transform response data before storing
+ * @property {typeof api} [apiFn] - API function to use (default: global `api`)
+ * @property {import('svelte/store').Readable[]} [dependencies] - Stores to watch (enables dependent fetching)
+ * @property {(...values: *[]) => boolean} [enabled] - Gate function for dependent fetching
+ */
+
+/**
+ * @typedef {Object} SWRStore
+ * @property {(run: (value: SWRState) => void) => (() => void)} subscribe - Svelte store contract
+ * @property {() => Promise<*>} refresh - Force refetch, resets circuit breaker
+ * @property {(data: *) => void} mutate - Optimistic update: set data + clear error + update cache
+ * @property {() => Promise<*>} invalidate - Clear cache + force refetch
+ * @property {() => SWRState} get - Read current state synchronously
+ */
+
+/**
+ * @typedef {Object} SWRParamStore
+ * @property {(run: (value: SWRState) => void) => (() => void)} subscribe - Svelte store contract
+ * @property {(params: Object) => Promise<*>} fetch - Fetch with new params (aborts previous)
+ * @property {() => Promise<*>|void} refresh - Refetch with last params
+ * @property {() => void} clear - Abort + clear cache + reset state
+ */
+
+/**
+ * @typedef {Object} SWRDependentStore
+ * @property {(run: (value: SWRState) => void) => (() => void)} subscribe - Svelte store contract
+ * @property {() => Promise<*>|undefined} refresh - Refresh inner store (if active)
+ * @property {() => SWRState} get - Read current state synchronously
+ */
+
+// =============================================================================
 // Low-level SWR engine
 // =============================================================================
 
 /**
- * Low-level SWR engine with caching, background refresh, and persistence.
+ * Low-level fetch store with caching, background refresh, and persistence.
+ * Use `SWR()` instead of calling this directly.
  *
- * Features:
- * - Returns cached data immediately (stale) — from memory or localStorage
- * - Revalidates in background
- * - Configurable refresh intervals with jitter (±10%)
- * - Deduplication of concurrent requests
- * - AbortController: cancels in-flight requests on cleanup
- * - Circuit breaker with auto-recovery cooldown
- * - localStorage persistence (default on)
- * - onSuccess / onError callbacks
- * - Manual refresh support
+ * @param {string} key - Cache key (typically the endpoint path)
+ * @param {(signal: AbortSignal) => Promise<*>} fetcher - Async function that fetches data
+ * @param {SWROptions} [options={}]
+ * @returns {SWRStore}
  */
 function createFetchStore(key, fetcher, options = {}) {
   const {
-    refreshInterval = 0, // Auto-refresh interval in ms (0 = disabled)
-    revalidateOnFocus = true, // Refresh when tab becomes visible
-    revalidateOnMount = true, // Fetch on first subscriber
-    dedupingInterval = 2000, // Dedupe requests within this window
+    refreshInterval = 0,
+    revalidateOnFocus = true,
+    revalidateOnMount = true,
+    dedupingInterval = 2000,
     initialData = null,
-    errorCooldown = 30000, // Resume polling after this many ms of errors
-    persist = true, // Persist to localStorage
-    persistTTL = 0, // Max cache age in ms (0 = no expiry)
-    onSuccess = null, // (data) => void
-    onError = null, // (error) => void
+    errorCooldown = 30000,
+    persist = true,
+    persistTTL = 0,
+    onSuccess = null,
+    onError = null,
   } = options;
 
   // Resolve initial data: explicit initialData > localStorage cache > null
@@ -92,7 +184,7 @@ function createFetchStore(key, fetcher, options = {}) {
     }
   }
 
-  // Internal state
+  /** @type {import('svelte/store').Writable<SWRState>} */
   const store = writable({
     data: resolvedInitial,
     error: null,
@@ -109,9 +201,6 @@ function createFetchStore(key, fetcher, options = {}) {
   let abortController = null;
   const MAX_ERRORS_BEFORE_PAUSE = 3;
 
-  // Fetch with deduplication, circuit breaker, and abort support.
-  // Retries with backoff are handled by the API client (withRetry);
-  // this layer only tracks consecutive failures to pause polling.
   async function doFetch(force = false) {
     if (!force && fetchPromise) return fetchPromise;
 
@@ -124,7 +213,7 @@ function createFetchStore(key, fetcher, options = {}) {
     if (consecutiveErrors >= MAX_ERRORS_BEFORE_PAUSE) {
       if (now - lastErrorTime < errorCooldown)
         return Promise.resolve(get(store).data);
-      consecutiveErrors = 0; // Cooldown elapsed, retry
+      consecutiveErrors = 0;
     }
 
     // Abort any in-flight request
@@ -174,7 +263,6 @@ function createFetchStore(key, fetcher, options = {}) {
     return fetchPromise;
   }
 
-  // Visibility change handler
   function handleVisibility() {
     if (document.visibilityState === "visible" && revalidateOnFocus) {
       consecutiveErrors = 0;
@@ -182,7 +270,6 @@ function createFetchStore(key, fetcher, options = {}) {
     }
   }
 
-  // Start/stop background refresh with per-tick jitter
   function startInterval() {
     if (refreshInterval > 0 && !intervalId) {
       const tick = () => {
@@ -208,13 +295,11 @@ function createFetchStore(key, fetcher, options = {}) {
     }
   }
 
-  // Custom subscribe that tracks subscribers
   const { subscribe: originalSubscribe } = store;
 
   function subscribe(run) {
     subscriberCount++;
 
-    // First subscriber: setup
     if (subscriberCount === 1) {
       if (revalidateOnFocus && typeof document !== "undefined") {
         document.addEventListener("visibilitychange", handleVisibility);
@@ -231,7 +316,6 @@ function createFetchStore(key, fetcher, options = {}) {
       unsubscribe();
       subscriberCount--;
 
-      // Last subscriber: cleanup
       if (subscriberCount === 0) {
         if (abortController) abortController.abort();
         if (typeof document !== "undefined") {
@@ -266,39 +350,37 @@ function createFetchStore(key, fetcher, options = {}) {
 // =============================================================================
 
 /**
- * SWR (Stale-While-Revalidate) for an API endpoint.
+ * Create an SWR (Stale-While-Revalidate) store for an API endpoint.
  *
- * String endpoint: fetches once, caches, revalidates in background.
- *   const snapshots = SWR('/infra/snapshots', { refreshInterval: 60000 })
+ * Three modes depending on arguments:
  *
- * Function endpoint: re-fetches when params change (with abort on param change).
- *   const containers = SWR(p => `/infra/agent/${p.server}/containers`)
+ * **Static endpoint** — string path, returns a polling store:
+ * ```js
+ * const snapshots = SWR('/infra/snapshots', { refreshInterval: 60000 })
+ * // Use in template: {#if $snapshots.loading}...{/if}
+ * ```
  *
- * Dependent fetching: waits for dependencies before fetching.
- *   const details = SWR(
- *     ($server) => `/servers/${$server.data.id}/details`,
- *     {
- *       dependencies: [serverStore],
- *       enabled: ($server) => !!$server.data,
- *     }
- *   )
+ * **Parameterised endpoint** — function, refetches on param change:
+ * ```js
+ * const containers = SWR(p => `/infra/agent/${p.server}/containers`)
+ * containers.fetch({ server: 'web1' })  // triggers fetch
+ * containers.fetch({ server: 'web2' })  // aborts previous, fetches new
+ * ```
  *
- * Options:
- *   refreshInterval   - Auto-refresh in ms (0 = disabled)
- *   revalidateOnFocus - Refresh on tab focus (default: true)
- *   revalidateOnMount - Fetch on first subscriber (default: true)
- *   dedupingInterval  - Dedupe window in ms (default: 2000)
- *   persist           - Cache in localStorage (default: true)
- *   persistTTL        - Max cache age in ms (0 = no expiry)
- *   errorCooldown     - Circuit breaker cooldown in ms (default: 30000)
- *   transform         - Transform response data (default: identity)
- *   onSuccess         - Callback on successful fetch
- *   onError           - Callback on failed fetch
- *   dependencies      - Array of stores to watch
- *   enabled           - (...storeValues) => boolean, gates fetching
+ * **Dependent endpoint** — waits for dependency stores:
+ * ```js
+ * const details = SWR(
+ *   ($server) => `/servers/${$server.data.id}/details`,
+ *   {
+ *     dependencies: [serverStore],
+ *     enabled: ($s) => !!$s.data,
+ *   }
+ * )
+ * ```
  *
- * @param {string|Function} endpoint - API endpoint or function returning one
- * @param {Object} options - Fetch store options
+ * @param {string|Function} endpoint - API path or function returning one
+ * @param {SWROptions} [options={}]
+ * @returns {SWRStore|SWRParamStore|SWRDependentStore}
  */
 export function SWR(endpoint, options = {}) {
   if (options.dependencies) {
@@ -325,6 +407,11 @@ export function SWR(endpoint, options = {}) {
 // Parameterised SWR — endpoint changes with params, aborts stale requests
 // =============================================================================
 
+/**
+ * @param {(params: Object) => string|null} endpointFn
+ * @param {SWROptions} options
+ * @returns {SWRParamStore}
+ */
 function _swrParam(endpointFn, options = {}) {
   const {
     transform = (d) => d,
@@ -335,6 +422,7 @@ function _swrParam(endpointFn, options = {}) {
     onError = null,
   } = options;
 
+  /** @type {import('svelte/store').Writable<SWRState>} */
   const store = writable({
     data: null,
     error: null,
@@ -354,12 +442,10 @@ function _swrParam(endpointFn, options = {}) {
       return;
     }
 
-    // Same params, return existing promise
     if (fetchPromise && JSON.stringify(params) === JSON.stringify(lastParams)) {
       return fetchPromise;
     }
 
-    // Abort previous request on param change
     if (abortController) abortController.abort();
     abortController = new AbortController();
     const { signal } = abortController;
@@ -367,7 +453,7 @@ function _swrParam(endpointFn, options = {}) {
     lastParams = params;
     lastEndpoint = endpoint;
 
-    // Check localStorage cache for this endpoint
+    // Check localStorage cache
     let cachedData = null;
     if (persist) {
       const cached = cacheGet(endpoint);
@@ -435,6 +521,11 @@ function _swrParam(endpointFn, options = {}) {
 // Dependent SWR — waits for dependency stores before fetching
 // =============================================================================
 
+/**
+ * @param {string|Function} endpoint
+ * @param {SWROptions & { dependencies: import('svelte/store').Readable[], enabled?: (...values: *[]) => boolean }} options
+ * @returns {SWRDependentStore}
+ */
 function _swrDependent(endpoint, options = {}) {
   const {
     dependencies = [],
@@ -448,6 +539,7 @@ function _swrDependent(endpoint, options = {}) {
     ...storeOptions
   } = options;
 
+  /** @type {import('svelte/store').Writable<SWRState>} */
   const store = writable({
     data: null,
     error: null,
@@ -465,7 +557,6 @@ function _swrDependent(endpoint, options = {}) {
       const ready = enabled(...values);
 
       if (ready && !innerStore) {
-        // Resolve endpoint (may use dep values)
         const resolvedEndpoint =
           typeof endpoint === "function" ? endpoint(...values) : endpoint;
         if (!resolvedEndpoint) return;
@@ -481,7 +572,6 @@ function _swrDependent(endpoint, options = {}) {
 
         innerUnsub = innerStore.subscribe((value) => store.set(value));
       } else if (!ready && innerStore) {
-        // Dependencies no longer met — tear down
         if (innerUnsub) innerUnsub();
         innerStore = null;
         innerUnsub = null;
@@ -506,7 +596,6 @@ function _swrDependent(endpoint, options = {}) {
     innerUnsub = null;
   }
 
-  // Track subscribers to manage lifecycle
   let subscriberCount = 0;
   const { subscribe: originalSubscribe } = store;
 
