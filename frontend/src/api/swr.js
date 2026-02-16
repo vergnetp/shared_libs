@@ -9,6 +9,7 @@ import { api } from "./client.js";
  * - Revalidates in background
  * - Configurable refresh intervals
  * - Deduplication of concurrent requests
+ * - Circuit breaker with auto-recovery cooldown
  * - Manual refresh support
  */
 function createFetchStore(key, fetcher, options = {}) {
@@ -18,6 +19,7 @@ function createFetchStore(key, fetcher, options = {}) {
     revalidateOnMount = true, // Fetch on first subscriber
     dedupingInterval = 2000, // Dedupe requests within this window
     initialData = null,
+    errorCooldown = 30000, // Resume polling after this many ms of errors
   } = options;
 
   // Internal state
@@ -33,6 +35,7 @@ function createFetchStore(key, fetcher, options = {}) {
   let intervalId = null;
   let subscriberCount = 0;
   let consecutiveErrors = 0;
+  let lastErrorTime = 0;
   const MAX_ERRORS_BEFORE_PAUSE = 3;
 
   // Fetch with deduplication and circuit breaker.
@@ -42,15 +45,20 @@ function createFetchStore(key, fetcher, options = {}) {
     if (!force && fetchPromise) return fetchPromise;
 
     const now = Date.now();
-    if (!force && now - lastFetchTime < dedupingInterval) return;
+    if (!force && now - lastFetchTime < dedupingInterval) {
+      return Promise.resolve(get(store).data);
+    }
 
-    // Circuit breaker: stop polling after repeated failures
-    if (consecutiveErrors >= MAX_ERRORS_BEFORE_PAUSE) return;
+    // Circuit breaker: pause after repeated failures, auto-recover after cooldown
+    if (consecutiveErrors >= MAX_ERRORS_BEFORE_PAUSE) {
+      if (now - lastErrorTime < errorCooldown) return Promise.resolve(get(store).data);
+      consecutiveErrors = 0; // Cooldown elapsed, retry
+    }
 
     lastFetchTime = now;
     store.update((s) => ({
       ...s,
-      loading: s.data === null || s.data?.length === 0,
+      loading: s.lastFetched === null,
     }));
 
     fetchPromise = (async () => {
@@ -66,6 +74,7 @@ function createFetchStore(key, fetcher, options = {}) {
         return data;
       } catch (error) {
         consecutiveErrors++;
+        lastErrorTime = Date.now();
         store.update((s) => ({
           ...s,
           error: error.message || "Fetch failed",
