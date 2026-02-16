@@ -4,8 +4,9 @@
  * Usage:
  *   import { Auth, Header, Button } from '@myorg/ui'
  *   import { useAuth, toasts } from '@myorg/ui'
- *   import { api, login, initAuth } from '@myorg/ui'
- *   import { SWR } from '@myorg/ui'
+ *   import { api, login, logout, initApp } from '@myorg/ui'
+ *   import { SWR, clearSWRCache } from '@myorg/ui'
+ *   import { useOnlineStatus, isOnline } from '@myorg/ui'
  *   import { presets, withPreset } from '@myorg/ui/presets'
  *   import '@myorg/ui/styles/base.css'
  */
@@ -22,6 +23,7 @@ export { default as Modal } from './components/Modal.svelte'
 export { default as Tabs } from './components/Tabs.svelte'
 export { default as ToastContainer } from './components/ToastContainer.svelte'
 export { default as ThemeToggle } from './components/ThemeToggle.svelte'
+export { default as OfflineBanner } from './components/OfflineBanner.svelte'
 
 // =============================================================================
 // Hooks (reactive state)
@@ -52,22 +54,31 @@ export {
   toggleTheme,
 } from './hooks/theme.js'
 
-export { SWR } from './api/swr.js'
+export {
+  useOnlineStatus,
+  isOnline,
+} from './hooks/online.js'
 
 // =============================================================================
-// API
+// API Client
+// =============================================================================
+export { api } from './api/client.js'
+
+// =============================================================================
+// SWR (Stale-While-Revalidate)
+// =============================================================================
+export { SWR, clearSWRCache } from './api/swr.js'
+
+// =============================================================================
+// App + Auth Flows
 // =============================================================================
 export {
-  api,
-  apiRaw,
-  apiStream,
-  apiStreamMultipart,
-  createApiClient,
-  setApiConfig,
+  initApp,
   login,
   register,
+  logout,
   initAuth,
-} from './api/client.js'
+} from './app.js'
 
 // =============================================================================
 // Presets (re-export for convenience)

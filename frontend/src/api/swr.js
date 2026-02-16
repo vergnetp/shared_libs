@@ -10,6 +10,7 @@
  * - Deduplication of concurrent requests
  * - AbortController (cancels stale requests on param change or cleanup)
  * - Circuit breaker with auto-recovery cooldown
+ * - Online/offline awareness (pauses when offline, revalidates on reconnect)
  * - onSuccess / onError callbacks
  * - Dependent fetching (wait for other stores before fetching)
  *
@@ -18,7 +19,9 @@
  *   const snapshots = SWR('/infra/snapshots', { refreshInterval: 60000 })
  *
  *   // Parameterised — refetches when params change, aborts stale requests
- *   const containers = SWR(p => `/infra/agent/${p.server}/containers`)
+ *   const containers = SWR(p => `/infra/agent/${p.server}/containers`, {
+ *     refreshInterval: 10000,
+ *   })
  *   containers.fetch({ server: 'web1' })
  *
  *   // Dependent — waits for server store before fetching
@@ -36,6 +39,7 @@
  */
 import { writable, get } from "svelte/store";
 import { api } from "./client.js";
+import { isOnline } from "../hooks/online.js";
 
 // =============================================================================
 // Persistent Cache — localStorage with silent degradation
@@ -60,9 +64,7 @@ function cacheSet(key, data) {
       CACHE_PREFIX + key,
       JSON.stringify({ data, ts: Date.now() }),
     );
-  } catch {
-    // Storage full or unavailable — silently skip
-  }
+  } catch {}
 }
 
 function cacheDelete(key) {
@@ -73,14 +75,11 @@ function cacheDelete(key) {
 
 /**
  * Clear all SWR cache entries from localStorage.
- * Call on logout or when you want a clean slate.
+ * Called automatically by `logout()`. Can also be called manually.
  *
  * @example
  *   import { clearSWRCache } from './swr.js'
- *   function handleLogout() {
- *     useAuth.logout()
- *     clearSWRCache()
- *   }
+ *   clearSWRCache()
  */
 export function clearSWRCache() {
   try {
@@ -91,6 +90,21 @@ export function clearSWRCache() {
     }
     keys.forEach((k) => localStorage.removeItem(k));
   } catch {}
+}
+
+/**
+ * Read cached data for a key if valid.
+ * @param {string} key
+ * @param {boolean} persist
+ * @param {number} persistTTL
+ * @returns {*|null}
+ */
+function readCache(key, persist, persistTTL) {
+  if (!persist) return null;
+  const cached = cacheGet(key);
+  if (!cached) return null;
+  if (persistTTL > 0 && Date.now() - cached.ts > persistTTL) return null;
+  return cached.data;
 }
 
 // =============================================================================
@@ -109,6 +123,7 @@ export function clearSWRCache() {
  * @typedef {Object} SWROptions
  * @property {number} [refreshInterval=0] - Auto-refresh interval in ms (0 = disabled)
  * @property {boolean} [revalidateOnFocus=true] - Refetch when browser tab becomes visible
+ * @property {boolean} [revalidateOnReconnect=true] - Refetch when browser comes back online
  * @property {boolean} [revalidateOnMount=true] - Fetch on first subscriber
  * @property {number} [dedupingInterval=2000] - Dedupe requests within this window (ms)
  * @property {*} [initialData=null] - Initial data before first fetch (overrides cache)
@@ -148,45 +163,41 @@ export function clearSWRCache() {
  */
 
 // =============================================================================
-// Low-level SWR engine
+// SWR Engine — shared resilience layer
+//
+// Owns: store, circuit breaker, abort, dedupe, interval with jitter,
+//       visibility handler, online/offline handler, subscriber lifecycle,
+//       localStorage cache.
+//
+// Used by both createFetchStore (fixed key) and _swrParam (dynamic key).
 // =============================================================================
 
 /**
- * Low-level fetch store with caching, background refresh, and persistence.
- * Use `SWR()` instead of calling this directly.
- *
- * @param {string} key - Cache key (typically the endpoint path)
- * @param {(signal: AbortSignal) => Promise<*>} fetcher - Async function that fetches data
- * @param {SWROptions} [options={}]
- * @returns {SWRStore}
+ * @param {Object} engineOptions
+ * @param {SWROptions} engineOptions.options - SWR config
+ * @param {*} [engineOptions.initialData=null] - Resolved initial data (after cache check)
+ * @returns {Object} Engine internals for the wrapper to compose
  */
-function createFetchStore(key, fetcher, options = {}) {
+function createEngine(engineOptions) {
   const {
-    refreshInterval = 0,
-    revalidateOnFocus = true,
-    revalidateOnMount = true,
-    dedupingInterval = 2000,
+    options: {
+      refreshInterval = 0,
+      revalidateOnFocus = true,
+      revalidateOnReconnect = true,
+      dedupingInterval = 2000,
+      errorCooldown = 30000,
+      persist = true,
+      onSuccess = null,
+      onError = null,
+    },
     initialData = null,
-    errorCooldown = 30000,
-    persist = true,
-    persistTTL = 0,
-    onSuccess = null,
-    onError = null,
-  } = options;
+  } = engineOptions;
 
-  // Resolve initial data: explicit initialData > localStorage cache > null
-  let resolvedInitial = initialData;
-  if (resolvedInitial === null && persist) {
-    const cached = cacheGet(key);
-    if (cached) {
-      const expired = persistTTL > 0 && Date.now() - cached.ts > persistTTL;
-      if (!expired) resolvedInitial = cached.data;
-    }
-  }
+  const MAX_ERRORS_BEFORE_PAUSE = 3;
 
   /** @type {import('svelte/store').Writable<SWRState>} */
   const store = writable({
-    data: resolvedInitial,
+    data: initialData,
     error: null,
     loading: false,
     lastFetched: null,
@@ -199,24 +210,38 @@ function createFetchStore(key, fetcher, options = {}) {
   let consecutiveErrors = 0;
   let lastErrorTime = 0;
   let abortController = null;
-  const MAX_ERRORS_BEFORE_PAUSE = 3;
 
-  async function doFetch(force = false) {
+  // --- Core fetch with all guards ---
+
+  /**
+   * @param {string} key - Cache key for this fetch
+   * @param {(signal: AbortSignal) => Promise<*>} fetcher
+   * @param {Object} [fetchOptions]
+   * @param {boolean} [fetchOptions.force=false] - Skip dedupe + circuit breaker
+   * @param {boolean} [fetchOptions.resetErrors=false] - Reset circuit breaker (e.g. new params)
+   * @returns {Promise<*>}
+   */
+  async function doFetch(key, fetcher, { force = false, resetErrors = false } = {}) {
+    // Skip when offline — serve from cache, don't error
+    if (!isOnline()) return Promise.resolve(get(store).data);
+
     if (!force && fetchPromise) return fetchPromise;
+
+    if (resetErrors) consecutiveErrors = 0;
 
     const now = Date.now();
     if (!force && now - lastFetchTime < dedupingInterval) {
       return Promise.resolve(get(store).data);
     }
 
-    // Circuit breaker: pause after repeated failures, auto-recover after cooldown
+    // Circuit breaker
     if (consecutiveErrors >= MAX_ERRORS_BEFORE_PAUSE) {
       if (now - lastErrorTime < errorCooldown)
         return Promise.resolve(get(store).data);
       consecutiveErrors = 0;
     }
 
-    // Abort any in-flight request
+    // Abort previous in-flight request
     if (abortController) abortController.abort();
     abortController = new AbortController();
     const { signal } = abortController;
@@ -263,10 +288,22 @@ function createFetchStore(key, fetcher, options = {}) {
     return fetchPromise;
   }
 
+  // --- Lifecycle: interval, visibility, online/offline, subscribers ---
+
+  /** @type {(() => void)|null} - Called on visibility change, reconnect, and interval tick */
+  let onPoll = null;
+
   function handleVisibility() {
     if (document.visibilityState === "visible" && revalidateOnFocus) {
       consecutiveErrors = 0;
-      doFetch();
+      if (onPoll) onPoll();
+    }
+  }
+
+  function handleOnline() {
+    if (revalidateOnReconnect) {
+      consecutiveErrors = 0;
+      if (onPoll) onPoll();
     }
   }
 
@@ -280,8 +317,8 @@ function createFetchStore(key, fetcher, options = {}) {
           intervalId = setTimeout(tick, refreshInterval);
           return;
         }
-        doFetch();
-        const jitter = refreshInterval * (0.9 + Math.random() * 0.2); // ±10%
+        if (isOnline() && onPoll) onPoll();
+        const jitter = refreshInterval * (0.9 + Math.random() * 0.2);
         intervalId = setTimeout(tick, jitter);
       };
       intervalId = setTimeout(tick, refreshInterval);
@@ -295,42 +332,106 @@ function createFetchStore(key, fetcher, options = {}) {
     }
   }
 
-  const { subscribe: originalSubscribe } = store;
+  /**
+   * Wrap a store's subscribe to manage lifecycle.
+   * @param {(run: Function) => (() => void)} originalSubscribe
+   * @param {Object} hooks
+   * @param {() => void} [hooks.onFirst] - Called when first subscriber attaches
+   * @param {() => void} [hooks.onLast] - Called when last subscriber detaches (before cleanup)
+   * @param {() => void} [hooks.onPoll] - Called on interval tick, visibility change, and reconnect
+   * @returns {(run: Function) => (() => void)}
+   */
+  function wrapSubscribe(originalSubscribe, hooks = {}) {
+    onPoll = hooks.onPoll || null;
 
-  function subscribe(run) {
-    subscriberCount++;
+    return function subscribe(run) {
+      subscriberCount++;
 
-    if (subscriberCount === 1) {
-      if (revalidateOnFocus && typeof document !== "undefined") {
-        document.addEventListener("visibilitychange", handleVisibility);
-      }
-      if (revalidateOnMount) {
-        doFetch();
-      }
-      startInterval();
-    }
-
-    const unsubscribe = originalSubscribe(run);
-
-    return () => {
-      unsubscribe();
-      subscriberCount--;
-
-      if (subscriberCount === 0) {
-        if (abortController) abortController.abort();
+      if (subscriberCount === 1) {
         if (typeof document !== "undefined") {
-          document.removeEventListener("visibilitychange", handleVisibility);
+          if (revalidateOnFocus) {
+            document.addEventListener("visibilitychange", handleVisibility);
+          }
         }
-        stopInterval();
+        if (typeof window !== "undefined") {
+          if (revalidateOnReconnect) {
+            window.addEventListener("online", handleOnline);
+          }
+        }
+        if (hooks.onFirst) hooks.onFirst();
+        startInterval();
       }
+
+      const unsubscribe = originalSubscribe(run);
+
+      return () => {
+        unsubscribe();
+        subscriberCount--;
+
+        if (subscriberCount === 0) {
+          if (hooks.onLast) hooks.onLast();
+          if (abortController) abortController.abort();
+          if (typeof document !== "undefined") {
+            document.removeEventListener("visibilitychange", handleVisibility);
+          }
+          if (typeof window !== "undefined") {
+            window.removeEventListener("online", handleOnline);
+          }
+          stopInterval();
+        }
+      };
     };
   }
 
   return {
+    store,
+    doFetch,
+    wrapSubscribe,
+    resetErrors: () => { consecutiveErrors = 0; },
+    abort: () => { if (abortController) abortController.abort(); },
+    getState: () => get(store),
+  };
+}
+
+// =============================================================================
+// Static SWR store — fixed key/fetcher
+// =============================================================================
+
+/**
+ * Create a fetch store for a fixed endpoint.
+ * Use `SWR()` instead of calling this directly.
+ *
+ * @param {string} key - Cache key (typically the endpoint path)
+ * @param {(signal: AbortSignal) => Promise<*>} fetcher
+ * @param {SWROptions} [options={}]
+ * @returns {SWRStore}
+ */
+function createFetchStore(key, fetcher, options = {}) {
+  const {
+    initialData = null,
+    revalidateOnMount = true,
+    persist = true,
+    persistTTL = 0,
+  } = options;
+
+  // Resolve initial data: explicit > cache > null
+  const resolvedInitial = initialData ?? readCache(key, persist, persistTTL);
+
+  const engine = createEngine({ options, initialData: resolvedInitial });
+  const { store, doFetch, wrapSubscribe, resetErrors } = engine;
+
+  const poll = () => doFetch(key, fetcher);
+
+  const subscribe = wrapSubscribe(store.subscribe, {
+    onFirst: revalidateOnMount ? poll : undefined,
+    onPoll: poll,
+  });
+
+  return {
     subscribe,
     refresh: () => {
-      consecutiveErrors = 0;
-      return doFetch(true);
+      resetErrors();
+      return doFetch(key, fetcher, { force: true });
     },
     mutate: (data) => {
       store.update((s) => ({ ...s, data, error: null }));
@@ -338,9 +439,181 @@ function createFetchStore(key, fetcher, options = {}) {
     },
     invalidate: () => {
       cacheDelete(key);
-      consecutiveErrors = 0;
-      return doFetch(true);
+      resetErrors();
+      return doFetch(key, fetcher, { force: true });
     },
+    get: () => get(store),
+  };
+}
+
+// =============================================================================
+// Parameterised SWR — dynamic key/fetcher based on params
+// =============================================================================
+
+/**
+ * @param {(params: Object) => string|null} endpointFn
+ * @param {SWROptions} options
+ * @returns {SWRParamStore}
+ */
+function _swrParam(endpointFn, options = {}) {
+  const {
+    transform = (d) => d,
+    apiFn = api,
+    persist = true,
+    persistTTL = 0,
+  } = options;
+
+  const engine = createEngine({ options });
+  const { store, doFetch, wrapSubscribe, resetErrors, abort } = engine;
+
+  let lastParams = null;
+  let lastEndpoint = null;
+
+  function makeFetcher(endpoint) {
+    return async (signal) => {
+      const data = await apiFn("GET", endpoint, null, { signal });
+      return transform(data);
+    };
+  }
+
+  async function fetchParams(params) {
+    const endpoint = endpointFn(params);
+    if (!endpoint) {
+      store.set({ data: null, error: null, loading: false, lastFetched: null });
+      return;
+    }
+
+    const isNewParams = JSON.stringify(params) !== JSON.stringify(lastParams);
+    lastParams = params;
+    lastEndpoint = endpoint;
+
+    // Show cached data immediately for new endpoint
+    if (isNewParams) {
+      const cached = readCache(endpoint, persist, persistTTL);
+      if (cached !== null) {
+        store.update((s) => ({ ...s, data: cached }));
+      }
+    }
+
+    return doFetch(endpoint, makeFetcher(endpoint), {
+      force: isNewParams,
+      resetErrors: isNewParams,
+    });
+  }
+
+  const subscribe = wrapSubscribe(store.subscribe, {
+    onPoll: () => lastParams && fetchParams(lastParams),
+  });
+
+  return {
+    subscribe,
+    fetch: fetchParams,
+    refresh: () => {
+      if (!lastParams) return;
+      resetErrors();
+      return doFetch(lastEndpoint, makeFetcher(lastEndpoint), { force: true });
+    },
+    clear: () => {
+      abort();
+      if (lastEndpoint && persist) cacheDelete(lastEndpoint);
+      lastParams = null;
+      lastEndpoint = null;
+      resetErrors();
+      store.set({ data: null, error: null, loading: false, lastFetched: null });
+    },
+  };
+}
+
+// =============================================================================
+// Dependent SWR — waits for dependency stores before fetching
+// =============================================================================
+
+/**
+ * @param {string|Function} endpoint
+ * @param {SWROptions & { dependencies: import('svelte/store').Readable[], enabled?: (...values: *[]) => boolean }} options
+ * @returns {SWRDependentStore}
+ */
+function _swrDependent(endpoint, options = {}) {
+  const {
+    dependencies = [],
+    enabled = () => true,
+    transform = (d) => d,
+    apiFn = api,
+    persist = true,
+    persistTTL = 0,
+    onSuccess = null,
+    onError = null,
+    ...storeOptions
+  } = options;
+
+  // Outer engine: only manages subscriber lifecycle (no polling/visibility/reconnect
+  // — the inner createFetchStore has its own engine for that).
+  const engine = createEngine({
+    options: {
+      refreshInterval: 0,
+      revalidateOnFocus: false,
+      revalidateOnReconnect: false,
+    },
+  });
+  const { store } = engine;
+
+  let innerStore = null;
+  let innerUnsub = null;
+  let depUnsubs = [];
+
+  function check() {
+    const values = dependencies.map((d) => get(d));
+    const ready = enabled(...values);
+
+    if (ready && !innerStore) {
+      const resolvedEndpoint =
+        typeof endpoint === "function" ? endpoint(...values) : endpoint;
+      if (!resolvedEndpoint) return;
+
+      innerStore = createFetchStore(
+        resolvedEndpoint,
+        async (signal) => {
+          const data = await apiFn("GET", resolvedEndpoint, null, { signal });
+          return transform(data);
+        },
+        { persist, persistTTL, onSuccess, onError, ...storeOptions },
+      );
+
+      innerUnsub = innerStore.subscribe((value) => store.set(value));
+    } else if (!ready && innerStore) {
+      if (innerUnsub) innerUnsub();
+      innerStore = null;
+      innerUnsub = null;
+      store.set({
+        data: null,
+        error: null,
+        loading: false,
+        lastFetched: null,
+      });
+    }
+  }
+
+  function setup() {
+    depUnsubs = dependencies.map((dep) => dep.subscribe(() => check()));
+    check();
+  }
+
+  function teardown() {
+    depUnsubs.forEach((u) => u());
+    depUnsubs = [];
+    if (innerUnsub) innerUnsub();
+    innerStore = null;
+    innerUnsub = null;
+  }
+
+  const subscribe = engine.wrapSubscribe(store.subscribe, {
+    onFirst: setup,
+    onLast: teardown,
+  });
+
+  return {
+    subscribe,
+    refresh: () => innerStore?.refresh(),
     get: () => get(store),
   };
 }
@@ -357,14 +630,14 @@ function createFetchStore(key, fetcher, options = {}) {
  * **Static endpoint** — string path, returns a polling store:
  * ```js
  * const snapshots = SWR('/infra/snapshots', { refreshInterval: 60000 })
- * // Use in template: {#if $snapshots.loading}...{/if}
  * ```
  *
  * **Parameterised endpoint** — function, refetches on param change:
  * ```js
- * const containers = SWR(p => `/infra/agent/${p.server}/containers`)
- * containers.fetch({ server: 'web1' })  // triggers fetch
- * containers.fetch({ server: 'web2' })  // aborts previous, fetches new
+ * const containers = SWR(p => `/infra/agent/${p.server}/containers`, {
+ *   refreshInterval: 10000,
+ * })
+ * containers.fetch({ server: 'web1' })
  * ```
  *
  * **Dependent endpoint** — waits for dependency stores:
@@ -401,219 +674,4 @@ export function SWR(endpoint, options = {}) {
     },
     storeOptions,
   );
-}
-
-// =============================================================================
-// Parameterised SWR — endpoint changes with params, aborts stale requests
-// =============================================================================
-
-/**
- * @param {(params: Object) => string|null} endpointFn
- * @param {SWROptions} options
- * @returns {SWRParamStore}
- */
-function _swrParam(endpointFn, options = {}) {
-  const {
-    transform = (d) => d,
-    apiFn = api,
-    persist = true,
-    persistTTL = 0,
-    onSuccess = null,
-    onError = null,
-  } = options;
-
-  /** @type {import('svelte/store').Writable<SWRState>} */
-  const store = writable({
-    data: null,
-    error: null,
-    loading: false,
-    lastFetched: null,
-  });
-
-  let lastParams = null;
-  let lastEndpoint = null;
-  let fetchPromise = null;
-  let abortController = null;
-
-  async function fetch(params) {
-    const endpoint = endpointFn(params);
-    if (!endpoint) {
-      store.set({ data: null, error: null, loading: false, lastFetched: null });
-      return;
-    }
-
-    if (fetchPromise && JSON.stringify(params) === JSON.stringify(lastParams)) {
-      return fetchPromise;
-    }
-
-    if (abortController) abortController.abort();
-    abortController = new AbortController();
-    const { signal } = abortController;
-
-    lastParams = params;
-    lastEndpoint = endpoint;
-
-    // Check localStorage cache
-    let cachedData = null;
-    if (persist) {
-      const cached = cacheGet(endpoint);
-      if (cached) {
-        const expired = persistTTL > 0 && Date.now() - cached.ts > persistTTL;
-        if (!expired) cachedData = cached.data;
-      }
-    }
-
-    store.update((s) => ({
-      ...s,
-      data: cachedData ?? s.data,
-      loading: cachedData === null,
-    }));
-
-    fetchPromise = (async () => {
-      try {
-        const data = await apiFn("GET", endpoint, null, { signal });
-        if (signal.aborted) return get(store).data;
-        const transformed = transform(data);
-        store.set({
-          data: transformed,
-          error: null,
-          loading: false,
-          lastFetched: new Date(),
-        });
-        if (persist) cacheSet(endpoint, transformed);
-        if (onSuccess) onSuccess(transformed);
-        return transformed;
-      } catch (error) {
-        if (signal.aborted || error.name === "AbortError") {
-          return get(store).data;
-        }
-        const msg = error.message || "Fetch failed";
-        store.update((s) => ({
-          ...s,
-          error: msg,
-          loading: false,
-        }));
-        if (onError) onError(error);
-        throw error;
-      } finally {
-        fetchPromise = null;
-      }
-    })();
-
-    return fetchPromise;
-  }
-
-  return {
-    subscribe: store.subscribe,
-    fetch,
-    refresh: () => lastParams && fetch(lastParams),
-    clear: () => {
-      if (abortController) abortController.abort();
-      if (lastEndpoint && persist) cacheDelete(lastEndpoint);
-      lastParams = null;
-      lastEndpoint = null;
-      store.set({ data: null, error: null, loading: false, lastFetched: null });
-    },
-  };
-}
-
-// =============================================================================
-// Dependent SWR — waits for dependency stores before fetching
-// =============================================================================
-
-/**
- * @param {string|Function} endpoint
- * @param {SWROptions & { dependencies: import('svelte/store').Readable[], enabled?: (...values: *[]) => boolean }} options
- * @returns {SWRDependentStore}
- */
-function _swrDependent(endpoint, options = {}) {
-  const {
-    dependencies = [],
-    enabled = () => true,
-    transform = (d) => d,
-    apiFn = api,
-    persist = true,
-    persistTTL = 0,
-    onSuccess = null,
-    onError = null,
-    ...storeOptions
-  } = options;
-
-  /** @type {import('svelte/store').Writable<SWRState>} */
-  const store = writable({
-    data: null,
-    error: null,
-    loading: false,
-    lastFetched: null,
-  });
-
-  let innerStore = null;
-  let innerUnsub = null;
-  let depUnsubs = [];
-
-  function setup() {
-    function check() {
-      const values = dependencies.map((d) => get(d));
-      const ready = enabled(...values);
-
-      if (ready && !innerStore) {
-        const resolvedEndpoint =
-          typeof endpoint === "function" ? endpoint(...values) : endpoint;
-        if (!resolvedEndpoint) return;
-
-        innerStore = createFetchStore(
-          resolvedEndpoint,
-          async (signal) => {
-            const data = await apiFn("GET", resolvedEndpoint, null, { signal });
-            return transform(data);
-          },
-          { persist, persistTTL, onSuccess, onError, ...storeOptions },
-        );
-
-        innerUnsub = innerStore.subscribe((value) => store.set(value));
-      } else if (!ready && innerStore) {
-        if (innerUnsub) innerUnsub();
-        innerStore = null;
-        innerUnsub = null;
-        store.set({
-          data: null,
-          error: null,
-          loading: false,
-          lastFetched: null,
-        });
-      }
-    }
-
-    depUnsubs = dependencies.map((dep) => dep.subscribe(() => check()));
-    check();
-  }
-
-  function teardown() {
-    depUnsubs.forEach((u) => u());
-    depUnsubs = [];
-    if (innerUnsub) innerUnsub();
-    innerStore = null;
-    innerUnsub = null;
-  }
-
-  let subscriberCount = 0;
-  const { subscribe: originalSubscribe } = store;
-
-  function subscribe(run) {
-    subscriberCount++;
-    if (subscriberCount === 1) setup();
-
-    const unsub = originalSubscribe(run);
-    return () => {
-      unsub();
-      subscriberCount--;
-      if (subscriberCount === 0) teardown();
-    };
-  }
-
-  return {
-    subscribe,
-    refresh: () => innerStore?.refresh(),
-    get: () => get(store),
-  };
 }

@@ -1,8 +1,10 @@
 /**
- * client.js — Shared API client
+ * client.js — Shared API client (auth-agnostic)
+ *
+ * Pure HTTP client. No auth opinions — auth is injected via `api.configure()`.
  *
  * Architecture: ONE core function (coreFetch) calls fetch().
- * All safeguards live there: auth, JWT validation, requestModifier,
+ * All safeguards live there: auth handler, requestModifier,
  * retry with exponential backoff, error handling.
  *
  * Everything hangs off `api`:
@@ -10,31 +12,41 @@
  *   api.get(path)                     → GET shorthand
  *   api.post(path, data)              → POST shorthand
  *   api.put(path, data)               → PUT shorthand
+ *   api.patch(path, data)             → PATCH shorthand
  *   api.del(path)                     → DELETE shorthand
  *   api.stream(method, path, data, onMessage)  → SSE reader (no retry)
  *   api.upload(path, formData, onMessage)      → multipart SSE
  *   api.configure({ baseUrl, ... })   → update global config
  *   api.create({ baseUrl, ... })      → scoped client instance
  *
+ * Auth:
+ *   See app.js for login, register, logout, initAuth.
+ *
  * @example
  *   import { api } from '@myorg/ui'
  *
+ *   // Minimal — no auth
  *   api.configure({ baseUrl: '/api/v1' })
+ *   const data = await api.get('/public/health')
  *
- *   const users = await api.get('/users')
- *   const user  = await api.post('/users', { name: 'John' })
- *   const csv   = await api.get('/export/csv')  // raw Response (not JSON)
+ *   // With auth (typically done by auth-flows.js on app init)
+ *   api.configure({
+ *     auth: (path) => {
+ *       const token = getToken()
+ *       if (!token) return null
+ *       return { headers: { 'Authorization': `Bearer ${token}` } }
+ *     },
+ *   })
  *
  *   // Scoped client for 3rd party APIs
  *   const stripe = api.create({
  *     baseUrl: 'https://api.stripe.com',
+ *     auth: () => ({ headers: { 'Authorization': `Bearer ${STRIPE_KEY}` } }),
  *     unwrap: (r) => r.data,
  *     parseError: (b) => b.error?.message,
  *   })
  *   const charges = await stripe.get('/charges')
  */
-import { get } from 'svelte/store'
-import { useAuth, getAuthToken } from '../hooks/auth.js'
 
 // =============================================================================
 // Configuration
@@ -57,8 +69,9 @@ function defaultUnwrap(result) {
 /**
  * @typedef {Object} ApiConfig
  * @property {string} baseUrl - Base URL prepended to all paths (default: '/api/v1')
- * @property {((msg: string) => void)|null} onUnauthorized - Called on 401 responses
- * @property {((url: string, path: string, headers: Object, options: Object) => {url?: string, headers?: Object, error?: string})|null} requestModifier - Rewrite URL/headers per-request. Return `{ error }` to skip the request.
+ * @property {((path: string) => { headers: Object }|{ skip: string }|null)|null} auth - Auth handler. Returns headers to merge, `{ skip }` to abort, or `null` for no auth. Default: `null` (no auth).
+ * @property {((msg: string, status: number) => void)|null} onUnauthorized - Called on 401 responses (e.g. to trigger logout)
+ * @property {((url: string, path: string, headers: Object, options: Object) => { url?: string, headers?: Object, error?: string })|null} requestModifier - Rewrite URL/headers per-request. Return `{ error }` to skip.
  * @property {((result: *) => *)|null} unwrap - Extract payload from JSON responses. `null` to disable.
  * @property {((body: Object) => string|null)|null} parseError - Extract error message from non-standard error bodies. Falls back to `detail`/`error`/`message`.
  */
@@ -66,6 +79,7 @@ function defaultUnwrap(result) {
 /** @type {ApiConfig} */
 let config = {
   baseUrl: '/api/v1',
+  auth: null,
   onUnauthorized: null,
   requestModifier: null,
   unwrap: defaultUnwrap,
@@ -75,11 +89,6 @@ let config = {
 // =============================================================================
 // Helpers
 // =============================================================================
-
-function isValidJwtFormat(token) {
-  if (!token || typeof token !== 'string') return false
-  return token.split('.').length === 3
-}
 
 function apiError(message, status) {
   const err = new Error(message)
@@ -114,14 +123,8 @@ async function handleErrorResponse(res, options = {}) {
       } catch {}
     }
 
-    const auth = get(useAuth)
-    if (auth.token) {
-      useAuth.logout()
-      errorMsg = 'Session expired - please login again'
-    }
-
     if (cfg.onUnauthorized) {
-      cfg.onUnauthorized(errorMsg)
+      cfg.onUnauthorized(errorMsg, 401)
     }
 
     throw apiError(errorMsg, 401)
@@ -152,7 +155,7 @@ function isRetryable(error) {
   return false
 }
 
-const RETRY_DEFAULTS = { GET: 3, POST: 1, PUT: 1, DELETE: 1 }
+const RETRY_DEFAULTS = { GET: 3, POST: 1, PUT: 1, PATCH: 1, DELETE: 1 }
 
 async function withRetry(fn, method, options = {}) {
   const maxRetries = options.retries ?? RETRY_DEFAULTS[method] ?? 1
@@ -200,7 +203,7 @@ async function readSSE(res, onMessage) {
 // coreFetch — the ONE function that calls fetch(). All safeguards live here.
 //
 // Every request in this client goes through this function. It handles:
-//   1. Auth (JWT validation + Bearer header)
+//   1. Auth handler (injected via config, no default)
 //   2. requestModifier (app-specific URL/header rewriting)
 //   3. Retry with exponential backoff (unless noRetry)
 //   4. Error handling (4xx/5xx → thrown errors with .status)
@@ -215,20 +218,17 @@ async function coreFetch(method, path, {
   ...options
 } = {}) {
   cfg = cfg || config
-  const auth = get(useAuth)
 
-  // --- Auth + JWT validation ---
-  const isAuthEndpoint = path.startsWith('/auth/login') || path.startsWith('/auth/register')
-
-  if (auth.token && !isAuthEndpoint && !options.skipAuth) {
-    if (!isValidJwtFormat(auth.token)) {
-      console.error('Invalid JWT format detected - token may be corrupted')
-      useAuth.logout()
-      const msg = 'Session corrupted - please login again'
-      if (throwOnSkip) throw new Error(msg)
-      console.debug(`Skipping ${path} - ${msg}`)
+  // --- Auth handler ---
+  const authHeaders = {}
+  if (cfg.auth) {
+    const authResult = cfg.auth(path)
+    if (authResult?.skip) {
+      if (throwOnSkip) throw new Error(authResult.skip)
+      console.debug(`Skipping ${path} - ${authResult.skip}`)
       return null
     }
+    if (authResult?.headers) Object.assign(authHeaders, authResult.headers)
   }
 
   // --- Headers ---
@@ -238,9 +238,7 @@ async function coreFetch(method, path, {
   } else {
     headers['Content-Type'] = 'application/json'
   }
-  if (auth.token && !isAuthEndpoint && !options.skipAuth) {
-    headers['Authorization'] = `Bearer ${auth.token}`
-  }
+  Object.assign(headers, authHeaders)
   if (options.headers) Object.assign(headers, options.headers)
 
   // --- URL + requestModifier ---
@@ -287,7 +285,6 @@ async function coreFetch(method, path, {
  * @property {AbortSignal} [signal] - AbortController signal to cancel the request
  * @property {Object} [headers] - Additional headers to merge
  * @property {number} [retries] - Override retry count for this request
- * @property {boolean} [skipAuth] - Skip auth header and JWT validation
  * @property {ApiConfig} [config] - Per-request config override (used by scoped clients)
  */
 
@@ -296,7 +293,7 @@ async function coreFetch(method, path, {
  * JSON responses are parsed and run through `unwrap`. Everything else
  * (blobs, files, HTML) returns the raw `Response` object.
  *
- * @param {'GET'|'POST'|'PUT'|'DELETE'} method - HTTP method
+ * @param {'GET'|'POST'|'PUT'|'PATCH'|'DELETE'} method - HTTP method
  * @param {string} path - API path appended to baseUrl (e.g. '/users')
  * @param {Object|FormData|null} [data=null] - Request body (auto-serialized to JSON unless FormData)
  * @param {RequestOptions} [options={}] - Request options
@@ -356,6 +353,16 @@ api.post = (path, data, options) => api('POST', path, data, options)
  * @example await api.put('/users/1', { name: 'Jane' })
  */
 api.put = (path, data, options) => api('PUT', path, data, options)
+
+/**
+ * PATCH request.
+ * @param {string} path - API path
+ * @param {Object|FormData|null} data - Request body (partial update)
+ * @param {RequestOptions} [options]
+ * @returns {Promise<*>}
+ * @example await api.patch('/users/1', { name: 'Jane' })
+ */
+api.patch = (path, data, options) => api('PATCH', path, data, options)
 
 /**
  * DELETE request.
@@ -421,12 +428,9 @@ api.upload = async (path, formData, onMessage, options = {}) => {
  * @example
  *   api.configure({ baseUrl: '/api/v2' })
  *   api.configure({
- *     unwrap: null,  // disable auto-unwrap
+ *     auth: (path) => ({ headers: { 'Authorization': `Bearer ${token}` } }),
+ *     unwrap: null,
  *     parseError: (body) => body.reason,
- *     requestModifier(url, path, headers) {
- *       headers['X-Custom'] = 'value'
- *       return { url, headers }
- *     },
  *   })
  */
 api.configure = (newConfig) => {
@@ -436,7 +440,7 @@ api.configure = (newConfig) => {
 /**
  * Create a scoped API client with its own configuration.
  * Inherits the current global config, overridden by `customConfig`.
- * The returned client has the same shape as `api` (get/post/put/del/stream/upload)
+ * The returned client has the same shape as `api` (get/post/put/patch/del/stream/upload)
  * but does not have `configure` or `create` — it's a leaf client.
  *
  * @param {Partial<ApiConfig>} [customConfig={}] - Config overrides for this client
@@ -445,8 +449,8 @@ api.configure = (newConfig) => {
  * @example
  *   const stripe = api.create({
  *     baseUrl: 'https://api.stripe.com',
+ *     auth: () => ({ headers: { 'Authorization': `Bearer ${STRIPE_KEY}` } }),
  *     unwrap: (r) => r.data,
- *     parseError: (b) => b.error?.message,
  *   })
  *   const charges = await stripe.get('/charges')
  */
@@ -463,6 +467,8 @@ api.create = (customConfig = {}) => {
   scoped.post = (path, data, options) => scoped('POST', path, data, options)
   /** @see api.put */
   scoped.put = (path, data, options) => scoped('PUT', path, data, options)
+  /** @see api.patch */
+  scoped.patch = (path, data, options) => scoped('PATCH', path, data, options)
   /** @see api.del */
   scoped.del = (path, options) => scoped('DELETE', path, null, options)
   /** @see api.stream */
@@ -473,79 +479,4 @@ api.create = (customConfig = {}) => {
     api.upload(path, formData, onMessage, { ...options, config: clientConfig })
 
   return scoped
-}
-
-// =============================================================================
-// Auth Flows (app_kernel standard endpoints)
-// =============================================================================
-
-/**
- * Login with email and password. Sets auth token and fetches user profile.
- *
- * @param {string} email
- * @param {string} password
- * @returns {Promise<Object>} User object from /auth/me
- * @throws {Error} On invalid credentials or network failure
- */
-export async function login(email, password) {
-  useAuth.setLoading(true)
-  useAuth.clearError()
-
-  try {
-    const res = await api('POST', '/auth/login', { username: email, password })
-    useAuth.setToken(res.access_token)
-
-    const user = await api('GET', '/auth/me')
-    useAuth.setUser(user)
-    useAuth.setLoading(false)
-
-    return user
-  } catch (err) {
-    useAuth.setError(err.message)
-    throw err
-  }
-}
-
-/**
- * Register a new account, then auto-login.
- *
- * @param {string} email
- * @param {string} password
- * @returns {Promise<Object>} User object from /auth/me
- * @throws {Error} On registration failure or network error
- */
-export async function register(email, password) {
-  useAuth.setLoading(true)
-  useAuth.clearError()
-
-  try {
-    await api('POST', '/auth/register', { username: email, email, password })
-    return await login(email, password)
-  } catch (err) {
-    useAuth.setError(err.message)
-    throw err
-  }
-}
-
-/**
- * Initialize auth from persisted token (cookie/localStorage).
- * Validates the token by calling /auth/me. Logs out on failure.
- *
- * @returns {Promise<boolean>} true if token was valid and user was loaded
- */
-export async function initAuth() {
-  const auth = get(useAuth)
-
-  if (!auth.token || auth.token.trim() === '') {
-    return false
-  }
-
-  try {
-    const user = await api('GET', '/auth/me')
-    useAuth.setUser(user)
-    return true
-  } catch (err) {
-    useAuth.logout()
-    return false
-  }
 }
