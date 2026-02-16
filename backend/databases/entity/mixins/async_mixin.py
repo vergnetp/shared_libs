@@ -314,6 +314,27 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
                                 'created_at': old.get('created_at'),  # Keep original created_at
                             }
                 
+                # If entity has id, merge with existing data for safe partial updates.
+                # Without this, partial saves (e.g. soft_delete setting only deleted_at)
+                # would fail on SQLite because NOT NULL constraints are checked on the
+                # INSERT portion BEFORE conflict resolution in ON CONFLICT DO UPDATE.
+                elif working_entity.get('id'):
+                    try:
+                        existing = await self.get_entity(
+                            entity_name, working_entity['id'],
+                            include_deleted=True,
+                            _caller=_ENTITY_CALLER,
+                        )
+                        if existing:
+                            working_entity = {
+                                **existing,
+                                **working_entity,
+                                'id': existing['id'],
+                                'created_at': existing.get('created_at'),
+                            }
+                    except Exception:
+                        pass  # New entity or get failed — proceed with provided data
+                
                 # Prepare entity with timestamps, IDs, etc.
                 prepared_entity = self._prepare_entity(entity_name, working_entity, user_id, comment)
                 
