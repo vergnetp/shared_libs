@@ -49,14 +49,14 @@ class SqliteConnectionPool(ConnectionPool):
     
     async def _create_connection(self) -> aiosqlite.Connection:
         """Create a new SQLite connection with optimal settings."""
-        conn = await aiosqlite.connect(self._db_path)
+        conn = await aiosqlite.connect(self._db_path, isolation_level=None)
         
         # WAL mode for concurrent access (readers don't block writers)
         await conn.execute("PRAGMA journal_mode=WAL")
         
-        # Wait up to 60 seconds for locks instead of failing immediately
-        # This is critical for FastAPI with concurrent requests
-        await conn.execute("PRAGMA busy_timeout=60000")
+        # Wait up to 5 seconds for locks instead of failing immediately
+        # Kept short because with autocommit, locks are held only per-statement
+        await conn.execute("PRAGMA busy_timeout=5000")
         
         # NORMAL sync is good balance of safety and speed
         await conn.execute("PRAGMA synchronous=NORMAL")
@@ -125,18 +125,25 @@ class SqliteConnectionPool(ConnectionPool):
     async def release(self, connection: Any) -> None:
         """
         Release a connection back to the pool.
+        Commits any open transaction as safety net.
         
         Args:
             connection: The connection to release
         """
         if self._closed:
-            # Pool is closed, just close the connection
             try:
                 await connection.close()
             except Exception:
                 pass
             return
             
+        # Safety: commit any lingering transaction before returning to pool
+        try:
+            if connection.in_transaction:
+                await connection.commit()
+        except Exception:
+            pass
+        
         if connection in self._in_use_conns:
             self._in_use_conns.discard(connection)
             await self._available.put(connection)
