@@ -239,6 +239,11 @@ def init_app_kernel(
     # =========================================================================
     redis_config = None
     
+    # Ensure Redis is initialized (no-op if bootstrap already called init_redis)
+    from .redis import client as _redis_mod
+    if not _redis_mod._initialized:
+        _redis_mod.init_redis(settings.redis.url if settings.redis.url else None)
+    
     if JOB_QUEUE_AVAILABLE and settings.redis.url:
         from .redis import get_sync_redis
         sync_redis_client = get_sync_redis()
