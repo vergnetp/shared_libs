@@ -9,8 +9,13 @@ import json
 
 
 def sse_event(event: str, data: dict) -> str:
-    """Format a generic SSE event."""
-    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+    """Format a generic SSE event.
+    
+    Includes event name as 'type' in the JSON payload so clients that only
+    parse 'data:' lines (and ignore 'event:' lines) still get the event type.
+    """
+    payload = {"type": event, **data}
+    return f"event: {event}\ndata: {json.dumps(payload)}\n\n"
 
 
 def sse_task_id(task_id: str, **extra) -> str:
