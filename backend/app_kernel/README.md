@@ -19,6 +19,73 @@ app = create_service(
 
 You get: Auth, SaaS (workspaces/teams), background jobs, rate limiting, caching, audit logging, health checks, metrics.
 
+## Quick Start (Alternative APIs)
+
+### `quick_service()` — Zero Config
+
+For prototyping or internal tools where you don't need any configuration:
+
+```python
+from app_kernel import quick_service
+
+app = quick_service("my-api", routers=[my_router])
+```
+
+Uses SQLite, fakeredis, and dev defaults. Equivalent to `create_service(name="my-api", config=ServiceConfig(), routers=[...])`.
+
+### `ServiceConfig.from_env()` — Environment Variables
+
+Load all configuration from environment variables:
+
+```python
+from app_kernel import create_service, ServiceConfig
+
+app = create_service(
+    name="my-api",
+    config=ServiceConfig.from_env(),
+    routers=[my_router],
+)
+```
+
+Reads: `JWT_SECRET`, `DATABASE_URL`, `REDIS_URL`, `CORS_ORIGINS` (comma-separated), `DEBUG`, `LOG_LEVEL`, `RATE_LIMIT_RPM`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `EMAIL_FROM`.
+
+### `init_app_kernel()` — Low-Level API
+
+For full control, use `KernelSettings` + `init_app_kernel()` directly:
+
+```python
+from fastapi import FastAPI
+from app_kernel import init_app_kernel, KernelSettings, AuthSettings, RedisSettings, FeatureSettings, JobRegistry
+
+app = FastAPI()
+registry = JobRegistry()
+
+@registry.task("process_document")
+async def process_document(payload, ctx):
+    ...
+
+settings = KernelSettings(
+    auth=AuthSettings(token_secret="your-secret-key-32-chars-minimum"),
+    redis=RedisSettings(url="redis://localhost:6379"),
+    features=FeatureSettings(
+        allow_self_signup=False,
+        protect_metrics="admin",
+    ),
+)
+
+init_app_kernel(app, settings, job_registry=registry, user_store=my_user_store)
+```
+
+Access the kernel runtime later via `get_kernel(app)`:
+
+```python
+from app_kernel import get_kernel
+
+kernel = get_kernel(app)
+logger = kernel.logger
+metrics = kernel.metrics
+```
+
 ## Typical Route Pattern
 
 ```python
@@ -553,6 +620,117 @@ result = await get_cache().get_or_set(
 )
 ```
 
+## Distributed Locks
+
+Redis-backed distributed locks for coordinating across multiple workers/processes. Uses atomic Lua scripts to prevent race conditions.
+
+```python
+from app_kernel import acquire_lock, release_lock, renew_lock, auto_renew_lock
+
+# Acquire — returns lock_id (UUID) or None if already locked
+lock_id = await acquire_lock("deploy:svc-123:prod", ttl=300, holder="user-456")
+if not lock_id:
+    raise Exception("Already locked by another process")
+
+# For long operations, auto-renew in the background
+renewer = await auto_renew_lock("deploy:svc-123:prod", lock_id, ttl=300, interval=120)
+try:
+    await do_long_deployment()
+finally:
+    renewer.cancel()
+    await release_lock("deploy:svc-123:prod", lock_id)
+```
+
+| Function | Description |
+|----------|-------------|
+| `acquire_lock(key, ttl, holder)` | Acquire lock. Returns `lock_id` (UUID) or `None`. |
+| `release_lock(key, lock_id)` | Release lock (atomic — only if you own it). |
+| `renew_lock(key, lock_id, ttl)` | Extend lock TTL (atomic — only if you own it). |
+| `auto_renew_lock(key, lock_id, ttl, interval)` | Background task that calls `renew_lock` periodically. Cancel when done. |
+
+When Redis is unavailable, `acquire_lock` returns a UUID (no contention protection) and `release_lock` returns `True`. This is safe for single-process dev but means no real locking — production requires real Redis.
+
+## Streaming
+
+SSE streaming with Redis-backed concurrency limits. Prevents a single user from monopolizing server resources.
+
+```python
+from app_kernel import stream_lease, StreamLimitExceeded, get_active_streams
+
+# In your SSE endpoint
+@router.get("/stream")
+async def stream_data(user: UserIdentity = Depends(get_current_user)):
+    try:
+        async with stream_lease(user.id) as lease:
+            async def generate():
+                yield "data: started\n\n"
+                await do_work()
+                yield "data: done\n\n"
+            return StreamingResponse(generate(), media_type="text/event-stream")
+    except StreamLimitExceeded:
+        raise HTTPException(429, "Too many concurrent streams")
+
+# Check active streams for a user
+active = await get_active_streams(user_id)  # Returns count
+```
+
+Default: 5 concurrent streams per user, 180s lease TTL. Configure via `StreamingSettings`:
+
+```python
+KernelSettings(
+    streaming=StreamingSettings(
+        max_concurrent_per_user=3,
+        lease_ttl_seconds=300,
+    ),
+)
+```
+
+## HTTP Client
+
+Pooled async HTTP client with connection reuse across requests. Built on `httpx`.
+
+```python
+from app_kernel import http_client, HttpConfig
+
+# Simple usage (uses default pool)
+async with http_client("https://api.example.com") as client:
+    resp = await client.get("/users")
+    data = resp.json()
+
+# With custom config
+async with http_client("https://api.example.com", config=HttpConfig(
+    timeout=30,
+    max_connections=20,
+    retries=3,
+)) as client:
+    resp = await client.post("/webhook", json={"event": "deploy"})
+```
+
+The client pool is shared per base URL — multiple callers reuse the same connection pool.
+
+## Profiler
+
+Simple timing utility for measuring code block performance.
+
+```python
+from app_kernel import Profiler, profiled_function
+
+# Manual profiling
+p = Profiler()
+await do_something()
+print(p.report("Step 1"))  # "Step 1: 12.34 ms"
+
+p.start()  # Reset timer
+await do_something_else()
+print(p.elapsed())  # 5.67 (milliseconds)
+
+# Decorator — logs timing automatically
+@profiled_function()
+async def my_handler(data):
+    ...
+# Logs: "my_handler completed in 45.2ms"
+```
+
 ## Custom Environment Checks
 
 Validation that runs at startup. In prod, failures prevent startup.
@@ -880,39 +1058,165 @@ If a deployment introduces a bad migration or corrupts data:
 
 ## API Reference
 
-### Core
+### Service Creation
 
 | Export | Description |
 |--------|-------------|
-| `create_service(...)` | Create FastAPI app |
-| `get_job_client()` | Background job client |
-| `db_context()` | Context manager for DB (batching) |
-| `get_cache()` | Cache client |
+| `create_service(name, ...)` | Create a production-ready FastAPI app with all kernel features. |
+| `quick_service(name, routers)` | Zero-config service for prototyping (SQLite + fakeredis). |
+| `ServiceConfig` | Configuration dataclass for `create_service`. Has `from_env()` classmethod. |
+| `init_app_kernel(app, settings, ...)` | Low-level init — attach kernel to an existing FastAPI app. |
+| `get_kernel(app)` | Get `KernelRuntime` from an initialized FastAPI app. |
+| `KernelRuntime` | Runtime state: `.logger`, `.metrics`, `.audit`, `.settings`, `.http_client()`. |
+
+### Settings (all frozen dataclasses)
+
+| Export | Description |
+|--------|-------------|
+| `KernelSettings` | Top-level settings container (composes all sub-settings). |
+| `AuthSettings` | `token_secret`, `access_token_expires_minutes`, `refresh_token_expires_days`. |
+| `RedisSettings` | `url`, `key_prefix`, `max_connections`, timeouts. |
+| `StreamingSettings` | `max_concurrent_per_user`, `lease_ttl_seconds`. |
+| `JobSettings` | `worker_count`, `thread_pool_size`, `work_timeout`, `max_attempts`. |
+| `ObservabilitySettings` | `service_name`, `log_level`, `request_metrics_enabled`. |
+| `TracingSettings` | `enabled`, `exclude_paths`, `sample_rate`, `save_threshold_ms`. |
+| `ReliabilitySettings` | Rate limit RPMs, idempotency TTL. |
+| `FeatureSettings` | Toggle auto-mounted routes, auth mode, signup, metrics protection. |
+| `CorsSettings` | `allow_origins`, `allow_credentials`, `allow_methods`, `allow_headers`. |
+| `SecuritySettings` | Toggle request ID, security headers, logging, error handling, max body size. |
 
 ### Auth
 
+| Export | Type | Description |
+|--------|------|-------------|
+| `get_current_user` | Dependency | Require auth, return `UserIdentity`, raise 401 if missing. |
+| `get_current_user_optional` | Dependency | Return `UserIdentity` or `None`. |
+| `require_admin` | Dependency | Require admin role, raise 401/403. |
+| `require_auth` | Dependency | Alias for `get_current_user`. |
+| `get_request_context` | Dependency | Returns `RequestContext` with user + request metadata. |
+| `UserIdentity` | Dataclass | `id`, `email`, `role`, `is_active`, `is_admin` (property). |
+| `TokenPayload` | Dataclass | Decoded JWT: `sub`, `email`, `role`, `type`, `user_id` (property). |
+| `RequestContext` | Dataclass | `user`, `request_id`, `ip_address`, `is_authenticated` (property). |
+| `AuthError` | Exception | Raised for auth/token failures. |
+| `UserStore` | Protocol | `get_by_username`, `get_by_id`, `create`, `update_password`. |
+| `AuthServiceAdapter` | Class | Wraps `backend.auth.AuthService` to implement `UserStore`. |
+| `create_auth_router(...)` | Factory | Create auth router with login/register/refresh/me/change-password. |
+
+### Database
+
 | Export | Description |
 |--------|-------------|
-| `get_current_user` | Require auth, return user |
-| `get_current_user_optional` | Return user or None |
-| `require_admin` | Require admin user |
-| `UserIdentity` | User type |
+| `db_context()` | Async context manager for strict DB connections (enforces entity class usage). |
 
-### Decorators
+### Redis & Locks
 
-| Decorator | Description |
-|-----------|-------------|
-| `@cached(ttl, key)` | Cache results |
-| `@rate_limit(rpm)` | Custom rate limit |
-| `@no_rate_limit` | Exempt from rate limit |
+| Export | Description |
+|--------|-------------|
+| `get_redis()` | Get shared async Redis client (or fakeredis). Returns `None` before init. |
+| `get_sync_redis()` | Get shared sync Redis client (used by job queue). |
+| `is_redis_fake()` | `True` if using fakeredis (in-memory, single-process). |
+| `acquire_lock(key, ttl, holder)` | Acquire distributed lock. Returns `lock_id` or `None`. |
+| `release_lock(key, lock_id)` | Release lock atomically (Lua script, ownership-verified). |
+| `renew_lock(key, lock_id, ttl)` | Extend lock TTL atomically. |
+| `auto_renew_lock(key, lock_id, ttl, interval)` | Background renewal task. Cancel when done. |
 
-### Environment
+### Jobs
 
-| Function | Description |
-|----------|-------------|
-| `get_env()` | Get environment name |
-| `is_prod()` | Check if production |
-| `is_dev()` | Check if development |
+| Export | Description |
+|--------|-------------|
+| `JobRegistry` | Register task processors via `.register()` or `@registry.task()`. |
+| `JobContext` | Passed to handlers: `job_id`, `task_name`, `attempt`, `max_attempts`, `user_id`. |
+| `get_job_client()` | Get `JobClient` for enqueuing: `await client.enqueue("task", data)`. |
+| `start_workers()` / `stop_workers()` | Start/stop job workers (for dedicated worker processes). |
+| `run_worker(tasks, redis_url, ...)` | Run a standalone worker process with signal handling. |
+| `create_jobs_router(...)` | Create router for job listing/status/cancel endpoints. |
+
+### Streaming
+
+| Export | Description |
+|--------|-------------|
+| `stream_lease(user_id)` | Async context manager — acquires a stream slot, raises `StreamLimitExceeded`. |
+| `StreamLimitExceeded` | Exception when user exceeds concurrent stream limit. |
+| `get_active_streams(user_id)` | Returns count of active streams for a user. |
+
+### Caching & Reliability
+
+| Export | Description |
+|--------|-------------|
+| `@cached(ttl, key)` | Decorator — cache function results in Redis/memory. |
+| `@rate_limit(limit, window)` | Decorator — custom per-route rate limit. |
+| `@no_rate_limit` | Decorator — exempt route from rate limiting. |
+| `@idempotent` / `@idempotent(ttl=N)` | Decorator — prevent duplicate execution. |
+
+### Observability
+
+| Export | Description |
+|--------|-------------|
+| `get_logger()` | Get the kernel's structured logger. |
+| `log_context(**kwargs)` | Context manager — adds fields to all logs within the block. |
+| `get_metrics()` | Get the metrics collector (counters, histograms). |
+| `get_audit()` | Get the audit logger for manual audit entries. |
+| `RequestMetric` | Dataclass — rich metadata for a single HTTP request. |
+| `RequestMetricsMiddleware` | Middleware — captures timing/status/user/geo per request. |
+| `RequestMetricsStore` | DB store — save/query/aggregate request metrics. |
+| `get_real_ip(request)` | Extract real client IP (handles reverse proxies). |
+| `get_geo_from_headers(request)` | Extract country/city from Cloudflare headers. |
+| `setup_request_metrics(app, ...)` | Attach `RequestMetricsMiddleware` to an app. |
+| `create_request_metrics_router(...)` | Create admin router for metrics queries. |
+| `get_traced_service_name()` | Get the service name used in tracing spans. |
+
+### SaaS (Multi-Tenant)
+
+| Export | Description |
+|--------|-------------|
+| `WorkspaceStore` | CRUD for workspaces: `create`, `get`, `list_for_user`, `update`, `delete`. |
+| `MemberStore` | CRUD for members: `add`, `remove`, `update_role`, `is_member`, `is_admin`. |
+| `InviteStore` | CRUD for invites: `create`, `accept`, `cancel`, `list_for_workspace`. |
+| `require_workspace_member` | Dependency — require user is a member of the workspace in the URL. |
+| `require_workspace_admin` | Dependency — require admin or owner role in the workspace. |
+| `require_workspace_owner` | Dependency — require owner role in the workspace. |
+| `create_saas_router(...)` | Create router with all workspace/member/invite endpoints. |
+
+### Integrations
+
+| Export | Description |
+|--------|-------------|
+| `send_email(to, subject, html, text, ...)` | Send transactional email via configured SMTP. |
+| `is_email_configured()` | Check if email is configured. |
+| `BillingService` | Stripe billing (optional — requires `billing` module). |
+| `BillingConfig` | Billing configuration. |
+| `StripeSync` | Sync products/prices to Stripe. |
+
+### SSE Task Helpers
+
+| Export | Description |
+|--------|-------------|
+| `TaskStream` | Full-featured stream context: logging, cancellation, SSE formatting. |
+| `TaskCancelled` / `Cancelled` | Exception raised when a task is cancelled by user. |
+| `create_tasks_router(...)` | Create router for task status/cancel endpoints. |
+| `sse_event(event, data)` | Format a generic SSE event string. |
+| `sse_task_id(task_id)` | Emit `task_id` SSE event for client cancellation. |
+| `sse_log(message, level)` | Emit a log SSE event. |
+| `sse_complete(success, task_id, error)` | Emit completion SSE event. |
+| `sse_urls(endpoints, domain)` | Emit deployment/service URL SSE event. |
+
+### Environment & Utilities
+
+| Export | Description |
+|--------|-------------|
+| `get_env()` | Get current environment name (`prod`, `dev`, etc.). |
+| `is_prod()` / `is_dev()` / `is_staging()` / `is_uat()` / `is_test()` | Environment checks. |
+| `load_env_hierarchy(...)` | Load `.env` + `.env.{ENV}` files with directory inheritance. |
+| `run_env_checks(settings, extra_checks)` | Run validation checks. Raises in prod on failure. |
+| `check_database_url` / `check_redis_url` / `check_jwt_secret` / `check_cors_origins` / `check_email_config` | Built-in check functions (reusable in custom checks). |
+| `EnvCheck` | Type alias for check functions: `(settings) -> (bool, str)`. |
+| `Profiler` | Simple timer: `.start()`, `.elapsed()`, `.report(msg)`. |
+| `profiled_function(is_entry)` | Decorator — logs function timing. |
+| `http_client(base_url, config)` | Pooled async HTTP client context manager. |
+| `HttpConfig` | HTTP client configuration (timeout, retries, max connections). |
+| `CacheBustedStaticFiles` | StaticFiles subclass with smart cache headers (hash-aware). |
+| `__version__` | Kernel version string. |
+| `create_health_router(...)` | Create health/readiness router. |
 
 ---
 
@@ -1283,6 +1587,1232 @@ if await check_scope(auth, "admin:write"):
 ```
 
 ---
+
+## Class API Reference
+
+<div style="background-color:#f8f9fa; border:1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 24px;margin-top: 24px;">
+
+
+### class `ServiceConfig`
+
+Service configuration with sensible defaults. Pass to `create_service(config=...)` or use `ServiceConfig.from_env()` to load from environment variables.
+
+<details>
+<summary><strong>Public Methods</strong></summary>
+
+| Decorators | Method | Args | Returns | Category | Description |
+|------------|--------|------|---------|----------|-------------|
+| `@classmethod` | `from_env` | | `ServiceConfig` | Factory | Creates ServiceConfig from environment variables (`JWT_SECRET`, `DATABASE_URL`, `REDIS_URL`, `CORS_ORIGINS`, `DEBUG`, `LOG_LEVEL`, `RATE_LIMIT_RPM`, `SMTP_*`, `EMAIL_FROM`). |
+
+</details>
+
+<br>
+
+<details>
+<summary><strong>Fields</strong></summary>
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `jwt_secret` | `str` | `"dev-secret-change-me"` | JWT signing secret. |
+| `jwt_expiry_hours` | `int` | `24` | JWT token expiry in hours. |
+| `auth_enabled` | `bool` | `True` | Enable auth routes. |
+| `allow_self_signup` | `bool` | `True` | Allow open registration. |
+| `saas_enabled` | `bool` | `True` | Enable workspace/team routes. |
+| `saas_invite_base_url` | `Optional[str]` | `None` | Base URL for invite links. |
+| `oauth_providers` | `Dict[str, Dict[str, str]]` | `{}` | OAuth provider configs. |
+| `redis_url` | `Optional[str]` | `None` | Redis connection string. |
+| `redis_key_prefix` | `str` | `"queue:"` | Redis key prefix. |
+| `database_url` | `Optional[str]` | `None` | Database connection string. |
+| `admin_worker_embedded` | `bool` | `True` | Run admin worker in-process. |
+| `admin_db_url` | `Optional[str]` | `None` | Separate DB URL for admin worker. |
+| `cors_origins` | `List[str]` | `["*"]` | Allowed CORS origins. |
+| `cors_credentials` | `bool` | `True` | Allow CORS credentials. |
+| `rate_limit_enabled` | `bool` | `True` | Enable rate limiting middleware. |
+| `rate_limit_requests` | `int` | `100` | Default rate limit RPM. |
+| `rate_limit_window` | `int` | `60` | Rate limit window in seconds. |
+| `max_concurrent_streams` | `int` | `3` | Max SSE streams per user. |
+| `stream_lease_ttl` | `int` | `300` | Stream lease TTL in seconds. |
+| `worker_count` | `int` | `4` | Background job worker count. |
+| `job_max_attempts` | `int` | `3` | Max retry attempts per job. |
+| `email_enabled` | `bool` | `False` | Enable email sending. |
+| `email_provider` | `str` | `"smtp"` | Email provider type. |
+| `email_from` | `Optional[str]` | `None` | Sender address. |
+| `email_reply_to` | `Optional[str]` | `None` | Reply-to address. |
+| `smtp_host` | `Optional[str]` | `None` | SMTP server host. |
+| `smtp_port` | `int` | `587` | SMTP server port. |
+| `smtp_user` | `Optional[str]` | `None` | SMTP username. |
+| `smtp_password` | `Optional[str]` | `None` | SMTP password. |
+| `smtp_use_tls` | `bool` | `True` | Use TLS for SMTP. |
+| `debug` | `bool` | `False` | Enable debug mode. |
+| `log_level` | `str` | `"INFO"` | Logging level. |
+| `request_metrics_enabled` | `bool` | `False` | Enable per-request metrics collection. |
+| `request_metrics_exclude_paths` | `List[str]` | `["/health", ...]` | Paths excluded from metrics. |
+| `tracing_enabled` | `bool` | `True` | Enable request tracing. |
+| `tracing_exclude_paths` | `List[str]` | `["/health", ...]` | Paths excluded from tracing. |
+| `tracing_sample_rate` | `float` | `1.0` | Fraction of requests to trace. |
+
+</details>
+
+<br>
+
+
+</div>
+
+<div style="background-color:#f8f9fa; border:1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 24px;margin-top: 24px;">
+
+
+### class `KernelSettings`
+
+Complete configuration for app_kernel (frozen dataclass). Used with `init_app_kernel()` for low-level initialization.
+
+<details>
+<summary><strong>Fields</strong></summary>
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `redis` | `RedisSettings` | `RedisSettings()` | Redis connection and pool settings. |
+| `streaming` | `StreamingSettings` | `StreamingSettings()` | SSE streaming limits. |
+| `jobs` | `JobSettings` | `JobSettings()` | Background job worker settings. |
+| `auth` | `AuthSettings` | `AuthSettings()` | Authentication settings. |
+| `observability` | `ObservabilitySettings` | `ObservabilitySettings()` | Logging and metrics settings. |
+| `tracing` | `TracingSettings` | `TracingSettings()` | Request tracing settings. |
+| `reliability` | `ReliabilitySettings` | `ReliabilitySettings()` | Rate limiting and idempotency settings. |
+| `features` | `FeatureSettings` | `FeatureSettings()` | Feature flags for auto-mounted routes. |
+| `cors` | `CorsSettings` | `CorsSettings()` | CORS middleware settings. |
+| `security` | `SecuritySettings` | `SecuritySettings()` | Security middleware settings. |
+| `database_url` | `Optional[str]` | `None` | Database connection string. |
+| `health_checks` | `Tuple[HealthCheckFn, ...]` | `()` | Custom health check functions. |
+
+</details>
+
+<br>
+
+
+</div>
+
+<div style="background-color:#f8f9fa; border:1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 24px;margin-top: 24px;">
+
+
+### class `KernelRuntime`
+
+Runtime state for an initialized kernel. Access via `get_kernel(app)`.
+
+<details>
+<summary><strong>Public Methods</strong></summary>
+
+| Decorators | Method | Args | Returns | Category | Description |
+|------------|--------|------|---------|----------|-------------|
+| `async` | `http_client` | `base_url: str` | Context manager | HTTP | Get a pooled HTTP client for the given base URL. |
+
+</details>
+
+<br>
+
+<details>
+<summary><strong>Fields</strong></summary>
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `logger` | `KernelLogger` | Structured logger instance. |
+| `metrics` | `MetricsCollector` | Prometheus-style metrics. |
+| `audit` | `AuditLogger` | Audit log publisher. |
+| `settings` | `KernelSettings` | Active kernel settings. |
+| `redis_config` | `Any` | Redis configuration (sync client for jobs). |
+| `job_registry` | `Optional[JobRegistry]` | Registered job handlers. |
+
+</details>
+
+<br>
+
+
+</div>
+
+<div style="background-color:#f8f9fa; border:1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 24px;margin-top: 24px;">
+
+
+### class `AuthSettings`
+
+Auth configuration (frozen dataclass).
+
+<details>
+<summary><strong>Fields</strong></summary>
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `token_secret` | `str` | `""` | JWT signing secret (32+ chars in prod). |
+| `access_token_expires_minutes` | `int` | `15` | Access token TTL. |
+| `refresh_token_expires_days` | `int` | `30` | Refresh token TTL. |
+| `enabled` | `bool` | `True` | Enable auth routes. |
+
+</details>
+
+<br>
+
+
+</div>
+
+<div style="background-color:#f8f9fa; border:1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 24px;margin-top: 24px;">
+
+
+### class `RedisSettings`
+
+Redis connection settings (frozen dataclass).
+
+<details>
+<summary><strong>Fields</strong></summary>
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `url` | `str` | `"redis://localhost:6379"` | Redis connection string. |
+| `key_prefix` | `str` | `"queue:"` | Key prefix for job queues. |
+| `max_connections` | `int` | `10` | Connection pool size. |
+| `socket_timeout` | `float` | `5.0` | Socket timeout in seconds. |
+| `socket_connect_timeout` | `float` | `5.0` | Connection timeout in seconds. |
+
+</details>
+
+<br>
+
+
+</div>
+
+<div style="background-color:#f8f9fa; border:1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 24px;margin-top: 24px;">
+
+
+### class `StreamingSettings`
+
+Streaming lifecycle settings (frozen dataclass).
+
+<details>
+<summary><strong>Fields</strong></summary>
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `max_concurrent_per_user` | `int` | `5` | Max concurrent SSE streams per user. |
+| `lease_ttl_seconds` | `int` | `180` | Stream lease TTL before auto-release. |
+| `lease_key_namespace` | `str` | `"stream_leases"` | Redis key namespace for leases. |
+
+</details>
+
+<br>
+
+
+</div>
+
+<div style="background-color:#f8f9fa; border:1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 24px;margin-top: 24px;">
+
+
+### class `JobSettings`
+
+Job queue settings (frozen dataclass).
+
+<details>
+<summary><strong>Fields</strong></summary>
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `worker_count` | `int` | `4` | Number of concurrent workers. |
+| `thread_pool_size` | `int` | `8` | Thread pool for sync tasks. |
+| `work_timeout` | `float` | `300.0` | Max seconds per job execution. |
+| `max_attempts` | `int` | `3` | Retry attempts before dead-letter. |
+| `retry_delays` | `Tuple[float, ...]` | `(1.0, 5.0, 30.0)` | Backoff delays between retries. |
+
+</details>
+
+<br>
+
+
+</div>
+
+<div style="background-color:#f8f9fa; border:1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 24px;margin-top: 24px;">
+
+
+### class `ObservabilitySettings`
+
+Logging and metrics settings (frozen dataclass).
+
+<details>
+<summary><strong>Fields</strong></summary>
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `service_name` | `str` | `"app"` | Service name in logs and metrics. |
+| `log_level` | `str` | `"INFO"` | Logging level. |
+| `log_dir` | `Optional[str]` | `None` | Directory for log files (None = stdout only). |
+| `add_caller_info` | `bool` | `True` | Add caller file/line to log entries. |
+| `request_metrics_enabled` | `bool` | `False` | Enable per-request metrics collection. |
+| `request_metrics_exclude_paths` | `Tuple[str, ...]` | `("/health", ...)` | Paths excluded from metrics. |
+
+</details>
+
+<br>
+
+
+</div>
+
+<div style="background-color:#f8f9fa; border:1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 24px;margin-top: 24px;">
+
+
+### class `TracingSettings`
+
+Request tracing settings (frozen dataclass).
+
+<details>
+<summary><strong>Fields</strong></summary>
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | `bool` | `True` | Enable tracing middleware. |
+| `exclude_paths` | `Tuple[str, ...]` | `("/health", ...)` | Paths excluded from tracing. |
+| `sample_rate` | `float` | `1.0` | Fraction of requests to trace (0.0–1.0). |
+| `save_threshold_ms` | `float` | `0` | Only persist traces slower than this (0 = all). |
+| `save_errors` | `bool` | `True` | Always persist error traces regardless of threshold. |
+
+</details>
+
+<br>
+
+
+</div>
+
+<div style="background-color:#f8f9fa; border:1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 24px;margin-top: 24px;">
+
+
+### class `ReliabilitySettings`
+
+Rate limiting and idempotency settings (frozen dataclass).
+
+<details>
+<summary><strong>Fields</strong></summary>
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `rate_limit_enabled` | `bool` | `True` | Enable rate limiting middleware. |
+| `rate_limit_anonymous_rpm` | `int` | `30` | Requests/min for anonymous users. |
+| `rate_limit_authenticated_rpm` | `int` | `120` | Requests/min for authenticated users. |
+| `rate_limit_admin_rpm` | `int` | `600` | Requests/min for admin users. |
+| `idempotency_enabled` | `bool` | `True` | Enable idempotency checking. |
+| `idempotency_ttl_seconds` | `int` | `86400` | Idempotency key TTL (default 24h). |
+
+</details>
+
+<br>
+
+
+</div>
+
+<div style="background-color:#f8f9fa; border:1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 24px;margin-top: 24px;">
+
+
+### class `FeatureSettings`
+
+Feature flags for auto-mounted kernel routers (frozen dataclass).
+
+<details>
+<summary><strong>Fields</strong></summary>
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enable_health_routes` | `bool` | `True` | Mount `/healthz` and `/readyz`. |
+| `health_path` | `str` | `"/healthz"` | Liveness probe path. |
+| `ready_path` | `str` | `"/readyz"` | Readiness probe path. |
+| `enable_metrics` | `bool` | `True` | Mount `/metrics` (Prometheus). |
+| `metrics_path` | `str` | `"/metrics"` | Metrics endpoint path. |
+| `protect_metrics` | `Literal["admin", "internal", "none"]` | `"admin"` | Metrics endpoint protection level. |
+| `enable_auth_routes` | `bool` | `True` | Mount auth routes (login/register/etc). |
+| `auth_mode` | `Literal["local", "apikey", "external"]` | `"local"` | Authentication mode. |
+| `allow_self_signup` | `bool` | `True` | Allow open registration. |
+| `auth_prefix` | `str` | `"/auth"` | Auth routes prefix. |
+| `enable_job_routes` | `bool` | `True` | Mount job management routes. |
+| `job_routes_prefix` | `str` | `"/jobs"` | Job routes prefix. |
+| `enable_audit_routes` | `bool` | `False` | Mount admin audit routes. |
+| `audit_path` | `str` | `"/audit"` | Audit routes prefix. |
+| `enable_saas_routes` | `bool` | `True` | Mount workspace/team routes. |
+| `saas_prefix` | `str` | `"/workspaces"` | SaaS routes prefix. |
+| `saas_invite_base_url` | `str` | `None` | Base URL for invite links. |
+| `enable_test_routes` | `bool` | `False` | Mount self-test routes (admin only). |
+| `kernel_prefix` | `str` | `""` | Global prefix for all kernel routes. |
+
+</details>
+
+<br>
+
+
+</div>
+
+<div style="background-color:#f8f9fa; border:1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 24px;margin-top: 24px;">
+
+
+### class `CorsSettings`
+
+CORS middleware configuration (frozen dataclass).
+
+<details>
+<summary><strong>Fields</strong></summary>
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | `bool` | `True` | Enable CORS middleware. |
+| `allow_origins` | `Tuple[str, ...]` | `("*",)` | Allowed origins. |
+| `allow_credentials` | `bool` | `True` | Allow credentials (cookies, auth headers). |
+| `allow_methods` | `Tuple[str, ...]` | `("*",)` | Allowed HTTP methods. |
+| `allow_headers` | `Tuple[str, ...]` | `("*",)` | Allowed request headers. |
+| `expose_headers` | `Tuple[str, ...]` | `("X-Runtime", "X-Request-ID")` | Headers exposed to browser. |
+
+</details>
+
+<br>
+
+
+</div>
+
+<div style="background-color:#f8f9fa; border:1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 24px;margin-top: 24px;">
+
+
+### class `SecuritySettings`
+
+Security middleware configuration (frozen dataclass).
+
+<details>
+<summary><strong>Fields</strong></summary>
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enable_request_id` | `bool` | `True` | Add `X-Request-ID` header. |
+| `enable_security_headers` | `bool` | `True` | Add security headers (XSS, CSRF, etc). |
+| `enable_request_logging` | `bool` | `True` | Log all requests with timing. |
+| `enable_error_handling` | `bool` | `True` | Global error handling middleware. |
+| `max_body_size` | `int` | `10485760` | Max request body size (10 MB). |
+| `debug` | `bool` | `False` | Debug mode (verbose errors). |
+
+</details>
+
+<br>
+
+
+</div>
+
+<div style="background-color:#f8f9fa; border:1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 24px;margin-top: 24px;">
+
+
+### class `UserIdentity`
+
+Core user identity for auth primitives (dataclass).
+
+<details>
+<summary><strong>Public Methods</strong></summary>
+
+| Decorators | Method | Args | Returns | Category | Description |
+|------------|--------|------|---------|----------|-------------|
+| `@property` | `is_admin` | | `bool` | Auth | Check if user has admin role. |
+| | `to_dict` | | `dict` | Serialization | Convert to dictionary. |
+| `@classmethod` | `from_dict` | `data: dict` | `UserIdentity` | Factory | Create from dictionary. |
+
+</details>
+
+<br>
+
+<details>
+<summary><strong>Fields</strong></summary>
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `id` | `str` | UUID | Unique user identifier. |
+| `email` | `str` | `""` | User email address. |
+| `role` | `str` | `"user"` | User role (`"user"`, `"admin"`). |
+| `is_active` | `bool` | `True` | Whether account is active. |
+| `created_at` | `datetime` | UTC now | Account creation timestamp. |
+
+</details>
+
+<br>
+
+
+</div>
+
+<div style="background-color:#f8f9fa; border:1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 24px;margin-top: 24px;">
+
+
+### class `TokenPayload`
+
+Decoded JWT token payload (dataclass).
+
+<details>
+<summary><strong>Public Methods</strong></summary>
+
+| Decorators | Method | Args | Returns | Category | Description |
+|------------|--------|------|---------|----------|-------------|
+| `@property` | `user_id` | | `str` | Auth | Alias for `sub`. |
+| `@property` | `is_admin` | | `bool` | Auth | Check if role is admin. |
+| `@property` | `is_refresh_token` | | `bool` | Auth | Check if type is refresh. |
+
+</details>
+
+<br>
+
+<details>
+<summary><strong>Fields</strong></summary>
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `sub` | `str` | required | Subject (user ID). |
+| `email` | `str` | `""` | User email. |
+| `role` | `str` | `"user"` | User role. |
+| `type` | `str` | `"access"` | Token type (`"access"` or `"refresh"`). |
+| `exp` | `Optional[datetime]` | `None` | Expiration time. |
+| `iat` | `Optional[datetime]` | `None` | Issued-at time. |
+
+</details>
+
+<br>
+
+
+</div>
+
+<div style="background-color:#f8f9fa; border:1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 24px;margin-top: 24px;">
+
+
+### class `RequestContext`
+
+Request-scoped context containing user identity and metadata (dataclass).
+
+<details>
+<summary><strong>Public Methods</strong></summary>
+
+| Decorators | Method | Args | Returns | Category | Description |
+|------------|--------|------|---------|----------|-------------|
+| `@property` | `is_authenticated` | | `bool` | Auth | Whether a user is present. |
+| `@property` | `user_id` | | `Optional[str]` | Auth | User ID if authenticated, else None. |
+| `@property` | `is_admin` | | `bool` | Auth | Whether the user is an admin. |
+
+</details>
+
+<br>
+
+<details>
+<summary><strong>Fields</strong></summary>
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `user` | `Optional[UserIdentity]` | `None` | Authenticated user (if any). |
+| `request_id` | `str` | UUID | Unique request identifier. |
+| `timestamp` | `datetime` | UTC now | Request timestamp. |
+| `ip_address` | `Optional[str]` | `None` | Client IP address. |
+| `user_agent` | `Optional[str]` | `None` | Client user agent string. |
+
+</details>
+
+<br>
+
+
+</div>
+
+<div style="background-color:#f8f9fa; border:1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 24px;margin-top: 24px;">
+
+
+### class `AuthError`
+
+Raised for authentication/authorization failures. Inherits from `Exception`.
+
+</div>
+
+<div style="background-color:#f8f9fa; border:1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 24px;margin-top: 24px;">
+
+
+### class `UserStore`
+
+Protocol for user storage. Implement this to use custom user backends with `create_auth_router()`.
+
+<details>
+<summary><strong>Public Methods</strong></summary>
+
+| Decorators | Method | Args | Returns | Category | Description |
+|------------|--------|------|---------|----------|-------------|
+| `async` | `get_by_username` | `username: str` | `Optional[dict]` | Query | Get user by username or email. |
+| `async` | `get_by_id` | `user_id: str` | `Optional[dict]` | Query | Get user by ID. |
+| `async` | `create` | `username: str`, `email: str`, `password_hash: str` | `dict` | Mutation | Create new user with pre-hashed password. |
+| `async` | `update_password` | `user_id: str`, `password_hash: str` | `bool` | Mutation | Update user's password hash. |
+
+</details>
+
+<br>
+
+
+</div>
+
+<div style="background-color:#f8f9fa; border:1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 24px;margin-top: 24px;">
+
+
+### class `AuthServiceAdapter`
+
+Adapter that wraps `backend.auth.AuthService` to implement `UserStore` protocol.
+
+<details>
+<summary><strong>Public Methods</strong></summary>
+
+| Decorators | Method | Args | Returns | Category | Description |
+|------------|--------|------|---------|----------|-------------|
+| `async` | `get_by_username` | `username: str` | `Optional[dict]` | Query | Get user by username (email). |
+| `async` | `get_by_id` | `user_id: str` | `Optional[dict]` | Query | Get user by ID. |
+| `async` | `create` | `username: str`, `email: str`, `password_hash: str` | `dict` | Mutation | Create new user with pre-hashed password. |
+| `async` | `update_password` | `user_id: str`, `password_hash: str` | `bool` | Mutation | Update user's password. |
+
+</details>
+
+<br>
+
+<details>
+<summary><strong>Private/Internal Methods</strong></summary>
+
+| Decorators | Method | Args | Returns | Category | Description |
+|------------|--------|------|---------|----------|-------------|
+| | `__init__` | `auth_service` | | Initialization | Wrap an AuthService instance. |
+| | `_user_to_dict` | `user` | `dict` | Internal | Convert user entity to dict. |
+
+</details>
+
+<br>
+
+
+</div>
+
+<div style="background-color:#f8f9fa; border:1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 24px;margin-top: 24px;">
+
+
+### class `Cache`
+
+Cache facade with environment-aware backend selection. In dev: `InMemoryCache` or `RedisCache`. In prod without Redis: `NoOpCache` (disabled to prevent stale data across droplets).
+
+<details>
+<summary><strong>Public Methods</strong></summary>
+
+| Decorators | Method | Args | Returns | Category | Description |
+|------------|--------|------|---------|----------|-------------|
+| `@property` | `backend_type` | | `str` | Info | Return the backend type name for logging. |
+| `async` | `get` | `key: str` | `Optional[Any]` | Read | Get value from cache. |
+| `async` | `set` | `key: str`, `value: Any`, `ttl: Optional[int]` | `None` | Write | Set value with optional TTL (seconds). |
+| `async` | `delete` | `key: str` | `bool` | Write | Delete a key. |
+| `async` | `delete_pattern` | `pattern: str` | `int` | Write | Delete keys matching glob pattern (e.g., `"projects:*"`). |
+| `async` | `clear` | | `None` | Write | Clear entire cache. |
+| `async` | `exists` | `key: str` | `bool` | Read | Check if key exists. |
+| `async` | `get_or_set` | `key: str`, `factory`, `ttl: Optional[int]` | `Any` | Read/Write | Get from cache or call factory. Single-flight per key (no stampede). |
+
+</details>
+
+<br>
+
+<details>
+<summary><strong>Private/Internal Methods</strong></summary>
+
+| Decorators | Method | Args | Returns | Category | Description |
+|------------|--------|------|---------|----------|-------------|
+| | `__init__` | `redis_client`, `prefix: str`, `is_fake: bool`, `is_prod: bool` | | Initialization | Select backend based on environment and Redis availability. |
+
+</details>
+
+<br>
+
+
+</div>
+
+<div style="background-color:#f8f9fa; border:1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 24px;margin-top: 24px;">
+
+
+### class `InMemoryCache`
+
+Simple in-memory LRU cache (fallback when Redis unavailable). Evicts expired entries every 50 `set()` calls.
+
+<details>
+<summary><strong>Public Methods</strong></summary>
+
+| Decorators | Method | Args | Returns | Category | Description |
+|------------|--------|------|---------|----------|-------------|
+| `async` | `get` | `key: str` | `Optional[Any]` | Read | Get value, returns None if expired. |
+| `async` | `set` | `key: str`, `value: Any`, `ttl: Optional[int]` | `None` | Write | Set value with LRU eviction at capacity. |
+| `async` | `delete` | `key: str` | `bool` | Write | Delete a key. |
+| `async` | `delete_pattern` | `pattern: str` | `int` | Write | Delete keys matching wildcard pattern. |
+| `async` | `clear` | | `None` | Write | Clear all entries. |
+| `async` | `exists` | `key: str` | `bool` | Read | Check if key exists and is not expired. |
+
+</details>
+
+<br>
+
+<details>
+<summary><strong>Private/Internal Methods</strong></summary>
+
+| Decorators | Method | Args | Returns | Category | Description |
+|------------|--------|------|---------|----------|-------------|
+| | `__init__` | `max_size: int = 1000` | | Initialization | Create cache with max entry count. |
+| | `_evict_expired` | | `None` | Internal | Remove all expired entries. |
+
+</details>
+
+<br>
+
+
+</div>
+
+<div style="background-color:#f8f9fa; border:1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 24px;margin-top: 24px;">
+
+
+### class `RedisCache`
+
+Async Redis-backed cache.
+
+<details>
+<summary><strong>Public Methods</strong></summary>
+
+| Decorators | Method | Args | Returns | Category | Description |
+|------------|--------|------|---------|----------|-------------|
+| `async` | `get` | `key: str` | `Optional[Any]` | Read | Get value from Redis. |
+| `async` | `set` | `key: str`, `value: Any`, `ttl: Optional[int]` | `None` | Write | Set value in Redis with optional TTL. |
+| `async` | `delete` | `key: str` | `bool` | Write | Delete a key. |
+| `async` | `delete_pattern` | `pattern: str` | `int` | Write | Delete keys matching pattern via SCAN. |
+| `async` | `clear` | | `None` | Write | Clear all cache keys (by prefix). |
+| `async` | `exists` | `key: str` | `bool` | Read | Check if key exists. |
+
+</details>
+
+<br>
+
+<details>
+<summary><strong>Private/Internal Methods</strong></summary>
+
+| Decorators | Method | Args | Returns | Category | Description |
+|------------|--------|------|---------|----------|-------------|
+| | `__init__` | `redis_client`, `prefix: str` | | Initialization | Wrap a Redis client with key prefix. |
+| | `_key` | `key: str` | `str` | Internal | Prefix a cache key. |
+
+</details>
+
+<br>
+
+
+</div>
+
+<div style="background-color:#f8f9fa; border:1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 24px;margin-top: 24px;">
+
+
+### class `NoOpCache`
+
+Cache that does nothing. Used in prod when real Redis is unavailable to prevent stale data across droplets.
+
+<details>
+<summary><strong>Public Methods</strong></summary>
+
+| Decorators | Method | Args | Returns | Category | Description |
+|------------|--------|------|---------|----------|-------------|
+| `async` | `get` | `key: str` | `None` | Read | Always returns None. |
+| `async` | `set` | `key: str`, `value: Any`, `ttl: Optional[int]` | `None` | Write | No-op. |
+| `async` | `delete` | `key: str` | `False` | Write | No-op, returns False. |
+| `async` | `delete_pattern` | `pattern: str` | `0` | Write | No-op, returns 0. |
+| `async` | `clear` | | `None` | Write | No-op. |
+| `async` | `exists` | `key: str` | `False` | Read | Always returns False. |
+
+</details>
+
+<br>
+
+
+</div>
+
+<div style="background-color:#f8f9fa; border:1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 24px;margin-top: 24px;">
+
+
+### class `RateLimitConfig`
+
+Configuration for rate limiting (dataclass).
+
+<details>
+<summary><strong>Fields</strong></summary>
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `anonymous_rpm` | `int` | `30` | Requests/min for anonymous users. |
+| `authenticated_rpm` | `int` | `120` | Requests/min for authenticated users. |
+| `admin_rpm` | `int` | `600` | Requests/min for admin users. |
+| `key_prefix` | `str` | `"ratelimit:"` | Redis key prefix. |
+| `exclude_paths` | `Set[str]` | `{"/health", ...}` | Paths exempt from rate limiting. |
+| `exclude_prefixes` | `Set[str]` | `{"/static", "/_next"}` | Path prefixes exempt from rate limiting. |
+
+</details>
+
+<br>
+
+
+</div>
+
+<div style="background-color:#f8f9fa; border:1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 24px;margin-top: 24px;">
+
+
+### class `RateLimiter`
+
+Async Redis-backed sliding window rate limiter.
+
+<details>
+<summary><strong>Public Methods</strong></summary>
+
+| Decorators | Method | Args | Returns | Category | Description |
+|------------|--------|------|---------|----------|-------------|
+| `async` | `check` | `identifier: str`, `limit: int`, `window: int` | `tuple[bool, int, int]` | Core | Check if request allowed. Returns `(allowed, remaining, retry_after)`. |
+| `async` | `get_limit_for_request` | `request: Request`, `user: Optional[UserIdentity]` | `tuple[str, int]` | Core | Get rate limit key and limit for a request (considers per-route overrides). |
+
+</details>
+
+<br>
+
+<details>
+<summary><strong>Private/Internal Methods</strong></summary>
+
+| Decorators | Method | Args | Returns | Category | Description |
+|------------|--------|------|---------|----------|-------------|
+| | `__init__` | `redis_client`, `config: Optional[RateLimitConfig]` | | Initialization | Create rate limiter with Redis backend. |
+| | `_get_key` | `identifier: str` | `str` | Internal | Build Redis key with prefix. |
+
+</details>
+
+<br>
+
+
+</div>
+
+<div style="background-color:#f8f9fa; border:1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 24px;margin-top: 24px;">
+
+
+### class `IdempotencyChecker`
+
+Manual idempotency checker for complex cases where the `@idempotent` decorator doesn't fit.
+
+<details>
+<summary><strong>Public Methods</strong></summary>
+
+| Decorators | Method | Args | Returns | Category | Description |
+|------------|--------|------|---------|----------|-------------|
+| `async` | `check` | `key: str` | `tuple[bool, Optional[Any]]` | Read | Check if operation was already performed. Returns `(was_seen, cached_result)`. |
+| `async` | `set` | `key: str`, `result: Any`, `ttl: Optional[int]` | | Write | Store result for idempotency key. |
+
+</details>
+
+<br>
+
+<details>
+<summary><strong>Private/Internal Methods</strong></summary>
+
+| Decorators | Method | Args | Returns | Category | Description |
+|------------|--------|------|---------|----------|-------------|
+| | `__init__` | `redis_client`, `ttl: int` | | Initialization | Create checker with default TTL. |
+
+</details>
+
+<br>
+
+
+</div>
+
+<div style="background-color:#f8f9fa; border:1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 24px;margin-top: 24px;">
+
+
+### class `JobRegistry`
+
+Registry mapping task names to processor functions.
+
+<details>
+<summary><strong>Public Methods</strong></summary>
+
+| Decorators | Method | Args | Returns | Category | Description |
+|------------|--------|------|---------|----------|-------------|
+| | `register` | `name: str`, `processor: ProcessorFunc` | `None` | Registration | Register a task processor. |
+| | `task` | `name: str` | `Callable` | Registration | Decorator for registering a task processor. |
+| | `get` | `name: str` | `Optional[ProcessorFunc]` | Query | Get a processor by name. |
+| | `get_metadata` | `name: str` | `Optional[Dict[str, Any]]` | Query | Get metadata for a task. |
+| | `has` | `name: str` | `bool` | Query | Check if a task is registered. |
+| `@property` | `tasks` | | `Dict[str, ProcessorFunc]` | Query | Get all registered tasks (read-only view). |
+
+</details>
+
+<br>
+
+
+</div>
+
+<div style="background-color:#f8f9fa; border:1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 24px;margin-top: 24px;">
+
+
+### class `JobContext`
+
+Context/metadata passed to job handlers (dataclass).
+
+<details>
+<summary><strong>Fields</strong></summary>
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `job_id` | `str` | required | Unique job identifier. |
+| `task_name` | `str` | required | Name of the task. |
+| `attempt` | `int` | `1` | Current attempt number (1, 2, 3...). |
+| `max_attempts` | `int` | `3` | Maximum attempts before dead-letter. |
+| `enqueued_at` | `Optional[datetime]` | `None` | When job was enqueued. |
+| `started_at` | `datetime` | UTC now | When this attempt started. |
+| `user_id` | `Optional[str]` | `None` | User who triggered the job. |
+| `metadata` | `Dict[str, Any]` | `{}` | Additional metadata. |
+
+</details>
+
+<br>
+
+
+</div>
+
+<div style="background-color:#f8f9fa; border:1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 24px;margin-top: 24px;">
+
+
+### class `TaskStream`
+
+Streaming task context with built-in cancel support and SSE formatting.
+
+<details>
+<summary><strong>Public Methods</strong></summary>
+
+| Decorators | Method | Args | Returns | Category | Description |
+|------------|--------|------|---------|----------|-------------|
+| | `register` | `task_id: str` | | Lifecycle | Register for cancellation (deferred pattern). |
+| | `cleanup` | | | Lifecycle | Remove cancel registration. Call in `finally`. |
+| | `check` | | | Lifecycle | Check if cancelled, raise `TaskCancelled` if so. |
+| `@property` | `is_cancelled` | | `bool` | Lifecycle | Check if cancelled (without raising). |
+| | `task_id_event` | | `str` | SSE | Emit `task_id` SSE event (usually auto-sent by first `log()` call). |
+| | `log` | `message: str`, `level: str = "info"` | `str` | SSE | Emit a log message as an SSE event. |
+| | `complete` | `success: bool`, `error: str = ""` | `str` | SSE | Emit completion SSE event. |
+| | `event` | `event_name: str`, `data: dict` | `str` | SSE | Emit a custom SSE event. |
+| | `flush` | | `str` | SSE | Return all logs joined by newlines. |
+| `@property` | `last` | | `str` | SSE | Return the last log message. |
+| `@property` | `logs` | | `List[str]` | SSE | Direct access to log list (for polling loops). |
+
+</details>
+
+<br>
+
+<details>
+<summary><strong>Private/Internal Methods</strong></summary>
+
+| Decorators | Method | Args | Returns | Category | Description |
+|------------|--------|------|---------|----------|-------------|
+| | `__init__` | `prefix: str`, `task_id: str = ""`, `register: bool = True` | | Initialization | Create stream context with auto-generated task ID. |
+| | `__call__` | `msg: str` | | Shorthand | Set message for next `log()` call. |
+| `async` | `__aenter__` | | | Context | Async context manager entry (registers). |
+| `async` | `__aexit__` | `exc_type, exc_val, exc_tb` | | Context | Async context manager exit (cleanup). |
+
+</details>
+
+<br>
+
+
+</div>
+
+<div style="background-color:#f8f9fa; border:1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 24px;margin-top: 24px;">
+
+
+### class `TaskCancelled`
+
+Raised when a task is cancelled by user. Inherits from `Exception`. Alias: `Cancelled`.
+
+</div>
+
+<div style="background-color:#f8f9fa; border:1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 24px;margin-top: 24px;">
+
+
+### class `StreamLimitExceeded`
+
+Raised when a user exceeds their concurrent stream limit. Inherits from `Exception`.
+
+</div>
+
+<div style="background-color:#f8f9fa; border:1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 24px;margin-top: 24px;">
+
+
+### class `WorkspaceStore`
+
+CRUD operations for workspaces.
+
+<details>
+<summary><strong>Public Methods</strong></summary>
+
+| Decorators | Method | Args | Returns | Category | Description |
+|------------|--------|------|---------|----------|-------------|
+| `async` | `create` | `name: str`, `owner_id: str`, `slug: str = ""`, `is_personal: bool = False`, `settings: Dict = {}` | `Dict[str, Any]` | Mutation | Create a new workspace and add owner as member. |
+| `async` | `get` | `workspace_id: str` | `Optional[Dict[str, Any]]` | Query | Get workspace by ID. |
+| `async` | `get_by_slug` | `slug: str` | `Optional[Dict[str, Any]]` | Query | Get workspace by slug. |
+| `async` | `list_for_user` | `user_id: str` | `List[Dict[str, Any]]` | Query | List all workspaces user is a member of. |
+| `async` | `get_personal_workspace` | `user_id: str` | `Optional[Dict[str, Any]]` | Query | Get user's personal workspace. |
+| `async` | `update` | `workspace_id: str`, `updates: Dict[str, Any]` | `Optional[Dict[str, Any]]` | Mutation | Update workspace. |
+| `async` | `delete` | `workspace_id: str` | `bool` | Mutation | Delete workspace and all members/invites. |
+
+</details>
+
+<br>
+
+<details>
+<summary><strong>Private/Internal Methods</strong></summary>
+
+| Decorators | Method | Args | Returns | Category | Description |
+|------------|--------|------|---------|----------|-------------|
+| | `__init__` | `conn` | | Initialization | Wrap a database connection. |
+| | `_generate_slug` | `name: str` | `str` | Internal | Generate URL-safe slug from workspace name. |
+
+</details>
+
+<br>
+
+
+</div>
+
+<div style="background-color:#f8f9fa; border:1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 24px;margin-top: 24px;">
+
+
+### class `MemberStore`
+
+CRUD operations for workspace members.
+
+<details>
+<summary><strong>Public Methods</strong></summary>
+
+| Decorators | Method | Args | Returns | Category | Description |
+|------------|--------|------|---------|----------|-------------|
+| `async` | `add` | `workspace_id: str`, `user_id: str`, `role: str`, `invited_by: str` | `Dict[str, Any]` | Mutation | Add a member to workspace. |
+| `async` | `get` | `workspace_id: str`, `user_id: str` | `Optional[Dict[str, Any]]` | Query | Get specific membership. |
+| `async` | `list_for_workspace` | `workspace_id: str` | `List[Dict[str, Any]]` | Query | List all members of a workspace. |
+| `async` | `update_role` | `workspace_id: str`, `user_id: str`, `role: str` | `Optional[Dict[str, Any]]` | Mutation | Update member's role. |
+| `async` | `remove` | `workspace_id: str`, `user_id: str` | `bool` | Mutation | Remove member from workspace. |
+| `async` | `is_member` | `workspace_id: str`, `user_id: str` | `bool` | Query | Check if user is a member. |
+| `async` | `is_admin` | `workspace_id: str`, `user_id: str` | `bool` | Query | Check if user is admin or owner. |
+| `async` | `is_owner` | `workspace_id: str`, `user_id: str` | `bool` | Query | Check if user is owner. |
+
+</details>
+
+<br>
+
+<details>
+<summary><strong>Private/Internal Methods</strong></summary>
+
+| Decorators | Method | Args | Returns | Category | Description |
+|------------|--------|------|---------|----------|-------------|
+| | `__init__` | `conn` | | Initialization | Wrap a database connection. |
+
+</details>
+
+<br>
+
+
+</div>
+
+<div style="background-color:#f8f9fa; border:1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 24px;margin-top: 24px;">
+
+
+### class `InviteStore`
+
+CRUD operations for workspace invites.
+
+<details>
+<summary><strong>Public Methods</strong></summary>
+
+| Decorators | Method | Args | Returns | Category | Description |
+|------------|--------|------|---------|----------|-------------|
+| `async` | `create` | `workspace_id: str`, `email: str`, `role: str`, `invited_by: str` | `Dict[str, Any]` | Mutation | Create a new invite (generates token). |
+| `async` | `get` | `invite_id: str` | `Optional[Dict[str, Any]]` | Query | Get invite by ID. |
+| `async` | `get_by_token` | `token: str` | `Optional[Dict[str, Any]]` | Query | Get invite by token. |
+| `async` | `get_pending_for_email` | `workspace_id: str`, `email: str` | `Optional[Dict[str, Any]]` | Query | Get pending invite for email in workspace. |
+| `async` | `list_for_workspace` | `workspace_id: str`, `status: str = "pending"` | `List[Dict[str, Any]]` | Query | List invites for workspace. |
+| `async` | `list_for_email` | `email: str` | `List[Dict[str, Any]]` | Query | List pending invites for an email. |
+| `async` | `accept` | `token: str`, `user_id: str` | `Optional[Dict[str, Any]]` | Mutation | Accept an invite (adds user as member). |
+| `async` | `cancel` | `invite_id: str` | `bool` | Mutation | Cancel an invite. |
+| `async` | `delete` | `invite_id: str` | `bool` | Mutation | Delete an invite. |
+
+</details>
+
+<br>
+
+<details>
+<summary><strong>Private/Internal Methods</strong></summary>
+
+| Decorators | Method | Args | Returns | Category | Description |
+|------------|--------|------|---------|----------|-------------|
+| | `__init__` | `conn` | | Initialization | Wrap a database connection. |
+
+</details>
+
+<br>
+
+
+</div>
+
+<div style="background-color:#f8f9fa; border:1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 24px;margin-top: 24px;">
+
+
+### class `RequestMetric`
+
+Rich metadata for a single HTTP request (dataclass).
+
+<details>
+<summary><strong>Public Methods</strong></summary>
+
+| Decorators | Method | Args | Returns | Category | Description |
+|------------|--------|------|---------|----------|-------------|
+| | `to_dict` | | `Dict[str, Any]` | Serialization | Convert to dictionary for storage. |
+
+</details>
+
+<br>
+
+<details>
+<summary><strong>Fields</strong></summary>
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `request_id` | `str` | required | Unique request identifier. |
+| `method` | `str` | required | HTTP method. |
+| `path` | `str` | required | Request path. |
+| `query_params` | `Optional[str]` | `None` | Query string. |
+| `status_code` | `int` | `0` | Response status code. |
+| `error` | `Optional[str]` | `None` | Error message (if any). |
+| `error_type` | `Optional[str]` | `None` | Error class name. |
+| `server_latency_ms` | `float` | `0.0` | Server-side latency in milliseconds. |
+| `client_ip` | `str` | `"unknown"` | Client IP address. |
+| `user_agent` | `Optional[str]` | `None` | Client user agent. |
+| `referer` | `Optional[str]` | `None` | HTTP referer header. |
+| `user_id` | `Optional[str]` | `None` | Authenticated user ID. |
+| `workspace_id` | `Optional[str]` | `None` | Workspace ID (if applicable). |
+| `country` | `Optional[str]` | `None` | Country (from Cloudflare headers). |
+| `city` | `Optional[str]` | `None` | City (from Cloudflare headers). |
+| `continent` | `Optional[str]` | `None` | Continent code. |
+| `timestamp` | `str` | `""` | ISO timestamp (auto-set). |
+| `year` / `month` / `day` / `hour` | `int` | `0` | Time components (auto-set for partitioning). |
+| `metadata` | `Dict[str, Any]` | `{}` | Additional metadata. |
+
+</details>
+
+<br>
+
+
+</div>
+
+<div style="background-color:#f8f9fa; border:1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 24px;margin-top: 24px;">
+
+
+### class `RequestMetricsMiddleware`
+
+Middleware that captures request metrics and pushes to Redis for async storage. Inherits from `BaseHTTPMiddleware`.
+
+<details>
+<summary><strong>Public Methods</strong></summary>
+
+| Decorators | Method | Args | Returns | Category | Description |
+|------------|--------|------|---------|----------|-------------|
+| `async` | `dispatch` | `request: Request`, `call_next: Callable` | `Response` | Core | Capture timing, status, user, geo and push metric to Redis. |
+
+</details>
+
+<br>
+
+<details>
+<summary><strong>Private/Internal Methods</strong></summary>
+
+| Decorators | Method | Args | Returns | Category | Description |
+|------------|--------|------|---------|----------|-------------|
+| | `__init__` | `app: ASGIApp`, `redis_client = None`, `redis_client_factory = None`, `exclude_paths: Optional[set] = None`, `sensitive_params: Optional[set] = None` | | Initialization | Create middleware. Accepts either a Redis client or a lazy factory. |
+| | `_get_redis` | | Redis client | Internal | Lazy Redis resolution — factory called on first use. |
+
+</details>
+
+<br>
+
+
+</div>
+
+<div style="background-color:#f8f9fa; border:1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 24px;margin-top: 24px;">
+
+
+### class `RequestMetricsStore`
+
+Database store for request metrics (hot data).
+
+<details>
+<summary><strong>Public Methods</strong></summary>
+
+| Decorators | Method | Args | Returns | Category | Description |
+|------------|--------|------|---------|----------|-------------|
+| `@classmethod`, `async` | `init_schema` | `db` | | Setup | Initialize the `kernel_request_metrics` table. |
+| `async` | `save` | `metric: Dict[str, Any]` | `str` | Write | Save a request metric. Returns ID. |
+| `async` | `get_recent` | `limit: int`, `offset: int`, `path_prefix: Optional[str]`, `status_code: Optional[int]`, `user_id: Optional[str]`, `min_latency_ms: Optional[float]` | `List[Dict]` | Query | Get recent metrics with optional filters. |
+| `async` | `get_stats` | `hours: int`, `path_prefix: Optional[str]` | `Dict[str, Any]` | Query | Get aggregated statistics (avg latency, error rates, etc). |
+| `async` | `cleanup_old` | `days: int` | `int` | Maintenance | Delete metrics older than N days. Returns count deleted. |
+
+</details>
+
+<br>
+
+
+</div>
+
+<div style="background-color:#f8f9fa; border:1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 24px;margin-top: 24px;">
+
+
+### class `Profiler`
+
+Simple timer for code blocks.
+
+<details>
+<summary><strong>Public Methods</strong></summary>
+
+| Decorators | Method | Args | Returns | Category | Description |
+|------------|--------|------|---------|----------|-------------|
+| | `start` | | `None` | Timing | Reset the start time to current time. |
+| | `elapsed` | | `float` | Timing | Return elapsed time in milliseconds since last `start()` or init. |
+| | `report` | `msg: str` | `str` | Timing | Return formatted string, e.g. `"Step 1: 12.34 ms"`. |
+
+</details>
+
+<br>
+
+
+</div>
+
+<div style="background-color:#f8f9fa; border:1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 24px;margin-top: 24px;">
+
+
+### class `HttpConfig`
+
+HTTP client configuration for `http_client()`.
+
+<details>
+<summary><strong>Fields</strong></summary>
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `timeout` | `float` | `30.0` | Request timeout in seconds. |
+| `max_connections` | `int` | `10` | Connection pool size per base URL. |
+| `retries` | `int` | `0` | Number of retries on failure. |
+
+</details>
+
+<br>
+
+
+</div>
+
+<div style="background-color:#f8f9fa; border:1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 24px;margin-top: 24px;">
+
+
+### class `CacheBustedStaticFiles`
+
+StaticFiles subclass with smart cache control headers. Inherits from `starlette.staticfiles.StaticFiles`.
+
+- HTML files: `no-cache, no-store, must-revalidate` (+ CDN headers)
+- Hashed assets (e.g. `main.a1b2c3d4.js`): `immutable, max-age=31536000` (1 year)
+- Non-hashed assets: `max-age=3600, must-revalidate` (1 hour)
+
+Usage: `app.mount("/", CacheBustedStaticFiles(directory="static", html=True), name="static")`
+
+</div>
 
 ## License
 
