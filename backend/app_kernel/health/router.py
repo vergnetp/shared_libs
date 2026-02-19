@@ -139,13 +139,12 @@ async def check_redis(redis_url: str = None) -> Tuple[bool, str]:
         return False, "redis_url not configured"
     
     try:
-        import redis.asyncio as redis
-        client = redis.from_url(redis_url)
+        from ..redis import get_redis
+        client = get_redis()
+        if client is None:
+            return False, "redis not initialized"
         await client.ping()
-        await client.close()
         return True, "redis connected"
-    except ImportError:
-        return False, "redis package not installed"
     except Exception as e:
         return False, f"redis error: {e}"
 

@@ -570,7 +570,7 @@ def create_service(
         # Redis always succeeds (has in-memory fallback)
         # Database auto-provisions in non-prod (SQLite fallback if Docker unavailable)
         try:
-            from .dev_deps import ensure_dev_deps, is_fake_redis_url
+            from .dev_deps import ensure_dev_deps
             deps_result = await ensure_dev_deps(
                 database_url=cfg.database_url,
                 redis_url=cfg.redis_url,
@@ -654,11 +654,12 @@ def create_service(
                 # Fail startup if lifecycle fails (especially migrations)
                 raise
             
-            # Create shared Redis client for audit + admin worker
+            # Initialize shared Redis client (one pool for the whole app)
             if resolved_redis_url:
-                from .dev_deps import get_async_redis_client, is_fake_redis_url
-                shared_redis_client = get_async_redis_client(resolved_redis_url)
-                is_fake = is_fake_redis_url(resolved_redis_url)
+                from .redis import init_redis, get_redis, is_fake as _is_redis_fake
+                init_redis(resolved_redis_url)
+                shared_redis_client = get_redis()
+                is_fake = _is_redis_fake()
                 
                 from .db.session import enable_auto_audit
                 enable_auto_audit(shared_redis_client, name)
@@ -813,25 +814,23 @@ def create_service(
     
     # Add request metrics middleware if enabled (uses shared Redis → admin worker)
     if request_metrics_enabled and cfg.redis_url:
-        from .dev_deps import get_async_redis_client
+        from .redis import get_redis as _get_metrics_redis
         from .observability.request_metrics import RequestMetricsMiddleware
         
-        _metrics_redis = get_async_redis_client(cfg.redis_url)
         app.add_middleware(
             RequestMetricsMiddleware,
-            redis_client=_metrics_redis,
+            redis_client=_get_metrics_redis(),
             exclude_paths=set(cfg.request_metrics_exclude_paths),
         )
     
     # Add usage metering middleware (uses shared Redis → admin worker)
     if cfg.redis_url:
-        from .dev_deps import get_async_redis_client as _get_redis
+        from .redis import get_redis as _get_metering_redis
         from .metering.middleware import UsageMeteringMiddleware
         
-        _metering_redis = _get_redis(cfg.redis_url)
         app.add_middleware(
             UsageMeteringMiddleware,
-            redis_client=_metering_redis,
+            redis_client=_get_metering_redis(),
             app_name=name,
         )
     

@@ -138,6 +138,17 @@ from .utils import (
 
 from .db import db_context
 
+# Redis — shared client and distributed locks
+from .redis import (
+    get_redis,
+    get_sync_redis,
+    is_fake as is_redis_fake,
+    acquire_lock,
+    release_lock,
+    renew_lock,
+    auto_renew_lock,
+)
+
 # SaaS - multi-tenant workspace/team functionality
 from .saas import (
     WorkspaceStore,
@@ -306,6 +317,15 @@ __all__ = [
     
     # Database
     "db_context",
+    
+    # Redis
+    "get_redis",
+    "get_sync_redis",
+    "is_redis_fake",
+    "acquire_lock",
+    "release_lock",
+    "renew_lock",
+    "auto_renew_lock",
     
     # SaaS
     "WorkspaceStore",

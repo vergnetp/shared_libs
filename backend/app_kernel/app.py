@@ -240,8 +240,8 @@ def init_app_kernel(
     redis_config = None
     
     if JOB_QUEUE_AVAILABLE and settings.redis.url:
-        from .dev_deps import get_sync_redis_client
-        sync_redis_client = get_sync_redis_client(settings.redis.url)
+        from .redis import get_sync_redis
+        sync_redis_client = get_sync_redis()
         
         redis_config = QueueRedisConfig(
             url=settings.redis.url,
@@ -340,7 +340,7 @@ def init_app_kernel(
     # =========================================================================
     if setup_reliability_middleware and settings.reliability.rate_limit_enabled:
         from .reliability.ratelimit import init_rate_limiter, RateLimitConfig, RateLimitMiddleware
-        from .dev_deps import get_async_redis_client, is_fake_redis_url
+        from .redis import get_redis as _get_rl_redis, is_fake as _is_rl_fake
         
         rate_config = RateLimitConfig(
             anonymous_rpm=settings.reliability.rate_limit_anonymous_rpm,
@@ -348,9 +348,9 @@ def init_app_kernel(
             admin_rpm=settings.reliability.rate_limit_admin_rpm,
         )
         
-        # Get async Redis client (real or fakeredis.aioredis)
-        redis_client = get_async_redis_client(settings.redis.url)
-        is_fake = is_fake_redis_url(settings.redis.url)
+        # Shared async Redis client
+        redis_client = _get_rl_redis()
+        is_fake = _is_rl_fake()
         init_rate_limiter(redis_client, rate_config, is_fake=is_fake)
         
         # Add middleware for global rate limiting
@@ -367,17 +367,17 @@ def init_app_kernel(
     
     if setup_reliability_middleware and settings.reliability.idempotency_enabled:
         from .reliability.idempotency import init_idempotency, IdempotencyConfig
-        from .dev_deps import get_async_redis_client, is_fake_redis_url
+        from .redis import get_redis as _get_idem_redis, is_fake as _is_idem_fake
         
         idempotency_config = IdempotencyConfig(
             default_ttl=settings.reliability.idempotency_ttl_seconds,
         )
         
-        # Get async Redis client (real or fakeredis.aioredis)
-        redis_client = get_async_redis_client(settings.redis.url)
+        # Shared async Redis client
+        redis_client = _get_idem_redis()
         init_idempotency(redis_client, idempotency_config)
         
-        if is_fake_redis_url(settings.redis.url):
+        if _is_idem_fake():
             logger.info(f"Idempotency: TTL {settings.reliability.idempotency_ttl_seconds}s (fakeredis)")
         else:
             logger.info(f"Idempotency: TTL {settings.reliability.idempotency_ttl_seconds}s (Redis)")
