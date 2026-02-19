@@ -222,13 +222,12 @@ def _create_json_deserializing_wrapper(task_name: str, processor):
     """
     Create a wrapper that handles JSON deserialization from Redis.
     
-    The job_queue library stores entities as JSON strings in Redis.
-    This wrapper ensures the entity/payload are properly deserialized
-    before being passed to the processor.
+    Used by run_worker() (standalone process). Differs from
+    JobWorkerManager._create_processor_wrapper by auto-acquiring a DB
+    connection and passing it to the processor as a third argument.
     
-    NOTE: queue_worker calls processors as `processor(operation_id, payload)`
-    where operation_id is a string and payload is the extracted entity data.
-    This wrapper handles that calling convention.
+    NOTE: Deserialization logic is shared with _create_processor_wrapper.
+    If changing the payload extraction here, update the class method too.
     """
     import json
     

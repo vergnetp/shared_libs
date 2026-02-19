@@ -12,9 +12,12 @@ logger = logging.getLogger(__name__)
 class InMemoryCache:
     """Simple in-memory LRU cache (fallback when Redis unavailable)."""
     
+    _EVICT_EVERY = 50  # Run eviction every N set() calls
+    
     def __init__(self, max_size: int = 1000):
         self._cache: OrderedDict[str, tuple[Any, float]] = OrderedDict()
         self._max_size = max_size
+        self._set_count = 0
     
     async def get(self, key: str) -> Optional[Any]:
         if key not in self._cache:
@@ -34,12 +37,25 @@ class InMemoryCache:
     async def set(self, key: str, value: Any, ttl: Optional[int] = None) -> None:
         expires_at = time.time() + ttl if ttl else None
         
+        # Periodic eviction of expired entries
+        self._set_count += 1
+        if self._set_count >= self._EVICT_EVERY:
+            self._set_count = 0
+            self._evict_expired()
+        
         # Remove oldest if at capacity
         while len(self._cache) >= self._max_size:
             self._cache.popitem(last=False)
         
         self._cache[key] = (value, expires_at)
         self._cache.move_to_end(key)
+    
+    def _evict_expired(self) -> None:
+        """Remove all expired entries."""
+        now = time.time()
+        expired = [k for k, (_, exp) in self._cache.items() if exp and now > exp]
+        for k in expired:
+            del self._cache[k]
     
     async def delete(self, key: str) -> bool:
         if key in self._cache:
@@ -217,25 +233,46 @@ class Cache:
         """Check if key exists."""
         return await self._backend.exists(key)
     
+    # In-flight locks for get_or_set (prevents stampede on cache miss)
+    _inflight: dict = None  # Lazy init to avoid dataclass issues
+    
     async def get_or_set(
         self,
         key: str,
         factory,
         ttl: Optional[int] = None,
     ) -> Any:
-        """Get from cache or call factory to populate."""
+        """Get from cache or call factory to populate. Single-flight per key."""
         value = await self.get(key)
         if value is not None:
             return value
         
-        import asyncio
-        if asyncio.iscoroutinefunction(factory):
-            value = await factory()
-        else:
-            value = factory()
+        # Single-flight: only one caller runs the factory per key
+        if self._inflight is None:
+            self._inflight = {}
         
-        await self.set(key, value, ttl)
-        return value
+        if key in self._inflight:
+            # Another coroutine is already computing this — wait for it
+            return await self._inflight[key]
+        
+        import asyncio
+        future = asyncio.get_event_loop().create_future()
+        self._inflight[key] = future
+        
+        try:
+            if asyncio.iscoroutinefunction(factory):
+                value = await factory()
+            else:
+                value = factory()
+            
+            await self.set(key, value, ttl)
+            future.set_result(value)
+            return value
+        except Exception as e:
+            future.set_exception(e)
+            raise
+        finally:
+            self._inflight.pop(key, None)
 
 
 # Module-level singleton

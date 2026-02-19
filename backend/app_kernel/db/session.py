@@ -133,7 +133,7 @@ class AuditWrappedConnection:
         if entity_id:
             try:
                 old = await self._conn.get_entity(table, entity_id, _caller=self._entity_caller)
-            except:
+            except Exception:
                 pass
         
         # Actual save (match_by handled by databases module)
@@ -146,7 +146,7 @@ class AuditWrappedConnection:
                 # If result id matches something that existed, it was an update
                 # We already have result, so this was handled by databases module
                 pass
-            except:
+            except Exception:
                 pass
         
         # Push audit event (fire and forget) — skip kernel internal tables
@@ -163,7 +163,7 @@ class AuditWrappedConnection:
                     new=result,
                     app=self._app,
                 )
-            except:
+            except Exception:
                 pass  # Never fail the save
         
         return result
@@ -177,7 +177,7 @@ class AuditWrappedConnection:
         old = None
         try:
             old = await self._conn.get_entity(table, entity_id, _caller=self._entity_caller)
-        except:
+        except Exception:
             pass
         
         # Actual delete
@@ -196,7 +196,7 @@ class AuditWrappedConnection:
                     new=None,
                     app=self._app,
                 )
-            except:
+            except Exception:
                 pass
         
         return result
@@ -246,7 +246,7 @@ async def _base_connection():
     
     caller = _get_caller()
     stats = _pool_stats()
-    logger.info(f"DB acquire [{caller}] {stats}")
+    logger.debug(f"DB acquire [{caller}] {stats}")
     t0 = time.monotonic()
     
     async with _db_manager.connection() as conn:
@@ -257,7 +257,7 @@ async def _base_connection():
     
     held = time.monotonic() - t0
     stats = _pool_stats()
-    level = logging.WARNING if held > 5 else logging.INFO
+    level = logging.WARNING if held > 5 else logging.DEBUG
     logger.log(level, f"DB release [{caller}] held {held:.2f}s {stats}")
 
 
@@ -296,7 +296,7 @@ async def raw_db_context():
     
     caller = _get_caller()
     stats = _pool_stats()
-    logger.info(f"DB acquire [{caller}] {stats}")
+    logger.debug(f"DB acquire [{caller}] {stats}")
     t0 = time.monotonic()
     
     async with _db_manager.connection() as conn:
@@ -304,7 +304,7 @@ async def raw_db_context():
     
     held = time.monotonic() - t0
     stats = _pool_stats()
-    level = logging.WARNING if held > 5 else logging.INFO
+    level = logging.WARNING if held > 5 else logging.DEBUG
     logger.log(level, f"DB release [{caller}] held {held:.2f}s {stats}")
 
 

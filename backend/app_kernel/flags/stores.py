@@ -115,19 +115,19 @@ def _parse_flag(row: Dict[str, Any]) -> Dict[str, Any]:
     if row.get("allowed_workspaces"):
         try:
             flag["allowed_workspaces"] = json.loads(row["allowed_workspaces"])
-        except:
+        except Exception:
             pass
     
     if row.get("allowed_users"):
         try:
             flag["allowed_users"] = json.loads(row["allowed_users"])
-        except:
+        except Exception:
             pass
     
     if row.get("metadata"):
         try:
             flag["metadata"] = json.loads(row["metadata"])
-        except:
+        except Exception:
             pass
     
     return flag

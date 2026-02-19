@@ -23,13 +23,15 @@ class UsageMeteringMiddleware(BaseHTTPMiddleware):
     def __init__(
         self,
         app,
-        redis_client,
-        app_name: str,
+        redis_client=None,
+        redis_client_factory=None,
+        app_name: str = "",
         exclude_paths: Optional[Set[str]] = None,
         get_user_from_request: Optional[Callable] = None,
     ):
         super().__init__(app)
-        self.redis = redis_client
+        self._redis = redis_client
+        self._redis_factory = redis_client_factory
         self.app_name = app_name
         self.exclude_paths = exclude_paths or {
             "/healthz", "/readyz", "/metrics", "/favicon.ico", "/docs", "/openapi.json"
@@ -50,7 +52,7 @@ class UsageMeteringMiddleware(BaseHTTPMiddleware):
         if request.headers.get("content-length"):
             try:
                 bytes_in = int(request.headers.get("content-length"))
-            except:
+            except Exception:
                 pass
         
         # Process request
@@ -64,7 +66,7 @@ class UsageMeteringMiddleware(BaseHTTPMiddleware):
         if response.headers.get("content-length"):
             try:
                 bytes_out = int(response.headers.get("content-length"))
-            except:
+            except Exception:
                 pass
         
         # Extract user/workspace info
@@ -84,25 +86,30 @@ class UsageMeteringMiddleware(BaseHTTPMiddleware):
                 if user_info:
                     user_id = user_info.get("user_id")
                     workspace_id = user_info.get("workspace_id")
-            except:
+            except Exception:
                 pass
         
         # Push to Redis (fire and forget)
         try:
-            from .publisher import track_request
+            redis = self._redis if self._redis is not None else (self._redis_factory() if self._redis_factory else None)
+            if self._redis is None and redis is not None:
+                self._redis = redis  # Cache for next request
             
-            await track_request(
-                self.redis,
-                app=self.app_name,
-                user_id=user_id,
-                workspace_id=workspace_id,
-                endpoint=path,
-                method=request.method,
-                status_code=response.status_code,
-                latency_ms=latency_ms,
-                bytes_in=bytes_in,
-                bytes_out=bytes_out,
-            )
+            if redis:
+                from .publisher import track_request
+                
+                await track_request(
+                    redis,
+                    app=self.app_name,
+                    user_id=user_id,
+                    workspace_id=workspace_id,
+                    endpoint=path,
+                    method=request.method,
+                    status_code=response.status_code,
+                    latency_ms=latency_ms,
+                    bytes_in=bytes_in,
+                    bytes_out=bytes_out,
+                )
         except Exception:
             pass  # Never fail the request
         

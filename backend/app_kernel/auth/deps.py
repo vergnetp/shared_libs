@@ -86,6 +86,10 @@ class AuthDependencies:
         except AuthError as e:
             raise HTTPException(status_code=401, detail=str(e))
         
+        # Reject refresh tokens at protected endpoints
+        if payload.type != "access":
+            raise HTTPException(status_code=401, detail="Expected access token")
+        
         # If we have a user loader, use it to get full user
         if self._user_loader:
             user = await self._user_loader(payload.sub)
@@ -119,6 +123,10 @@ class AuthDependencies:
         try:
             payload = decode_token(credentials.credentials, self._token_secret)
         except AuthError:
+            return None
+        
+        # Refresh tokens are not valid for resource access
+        if payload.type != "access":
             return None
         
         if self._user_loader:

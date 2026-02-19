@@ -35,6 +35,39 @@ logger = logging.getLogger("app_kernel")
 
 
 # =============================================================================
+# Shared utilities
+# =============================================================================
+
+# Characters that make up a content hash
+_HASH_CHARS = set('0123456789abcdef')
+
+
+def _has_hash_in_filename(path: str) -> bool:
+    """
+    Check if filename contains a content hash (Vite/webpack style).
+    Matches: main.a1b2c3d4.js, style-5f6g7h8i.css, etc.
+    Shared by CacheBustedStaticFiles and SecurityHeadersMiddleware.
+    """
+    if not path:
+        return False
+    
+    filename = Path(path).name if '/' not in path else path.split('/')[-1]
+    name_parts = filename.rsplit('.', 1)
+    if len(name_parts) < 2:
+        return False
+    
+    name = name_parts[0]
+    
+    for sep in ('.', '-'):
+        if sep in name:
+            potential_hash = name.rsplit(sep, 1)[-1]
+            if len(potential_hash) >= 8 and all(c in _HASH_CHARS for c in potential_hash.lower()):
+                return True
+    
+    return False
+
+
+# =============================================================================
 # Tracing
 # =============================================================================
 
@@ -146,30 +179,6 @@ class CacheBustedStaticFiles(StaticFiles):
     # Extensions that are static assets
     STATIC_EXTENSIONS = {'.js', '.css', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico', '.woff', '.woff2', '.ttf', '.eot', '.webp', '.avif', '.mp4', '.webm', '.map'}
     
-    # Characters that make up a hash
-    HASH_CHARS = set('0123456789abcdef')
-    
-    def _has_hash_in_filename(self, path: str) -> bool:
-        """Check if filename contains a hash (Vite/webpack style)."""
-        if not path:
-            return False
-        
-        filename = Path(path).name
-        name_parts = filename.rsplit('.', 1)
-        if len(name_parts) < 2:
-            return False
-        
-        name = name_parts[0]
-        
-        # Check for hash separated by . or -
-        for sep in ('.', '-'):
-            if sep in name:
-                potential_hash = name.rsplit(sep, 1)[-1]
-                if len(potential_hash) >= 8 and all(c in self.HASH_CHARS for c in potential_hash.lower()):
-                    return True
-        
-        return False
-    
     def _get_cache_headers(self, path: str) -> dict:
         """Determine cache headers based on file path."""
         suffix = Path(path).suffix.lower()
@@ -184,7 +193,7 @@ class CacheBustedStaticFiles(StaticFiles):
                 'Cloudflare-CDN-Cache-Control': 'no-store',
             }
         elif suffix in self.STATIC_EXTENSIONS:
-            if self._has_hash_in_filename(path):
+            if _has_hash_in_filename(path):
                 # Hashed asset - cache forever
                 return {'Cache-Control': 'public, max-age=31536000, immutable'}
             else:
@@ -342,36 +351,6 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     # Extensions that are static assets
     STATIC_EXTENSIONS = {'.js', '.css', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico', '.woff', '.woff2', '.ttf', '.eot', '.webp', '.avif', '.mp4', '.webm', '.map'}
     
-    # Pattern for hashed filenames (Vite/webpack style: name.abc123.js or name-abc123.js)
-    # Matches: main.a1b2c3d4.js, style-5f6g7h8i.css, etc.
-    HASH_PATTERN_CHARS = set('0123456789abcdef')
-    
-    def _has_hash_in_filename(self, path: str) -> bool:
-        """Check if filename contains a hash (for cache busting)."""
-        # Get filename without extension
-        parts = path.split('/')
-        if not parts:
-            return False
-        filename = parts[-1]
-        
-        # Look for patterns like .abc123. or -abc123.
-        # Vite uses: name-[hash].ext or name.[hash].ext
-        name_parts = filename.rsplit('.', 1)
-        if len(name_parts) < 2:
-            return False
-        
-        name = name_parts[0]
-        
-        # Check for hash separated by . or -
-        for sep in ('.', '-'):
-            if sep in name:
-                potential_hash = name.rsplit(sep, 1)[-1]
-                # Hash is typically 8+ hex characters
-                if len(potential_hash) >= 8 and all(c in self.HASH_PATTERN_CHARS for c in potential_hash.lower()):
-                    return True
-        
-        return False
-    
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         response = await call_next(request)
         
@@ -390,7 +369,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         
         elif any(path.endswith(ext) for ext in self.STATIC_EXTENSIONS):
             # Static assets
-            if self._has_hash_in_filename(path):
+            if _has_hash_in_filename(path):
                 # Hashed filename (Vite/webpack) - cache for 1 year (immutable)
                 response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
             else:
@@ -599,7 +578,22 @@ def setup_security_middleware(app: FastAPI, settings: SecuritySettings) -> None:
     """
     Configure all security middleware.
     
-    Order matters! Middleware executes in reverse order of addition.
+    MIDDLEWARE EXECUTION ORDER (outermost → innermost):
+    
+        Request
+         → RequestIdMiddleware          (5. added last = runs first)
+         → SecurityHeadersMiddleware    (4.)
+         → RequestLoggingMiddleware     (3.)
+         → MaxBodySizeMiddleware        (2.)
+         → ErrorHandlingMiddleware      (1. added first = runs last before route)
+         → [RateLimitMiddleware]        (added by init_app_kernel)
+         → [RequestMetricsMiddleware]   (added by bootstrap after lifespan)
+         → [UsageMeteringMiddleware]    (added by bootstrap after lifespan)
+         → [TracingMiddleware]          (added by setup_tracing_middleware)
+         → Route handler
+    
+    Starlette executes middleware in REVERSE order of addition.
+    Do not reorder add_middleware calls without updating this diagram.
     """
     # Add in reverse order of execution
 

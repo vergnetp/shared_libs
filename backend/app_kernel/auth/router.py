@@ -20,7 +20,7 @@ from pydantic import BaseModel, EmailStr, Field
 from .models import UserIdentity
 from .utils import (
     hash_password,
-    verify_password,
+    verify_password_async,
     create_access_token,
     create_refresh_token,
     decode_token,
@@ -269,7 +269,7 @@ def create_auth_router(
             )
         
         # Verify password
-        if not verify_password(request.password, user.get("password_hash", "")):
+        if not await verify_password_async(request.password, user.get("password_hash", "")):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid credentials",
@@ -312,6 +312,13 @@ def create_auth_router(
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail=str(e),
+            )
+        
+        # Reject access tokens used at the refresh endpoint
+        if payload.type != "refresh":
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Expected refresh token",
             )
         
         # Verify user still exists
@@ -427,7 +434,7 @@ def create_auth_router(
             )
         
         # Verify old password
-        if not verify_password(request_body.old_password, user.get("password_hash", "")):
+        if not await verify_password_async(request_body.old_password, user.get("password_hash", "")):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Invalid current password",

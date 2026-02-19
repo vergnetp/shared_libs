@@ -193,6 +193,26 @@ def no_rate_limit(func):
     return wrapper
 
 
+def _extract_user_from_token(request: Request) -> Optional[UserIdentity]:
+    """
+    Lightweight user extraction from Bearer token for rate-limit tiering.
+    Runs in middleware (before route handler), so we decode the JWT directly.
+    Returns None on any failure — request falls to anonymous tier.
+    """
+    auth_header = request.headers.get("authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return None
+    token = auth_header[7:]
+    try:
+        from ..auth.utils import decode_token
+        payload = decode_token(token, RateLimitMiddleware._token_secret)
+        if payload.type != "access":
+            return None
+        return UserIdentity(id=payload.sub, email=payload.email, role=payload.role)
+    except Exception:
+        return None
+
+
 class RateLimitMiddleware(BaseHTTPMiddleware):
     """
     Global rate limiting middleware.
@@ -204,6 +224,9 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     
     Routes can override with @rate_limit(n) or exclude with @no_rate_limit.
     """
+    
+    # Cached token secret (set during init_rate_limiter)
+    _token_secret: str = ""
     
     def __init__(
         self,
@@ -260,8 +283,8 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         if self._should_skip(request):
             return await call_next(request)
         
-        # Get user from request state (set by auth middleware)
-        user = getattr(request.state, "user", None) if hasattr(request, "state") else None
+        # Extract user identity from Bearer token (lightweight decode, no DB call)
+        user = _extract_user_from_token(request)
         
         try:
             # Get rate limit key and default limit
@@ -314,11 +337,13 @@ def init_rate_limiter(
     redis_client,
     config: Optional[RateLimitConfig] = None,
     is_fake: bool = False,
+    token_secret: str = "",
 ):
     """Initialize the rate limiter."""
     global _rate_limiter, _is_fake_redis
     _rate_limiter = RateLimiter(redis_client, config)
     _is_fake_redis = is_fake
+    RateLimitMiddleware._token_secret = token_secret
 
 
 def get_rate_limiter() -> RateLimiter:

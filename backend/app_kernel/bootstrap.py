@@ -219,6 +219,9 @@ async def _run_embedded_admin_worker(
     
     try:
         logger.info("Admin worker: polling started")
+        consecutive_redis_errors = 0
+        max_backoff = 60  # Cap at 60 seconds
+        
         while True:
             # Drain all queues
             all_batches = []  # [(table, entity_dict), ...]
@@ -233,9 +236,24 @@ async def _run_embedded_admin_worker(
                             all_batches.append((table, builder(json.loads(data))))
                         except Exception as e:
                             logger.debug(f"Event parse error ({redis_key}): {e}")
+                consecutive_redis_errors = 0  # Reset on success
             except Exception as e:
-                logger.warning(f"Admin worker Redis error: {e}")
-                await asyncio.sleep(poll_interval * 4)
+                consecutive_redis_errors += 1
+                backoff = min(poll_interval * (2 ** consecutive_redis_errors), max_backoff)
+                logger.warning(f"Admin worker Redis error (attempt {consecutive_redis_errors}, retry in {backoff:.0f}s): {e}")
+                
+                # After repeated failures, try to refresh the client
+                if consecutive_redis_errors >= 5:
+                    try:
+                        from .redis import get_redis
+                        refreshed = get_redis()
+                        if refreshed is not None:
+                            redis_client = refreshed
+                            logger.info("Admin worker: refreshed Redis client")
+                    except Exception:
+                        pass
+                
+                await asyncio.sleep(backoff)
                 continue
             
             # Write batch in single connection
@@ -273,14 +291,10 @@ def _next_cron_run(cron_str: str) -> float:
     Calculate seconds until the next cron match.
     
     Supports standard 5-field cron: minute hour day month weekday
-    Each field supports: number, *, */N, comma-separated values.
+    Each field supports: number, *, */N, comma-separated values, ranges.
     
-    Examples:
-        "0 15 * * *"    → daily at 15:00 UTC
-        "0 */6 * * *"   → every 6 hours on the hour
-        "30 2 * * 1"    → Monday at 02:30 UTC
-        "0 3 1 * *"     → 1st of month at 03:00 UTC
-        "0 9,17 * * *"  → 9am and 5pm daily
+    Uses field-level jumps instead of minute-by-minute iteration.
+    Worst case: ~400 iterations (one per day for irregular month/weekday combos).
     """
     from datetime import datetime, timezone, timedelta
     
@@ -304,29 +318,35 @@ def _next_cron_run(cron_str: str) -> float:
                 values.add(int(part))
         return values
     
-    minutes = _parse_field(fields[0], 0, 59)
-    hours = _parse_field(fields[1], 0, 23)
+    minutes = sorted(_parse_field(fields[0], 0, 59))
+    hours = sorted(_parse_field(fields[1], 0, 23))
     days = _parse_field(fields[2], 1, 31)
     months = _parse_field(fields[3], 1, 12)
-    weekdays = _parse_field(fields[4], 0, 6)  # 0=Monday in Python (cron: 0=Sunday)
+    weekdays_cron = _parse_field(fields[4], 0, 6)
     
     # Convert cron weekday (0=Sun) to Python weekday (0=Mon)
     py_weekdays = set()
-    for wd in weekdays:
-        py_weekdays.add((wd - 1) % 7)  # Sun(0)->6, Mon(1)->0, ...
+    for wd in weekdays_cron:
+        py_weekdays.add((wd - 1) % 7)
     
     now = datetime.now(timezone.utc)
     candidate = now.replace(second=0, microsecond=0) + timedelta(minutes=1)
     
-    # Search up to 400 days ahead (covers any monthly/yearly pattern)
-    for _ in range(400 * 24 * 60):
-        if (candidate.minute in minutes and
-            candidate.hour in hours and
-            candidate.day in days and
-            candidate.month in months and
-            candidate.weekday() in py_weekdays):
-            return (candidate - now).total_seconds()
-        candidate += timedelta(minutes=1)
+    # Jump day-by-day, then find first valid hour:minute within each day
+    for _ in range(400):  # Max ~13 months of days
+        if candidate.month in months and candidate.day in days and candidate.weekday() in py_weekdays:
+            # This day is valid — find earliest valid hour:minute at or after candidate time
+            for h in hours:
+                if h < candidate.hour:
+                    continue
+                for m in minutes:
+                    if h == candidate.hour and m < candidate.minute:
+                        continue
+                    result = candidate.replace(hour=h, minute=m)
+                    return (result - now).total_seconds()
+        
+        # Jump to start of next day
+        candidate = (candidate + timedelta(days=1)).replace(hour=0, minute=0)
     
     raise ValueError(f"No matching time found for cron: {cron_str!r}")
 
@@ -458,6 +478,59 @@ class ServiceConfig:
         "/health", "/healthz", "/readyz", "/metrics", "/favicon.ico"
     ])
     tracing_sample_rate: float = 1.0
+    
+    @classmethod
+    def from_env(cls) -> "ServiceConfig":
+        """
+        Create ServiceConfig from environment variables.
+        
+        Environment variables:
+            JWT_SECRET: JWT signing secret (required for production)
+            DATABASE_URL: Database connection string
+            REDIS_URL: Redis connection string
+            CORS_ORIGINS: Comma-separated list of allowed origins
+            DEBUG: Enable debug mode (true/false/1/0)
+            LOG_LEVEL: Logging level (DEBUG, INFO, WARNING, ERROR)
+            RATE_LIMIT_RPM: Requests per minute (default: 100)
+            SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD: Email settings
+            EMAIL_FROM: Sender email address
+        """
+        import os
+        
+        def _bool(val: str) -> bool:
+            return val.lower() in ("true", "1", "yes")
+        
+        cors_raw = os.getenv("CORS_ORIGINS", "*")
+        cors_origins = [o.strip() for o in cors_raw.split(",") if o.strip()]
+        
+        debug = _bool(os.getenv("DEBUG", "false"))
+        
+        kwargs = dict(
+            jwt_secret=os.getenv("JWT_SECRET", "dev-secret-change-me"),
+            database_url=os.getenv("DATABASE_URL"),
+            redis_url=os.getenv("REDIS_URL"),
+            cors_origins=cors_origins,
+            debug=debug,
+            log_level=os.getenv("LOG_LEVEL", "DEBUG" if debug else "INFO"),
+        )
+        
+        # Optional overrides
+        if os.getenv("RATE_LIMIT_RPM"):
+            kwargs["rate_limit_requests"] = int(os.getenv("RATE_LIMIT_RPM"))
+        
+        # Email
+        smtp_host = os.getenv("SMTP_HOST")
+        if smtp_host:
+            kwargs.update(
+                email_enabled=True,
+                smtp_host=smtp_host,
+                smtp_port=int(os.getenv("SMTP_PORT", "587")),
+                smtp_user=os.getenv("SMTP_USER"),
+                smtp_password=os.getenv("SMTP_PASSWORD"),
+                email_from=os.getenv("EMAIL_FROM"),
+            )
+        
+        return cls(**kwargs)
 
 
 # Type aliases
@@ -813,24 +886,26 @@ def create_service(
     )
     
     # Add request metrics middleware if enabled (uses shared Redis → admin worker)
+    # NOTE: Redis is initialized during lifespan, not at module-init time.
+    # Pass a lazy getter so the middleware resolves the client on first request.
     if request_metrics_enabled and cfg.redis_url:
-        from .redis import get_redis as _get_metrics_redis
         from .observability.request_metrics import RequestMetricsMiddleware
+        from .redis import get_redis as _get_metrics_redis
         
         app.add_middleware(
             RequestMetricsMiddleware,
-            redis_client=_get_metrics_redis(),
+            redis_client_factory=_get_metrics_redis,
             exclude_paths=set(cfg.request_metrics_exclude_paths),
         )
     
     # Add usage metering middleware (uses shared Redis → admin worker)
     if cfg.redis_url:
-        from .redis import get_redis as _get_metering_redis
         from .metering.middleware import UsageMeteringMiddleware
+        from .redis import get_redis as _get_metering_redis
         
         app.add_middleware(
             UsageMeteringMiddleware,
-            redis_client=_get_metering_redis(),
+            redis_client_factory=_get_metering_redis,
             app_name=name,
         )
     

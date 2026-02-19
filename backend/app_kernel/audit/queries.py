@@ -76,7 +76,7 @@ async def get_audit_logs(
             if log.get(field):
                 try:
                     log[field] = json.loads(log[field])
-                except:
+                except Exception:
                     pass
         logs.append(log)
     

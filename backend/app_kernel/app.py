@@ -356,7 +356,7 @@ def init_app_kernel(
         # Shared async Redis client
         redis_client = _get_rl_redis()
         is_fake = _is_rl_fake()
-        init_rate_limiter(redis_client, rate_config, is_fake=is_fake)
+        init_rate_limiter(redis_client, rate_config, is_fake=is_fake, token_secret=settings.auth.token_secret)
         
         # Add middleware for global rate limiting
         app.add_middleware(

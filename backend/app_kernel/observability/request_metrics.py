@@ -268,13 +268,21 @@ class RequestMetricsMiddleware(BaseHTTPMiddleware):
         self,
         app: ASGIApp,
         redis_client = None,
+        redis_client_factory = None,
         exclude_paths: Optional[set] = None,
         sensitive_params: Optional[set] = None,
     ):
         super().__init__(app)
         self._redis = redis_client
+        self._redis_factory = redis_client_factory
         self._exclude_paths = exclude_paths or self.DEFAULT_EXCLUDE_PATHS
         self._sensitive_params = sensitive_params
+    
+    def _get_redis(self):
+        """Lazy Redis resolution — factory is called on first use."""
+        if self._redis is None and self._redis_factory is not None:
+            self._redis = self._redis_factory()
+        return self._redis
     
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         """Capture metrics and push to Redis."""
@@ -331,9 +339,10 @@ class RequestMetricsMiddleware(BaseHTTPMiddleware):
             metric.workspace_id = getattr(request.state, "workspace_id", None)
             
             # Push to Redis (fire and forget)
-            if self._redis:
+            redis = self._get_redis()
+            if redis:
                 try:
-                    await self._redis.lpush(
+                    await redis.lpush(
                         self.REDIS_KEY,
                         json.dumps(metric.to_dict()),
                     )

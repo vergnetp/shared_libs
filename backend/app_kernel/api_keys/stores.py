@@ -115,7 +115,7 @@ async def verify_api_key(db, key: str) -> Optional[Dict[str, Any]]:
     if key_data.get("scopes"):
         try:
             scopes = json.loads(key_data["scopes"])
-        except:
+        except Exception:
             pass
     
     return {
@@ -159,7 +159,7 @@ async def list_api_keys(
         if row.get("scopes"):
             try:
                 scopes = json.loads(row["scopes"])
-            except:
+            except Exception:
                 pass
         
         keys.append({
@@ -196,7 +196,7 @@ async def get_api_key(db, key_id: str, user_id: str) -> Optional[Dict[str, Any]]
     if row.get("scopes"):
         try:
             scopes = json.loads(row["scopes"])
-        except:
+        except Exception:
             pass
     
     return {

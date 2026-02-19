@@ -235,7 +235,7 @@ async def get_delivery_logs(
         if log.get("payload"):
             try:
                 log["payload"] = json.loads(log["payload"])
-            except:
+            except Exception:
                 pass
         log["success"] = bool(log.get("success"))
         logs.append(log)

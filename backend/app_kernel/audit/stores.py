@@ -140,12 +140,12 @@ async def get_audit_logs(
         if log.get("changes"):
             try:
                 log["changes"] = json.loads(log["changes"])
-            except:
+            except Exception:
                 pass
         if log.get("metadata"):
             try:
                 log["metadata"] = json.loads(log["metadata"])
-            except:
+            except Exception:
                 pass
         logs.append(log)
     
