@@ -8,7 +8,7 @@ Usage:
     app.include_router(create_tasks_router())
 """
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 
 from . import cancel
 
@@ -29,9 +29,19 @@ def create_tasks_router(auth_dependency=None) -> APIRouter:
         summary="Cancel a running task",
         dependencies=deps,
     )
-    async def cancel_task(task_id: str):
-        """Cancel a running task by its task_id (emitted as SSE event at start)."""
-        if cancel.trigger(task_id):
+    async def cancel_task(task_id: str, request: Request):
+        """Cancel a running task by its task_id (emitted as SSE event at start).
+        
+        Any X-*-Token headers (e.g. X-DO-Token, X-CF-Token) are forwarded
+        to cleanup callbacks so they can authenticate against external APIs.
+        """
+        # Extract token headers for cleanup callbacks
+        tokens = {
+            k: v for k, v in request.headers.items()
+            if k.lower().startswith('x-') and k.lower().endswith('-token')
+        }
+        
+        if cancel.trigger(task_id, tokens=tokens):
             return {"status": "cancelling", "task_id": task_id}
         else:
             raise HTTPException(400, "Task is not currently running on this server")

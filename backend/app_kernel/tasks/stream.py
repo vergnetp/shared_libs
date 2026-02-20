@@ -115,6 +115,20 @@ class TaskStream:
         """Check if cancelled (without raising)."""
         return cancel.is_cancelled(self.task_id)
     
+    @property
+    def cancel_tokens(self) -> dict:
+        """Auth tokens forwarded from the cancel request.
+        
+        Returns dict of header→value pairs (e.g. {'X-DO-Token': '...'}).
+        Empty dict if cancel hasn't been triggered or no tokens were sent.
+        
+        Usage in cancel handler:
+            except TaskCancelled:
+                do_token = stream.cancel_tokens.get('x-do-token', do_token)
+                await stream.run_cleanups()
+        """
+        return cancel.get_tokens(self.task_id)
+    
     async def cancellable(self, coro: Awaitable[Any], interval: float = 0.5) -> Any:
         """Await a coroutine while polling for cancellation.
         
@@ -133,6 +147,7 @@ class TaskStream:
         while not task.done():
             self.check()  # raises TaskCancelled if flagged
             await asyncio.wait({task}, timeout=interval)
+        self.check()  # final check — cancel may have arrived during last wait
         return task.result()
     
     async def cancellable_gather(self, *coros: Awaitable[Any], interval: float = 0.5) -> List[Any]:
@@ -149,6 +164,7 @@ class TaskStream:
         while not all(t.done() for t in tasks):
             self.check()
             await asyncio.wait(set(tasks), timeout=interval)
+        self.check()  # final check — cancel may have arrived during last wait
         return [t.result() for t in tasks]
     
     # --- Cancel cleanup registration ---

@@ -3,10 +3,16 @@ Task cancellation registry.
 
 Uses in-memory asyncio.Events for zero-latency cancel signalling.
 The task loop checks the event between steps; the cancel endpoint sets it.
+
+Token forwarding:
+    The cancel request can carry auth tokens (X-DO-Token, X-CF-Token, etc.)
+    via headers. These are stored alongside the cancel flag and exposed via
+    get_tokens() so cleanup callbacks can use them without the original
+    request scope.
 """
 
 import asyncio
-from typing import Dict
+from typing import Dict, Optional
 
 
 class TaskCancelled(Exception):
@@ -21,6 +27,9 @@ Cancelled = TaskCancelled
 # Active task cancel events
 _cancel_events: Dict[str, asyncio.Event] = {}
 
+# Tokens forwarded from the cancel request (task_id -> {header: value})
+_cancel_tokens: Dict[str, Dict[str, str]] = {}
+
 
 def register(task_id: str) -> asyncio.Event:
     """Register a cancellable task. Returns the event for advanced usage."""
@@ -29,18 +38,37 @@ def register(task_id: str) -> asyncio.Event:
     return event
 
 
-def trigger(task_id: str) -> bool:
-    """Signal a task to cancel. Returns True if task was found."""
+def trigger(task_id: str, tokens: Optional[Dict[str, str]] = None) -> bool:
+    """Signal a task to cancel. Returns True if task was found.
+    
+    Args:
+        task_id: The task to cancel.
+        tokens: Optional dict of auth tokens from the cancel request headers.
+            These are stored and accessible via get_tokens() so cleanup
+            callbacks can authenticate against external APIs.
+    """
     event = _cancel_events.get(task_id)
     if event:
+        if tokens:
+            _cancel_tokens[task_id] = tokens
         event.set()
         return True
     return False
 
 
+def get_tokens(task_id: str) -> Dict[str, str]:
+    """Get tokens forwarded from the cancel request.
+    
+    Returns dict of header->value pairs (e.g. {'X-DO-Token': '...'}).
+    Empty dict if no tokens were sent or task not found.
+    """
+    return _cancel_tokens.get(task_id, {})
+
+
 def cleanup(task_id: str):
-    """Remove cancel event after task finishes."""
+    """Remove cancel event and tokens after task finishes."""
     _cancel_events.pop(task_id, None)
+    _cancel_tokens.pop(task_id, None)
 
 
 def is_active(task_id: str) -> bool:
