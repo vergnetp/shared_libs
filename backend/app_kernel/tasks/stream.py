@@ -30,8 +30,10 @@ Deferred registration (logger first, register later):
     stream.register(deployment_id)  # now cancellable
 """
 
+import asyncio
 import uuid
-from typing import List
+import logging
+from typing import Any, Awaitable, Callable, List
 
 from datetime import datetime, timezone
 
@@ -40,12 +42,32 @@ from .cancel import TaskCancelled, Cancelled
 from .sse import sse_task_id, sse_log, sse_complete, sse_event
 
 
+_logger = logging.getLogger(__name__)
+
+
+class _CancelHandle:
+    """Handle returned by on_cancel() — call discard() when the resource is committed."""
+    __slots__ = ('_entry', '_list')
+    
+    def __init__(self, entry: list, parent_list: list):
+        self._entry = entry
+        self._list = parent_list
+    
+    def discard(self):
+        """Remove this cleanup — the resource was committed successfully."""
+        try:
+            self._list.remove(self._entry)
+        except ValueError:
+            pass  # already removed
+
+
 class TaskStream:
     """Streaming task context with built-in cancel support and SSE formatting."""
     
     def __init__(self, prefix: str = "task", task_id: str = None, register: bool = True):
         self.task_id = task_id or f"{prefix}-{uuid.uuid4().hex[:12]}"
         self._logs: List[str] = []
+        self._cancel_callbacks: List[list] = []  # [[fn, args, kwargs], ...]
         self._registered = False
         self._task_id_sent = False
         if register:
@@ -76,7 +98,8 @@ class TaskStream:
         return False
     
     def cleanup(self):
-        """Remove cancel registration. Call in finally or use context manager."""
+        """Remove cancel registration and clear callbacks. Call in finally or use context manager."""
+        self._cancel_callbacks.clear()
         if self._registered:
             cancel.cleanup(self.task_id)
             self._registered = False
@@ -91,6 +114,90 @@ class TaskStream:
     def is_cancelled(self) -> bool:
         """Check if cancelled (without raising)."""
         return cancel.is_cancelled(self.task_id)
+    
+    async def cancellable(self, coro: Awaitable[Any], interval: float = 0.5) -> Any:
+        """Await a coroutine while polling for cancellation.
+        
+        Long HTTP calls (DO API, image export, docker build) can block for
+        minutes. This polls check() every `interval` seconds so cancel
+        responds within that window instead of waiting for the call to finish.
+        
+        The in-flight call continues in background on cancel — the caller's
+        except TaskCancelled handler is responsible for cleanup.
+        
+        Usage:
+            # Instead of: result = await provision_droplet(...)
+            result = await stream.cancellable(provision_droplet(...))
+        """
+        task = asyncio.ensure_future(coro)
+        while not task.done():
+            self.check()  # raises TaskCancelled if flagged
+            await asyncio.wait({task}, timeout=interval)
+        return task.result()
+    
+    async def cancellable_gather(self, *coros: Awaitable[Any], interval: float = 0.5) -> List[Any]:
+        """Like asyncio.gather() but polls for cancellation while waiting.
+        
+        Usage:
+            results = await stream.cancellable_gather(
+                provision_droplet(region='lon1'),
+                provision_droplet(region='lon1'),
+                provision_droplet(region='lon1'),
+            )
+        """
+        tasks = [asyncio.ensure_future(c) for c in coros]
+        while not all(t.done() for t in tasks):
+            self.check()
+            await asyncio.wait(set(tasks), timeout=interval)
+        return [t.result() for t in tasks]
+    
+    # --- Cancel cleanup registration ---
+    
+    def on_cancel(self, fn: Callable, *args, **kwargs) -> _CancelHandle:
+        """Register a cleanup callback to run if the task is cancelled.
+        
+        Callbacks run in reverse order (LIFO) — last registered runs first,
+        like a stack of undo operations.
+        
+        Returns a handle — call handle.discard() when the resource is
+        committed and no longer needs cleanup on cancel.
+        
+        Usage:
+            # Register cleanup as you create resources:
+            stream.on_cancel(destroy_droplet, None, did, do_token)
+            stream.on_cancel(agent_client.remove_container, ip, name, token)
+            
+            # If resource is committed (no undo needed):
+            handle = stream.on_cancel(remove_temp_file, path)
+            # ... work succeeds ...
+            handle.discard()  # committed — skip this on cancel
+        """
+        entry = [fn, args, kwargs]
+        self._cancel_callbacks.append(entry)
+        return _CancelHandle(entry, self._cancel_callbacks)
+    
+    async def run_cleanups(self):
+        """Run all registered cancel callbacks in reverse order (LIFO).
+        
+        Best-effort: each callback runs independently, errors are logged
+        but don't prevent remaining callbacks from running.
+        
+        Call this in your except TaskCancelled handler:
+        
+            except TaskCancelled:
+                stream("Cancelled by user.")
+                yield stream.log(level="warning")
+                await stream.run_cleanups()
+                yield stream.complete(False, error="Cancelled by user")
+        """
+        for fn, args, kwargs in reversed(self._cancel_callbacks):
+            try:
+                result = fn(*args, **kwargs)
+                if asyncio.iscoroutine(result) or asyncio.isfuture(result):
+                    await result
+            except Exception as e:
+                _logger.warning(f"Cancel cleanup failed ({fn.__name__}): {e}")
+        self._cancel_callbacks.clear()
     
     # --- SSE event helpers ---
     

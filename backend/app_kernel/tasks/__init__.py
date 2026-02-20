@@ -26,13 +26,22 @@ Quick start:
         finally:
             stream.cleanup()
 
-Cancel endpoint:
-    from app_kernel.tasks import create_tasks_router
-    app.include_router(create_tasks_router(auth_dependency=get_current_user))
+Cancel-safe long HTTP calls:
+    # Single call — polls cancel every 0.5s instead of blocking for minutes
+    result = await stream.cancellable(provision_droplet(...))
+    
+    # Multiple concurrent calls
+    results = await stream.cancellable_gather(
+        provision_droplet(region='lon1'),
+        provision_droplet(region='lon1'),
+    )
+
+Cancel endpoint (auto-mounted by kernel):
+    POST /api/v1/tasks/{task_id}/cancel
 
 Client-side:
     1. Listen for `event: task_id` in SSE stream
-    2. POST /tasks/{task_id}/cancel to cancel
+    2. POST /api/v1/tasks/{task_id}/cancel to cancel
 """
 
 # Cancel registry

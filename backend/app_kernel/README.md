@@ -1483,7 +1483,7 @@ Data collected per request:
 
 ### SSE Task Streaming
 
-Long-running operations with progress streaming and cancellation.
+Long-running operations with progress streaming, cancellation, and automatic cleanup.
 
 ```python
 from app_kernel.tasks import TaskStream, TaskCancelled
@@ -1493,7 +1493,7 @@ async def deploy_service(request_data) -> AsyncIterator[str]:
     try:
         yield stream.log("Building image...")  # Auto-sends task_id on first call
         await build_image()
-        stream.check()  # Raises Cancelled if user cancelled
+        stream.check()  # Raises TaskCancelled if user cancelled
         
         yield stream.log("Pushing to registry...")
         await push_image()
@@ -1517,7 +1517,74 @@ async def deploy(data: DeployRequest):
     )
 ```
 
-Client cancels via: `POST /tasks/{task_id}/cancel`
+Cancel endpoint is auto-mounted by the kernel: `POST /api/v1/tasks/{task_id}/cancel`
+
+#### Cancel-Safe Long Operations
+
+`stream.check()` only detects cancel when called. Long HTTP calls (cloud API provisioning, image builds, file transfers) can block for minutes with no check. Wrap them with `cancellable()` to poll for cancel every 0.5s:
+
+```python
+# Single call — responds to cancel within 0.5s instead of minutes
+result = await stream.cancellable(provision_droplet(region='lon1'))
+
+# Multiple concurrent calls
+results = await stream.cancellable_gather(
+    provision_droplet(region='lon1'),
+    provision_droplet(region='lon1'),
+    provision_droplet(region='lon1'),
+)
+```
+
+The in-flight HTTP call continues in background on cancel — the caller's `except TaskCancelled` handler is responsible for cleanup (see below).
+
+#### Cleanup on Cancel (`on_cancel`)
+
+The hard part of cancellation is cleaning up resources that were already created (VMs, containers, files). Without this, cancelled operations leave orphans. `on_cancel()` registers undo callbacks as you create resources:
+
+```python
+async def deploy_service(do_token, ...) -> AsyncIterator[str]:
+    stream = TaskStream("deploy")
+    try:
+        # Provision infrastructure
+        droplets = await stream.cancellable(create_droplets(...))
+        for d in droplets:
+            stream.on_cancel(destroy_droplet, d['id'], do_token)  # ← register undo
+        
+        # Deploy to each server
+        for d in droplets:
+            await deploy_to(d, ...)
+            stream.on_cancel(remove_container, d['ip'], name, do_token)  # ← register undo
+        
+        # Configure routing — past this point, everything is committed
+        await configure_nginx(...)
+        await setup_dns(...)
+        
+        yield stream.complete(True)
+        # stream.cleanup() in finally clears all callbacks — nothing to undo
+        
+    except TaskCancelled:
+        stream("Cancelled by user.")
+        yield stream.log(level="warning")
+        await stream.run_cleanups()  # ← runs all registered undos in LIFO order
+        yield stream.complete(False, error="Cancelled by user")
+    finally:
+        stream.cleanup()
+```
+
+If a resource is committed before the task ends (no longer needs undo):
+
+```python
+handle = stream.on_cancel(delete_temp_file, path)
+# ... upload succeeds, file is permanent now ...
+handle.discard()  # remove from undo list
+```
+
+Key behaviors:
+
+- Callbacks run in **reverse order** (LIFO) — last registered runs first, like a stack
+- **Best-effort**: each callback runs independently, errors are logged but don't block remaining cleanups
+- `stream.cleanup()` (in `finally`) clears all registered callbacks — successful tasks have nothing to undo
+- Only the DB status update ("cancelled") and SSE completion event stay in the `except` block — everything else is handled by `run_cleanups()`
 
 ### Self-Testing
 
@@ -2477,9 +2544,13 @@ Streaming task context with built-in cancel support and SSE formatting.
 | Decorators | Method | Args | Returns | Category | Description |
 |------------|--------|------|---------|----------|-------------|
 | | `register` | `task_id: str` | | Lifecycle | Register for cancellation (deferred pattern). |
-| | `cleanup` | | | Lifecycle | Remove cancel registration. Call in `finally`. |
-| | `check` | | | Lifecycle | Check if cancelled, raise `TaskCancelled` if so. |
-| `@property` | `is_cancelled` | | `bool` | Lifecycle | Check if cancelled (without raising). |
+| | `cleanup` | | | Lifecycle | Remove cancel registration and clear callbacks. Call in `finally`. |
+| | `check` | | | Cancel | Check if cancelled, raise `TaskCancelled` if so. |
+| `@property` | `is_cancelled` | | `bool` | Cancel | Check if cancelled (without raising). |
+| `async` | `cancellable` | `coro: Awaitable`, `interval: float = 0.5` | `Any` | Cancel | Await a coroutine while polling for cancellation. Use for long HTTP calls. |
+| `async` | `cancellable_gather` | `*coros: Awaitable`, `interval: float = 0.5` | `List[Any]` | Cancel | Like `asyncio.gather()` but polls for cancellation while waiting. |
+| | `on_cancel` | `fn: Callable`, `*args`, `**kwargs` | `_CancelHandle` | Cancel | Register a cleanup callback (LIFO). Call `handle.discard()` to remove. |
+| `async` | `run_cleanups` | | | Cancel | Run all registered cancel callbacks in reverse order. Call in `except TaskCancelled`. |
 | | `task_id_event` | | `str` | SSE | Emit `task_id` SSE event (usually auto-sent by first `log()` call). |
 | | `log` | `message: str`, `level: str = "info"` | `str` | SSE | Emit a log message as an SSE event. |
 | | `complete` | `success: bool`, `error: str = ""` | `str` | SSE | Emit completion SSE event. |
@@ -2501,6 +2572,27 @@ Streaming task context with built-in cancel support and SSE formatting.
 | | `__call__` | `msg: str` | | Shorthand | Set message for next `log()` call. |
 | `async` | `__aenter__` | | | Context | Async context manager entry (registers). |
 | `async` | `__aexit__` | `exc_type, exc_val, exc_tb` | | Context | Async context manager exit (cleanup). |
+
+</details>
+
+<br>
+
+
+</div>
+
+<div style="background-color:#f8f9fa; border:1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 24px;margin-top: 24px;">
+
+
+### class `_CancelHandle`
+
+Handle returned by `TaskStream.on_cancel()`. Call `discard()` when the resource is committed and no longer needs cleanup on cancel.
+
+<details>
+<summary><strong>Public Methods</strong></summary>
+
+| Decorators | Method | Args | Returns | Category | Description |
+|------------|--------|------|---------|----------|-------------|
+| | `discard` | | | Lifecycle | Remove this cleanup from the undo list — resource was committed successfully. |
 
 </details>
 
