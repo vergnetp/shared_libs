@@ -35,30 +35,22 @@ logger = logging.getLogger(__name__)
 
 LOCK_PREFIX = "lock:"
 
-# Lua scripts for atomic lock operations (prevents TOCTOU races)
-_RELEASE_SCRIPT = """
-local data = redis.call("get", KEYS[1])
-if not data then return 0 end
-local obj = cjson.decode(data)
-if obj.lock_id == ARGV[1] then
-    return redis.call("del", KEYS[1])
-end
-return 0
-"""
-
-_RENEW_SCRIPT = """
-local data = redis.call("get", KEYS[1])
-if not data then return 0 end
-local obj = cjson.decode(data)
-if obj.lock_id == ARGV[1] then
-    return redis.call("expire", KEYS[1], tonumber(ARGV[2]))
-end
-return 0
-"""
-
 
 def _redis_key(key: str) -> str:
     return f"{LOCK_PREFIX}{key}"
+
+
+async def _get_lock_data(redis, rkey: str) -> Optional[dict]:
+    """Read and parse lock value. Returns parsed dict or None."""
+    try:
+        raw = await redis.get(rkey)
+        if not raw:
+            return None
+        if isinstance(raw, bytes):
+            raw = raw.decode()
+        return json.loads(raw)
+    except (json.JSONDecodeError, Exception):
+        return None
 
 
 async def acquire_lock(
@@ -103,7 +95,7 @@ async def acquire_lock(
 async def renew_lock(key: str, lock_id: str, ttl: int = 300) -> bool:
     """
     Extend lock TTL. Returns False if lock was lost (expired or stolen).
-    Uses Lua script for atomic check-and-expire (no TOCTOU race).
+    Uses GET + ownership check + EXPIRE (no Lua/EVAL required).
     """
     from .client import get_redis
     
@@ -113,10 +105,11 @@ async def renew_lock(key: str, lock_id: str, ttl: int = 300) -> bool:
     
     rkey = _redis_key(key)
     try:
-        result = await redis.eval(
-            _RENEW_SCRIPT, 1, rkey, lock_id.encode(), str(ttl).encode()
-        )
-        return result == 1
+        data = await _get_lock_data(redis, rkey)
+        if not data or data.get('lock_id') != lock_id:
+            return False
+        await redis.expire(rkey, ttl)
+        return True
     except Exception as e:
         logger.error(f"Lock renew error ({key}): {e}")
         return False
@@ -125,7 +118,7 @@ async def renew_lock(key: str, lock_id: str, ttl: int = 300) -> bool:
 async def release_lock(key: str, lock_id: str) -> bool:
     """
     Release a lock. Only succeeds if lock_id matches (you own the lock).
-    Uses Lua script for atomic check-and-delete (no TOCTOU race).
+    Uses GET + ownership check + DEL (no Lua/EVAL required).
     """
     from .client import get_redis
     
@@ -135,14 +128,12 @@ async def release_lock(key: str, lock_id: str) -> bool:
     
     rkey = _redis_key(key)
     try:
-        # Atomic: check owner then delete in one round-trip
-        result = await redis.eval(
-            _RELEASE_SCRIPT, 1, rkey, lock_id.encode()
-        )
-        released = result == 1
-        if released:
-            logger.info(f"Lock released: {key} ({lock_id[:8]})")
-        return released
+        data = await _get_lock_data(redis, rkey)
+        if not data or data.get('lock_id') != lock_id:
+            return False
+        await redis.delete(rkey)
+        logger.info(f"Lock released: {key} ({lock_id[:8]})")
+        return True
     except Exception as e:
         logger.error(f"Lock release error ({key}): {e}")
         return False
