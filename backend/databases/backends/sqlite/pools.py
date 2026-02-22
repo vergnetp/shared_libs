@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from typing import Any, Optional
 import aiosqlite
 
@@ -6,6 +7,8 @@ from ....utils import async_method
 
 from ...config import DatabaseConfig
 from ...pools import ConnectionPool, PoolManager
+
+logger = logging.getLogger("app_kernel")
 
 
 class SqliteConnectionPool(ConnectionPool):
@@ -46,23 +49,65 @@ class SqliteConnectionPool(ConnectionPool):
         self._max_size = max_size
         self._lock = asyncio.Lock()
         self._closed = False
+        self._conn_counter = 0  # Track connection IDs for debugging
     
     async def _create_connection(self) -> aiosqlite.Connection:
         """Create a new SQLite connection with optimal settings."""
         conn = await aiosqlite.connect(self._db_path, isolation_level=None)
         
+        self._conn_counter += 1
+        conn_id = self._conn_counter
+        
         # WAL mode for concurrent access (readers don't block writers)
-        await conn.execute("PRAGMA journal_mode=WAL")
+        async with conn.execute("PRAGMA journal_mode=WAL") as cursor:
+            row = await cursor.fetchone()
+            wal_result = row[0] if row else "unknown"
         
         # Wait up to 5 seconds for locks instead of failing immediately
         # Kept short because with autocommit, locks are held only per-statement
         await conn.execute("PRAGMA busy_timeout=5000")
+        
+        # Verify busy_timeout actually stuck
+        async with conn.execute("PRAGMA busy_timeout") as cursor:
+            row = await cursor.fetchone()
+            busy_result = row[0] if row else "unknown"
         
         # NORMAL sync is good balance of safety and speed
         await conn.execute("PRAGMA synchronous=NORMAL")
         
         # Enable foreign keys
         await conn.execute("PRAGMA foreign_keys=ON")
+        
+        # Verify all PRAGMAs
+        pragmas = {}
+        for pragma in ("journal_mode", "synchronous", "foreign_keys"):
+            async with conn.execute(f"PRAGMA {pragma}") as cursor:
+                row = await cursor.fetchone()
+                pragmas[pragma] = row[0] if row else "unknown"
+        
+        logger.info(
+            f"SQLite pool conn #{conn_id} created: "
+            f"journal_mode={pragmas['journal_mode']}, "
+            f"busy_timeout={busy_result}, "
+            f"synchronous={pragmas['synchronous']}, "
+            f"foreign_keys={pragmas['foreign_keys']} "
+            f"(pool: {len(self._all_conns)+1}/{self._max_size}, "
+            f"path={self._db_path})"
+        )
+        
+        # ALERT if busy_timeout didn't stick (this is the suspected bug)
+        if str(busy_result) == "0":
+            logger.error(
+                f"PRAGMA busy_timeout=5000 DID NOT STICK on conn #{conn_id}! "
+                f"Value is still 0. This causes instant 'database is locked' failures. "
+                f"isolation_level=None may be resetting it."
+            )
+        
+        if str(wal_result).lower() != "wal":
+            logger.error(
+                f"PRAGMA journal_mode=WAL failed on conn #{conn_id}! "
+                f"Got '{wal_result}' instead. Concurrent writes will fail."
+            )
         
         return conn
     
@@ -233,4 +278,3 @@ class SqlitePoolManager(PoolManager):
         await pool.initialize()
         
         return pool
-    

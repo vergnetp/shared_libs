@@ -1,5 +1,7 @@
 import asyncio
-from typing import Dict, Any
+import time
+import random
+from typing import Dict, Any, List, Tuple, Optional
 
 from .... import log as logger
 from ....resilience import retry_with_backoff
@@ -26,6 +28,20 @@ SQLITE_RETRY_CONFIG = dict(
     total_timeout=300.0,   # 5 minutes total - allows for heavy contention
     exceptions=(sqlite3.OperationalError, Exception),  # Catch "database is locked"
 )
+
+# Lock retry config used by async execute/executemany overrides.
+# These retries wrap the ENTIRE execute (including its internal timeout),
+# so backoff sleeps are never killed by asyncio.wait_for.
+_LOCK_RETRY_MAX       = SQLITE_RETRY_CONFIG['max_retries']
+_LOCK_RETRY_BASE      = SQLITE_RETRY_CONFIG['base_delay']
+_LOCK_RETRY_MAX_DELAY = SQLITE_RETRY_CONFIG['max_delay']
+_LOCK_RETRY_TIMEOUT   = SQLITE_RETRY_CONFIG['total_timeout']
+
+
+def _is_lock_error(exc: Exception) -> bool:
+    """Check if an exception is a SQLite lock contention error."""
+    msg = str(exc).lower()
+    return 'database is locked' in msg or 'database is busy' in msg
 
 
 class SqliteSyncConnection(SyncConnection, EntitySyncMixin):
@@ -65,6 +81,9 @@ class SqliteSyncConnection(SyncConnection, EntitySyncMixin):
         
         Note: busy_timeout (60s) handles lock waiting at the database level.
         This retry decorator (90s total) allows additional retries if needed.
+        
+        Sync path: time.sleep() can't be cancelled by asyncio, so retry
+        decorator works correctly here (unlike the async path).
         """
         self._cursor.execute(statement, params or ())
         return self._cursor.fetchall()
@@ -133,6 +152,15 @@ class SqliteAsyncConnection(AsyncConnection, EntityAsyncMixin):
     This class wraps a raw aiosqlite connection to provide the standardized
     AsyncConnection interface, including transaction management.
     
+    IMPORTANT — retry layering:
+    The base class execute() wraps _execute_statement_async in
+    execute_with_timeout (asyncio.wait_for). If retry lives INSIDE that
+    timeout, the backoff sleeps get cancelled instantly on timeout.
+    
+    Fix: retry is on execute()/executemany() (OUTSIDE the timeout), so each
+    attempt gets its own fresh timeout and backoff sleeps are never cancelled.
+    _execute_statement_async is a plain single-attempt call.
+    
     Args:
         conn: Raw aiosqlite connection object.
     """
@@ -147,23 +175,118 @@ class SqliteAsyncConnection(AsyncConnection, EntityAsyncMixin):
             self._sql_generator = SqliteSqlGenerator()
         return self._sql_generator
   
-    @retry_with_backoff(**SQLITE_RETRY_CONFIG)
     async def _prepare_statement_async(self, native_sql: str) -> Any:
         """
         SQLite with aiosqlite doesn't have a separate prepare API.
         """       
         return native_sql
     
-    @retry_with_backoff(**SQLITE_RETRY_CONFIG)
     async def _execute_statement_async(self, statement: Any, params=None) -> Any:
         """
-        Execute a prepared statement using aiosqlite.
+        Execute a prepared statement using aiosqlite (single attempt).
         
-        Note: busy_timeout (60s) handles lock waiting at the database level.
-        This retry decorator (90s total) allows additional retries if needed.
+        No retry decorator — retry lives at execute() level so backoff
+        sleeps are outside the timeout wrapper and can't be cancelled.
         """
         async with self._conn.execute(statement, params or ()) as cursor:
             return await cursor.fetchall()
+
+    # -----------------------------------------------------------------
+    # Retry-outside-timeout overrides
+    # -----------------------------------------------------------------
+
+    async def _with_lock_retry(self, coro_fn, *args, **kwargs):
+        """
+        Retry wrapper for SQLite lock contention.
+        
+        Calls coro_fn(*args, **kwargs) which is expected to be
+        super().execute() or super().executemany(). Those methods
+        internally use execute_with_timeout, so each attempt gets
+        its own timeout. The backoff sleep here lives OUTSIDE any
+        timeout wrapper and cannot be cancelled by asyncio.wait_for.
+        
+        Only retries on 'database is locked' / 'database is busy'.
+        All other errors propagate immediately.
+        """
+        retries = 0
+        delay = _LOCK_RETRY_BASE
+        start = time.monotonic()
+        last_exc = None
+
+        while True:
+            # Total timeout guard
+            elapsed = time.monotonic() - start
+            if _LOCK_RETRY_TIMEOUT and elapsed > _LOCK_RETRY_TIMEOUT:
+                logger.warning(
+                    f"SQLite lock retry timeout ({_LOCK_RETRY_TIMEOUT}s) "
+                    f"exceeded for {coro_fn.__name__}"
+                )
+                raise last_exc or TimeoutError(
+                    f"SQLite lock retry timed out after {_LOCK_RETRY_TIMEOUT}s"
+                )
+
+            try:
+                return await coro_fn(*args, **kwargs)
+
+            except Exception as e:
+                if not _is_lock_error(e):
+                    raise  # Not a lock error — propagate immediately
+
+                last_exc = e
+                retries += 1
+
+                if retries > _LOCK_RETRY_MAX:
+                    logger.warning(
+                        f"SQLite lock retry exhausted ({_LOCK_RETRY_MAX} retries) "
+                        f"for {coro_fn.__name__}: {e}"
+                    )
+                    raise
+
+                # Exponential backoff with jitter — this sleep is SAFE
+                # because it's outside any asyncio.wait_for wrapper
+                jitter = random.uniform(0.8, 1.2)
+                sleep_time = min(delay * jitter, _LOCK_RETRY_MAX_DELAY)
+
+                # Don't sleep past total timeout
+                remaining = _LOCK_RETRY_TIMEOUT - (time.monotonic() - start)
+                if remaining < sleep_time:
+                    if remaining > 0.1:
+                        sleep_time = remaining * 0.9
+                    else:
+                        raise
+
+                logger.info(
+                    f"SQLite locked, retry {retries}/{_LOCK_RETRY_MAX} "
+                    f"in {sleep_time:.1f}s: {str(e)[:80]}"
+                )
+                await asyncio.sleep(sleep_time)
+                delay = min(delay * 2, _LOCK_RETRY_MAX_DELAY)
+
+    async def execute(self, sql: str, params: Optional[tuple] = None,
+                      timeout: Optional[float] = None,
+                      tags: Optional[Dict[str, Any]] = None) -> List[Tuple]:
+        """
+        SQLite override: retry wraps timeout for proper lock handling.
+        
+        Each retry attempt calls super().execute() which has its own
+        execute_with_timeout internally. Backoff sleeps live outside
+        that timeout and can never be cancelled.
+        """
+        return await self._with_lock_retry(
+            super().execute, sql, params, timeout, tags
+        )
+
+    async def executemany(self, sql: str, param_list: List[tuple],
+                          timeout: Optional[float] = None,
+                          tags: Optional[Dict[str, Any]] = None) -> List[Tuple]:
+        """
+        SQLite override: retry wraps timeout for proper lock handling.
+        """
+        return await self._with_lock_retry(
+            super().executemany, sql, param_list, timeout, tags
+        )
+
+    # -----------------------------------------------------------------
 
     @async_method
     async def in_transaction(self) -> bool:
@@ -228,4 +351,3 @@ class SqliteAsyncConnection(AsyncConnection, EntityAsyncMixin):
             "db_server_version": server_version,
             "db_driver": driver_version
         }
- 
