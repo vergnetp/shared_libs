@@ -132,7 +132,7 @@ async def _run_embedded_admin_worker(
     app_name: str,
     logger,
     batch_size: int = 100,
-    poll_interval: float = 0.5,
+    poll_interval: float = 5,
 ):
     """
     Run admin worker as background task.

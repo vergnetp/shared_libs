@@ -43,6 +43,46 @@ class CircuitBreaker:
             elif name in cls._breakers:
                 del cls._breakers[name]
     
+    @classmethod
+    def force_close(cls, name):
+        """
+        Force a circuit breaker back to CLOSED state.
+        
+        Used for manual/forced operations that should bypass the breaker
+        (e.g. user explicitly clicking retry, admin terminal commands).
+        Unlike reset(), this keeps the breaker instance but clears failure history.
+        
+        Args:
+            name: Name of the breaker to force close.
+        """
+        with cls._lock:
+            breaker = cls._breakers.get(name)
+            if breaker:
+                with breaker._lock:
+                    breaker._state = CircuitState.CLOSED
+                    breaker._failure_count = 0
+                    breaker._recent_failures = []
+                    breaker._half_open_calls = 0
+                    breaker._half_open_successes = 0
+                    breaker._last_state_change_time = time.time()
+    
+    @classmethod
+    def force_close_matching(cls, prefix):
+        """
+        Force-close all circuit breakers whose name starts with prefix.
+        
+        Useful when the breaker name includes a dynamic component like an IP
+        (e.g. force_close_matching('http://10.0.0.1') closes all breakers
+        for that host regardless of port or path).
+        
+        Args:
+            prefix: Name prefix to match.
+        """
+        with cls._lock:
+            for bname in list(cls._breakers.keys()):
+                if bname.startswith(prefix):
+                    cls.force_close(bname)
+    
     def __init__(self, name, failure_threshold=5, recovery_timeout=30.0, 
                 half_open_max_calls=3, window_size=60.0):
         """
@@ -238,4 +278,3 @@ def circuit_breaker(name=None, failure_threshold=5, recovery_timeout=30.0,
             return sync_wrapper
     
     return decorator
-
