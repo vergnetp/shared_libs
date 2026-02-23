@@ -5,6 +5,8 @@ Allows defining entities as dataclasses with metadata for validation,
 schema generation, and automatic migrations.
 
 The @entity decorator auto-adds:
+- System fields: id, created_at, updated_at, created_by, updated_by, deleted_at
+  (injected automatically if not declared — apps only define business fields)
 - from_dict(cls, data) - creates instance, deserializing JSON fields based on type hints
 - get(cls, db, id) - fetch by ID (excludes soft-deleted by default)
 - get_many(cls, db, ids) - batch fetch by IDs
@@ -24,6 +26,21 @@ import functools
 from dataclasses import field, Field, fields as dataclass_fields
 from datetime import datetime, timezone
 from typing import Any, Optional, Dict, List, get_type_hints, get_origin, get_args, TYPE_CHECKING
+
+
+# Global registry of entity schemas
+ENTITY_SCHEMAS: Dict[str, type] = {}
+
+# System fields auto-injected by @entity if not already defined.
+# These are kernel infrastructure — apps shouldn't have to declare them.
+SYSTEM_FIELDS: Dict[str, Any] = {
+    'id': Optional[str],
+    'created_at': Optional[str],
+    'updated_at': Optional[str],
+    'created_by': Optional[str],
+    'updated_by': Optional[str],
+    'deleted_at': Optional[str],
+}
 
 
 # Sentinel for strict entity access - only entity methods should call db methods directly.
@@ -129,8 +146,40 @@ def entity_field(**kwargs) -> Field:
     return field(default=default_value, metadata=metadata)
 
 
-# Global registry of entity schemas
-ENTITY_SCHEMAS: Dict[str, type] = {}
+def _inject_system_fields(cls):
+    """
+    Auto-inject system fields (id, created_at, ..., deleted_at) into a dataclass
+    if not already defined. Re-runs @dataclass to regenerate __init__ etc.
+    
+    This means apps only declare their business fields:
+    
+        @entity(table="containers")
+        @dataclass
+        class Container:
+            name: str = entity_field(nullable=False)
+            # id, created_at, updated_at, created_by, updated_by, deleted_at
+            # are all injected automatically
+    """
+    import dataclasses
+    
+    existing = {f.name for f in dataclass_fields(cls)}
+    injected = False
+    
+    for name, type_hint in SYSTEM_FIELDS.items():
+        if name not in existing:
+            cls.__annotations__[name] = type_hint
+            setattr(cls, name, None)
+            injected = True
+    
+    if injected:
+        # Re-run @dataclass to pick up the new fields in __init__, __repr__, etc.
+        # Must delete existing dunders first — @dataclass skips if they exist
+        for attr in ('__init__', '__repr__', '__eq__'):
+            if attr in cls.__dict__:
+                delattr(cls, attr)
+        cls = dataclasses.dataclass(cls)
+    
+    return cls
 
 
 def _now_iso() -> str:
@@ -501,7 +550,8 @@ def entity(table: str = None, history: bool = True):
     """
     Decorator to mark a dataclass as a database entity.
     
-    Auto-adds CRUD methods - no separate store layer needed.
+    Auto-injects system fields (id, created_at, updated_at, created_by,
+    updated_by, deleted_at) if not already declared, and adds CRUD methods.
     
     Usage:
         @entity(table="projects")
@@ -509,6 +559,8 @@ def entity(table: str = None, history: bool = True):
         class Project:
             name: str
             tags: List[str] = entity_field(default=None)
+            # id, created_at, updated_at, created_by, updated_by, deleted_at
+            # are injected automatically — no need to declare them
         
         # The entity IS the store:
         project = await Project.get(db, "123")
@@ -519,6 +571,9 @@ def entity(table: str = None, history: bool = True):
     """
     def decorator(cls):
         tbl = table or cls.__name__.lower()
+        
+        # Auto-inject system fields (id, timestamps, deleted_at) if missing
+        cls = _inject_system_fields(cls)
         
         # Add entity metadata
         cls.__entity_table__ = tbl
