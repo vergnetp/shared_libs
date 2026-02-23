@@ -12,7 +12,11 @@ Token forwarding:
 """
 
 import asyncio
+import logging
 from typing import Dict, Optional
+
+
+logger = logging.getLogger(__name__)
 
 
 class TaskCancelled(Exception):
@@ -35,6 +39,7 @@ def register(task_id: str) -> asyncio.Event:
     """Register a cancellable task. Returns the event for advanced usage."""
     event = asyncio.Event()
     _cancel_events[task_id] = event
+    logger.info(f"Task registered: {task_id}")
     return event
 
 
@@ -52,7 +57,9 @@ def trigger(task_id: str, tokens: Optional[Dict[str, str]] = None) -> bool:
         if tokens:
             _cancel_tokens[task_id] = tokens
         event.set()
+        logger.info(f"Task cancel triggered: {task_id}")
         return True
+    logger.warning(f"Task cancel miss: {task_id} not in registry (active: {list(_cancel_events.keys())})")
     return False
 
 
