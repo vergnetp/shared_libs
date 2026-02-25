@@ -326,6 +326,71 @@ class Registry:
         )
 
 
+@dataclass
+class Volume:
+    """DO Block Storage Volume info.
+    
+    Pricing: $0.10/GB/month
+    - 50GB = $5/mo, 100GB = $10/mo, 250GB = $25/mo
+    
+    Volumes are region-scoped and can be attached to one droplet at a time.
+    They support online resize (grow only) and ext4/xfs filesystems.
+    """
+    id: str
+    name: str
+    size_gigabytes: int = 0
+    region: str = ""
+    droplet_ids: List[int] = field(default_factory=list)
+    description: str = ""
+    filesystem_type: str = ""
+    filesystem_label: str = ""
+    created_at: Optional[str] = None
+    
+    @property
+    def is_attached(self) -> bool:
+        return len(self.droplet_ids) > 0
+    
+    @property
+    def attached_to(self) -> Optional[int]:
+        """Droplet ID this volume is attached to, or None."""
+        return self.droplet_ids[0] if self.droplet_ids else None
+    
+    @property
+    def device_path(self) -> str:
+        """Expected device path on the droplet."""
+        return f"/dev/disk/by-id/scsi-0DO_Volume_{self.name}"
+    
+    @property
+    def price_monthly(self) -> float:
+        return self.size_gigabytes * 0.10
+    
+    def to_dict(self) -> Dict[str, Any]:
+        result = asdict(self)
+        result["is_attached"] = self.is_attached
+        result["attached_to"] = self.attached_to
+        result["device_path"] = self.device_path
+        result["price_monthly"] = self.price_monthly
+        return result
+    
+    @classmethod
+    def from_api(cls, data: Dict[str, Any]) -> 'Volume':
+        """Create from DO API response."""
+        region = data.get("region", {})
+        if isinstance(region, dict):
+            region = region.get("slug", "")
+        return cls(
+            id=data["id"],
+            name=data["name"],
+            size_gigabytes=data.get("size_gigabytes", 0),
+            region=region,
+            droplet_ids=data.get("droplet_ids", []),
+            description=data.get("description", ""),
+            filesystem_type=data.get("filesystem_type", ""),
+            filesystem_label=data.get("filesystem_label", ""),
+            created_at=data.get("created_at"),
+        )
+
+
 # =============================================================================
 # Result Type (for operations that can fail gracefully)
 # =============================================================================
@@ -856,6 +921,92 @@ systemctl restart node_agent 2>/dev/null || true
         
         result = self._post("/firewalls", data)
         return Firewall.from_api(result.get("firewall", {}))
+    
+    # =========================================================================
+    # Volumes (Block Storage)
+    # =========================================================================
+    
+    def create_volume(
+        self,
+        name: str,
+        region: str,
+        size_gigabytes: int = 50,
+        description: str = "",
+        filesystem_type: str = "ext4",
+        tags: Optional[List[str]] = None,
+    ) -> Volume:
+        """Create a block storage volume ($0.10/GB/mo)."""
+        data = {
+            "size_gigabytes": size_gigabytes,
+            "name": name,
+            "description": description,
+            "region": region,
+            "filesystem_type": filesystem_type,
+        }
+        if tags:
+            data["tags"] = tags
+        
+        result = self._post("/volumes", data)
+        return Volume.from_api(result["volume"])
+    
+    def get_volume(self, volume_id: str) -> Optional[Volume]:
+        """Get volume by ID."""
+        try:
+            result = self._get(f"/volumes/{volume_id}")
+            return Volume.from_api(result["volume"])
+        except DOError as e:
+            if e.status_code == 404:
+                return None
+            raise
+    
+    def list_volumes(self, region: str = None) -> List[Volume]:
+        """List volumes, optionally filtered by region."""
+        params = {}
+        if region:
+            params["region"] = region
+        result = self._get("/volumes", params=params)
+        return [Volume.from_api(v) for v in result.get("volumes", [])]
+    
+    def delete_volume(self, volume_id: str) -> Result:
+        """Delete a volume (must be detached first)."""
+        try:
+            self._delete(f"/volumes/{volume_id}")
+            return Result.ok(f"Volume {volume_id} deleted")
+        except DOError as e:
+            return Result.fail(str(e))
+    
+    def attach_volume(
+        self, volume_id: str, droplet_id: int, region: str,
+    ) -> Action:
+        """Attach volume to a droplet."""
+        result = self._post(f"/volumes/{volume_id}/actions", {
+            "type": "attach",
+            "droplet_id": droplet_id,
+            "region": region,
+        })
+        return Action.from_api(result.get("action", {}))
+    
+    def detach_volume(
+        self, volume_id: str, droplet_id: int, region: str,
+    ) -> Action:
+        """Detach volume from a droplet."""
+        result = self._post(f"/volumes/{volume_id}/actions", {
+            "type": "detach",
+            "droplet_id": droplet_id,
+            "region": region,
+        })
+        return Action.from_api(result.get("action", {}))
+    
+    def resize_volume(
+        self, volume_id: str, size_gigabytes: int, region: str,
+    ) -> Action:
+        """Resize a volume (can only grow, not shrink)."""
+        result = self._post(f"/volumes/{volume_id}/actions", {
+            "type": "resize",
+            "size_gigabytes": size_gigabytes,
+            "region": region,
+        })
+        return Action.from_api(result.get("action", {}))
     
     # =========================================================================
     # Snapshots
@@ -1406,6 +1557,104 @@ systemctl restart node_agent 2>/dev/null || true
                     if vpc.region == region:
                         return vpc.id
             raise
+    
+    # =========================================================================
+    # Volumes (Block Storage)
+    # =========================================================================
+    
+    async def create_volume(
+        self,
+        name: str,
+        region: str,
+        size_gigabytes: int = 50,
+        description: str = "",
+        filesystem_type: str = "ext4",
+        tags: Optional[List[str]] = None,
+    ) -> Volume:
+        """Create a block storage volume ($0.10/GB/mo)."""
+        data = {
+            "size_gigabytes": size_gigabytes,
+            "name": name,
+            "description": description,
+            "region": region,
+            "filesystem_type": filesystem_type,
+        }
+        if tags:
+            data["tags"] = tags
+        
+        result = await self._post("/volumes", data)
+        return Volume.from_api(result["volume"])
+    
+    async def get_volume(self, volume_id: str) -> Optional[Volume]:
+        """Get volume by ID."""
+        try:
+            result = await self._get(f"/volumes/{volume_id}")
+            return Volume.from_api(result["volume"])
+        except DOError as e:
+            if e.status_code == 404:
+                return None
+            raise
+    
+    async def list_volumes(self, region: str = None) -> List[Volume]:
+        """List volumes, optionally filtered by region."""
+        params = {}
+        if region:
+            params["region"] = region
+        result = await self._get("/volumes", params=params)
+        return [Volume.from_api(v) for v in result.get("volumes", [])]
+    
+    async def delete_volume(self, volume_id: str) -> Result:
+        """Delete a volume (must be detached first)."""
+        try:
+            await self._delete(f"/volumes/{volume_id}")
+            return Result.ok(f"Volume {volume_id} deleted")
+        except DOError as e:
+            return Result.fail(str(e))
+    
+    async def attach_volume(
+        self, volume_id: str, droplet_id: int, region: str,
+        wait: bool = True, wait_timeout: int = 120,
+    ) -> Action:
+        """Attach volume to a droplet."""
+        result = await self._post(f"/volumes/{volume_id}/actions", {
+            "type": "attach",
+            "droplet_id": droplet_id,
+            "region": region,
+        })
+        action = Action.from_api(result.get("action", {}))
+        if wait and action.id:
+            action = await self._wait_for_action(action.id, wait_timeout)
+        return action
+    
+    async def detach_volume(
+        self, volume_id: str, droplet_id: int, region: str,
+        wait: bool = True, wait_timeout: int = 120,
+    ) -> Action:
+        """Detach volume from a droplet."""
+        result = await self._post(f"/volumes/{volume_id}/actions", {
+            "type": "detach",
+            "droplet_id": droplet_id,
+            "region": region,
+        })
+        action = Action.from_api(result.get("action", {}))
+        if wait and action.id:
+            action = await self._wait_for_action(action.id, wait_timeout)
+        return action
+    
+    async def resize_volume(
+        self, volume_id: str, size_gigabytes: int, region: str,
+        wait: bool = True, wait_timeout: int = 120,
+    ) -> Action:
+        """Resize a volume (can only grow, not shrink)."""
+        result = await self._post(f"/volumes/{volume_id}/actions", {
+            "type": "resize",
+            "size_gigabytes": size_gigabytes,
+            "region": region,
+        })
+        action = Action.from_api(result.get("action", {}))
+        if wait and action.id:
+            action = await self._wait_for_action(action.id, wait_timeout)
+        return action
     
     # =========================================================================
     # Regions & Sizes
