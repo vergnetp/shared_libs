@@ -7,6 +7,8 @@ Endpoints:
     GET  /migrations           — list applied migrations
     GET  /migrations/{hash}    — detail for one migration
     GET  /backups              — list available CSV restore points
+    GET  /backups/{name}/download — download backup as ZIP
+    POST /backups/upload       — upload a CSV backup ZIP
     GET  /schema/orphans       — columns/tables in DB but not in code
     POST /backup               — trigger backup now
     POST /backfill             — manually run rename backfills
@@ -19,7 +21,7 @@ import logging
 from pathlib import Path
 from typing import Callable, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
@@ -166,6 +168,89 @@ def create_db_admin_router(
             ]
         }
     
+    @router.get("/backups/{backup_name}/download", summary="Download backup as ZIP")
+    async def download_backup(backup_name: str, user=Depends(get_current_user)):
+        """Download a CSV backup directory as a ZIP file."""
+        _require_admin(user)
+        import io
+        import zipfile
+        from fastapi.responses import StreamingResponse
+
+        if ".." in backup_name or "/" in backup_name or "\\" in backup_name:
+            raise HTTPException(400, "Invalid backup name")
+
+        csv_dir = Path(backup_dir) / backup_name
+        if not csv_dir.is_dir():
+            raise HTTPException(404, f"Backup '{backup_name}' not found")
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for f in sorted(csv_dir.iterdir()):
+                if f.is_file():
+                    zf.write(f, f"{backup_name}/{f.name}")
+        buf.seek(0)
+
+        return StreamingResponse(
+            buf,
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{backup_name}.zip"'},
+        )
+
+    @router.post("/backups/upload", summary="Upload a CSV backup ZIP")
+    async def upload_backup(
+        file: UploadFile,
+        user=Depends(get_current_user),
+    ):
+        """
+        Upload a CSV backup ZIP to the backups directory.
+
+        After uploading, use POST /restore/full or POST /restore/csv to import.
+        """
+        _require_admin(user)
+        import io
+        import zipfile
+
+        content = await file.read()
+        buf = io.BytesIO(content)
+
+        try:
+            with zipfile.ZipFile(buf, "r") as zf:
+                names = zf.namelist()
+                if not names:
+                    raise HTTPException(400, "ZIP is empty")
+
+                # Detect backup name from first entry (e.g. "csv_20260210_140000_abc/table.csv")
+                first = names[0]
+                backup_name = first.split("/")[0] if "/" in first else None
+                if not backup_name:
+                    raise HTTPException(400, "ZIP must contain a backup directory (e.g. csv_YYYYMMDD_HHMMSS_hash/)")
+
+                # Security: reject path traversal
+                for name in names:
+                    if ".." in name or name.startswith("/"):
+                        raise HTTPException(400, f"Invalid path in ZIP: {name}")
+
+                # Extract into backup directory
+                target = Path(backup_dir) / backup_name
+                target.mkdir(parents=True, exist_ok=True)
+
+                for name in names:
+                    if name.endswith("/"):
+                        continue
+                    filename = name.split("/", 1)[1] if "/" in name else name
+                    if filename:
+                        (target / filename).write_bytes(zf.read(name))
+
+        except zipfile.BadZipFile:
+            raise HTTPException(400, "Invalid ZIP file")
+
+        return {
+            "status": "ok",
+            "backup_name": backup_name,
+            "files": len([n for n in names if not n.endswith("/")]),
+            "message": f"Uploaded to {backup_name}/. Use POST /restore/full or /restore/csv to import.",
+        }
+
     @router.get("/schema/orphans", summary="Find orphaned columns/tables")
     async def schema_orphans(user=Depends(get_current_user)):
         """
