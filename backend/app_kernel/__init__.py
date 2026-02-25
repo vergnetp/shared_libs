@@ -214,6 +214,15 @@ from .tasks import (
     sse_urls,
 )
 
+# Action Replay - frontend error diagnosis
+from .action_replay import (
+    create_action_replay_router,
+    save_replay,
+    list_replays,
+    get_replay,
+    resolve_replay,
+)
+
 __all__ = [
     # Version
     "__version__",
@@ -359,4 +368,11 @@ __all__ = [
     "sse_log",
     "sse_complete",
     "sse_urls",
+    
+    # Action Replay
+    "create_action_replay_router",
+    "save_replay",
+    "list_replays",
+    "get_replay",
+    "resolve_replay",
 ]

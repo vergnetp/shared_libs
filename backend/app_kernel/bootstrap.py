@@ -936,6 +936,19 @@ def create_service(
         )
         app.include_router(audit_router, prefix=api_prefix)
     
+    # Mount action replay routes (frontend error diagnosis)
+    if cfg.database_url:
+        from .action_replay import create_action_replay_router
+        from .auth.deps import get_current_user, get_current_user_optional
+        
+        replay_router = create_action_replay_router(
+            get_current_user=get_current_user,
+            get_current_user_optional=get_current_user_optional,
+            prefix="/admin",
+            is_admin=is_admin or _default_is_admin,
+        )
+        app.include_router(replay_router, prefix=api_prefix)
+    
     # Mount database admin routes (admin only)
     if cfg.database_url:
         from .db.lifecycle import get_lifecycle_config

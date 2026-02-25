@@ -17,7 +17,7 @@ app = create_service(
 )
 ```
 
-You get: Auth, SaaS (workspaces/teams), background jobs, rate limiting, caching, audit logging, health checks, metrics.
+You get: Auth, SaaS (workspaces/teams), background jobs, rate limiting, caching, audit logging, action replay (frontend error diagnosis), health checks, metrics.
 
 ## Quick Start (Alternative APIs)
 
@@ -1025,6 +1025,19 @@ If a deployment introduces a bad migration or corrupts data:
 |-------|-------------|
 | `GET /` | Query audit logs |
 | `GET /entity/{type}/{id}` | Entity audit history |
+
+### Admin — Action Replay (`/api/v1/admin`)
+
+Captures frontend user action buffers on error for bug diagnosis. The frontend auto-POSTs a circular buffer of the last 25 actions (API calls, navigation, clicks) when a JS error or 5xx response occurs. Auth is optional on save (errors can happen before login).
+
+Companion frontend: `actionLog` hook in `@myorg/ui` — configure with `actionLog.configure({ saveUrl: '/api/v1/admin/action-replay' })`.
+
+| Route | Description |
+|-------|-------------|
+| `POST /action-replay` | Save replay (auth optional, auto-called by frontend) |
+| `GET /action-replays` | List replays (admin) |
+| `GET /action-replays/{id}` | Full replay with action log (admin) |
+| `PATCH /action-replays/{id}/resolve` | Mark resolved (admin) |
 
 ### Admin — Usage (`/api/v1/admin/usage`)
 
@@ -2903,6 +2916,45 @@ StaticFiles subclass with smart cache control headers. Inherits from `starlette.
 - Non-hashed assets: `max-age=3600, must-revalidate` (1 hour)
 
 Usage: `app.mount("/", CacheBustedStaticFiles(directory="static", html=True), name="static")`
+
+</div>
+
+<div style="background-color:#f8f9fa; border:1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 24px;margin-top: 24px;">
+
+
+### `create_action_replay_router`
+
+Factory for frontend action replay routes. Companion to `actionLog` hook in `@myorg/ui`.
+
+<details>
+<summary><strong>Parameters</strong></summary>
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `get_current_user` | `Callable` | required | Auth dependency for admin routes |
+| `get_current_user_optional` | `Callable` | `None` | Optional auth for save route (errors can happen before login) |
+| `prefix` | `str` | `""` | Route prefix |
+| `tags` | `List[str]` | `["action-replay"]` | OpenAPI tags |
+| `is_admin` | `Callable` | `None` | `(user) -> bool`. Defaults to `role == "admin"` |
+
+</details>
+
+<br>
+
+<details>
+<summary><strong>Standalone Functions</strong></summary>
+
+| Function | Args | Returns | Description |
+|----------|------|---------|-------------|
+| `save_replay` | `db`, `error_message`, `error_source`, `url`, `user_agent`, `replay_log`, `user_id`, `workspace_id` | `str` | Save a replay, returns ID. All args optional except `db`. |
+| `list_replays` | `db`, `workspace_id=None`, `resolved=None`, `since=None`, `until=None`, `limit=50`, `offset=0` | `List[Dict]` | List replays (summary, no log body). |
+| `get_replay` | `db`, `replay_id` | `Dict \| None` | Get full replay including parsed action log. |
+| `resolve_replay` | `db`, `replay_id` | `bool` | Mark replay as resolved. |
+
+</details>
+
+<br>
+
 
 </div>
 

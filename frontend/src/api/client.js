@@ -2,6 +2,7 @@
  * client.js — Shared API client (auth-agnostic)
  *
  * Pure HTTP client. No auth opinions — auth is injected via `api.configure()`.
+ * Auto-records to actionLog for bug replay (if configured).
  *
  * Architecture: ONE core function (coreFetch) calls fetch().
  * All safeguards live there: auth handler, requestModifier,
@@ -85,6 +86,9 @@ let config = {
   unwrap: defaultUnwrap,
   parseError: null,
 }
+
+// Action log — imported lazily to avoid circular dependency
+import { actionLog } from '../hooks/actionLog.js'
 
 // =============================================================================
 // Helpers
@@ -306,21 +310,31 @@ async function coreFetch(method, path, {
  */
 export async function api(method, path, data = null, options = {}) {
   const cfg = options.config || config
-  const res = await coreFetch(method, path, { data, ...options })
-  if (res === null) return null
-  if (res.status === 204) return null
+  actionLog.record('api_call', { method, path })
+  const start = performance.now()
+  try {
+    const res = await coreFetch(method, path, { data, ...options })
+    if (res === null) return null
+    if (res.status === 204) return null
 
-  const contentType = res.headers.get('content-type') || ''
-  if (!contentType.includes('application/json')) {
-    return res
+    const contentType = res.headers.get('content-type') || ''
+    if (!contentType.includes('application/json')) {
+      actionLog.record('api_response', { method, path, status: res.status, duration_ms: Math.round(performance.now() - start) })
+      return res
+    }
+
+    const result = await res.json()
+    actionLog.record('api_response', { method, path, status: 200, duration_ms: Math.round(performance.now() - start) })
+
+    if (cfg.unwrap) {
+      return cfg.unwrap(result)
+    }
+    return result
+  } catch (err) {
+    actionLog.record('api_error', { method, path, status: err.status, error: (err.message || String(err)).slice(0, 120), duration_ms: Math.round(performance.now() - start) })
+    if (err.status >= 500) actionLog.saveToBackend(`${method} ${path}: ${err.message}`, 'api_5xx')
+    throw err
   }
-
-  const result = await res.json()
-
-  if (cfg.unwrap) {
-    return cfg.unwrap(result)
-  }
-  return result
 }
 
 // --- Convenience shorthands ---
@@ -392,8 +406,17 @@ api.del = (path, options) => api('DELETE', path, null, options)
  *   })
  */
 api.stream = async (method, path, data, onMessage, options = {}) => {
-  const res = await coreFetch(method, path, { data, noRetry: true, throwOnSkip: true, ...options })
-  await readSSE(res, onMessage)
+  actionLog.record('stream_start', { method, path })
+  const start = performance.now()
+  try {
+    const res = await coreFetch(method, path, { data, noRetry: true, throwOnSkip: true, ...options })
+    await readSSE(res, onMessage)
+    actionLog.record('stream_end', { path, duration_ms: Math.round(performance.now() - start) })
+  } catch (err) {
+    actionLog.record('api_error', { method, path, error: (err.message || String(err)).slice(0, 120), type: 'stream' })
+    actionLog.saveToBackend(`stream ${method} ${path}: ${err.message}`, 'stream_error')
+    throw err
+  }
 }
 
 /**
@@ -435,6 +458,10 @@ api.upload = async (path, formData, onMessage, options = {}) => {
  */
 api.configure = (newConfig) => {
   config = { ...config, ...newConfig }
+  // Auto-configure actionLog save URL so kernel-based apps get replay for free
+  if (!actionLog._userConfigured) {
+    actionLog.configure({ saveUrl: `${config.baseUrl}/admin/action-replay` })
+  }
 }
 
 /**
