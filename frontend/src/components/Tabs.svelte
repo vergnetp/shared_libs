@@ -51,6 +51,10 @@
     -webkit-overflow-scrolling: touch;
     scrollbar-width: none;
   }
+
+  .tabs.scrollable .tab {
+    flex-shrink: 0;
+  }
   
   .tabs.scrollable::-webkit-scrollbar {
     display: none;
@@ -104,8 +108,12 @@
     }
     
     .tab {
-      padding: 8px 10px;
+      padding: 7px 10px;
       font-size: 0.75rem;
+    }
+
+    /* Only expand tabs to fill when NOT scrolling */
+    .tabs:not(.scrollable) .tab {
       flex: 1;
       justify-content: center;
     }

@@ -140,17 +140,35 @@
   
   @media (max-width: 640px) {
     .header {
-      flex-direction: column;
-      padding: 12px 16px;
-      gap: 12px;
+      padding: 10px 12px;
+      gap: 8px;
     }
     
     h1 {
-      font-size: 1.1rem;
+      font-size: 1rem;
     }
     
+    .header-actions {
+      gap: 8px;
+    }
+
     .user-email {
       display: none;
+    }
+  }
+
+  @media (max-width: 380px) {
+    .header {
+      padding: 8px 10px;
+      gap: 6px;
+    }
+
+    h1 {
+      font-size: 0.9rem;
+    }
+
+    .header-actions {
+      gap: 6px;
     }
   }
 </style>

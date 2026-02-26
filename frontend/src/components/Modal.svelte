@@ -165,8 +165,25 @@
     }
     
     .modal {
+      max-width: calc(100vw - 20px) !important;
       max-height: 85vh;
       border-radius: var(--r2) var(--r2) 0 0;
+    }
+
+    .modal-header {
+      padding: 12px 14px;
+    }
+
+    .modal-header h3 {
+      font-size: 1rem;
+    }
+
+    .modal-body {
+      padding: 14px;
+    }
+
+    .modal-footer {
+      padding: 12px 14px;
     }
   }
 </style>
