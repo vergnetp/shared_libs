@@ -1,21 +1,23 @@
 /**
- * theme.js - Theme (dark/light mode) store
+ * theme.js - Theme (dark/light/fancy) store
  * 
  * Usage:
  *   import { theme, toggleTheme, setTheme } from '@myorg/ui'
  *   
- *   $theme // 'dark' or 'light'
+ *   $theme // 'dark', 'light', or 'fancy'
  *   toggleTheme()
- *   setTheme('light')
+ *   setTheme('fancy')
  */
 import { writable, get } from 'svelte/store'
 
 const STORAGE_KEY = 'theme'
 const DEFAULT_THEME = 'dark'
+const THEMES = ['dark', 'light', 'fancy']
 
 function getInitialTheme() {
   if (typeof localStorage === 'undefined') return DEFAULT_THEME
-  return localStorage.getItem(STORAGE_KEY) || DEFAULT_THEME
+  const stored = localStorage.getItem(STORAGE_KEY)
+  return THEMES.includes(stored) ? stored : DEFAULT_THEME
 }
 
 function applyTheme(themeName) {
@@ -55,5 +57,7 @@ export function setTheme(themeName) {
 
 export function toggleTheme() {
   const current = get(theme)
-  theme.set(current === 'dark' ? 'light' : 'dark')
+  const idx = THEMES.indexOf(current)
+  const next = THEMES[(idx + 1) % THEMES.length]
+  theme.set(next)
 }
