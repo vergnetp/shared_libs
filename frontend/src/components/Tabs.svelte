@@ -170,7 +170,7 @@
     cursor: pointer;
     transition: border-color 0.12s;
   }
-  .mobile-toggle:hover { border-color: rgba(255,255,255,.15); }
+  .mobile-toggle:hover { border-color: var(--border2); }
 
   .hamburger {
     display: flex;
@@ -205,8 +205,8 @@
     top: calc(100% + 4px);
     left: 0;
     right: 0;
-    background: var(--bg-secondary, #1a2332);
-    border: 1px solid rgba(255,255,255,.1);
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
     border-radius: 8px;
     padding: 4px 0;
     box-shadow: 0 8px 24px rgba(0,0,0,.4);
@@ -223,7 +223,7 @@
     background: transparent;
   }
   .mobile-dropdown::-webkit-scrollbar-thumb {
-    background: rgba(255,255,255,.15);
+    background: var(--border);
     border-radius: 2px;
   }
 
@@ -241,7 +241,7 @@
     cursor: pointer;
     text-align: left;
   }
-  .mobile-item:hover { background: rgba(255,255,255,.06); color: var(--text); }
+  .mobile-item:hover { background: var(--bg-hover); color: var(--text); }
   .mobile-item.active { color: var(--tab-active-text); font-weight: 600; }
   .mobile-item-icon { font-size: 1rem; }
   .mobile-item-label { flex: 1; }

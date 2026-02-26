@@ -8,7 +8,7 @@
  *   toggleTheme()
  *   setTheme('light')
  */
-import { writable } from 'svelte/store'
+import { writable, get } from 'svelte/store'
 
 const STORAGE_KEY = 'theme'
 const DEFAULT_THEME = 'dark'
@@ -26,19 +26,23 @@ function applyTheme(themeName) {
 
 function createThemeStore() {
   const initial = getInitialTheme()
-  const { subscribe, set } = writable(initial)
+  const store = writable(initial)
   
-  // Apply initial theme
   applyTheme(initial)
   
   return {
-    subscribe,
+    subscribe: store.subscribe,
     set(themeName) {
       if (typeof localStorage !== 'undefined') {
         localStorage.setItem(STORAGE_KEY, themeName)
       }
       applyTheme(themeName)
-      set(themeName)
+      store.set(themeName)
+    },
+    update(fn) {
+      const current = get(store)
+      const next = fn(current)
+      this.set(next)
     }
   }
 }
@@ -50,12 +54,6 @@ export function setTheme(themeName) {
 }
 
 export function toggleTheme() {
-  theme.update(current => {
-    const next = current === 'dark' ? 'light' : 'dark'
-    if (typeof localStorage !== 'undefined') {
-      localStorage.setItem(STORAGE_KEY, next)
-    }
-    applyTheme(next)
-    return next
-  })
+  const current = get(theme)
+  theme.set(current === 'dark' ? 'light' : 'dark')
 }
