@@ -443,6 +443,8 @@ class ServiceConfig:
     rate_limit_requests: int = 100
     rate_limit_window: int = 60
     
+    max_body_size: int = 10 * 1024 * 1024
+    
     # Streaming
     max_concurrent_streams: int = 3
     stream_lease_ttl: int = 300
@@ -1144,6 +1146,7 @@ def _build_kernel_settings(
             enable_request_logging=True,
             enable_error_handling=True,
             debug=cfg.debug,
+            max_body_size=getattr(cfg, 'max_body_size', 10 * 1024 * 1024),
         ),
         
         features=FeatureSettings(

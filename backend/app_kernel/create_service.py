@@ -87,6 +87,9 @@ def create_service(
     rate_limit_anonymous_rpm: int = 30,
     rate_limit_authenticated_rpm: int = 120,
     rate_limit_admin_rpm: int = 600,
+
+    # === Size limit ===
+    max_body_size: int = 10 * 1024 * 1024,  # 10 MB default
     
     # === CORS ===
     cors_origins: Optional[List[str]] = None,
@@ -356,6 +359,7 @@ def create_service(
         rate_limit_enabled=True,
         rate_limit_requests=rate_limit_authenticated_rpm,
         rate_limit_window=60,
+        max_body_size=max_body_size,
         email_enabled=bool(smtp_url and email_from),
         email_from=email_from,
         **_parse_smtp_url(smtp_url) if smtp_url else {},
