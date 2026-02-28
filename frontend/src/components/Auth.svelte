@@ -145,7 +145,7 @@
       
       useAuth.setUser(user)
       
-      const result = { user, token }
+      const result = { user, token, password: loginPassword }
       dispatch('success', result)
       if (onSuccess) onSuccess(result)
       
@@ -205,7 +205,7 @@
       
       useAuth.setUser(user)
       
-      const result = { user, token }
+      const result = { user, token, password: signupPassword }
       dispatch('success', result)
       if (onSuccess) onSuccess(result)
       
