@@ -5,7 +5,7 @@
  *   import { Auth, Header, Button } from '@myorg/ui'
  *   import { useAuth, toasts } from '@myorg/ui'
  *   import { api, login, logout, initApp } from '@myorg/ui'
- *   import { SWR, clearSWRCache } from '@myorg/ui'
+ *   import { SWR, clearSWRCache, debugSWRCache } from '@myorg/ui'
  *   import { useOnlineStatus, isOnline } from '@myorg/ui'
  *   import { presets, withPreset } from '@myorg/ui/presets'
  *   import '@myorg/ui/styles/base.css'
@@ -69,7 +69,7 @@ export { api } from './api/client.js'
 // =============================================================================
 // SWR (Stale-While-Revalidate)
 // =============================================================================
-export { SWR, clearSWRCache } from './api/swr.js'
+export { SWR, clearSWRCache, debugSWRCache } from './api/swr.js'
 
 // =============================================================================
 // App + Auth Flows

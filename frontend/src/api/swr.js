@@ -93,18 +93,54 @@ export function clearSWRCache() {
 }
 
 /**
+ * Debug helper — dump all SWR cache entries with age.
+ * Call from browser console: `import('./api/swr.js').then(m => m.debugSWRCache())`
+ *
+ * @returns {Array<{ key: string, age: string, ageMs: number, size: number, data: * }>}
+ */
+export function debugSWRCache() {
+  const entries = [];
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!k?.startsWith(CACHE_PREFIX)) continue;
+      const raw = localStorage.getItem(k);
+      const { data, ts } = JSON.parse(raw);
+      const ageMs = Date.now() - ts;
+      const ageSec = Math.floor(ageMs / 1000);
+      const age = ageSec < 60 ? `${ageSec}s`
+        : ageSec < 3600 ? `${Math.floor(ageSec / 60)}m ${ageSec % 60}s`
+        : `${Math.floor(ageSec / 3600)}h ${Math.floor((ageSec % 3600) / 60)}m`;
+      entries.push({
+        key: k.slice(CACHE_PREFIX.length),
+        age,
+        ageMs,
+        size: raw.length,
+        cachedAt: new Date(ts).toISOString(),
+        data,
+      });
+    }
+    entries.sort((a, b) => a.ageMs - b.ageMs);
+    console.table(entries.map(({ key, age, cachedAt, size }) => ({ key, age, cachedAt, bytes: size })));
+  } catch (e) {
+    console.error('debugSWRCache failed:', e);
+  }
+  return entries;
+}
+
+/**
  * Read cached data for a key if valid.
  * @param {string} key
  * @param {boolean} persist
  * @param {number} persistTTL
- * @returns {*|null}
+ * @returns {{ data: *, cachedAt: number }|null}
  */
 function readCache(key, persist, persistTTL) {
   if (!persist) return null;
   const cached = cacheGet(key);
   if (!cached) return null;
   if (persistTTL > 0 && Date.now() - cached.ts > persistTTL) return null;
-  return cached.data;
+  return { data: cached.data, cachedAt: cached.ts };
 }
 
 // =============================================================================
@@ -116,7 +152,9 @@ function readCache(key, persist, persistTTL) {
  * @property {*} data - The fetched data (or null if not yet loaded)
  * @property {string|null} error - Error message from last failed fetch (null if ok)
  * @property {boolean} loading - True only on first load with no cached data
- * @property {Date|null} lastFetched - Timestamp of last successful fetch (null if never)
+ * @property {Date|null} lastFetched - When data was last received from the backend.
+ *   Restored from localStorage on page reload so you can tell how stale cached data is.
+ *   null only if no fetch has ever succeeded AND no cache exists.
  */
 
 /**
@@ -191,6 +229,7 @@ function createEngine(engineOptions) {
       onError = null,
     },
     initialData = null,
+    initialCachedAt = null,
   } = engineOptions;
 
   const MAX_ERRORS_BEFORE_PAUSE = 3;
@@ -200,7 +239,7 @@ function createEngine(engineOptions) {
     data: initialData,
     error: null,
     loading: false,
-    lastFetched: null,
+    lastFetched: initialCachedAt ? new Date(initialCachedAt) : null,
   });
 
   let lastFetchTime = 0;
@@ -415,9 +454,11 @@ function createFetchStore(key, fetcher, options = {}) {
   } = options;
 
   // Resolve initial data: explicit > cache > null
-  const resolvedInitial = initialData ?? readCache(key, persist, persistTTL);
+  const cached = readCache(key, persist, persistTTL);
+  const resolvedInitial = initialData ?? cached?.data ?? null;
+  const resolvedCachedAt = initialData != null ? null : cached?.cachedAt ?? null;
 
-  const engine = createEngine({ options, initialData: resolvedInitial });
+  const engine = createEngine({ options, initialData: resolvedInitial, initialCachedAt: resolvedCachedAt });
   const { store, doFetch, wrapSubscribe, resetErrors } = engine;
 
   const poll = () => doFetch(key, fetcher);
@@ -491,7 +532,11 @@ function _swrParam(endpointFn, options = {}) {
     if (isNewParams) {
       const cached = readCache(endpoint, persist, persistTTL);
       if (cached !== null) {
-        store.update((s) => ({ ...s, data: cached }));
+        store.update((s) => ({
+          ...s,
+          data: cached.data,
+          lastFetched: cached.cachedAt ? new Date(cached.cachedAt) : s.lastFetched,
+        }));
       }
     }
 
