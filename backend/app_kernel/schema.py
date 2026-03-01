@@ -227,6 +227,19 @@ class AuditLog:
     user_agent: Optional[str] = None
     timestamp: Optional[str] = entity_field(default=None, index=True)
 
+@entity(table="kernel_action_replays", history=False)
+@dataclass
+class ActionReplay:
+    """Frontend action replays for bug diagnosis."""
+    workspace_id: Optional[str] = entity_field(default=None, index=True)
+    user_id: Optional[str] = entity_field(default=None, index=True)
+    error_message: Optional[str] = None
+    error_source: Optional[str] = None
+    url: Optional[str] = None
+    user_agent: Optional[str] = None
+    replay_log: Optional[str] = None
+    resolved: int = entity_field(default=0)
+    timestamp: Optional[str] = entity_field(default=None, index=True)
 
 # =============================================================================
 # Metering
