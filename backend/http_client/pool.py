@@ -144,11 +144,17 @@ class AsyncConnectionPool:
         self._misses = 0
     
     def _make_key(self, base_url: str, config: "HttpConfig" = None) -> str:
-        """Create unique key for client lookup."""
+        """Create unique key for client lookup.
+        
+        Includes all config fields that affect the underlying httpx client
+        construction (timeouts, SSL verification, redirects).
+        """
         config_str = ""
         if config:
-            # Hash relevant config fields
-            config_str = f"{config.timeout}:{config.connect_timeout}"
+            config_str = (
+                f"{config.timeout}:{config.connect_timeout}"
+                f":{config.verify_ssl}:{config.follow_redirects}"
+            )
         
         combined = f"{base_url}:{config_str}"
         return hashlib.sha256(combined.encode()).hexdigest()[:16]
@@ -363,10 +369,17 @@ class SyncConnectionPool:
         self._misses = 0
     
     def _make_key(self, base_url: str, config: "HttpConfig" = None) -> str:
-        """Create unique key for client lookup."""
+        """Create unique key for client lookup.
+        
+        Includes all config fields that affect the underlying requests session
+        construction (timeouts, SSL verification, redirects).
+        """
         config_str = ""
         if config:
-            config_str = f"{config.timeout}:{config.connect_timeout}"
+            config_str = (
+                f"{config.timeout}:{config.connect_timeout}"
+                f":{config.verify_ssl}:{config.follow_redirects}"
+            )
         
         combined = f"{base_url}:{config_str}"
         return hashlib.sha256(combined.encode()).hexdigest()[:16]
