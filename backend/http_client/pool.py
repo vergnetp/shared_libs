@@ -267,6 +267,7 @@ class AsyncConnectionPool:
             http2=http2,
             timeout=timeout,
             limits=limits,
+            verify=config.verify_ssl,
             follow_redirects=config.follow_redirects,
         )
     
