@@ -1112,8 +1112,61 @@ Companion frontend: `actionLog` hook in `@myorg/ui` — configure with `actionLo
 | `RequestContext` | Dataclass | `user`, `request_id`, `ip_address`, `is_authenticated` (property). |
 | `AuthError` | Exception | Raised for auth/token failures. |
 | `UserStore` | Protocol | `get_by_username`, `get_by_id`, `create`, `update_password`. |
-| `AuthServiceAdapter` | Class | Wraps `backend.auth.AuthService` to implement `UserStore`. |
+| `AuthServiceAdapter` | Class | **Deprecated.** Wraps `backend.auth.AuthService` to implement `UserStore`. Will be removed once RBAC is migrated into the kernel (see TODO below). |
 | `create_auth_router(...)` | Factory | Create auth router with login/register/refresh/me/change-password. |
+
+#### `app.state` — Auth Primitives for Custom Flows
+
+After `init_app_kernel`, bootstrap exposes the user store and auth config on `app.state` so that app-specific routes (external provider auth, API key auth, magic links, etc.) can create/lookup users and issue tokens without importing kernel internals or writing to DB tables directly.
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `app.state.user_store` | `UserStore` | The kernel's user store instance (`KernelUserStore` by default). |
+| `app.state.auth_config` | `dict` | `{"token_secret", "access_token_expires_minutes", "refresh_token_expires_days"}` |
+
+Example — external provider auth (e.g. DigitalOcean token, API key):
+
+```python
+from shared_libs.backend.app_kernel.auth import hash_password, create_access_token, create_refresh_token
+
+async def authenticate_with_external_token(external_token: str, app):
+    """Validate external token, then find/create user via kernel user_store."""
+    # 1. Validate token with external provider (your logic)
+    account = await validate_external_token(external_token)
+    email = f"provider-{account['id']}@myapp.local"
+
+    # 2. Find or create user via kernel user_store
+    user_store = app.state.user_store
+    auth_config = app.state.auth_config
+    user = await user_store.get_by_username(email)
+
+    if user:
+        await user_store.update_password(user["id"], hash_password(external_token))
+    else:
+        user = await user_store.create(
+            username=email, email=email,
+            password_hash=hash_password(external_token),
+        )
+
+    # 3. Issue tokens via kernel auth utils
+    access_token = create_access_token(
+        user_id=user["id"], role=user.get("role", "user"),
+        email=email, secret=auth_config["token_secret"],
+        expires_minutes=auth_config["access_token_expires_minutes"],
+    )
+    return {"access_token": access_token, "user": user}
+```
+
+Access from any route via `request.app`:
+
+```python
+@router.post("/auth/my-provider")
+async def my_provider_auth(req: MyRequest, request: Request):
+    result = await authenticate_with_external_token(req.token, request.app)
+    return result
+```
+
+> **TODO: RBAC migration.** Role-based access control (roles, permissions, resource-scoped assignments) currently lives in `shared_libs/backend/auth` as a separate module with its own `AuthService`, `DatabaseUserStore`, `DatabaseRoleStore`, and `auth_users` table. This creates confusion: two auth systems, two user tables, two sets of hashing/token utilities. The kernel auth handles user management, JWT tokens, and login/register — the only thing missing is RBAC. Plan: migrate `Role`, `RoleAssignment`, `has_permission`, `assign_role`, `revoke_role`, `require_permission` into the kernel, backed by `kernel_auth_roles` and `kernel_auth_role_assignments` tables. Once migrated, delete `shared_libs/backend/auth` entirely and remove `AuthServiceAdapter`.
 
 ### Database
 

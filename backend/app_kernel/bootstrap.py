@@ -887,6 +887,16 @@ def create_service(
         api_prefix=api_prefix,
     )
     
+    # Expose auth primitives on app.state so app-specific routes (e.g. OAuth,
+    # external-provider auth) can create/lookup users and issue tokens without
+    # importing kernel internals or writing to DB tables directly.
+    app.state.user_store = _user_store
+    app.state.auth_config = {
+        "token_secret": cfg.jwt_secret,
+        "access_token_expires_minutes": cfg.jwt_expiry_hours * 60,
+        "refresh_token_expires_days": 30,
+    }
+    
     # Add request metrics middleware if enabled (uses shared Redis → admin worker)
     # NOTE: Redis is initialized during lifespan, not at module-init time.
     # Pass a lazy getter so the middleware resolves the client on first request.
