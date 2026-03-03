@@ -38,7 +38,7 @@ from .utils import (
     verify_token,
 )
 from .router import create_auth_router, UserStore, AuthServiceAdapter
-from .schema import init_auth_schema
+from .schema import init_auth_schema, migrate_add_identity_hash
 from .stores import KernelUserStore, create_kernel_user_store
 
 __all__ = [
@@ -72,6 +72,7 @@ __all__ = [
     
     # Schema & Stores
     "init_auth_schema",
+    "migrate_add_identity_hash",
     "KernelUserStore",
     "create_kernel_user_store",
 ]

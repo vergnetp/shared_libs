@@ -106,12 +106,14 @@ def create_access_token(
     *,
     user: "UserIdentity" = None,
     expires_delta: timedelta = None,
+    extra_claims: dict = None,
 ) -> str:
     """
     Create an access token.
     
     Can be called two ways:
-    1. create_access_token(user_id="123", role="user", email="user@example.com", secret="...", expires_minutes=15)
+    1. create_access_token(user_id="123", role="user", email="user@example.com",
+                           secret="...", expires_minutes=15, extra_claims={...})
     2. create_access_token(user=user_identity, secret="...", expires_delta=timedelta(...))
     
     Args:
@@ -122,6 +124,7 @@ def create_access_token(
         expires_minutes: Token expiration in minutes
         user: UserIdentity object (alternative to user_id/role/email)
         expires_delta: Token expiration as timedelta (alternative to expires_minutes)
+        extra_claims: Additional claims to embed in the JWT (e.g. do_uuid, enc_do_token)
     
     Returns:
         Encoded JWT token string
@@ -145,12 +148,15 @@ def create_access_token(
     
     payload = {
         "sub": _user_id,
-        "email": _email,
+        "email": _email or "",
         "role": _role,
         "type": "access",
         "iat": now,
         "exp": expires
     }
+    
+    if extra_claims:
+        payload.update(extra_claims)
     
     return jwt.encode(payload, secret, algorithm="HS256")
 
@@ -212,7 +218,7 @@ def decode_token(token: str, secret: str) -> TokenPayload:
         secret: Secret key for verification
     
     Returns:
-        TokenPayload with decoded claims
+        TokenPayload with decoded claims (including any extra_claims)
     
     Raises:
         AuthError: If token is invalid or expired
@@ -220,13 +226,18 @@ def decode_token(token: str, secret: str) -> TokenPayload:
     try:
         payload = jwt.decode(token, secret, algorithms=["HS256"])
         
+        # Collect extra claims (anything not in the standard set)
+        _standard = {"sub", "email", "role", "type", "iat", "exp"}
+        extra = {k: v for k, v in payload.items() if k not in _standard}
+        
         return TokenPayload(
             sub=payload["sub"],
             email=payload.get("email", ""),
             role=payload.get("role", "user"),
             type=payload.get("type", "access"),
             exp=datetime.fromtimestamp(payload["exp"], tz=UTC) if "exp" in payload else None,
-            iat=datetime.fromtimestamp(payload["iat"], tz=UTC) if "iat" in payload else None
+            iat=datetime.fromtimestamp(payload["iat"], tz=UTC) if "iat" in payload else None,
+            extra=extra,
         )
         
     except jwt.ExpiredSignatureError:

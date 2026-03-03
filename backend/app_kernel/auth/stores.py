@@ -41,7 +41,6 @@ class KernelUserStore(UserStore):
     async def get_by_username(self, username: str) -> Optional[Dict[str, Any]]:
         """Get user by username (email)."""
         async with self._get_db() as db:
-            # Use find_entities which is available on the connection
             results = await db.find_entities(
                 "kernel_auth_users",
                 where_clause="[email] = ?",
@@ -54,10 +53,28 @@ class KernelUserStore(UserStore):
                 return self._entity_to_user(results[0])
             return None
     
+    async def get_by_identity_hash(self, identity_hash: str) -> Optional[Dict[str, Any]]:
+        """Get user by external identity hash (e.g. SHA256 of DO UUID).
+        
+        Used by external auth flows (DigitalOcean, etc.) where the user
+        is identified by a stable hash rather than an email address.
+        """
+        async with self._get_db() as db:
+            results = await db.find_entities(
+                "kernel_auth_users",
+                where_clause="[identity_hash] = ?",
+                params=(identity_hash,),
+                limit=1,
+                include_deleted=False,
+                deserialize=True
+            )
+            if results:
+                return self._entity_to_user(results[0])
+            return None
+    
     async def get_by_id(self, user_id: str) -> Optional[Dict[str, Any]]:
         """Get user by ID."""
         async with self._get_db() as db:
-            # Use get_entity for ID lookup
             result = await db.get_entity(
                 "kernel_auth_users",
                 user_id,
@@ -68,27 +85,48 @@ class KernelUserStore(UserStore):
                 return self._entity_to_user(result)
             return None
     
-    async def create(self, username: str, email: str, password_hash: str) -> Dict[str, Any]:
-        """Create new user."""
+    async def create(self, username: str, email: str, password_hash: str,
+                     identity_hash: str = None) -> Dict[str, Any]:
+        """Create new user.
+        
+        Args:
+            username: Display name.
+            email: Email address (can be empty for external-auth users).
+            password_hash: Hashed password.
+            identity_hash: Optional external identity hash for lookup.
+        """
         async with self._get_db() as db:
-            # Check if email exists using find_entities
-            existing = await db.find_entities(
-                "kernel_auth_users",
-                where_clause="[email] = ?",
-                params=(email or username,),
-                limit=1,
-                include_deleted=True  # Check even deleted ones
-            )
-            if existing:
-                raise ValueError(f"Email '{email or username}' already exists")
+            # Check for duplicate email (if provided)
+            if email:
+                existing = await db.find_entities(
+                    "kernel_auth_users",
+                    where_clause="[email] = ?",
+                    params=(email,),
+                    limit=1,
+                    include_deleted=True
+                )
+                if existing:
+                    raise ValueError(f"Email '{email}' already exists")
+            
+            # Check for duplicate identity_hash (if provided)
+            if identity_hash:
+                existing = await db.find_entities(
+                    "kernel_auth_users",
+                    where_clause="[identity_hash] = ?",
+                    params=(identity_hash,),
+                    limit=1,
+                    include_deleted=True
+                )
+                if existing:
+                    raise ValueError(f"Identity hash already exists")
             
             now = _now()
             user_id = _uuid()
             
-            # Use save_entity
             user_data = {
                 "id": user_id,
-                "email": email or username,
+                "email": email or None,
+                "identity_hash": identity_hash,
                 "password_hash": password_hash,
                 "name": username,
                 "role": "user",
@@ -102,7 +140,8 @@ class KernelUserStore(UserStore):
             return {
                 "id": user_id,
                 "username": username,
-                "email": email or username,
+                "email": email or None,
+                "identity_hash": identity_hash,
                 "role": "user",
                 "created_at": now,
             }
@@ -110,13 +149,24 @@ class KernelUserStore(UserStore):
     async def update_password(self, user_id: str, password_hash: str) -> bool:
         """Update user's password hash."""
         async with self._get_db() as db:
-            # Get existing user
             user = await db.get_entity("kernel_auth_users", user_id, include_deleted=False)
             if not user:
                 return False
             
-            # Update password
             user["password_hash"] = password_hash
+            user["updated_at"] = _now()
+            
+            await db.save_entity("kernel_auth_users", user)
+            return True
+    
+    async def update_email(self, user_id: str, email: str) -> bool:
+        """Update user's email (e.g. when DO user provides real email later)."""
+        async with self._get_db() as db:
+            user = await db.get_entity("kernel_auth_users", user_id, include_deleted=False)
+            if not user:
+                return False
+            
+            user["email"] = email
             user["updated_at"] = _now()
             
             await db.save_entity("kernel_auth_users", user)
@@ -124,7 +174,6 @@ class KernelUserStore(UserStore):
     
     def _entity_to_user(self, entity: Dict[str, Any]) -> Dict[str, Any]:
         """Convert database entity to user dict for auth router."""
-        # Parse metadata if it's JSON string
         metadata = entity.get("metadata")
         if isinstance(metadata, str):
             try:
@@ -134,8 +183,9 @@ class KernelUserStore(UserStore):
         
         return {
             "id": entity.get("id"),
-            "username": entity.get("email"),  # email is username
+            "username": entity.get("email") or entity.get("name", ""),
             "email": entity.get("email"),
+            "identity_hash": entity.get("identity_hash"),
             "password_hash": entity.get("password_hash"),
             "name": entity.get("name"),
             "role": entity.get("role", "user"),

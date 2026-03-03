@@ -6,7 +6,7 @@ Apps may extend these or map to their own domain models.
 """
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Dict, Any
 import uuid
 
 UTC = timezone.utc
@@ -53,6 +53,7 @@ class TokenPayload:
     Decoded JWT token payload.
     
     Contains the essential claims from a verified token.
+    Extra claims (e.g. do_uuid, enc_do_token) are in the `extra` dict.
     """
     sub: str  # User ID
     email: str = ""
@@ -60,6 +61,7 @@ class TokenPayload:
     type: str = "access"  # 'access' | 'refresh'
     exp: Optional[datetime] = None
     iat: Optional[datetime] = None
+    extra: Dict[str, Any] = field(default_factory=dict)
     
     @property
     def user_id(self) -> str:
