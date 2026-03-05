@@ -98,13 +98,33 @@ class UserStore:
         """
         raise NotImplementedError
     
+    async def get_by_identity_hash(self, identity_hash: str) -> Optional[dict]:
+        """
+        Get user by external identity hash.
+        
+        Used by external auth flows (OAuth, API tokens, etc.) where
+        the user is identified by a stable hash of their external ID
+        (e.g. SHA256 of DigitalOcean UUID, Google sub, GitHub user ID).
+        
+        Returns dict with: id, username, email, password_hash, role
+        Returns None if not found or not supported.
+        """
+        return None  # Default: not supported (email/password-only stores)
+    
     async def get_by_id(self, user_id: str) -> Optional[dict]:
         """Get user by ID."""
         raise NotImplementedError
     
-    async def create(self, username: str, email: str, password_hash: str) -> dict:
+    async def create(self, username: str, email: str, password_hash: str,
+                     identity_hash: str = None) -> dict:
         """
         Create new user.
+        
+        Args:
+            username: Display name.
+            email: Email address (can be empty for external-auth users).
+            password_hash: Hashed password.
+            identity_hash: Optional stable hash of external identity for lookup.
         
         Returns created user dict (without password_hash).
         Raises ValueError if username/email already exists.
@@ -168,7 +188,8 @@ class AuthServiceAdapter(UserStore):
         except Exception:
             return None
     
-    async def create(self, username: str, email: str, password_hash: str) -> dict:
+    async def create(self, username: str, email: str, password_hash: str,
+                     identity_hash: str = None) -> dict:
         """Create new user with pre-hashed password."""
         # Check if user exists
         existing = await self.auth.user_store.get_by_email(email or username)
