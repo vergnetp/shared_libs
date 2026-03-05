@@ -83,6 +83,7 @@ class User:
 class AuthUser:
     """Authentication users."""
     email: str = entity_field(default="", unique=True, index=True)
+    identity_hash: Optional[str] = entity_field(default=None, unique=True, index=True)
     password_hash: Optional[str] = None
     name: Optional[str] = None
     role: str = entity_field(default="user", index=True)
