@@ -124,22 +124,27 @@ class WorkspaceStore:
         return workspace
     
     async def delete(self, workspace_id: str) -> bool:
-        """Delete workspace and all members/invites."""
+        """Delete workspace and all members/invites (hard delete)."""
         # Delete members
-        await self.conn.execute(
-            "DELETE FROM workspace_members WHERE workspace_id = ?",
-            (workspace_id,),
+        members = await self.conn.find_entities(
+            "kernel_workspace_members",
+            where_clause="[workspace_id] = ?",
+            params=(workspace_id,),
         )
+        for m in members:
+            await self.conn.delete_entity("kernel_workspace_members", m["id"], permanent=True)
+        
         # Delete invites
-        await self.conn.execute(
-            "DELETE FROM workspace_invites WHERE workspace_id = ?",
-            (workspace_id,),
+        invites = await self.conn.find_entities(
+            "kernel_workspace_invites",
+            where_clause="[workspace_id] = ?",
+            params=(workspace_id,),
         )
-        # Delete workspace
-        await self.conn.execute(
-            "DELETE FROM workspaces WHERE id = ?",
-            (workspace_id,),
-        )
+        for inv in invites:
+            await self.conn.delete_entity("kernel_workspace_invites", inv["id"], permanent=True)
+        
+        # Delete workspace itself
+        await self.conn.delete_entity("kernel_workspaces", workspace_id, permanent=True)
         return True
     
     def _generate_slug(self, name: str) -> str:
@@ -217,10 +222,13 @@ class MemberStore:
     
     async def remove(self, workspace_id: str, user_id: str) -> bool:
         """Remove member from workspace."""
-        await self.conn.execute(
-            "DELETE FROM workspace_members WHERE workspace_id = ? AND user_id = ?",
-            (workspace_id, user_id),
+        results = await self.conn.find_entities(
+            "kernel_workspace_members",
+            where_clause="[workspace_id] = ? AND [user_id] = ?",
+            params=(workspace_id, user_id),
         )
+        for member in results:
+            await self.conn.delete_entity("kernel_workspace_members", member["id"], permanent=True)
         return True
     
     async def is_member(self, workspace_id: str, user_id: str) -> bool:
@@ -378,10 +386,7 @@ class InviteStore:
     
     async def delete(self, invite_id: str) -> bool:
         """Delete an invite."""
-        await self.conn.execute(
-            "DELETE FROM workspace_invites WHERE id = ?",
-            (invite_id,),
-        )
+        await self.conn.delete_entity("kernel_workspace_invites", invite_id, permanent=True)
         return True
 
 
@@ -423,13 +428,13 @@ class ProjectStore:
             "updated_at": datetime.utcnow().isoformat(),
         }
         
-        await self.conn.save_entity("projects", project)
+        await self.conn.save_entity("kernel_projects", project)
         return self._deserialize(project)
     
     async def get(self, project_id: str) -> Optional[Dict[str, Any]]:
         """Get project by ID."""
         results = await self.conn.find_entities(
-            "projects",
+            "kernel_projects",
             where_clause="id = ?",
             params=(project_id,),
             limit=1,
@@ -439,7 +444,7 @@ class ProjectStore:
     async def get_by_slug(self, workspace_id: str, slug: str) -> Optional[Dict[str, Any]]:
         """Get project by slug within workspace."""
         results = await self.conn.find_entities(
-            "projects",
+            "kernel_projects",
             where_clause="workspace_id = ? AND slug = ?",
             params=(workspace_id, slug),
             limit=1,
@@ -449,7 +454,7 @@ class ProjectStore:
     async def list_for_workspace(self, workspace_id: str) -> List[Dict[str, Any]]:
         """List all projects in a workspace."""
         results = await self.conn.find_entities(
-            "projects",
+            "kernel_projects",
             where_clause="workspace_id = ?",
             params=(workspace_id,),
             order_by="name ASC",
@@ -465,7 +470,7 @@ class ProjectStore:
         import json
         
         project = await self.conn.find_entities(
-            "projects",
+            "kernel_projects",
             where_clause="id = ?",
             params=(project_id,),
             limit=1,
@@ -481,15 +486,12 @@ class ProjectStore:
         
         project.update(updates)
         project["updated_at"] = datetime.utcnow().isoformat()
-        await self.conn.save_entity("projects", project)
+        await self.conn.save_entity("kernel_projects", project)
         return self._deserialize(project)
     
     async def delete(self, project_id: str) -> bool:
         """Delete a project."""
-        await self.conn.execute(
-            "DELETE FROM projects WHERE id = ?",
-            (project_id,),
-        )
+        await self.conn.delete_entity("kernel_projects", project_id, permanent=True)
         return True
     
     async def get_or_create_default(

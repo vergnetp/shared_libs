@@ -26,7 +26,6 @@ Usage:
         ...
 """
 
-from .schema import SAAS_TABLES, get_saas_table_sql, get_all_saas_tables_sql
 from .stores import WorkspaceStore, MemberStore, InviteStore, ProjectStore
 from .deps import (
     require_workspace_member,
@@ -38,10 +37,6 @@ from .router import create_saas_router
 from .email import set_email_sender, get_email_sender, send_invite_email
 
 __all__ = [
-    # Schema
-    "SAAS_TABLES",
-    "get_saas_table_sql",
-    "get_all_saas_tables_sql",
     # Stores
     "WorkspaceStore",
     "MemberStore", 

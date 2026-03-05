@@ -386,59 +386,6 @@ class RequestMetricsStore:
     
     TABLE_NAME = "kernel_request_metrics"
     
-    # Schema for table creation
-    SCHEMA = """
-        CREATE TABLE IF NOT EXISTS request_metrics (
-            id TEXT PRIMARY KEY,
-            request_id TEXT NOT NULL,
-            method TEXT NOT NULL,
-            path TEXT NOT NULL,
-            query_params TEXT,
-            status_code INTEGER NOT NULL,
-            error TEXT,
-            error_type TEXT,
-            server_latency_ms REAL NOT NULL,
-            client_ip TEXT,
-            user_agent TEXT,
-            referer TEXT,
-            user_id TEXT,
-            workspace_id TEXT,
-            country TEXT,
-            city TEXT,
-            continent TEXT,
-            timestamp TEXT NOT NULL,
-            year INTEGER NOT NULL,
-            month INTEGER NOT NULL,
-            day INTEGER NOT NULL,
-            hour INTEGER NOT NULL,
-            metadata TEXT,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """
-    
-    # Indexes for common queries
-    INDEXES = [
-        "CREATE INDEX IF NOT EXISTS idx_request_metrics_timestamp ON request_metrics(timestamp DESC)",
-        "CREATE INDEX IF NOT EXISTS idx_request_metrics_path ON request_metrics(path)",
-        "CREATE INDEX IF NOT EXISTS idx_request_metrics_status ON request_metrics(status_code)",
-        "CREATE INDEX IF NOT EXISTS idx_request_metrics_user ON request_metrics(user_id)",
-        "CREATE INDEX IF NOT EXISTS idx_request_metrics_date ON request_metrics(year, month, day)",
-    ]
-    
-    @classmethod
-    async def init_schema(cls, db):
-        """
-        Initialize the request_metrics table.
-        
-        Call this from your schema_init function:
-            async def init_schema(db):
-                await RequestMetricsStore.init_schema(db)
-                # ... other tables
-        """
-        await db.execute(cls.SCHEMA)
-        for index in cls.INDEXES:
-            await db.execute(index)
-    
     async def save(self, metric: Dict[str, Any]) -> str:
         """Save a request metric to the database."""
         from ..db.session import raw_db_context

@@ -96,6 +96,8 @@ class AuditWrappedConnection:
     _SKIP_AUDIT_TABLES = frozenset({
         "kernel_audit_logs",
         "kernel_audit_logs_history",
+        "kernel_action_replays",
+        "kernel_action_replays_history",
         "kernel_usage_events",
         "kernel_usage_events_history",
         "kernel_request_metrics",
