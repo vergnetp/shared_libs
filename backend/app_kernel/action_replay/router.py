@@ -8,24 +8,24 @@ from ..db.session import raw_db_context
 
 
 class ActionReplayRequest(BaseModel):
-    error_message: str | None = None
-    error_source: str | None = None
-    url: str | None = None
-    user_agent: str | None = None
-    replay_log: str | None = None
+    error_message: Optional[str] = None
+    error_source: Optional[str] = None
+    url: Optional[str] = None
+    user_agent: Optional[str] = None
+    replay_log: Optional[str] = None
 
 
 class ActionReplaySummary(BaseModel):
     model_config = {"extra": "ignore"}
     id: str
-    user_id: str | None = None
-    workspace_id: str | None = None
-    error_message: str | None = None
-    error_source: str | None = None
-    url: str | None = None
+    user_id: Optional[str] = None
+    workspace_id: Optional[str] = None
+    error_message: Optional[str] = None
+    error_source: Optional[str] = None
+    url: Optional[str] = None
     resolved: bool = False
-    timestamp: str | None = None
-    created_at: str | None = None
+    timestamp: Optional[str] = None
+    created_at: Optional[str] = None
 
 
 def create_action_replay_router(
@@ -97,9 +97,9 @@ def create_action_replay_router(
     
     @router.get("/action-replays")
     async def list_action_replays(
-        resolved: bool | None = None,
-        since: str | None = Query(None, description="From timestamp (ISO format)"),
-        until: str | None = Query(None, description="To timestamp (ISO format)"),
+        resolved: Optional[bool] = None,
+        since: Optional[str] = Query(None, description="From timestamp (ISO format)"),
+        until: Optional[str] = Query(None, description="To timestamp (ISO format)"),
         limit: int = Query(50, le=200),
         offset: int = Query(0, ge=0),
         user=Depends(get_current_user),
