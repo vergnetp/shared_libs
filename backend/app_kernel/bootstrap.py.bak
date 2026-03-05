@@ -132,7 +132,7 @@ async def _run_embedded_admin_worker(
     app_name: str,
     logger,
     batch_size: int = 100,
-    poll_interval: float = 60,
+    poll_interval: float = 5,
 ):
     """
     Run admin worker as background task.
@@ -265,31 +265,18 @@ async def _run_embedded_admin_worker(
                 summary = ", ".join(f"{v} {k.replace('kernel_', '')}" for k, v in counts.items())
                 logger.info(f"Admin worker: processing {summary}")
                 
-                # Sub-batch writes: limit lock holding time per session.
-                # Each sub-batch gets its own short DB session with a yield
-                # between them so API requests and other writers can proceed.
-                SUB_BATCH_SIZE = 15
-                failed = []
-                for i in range(0, len(all_batches), SUB_BATCH_SIZE):
-                    chunk = all_batches[i:i + SUB_BATCH_SIZE]
+                try:
+                    async with raw_db_context() as db:
+                        for table, entity in all_batches:
+                            await db.save_entity(table, entity)
+                except Exception as e:
+                    logger.warning(f"Admin worker DB error: {e}")
+                    # Push failed events to dead-letter queue for later retry
                     try:
-                        async with raw_db_context() as db:
-                            for table, entity in chunk:
-                                await db.save_entity(table, entity)
-                    except Exception as e:
-                        logger.warning(f"Admin worker DB error (sub-batch {i // SUB_BATCH_SIZE}): {e}")
-                        failed.extend(chunk)
-                    # Yield between sub-batches to let other writers acquire the lock
-                    if i + SUB_BATCH_SIZE < len(all_batches):
-                        await asyncio.sleep(0.05)
-                
-                # Push failed events to dead-letter queue
-                if failed:
-                    try:
-                        for table, entity in failed:
+                        for table, entity in all_batches:
                             dlq_entry = json.dumps({"table": table, "entity": entity})
                             await redis_client.lpush("admin:dead_letter", dlq_entry)
-                        logger.info(f"Admin worker: {len(failed)} events moved to dead-letter queue")
+                        logger.info(f"Admin worker: {len(all_batches)} events moved to dead-letter queue")
                     except Exception as dlq_err:
                         logger.error(f"Admin worker: failed to write to dead-letter queue: {dlq_err}")
             else:
