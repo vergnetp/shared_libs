@@ -878,6 +878,20 @@ def create_service(
         redoc_url=redoc_url,
     )
     
+    # Log validation errors (422) so they appear in server logs with detail
+    from fastapi.exceptions import RequestValidationError
+    from fastapi.responses import JSONResponse
+    
+    @app.exception_handler(RequestValidationError)
+    async def _validation_error_handler(request, exc):
+        errors = exc.errors()
+        fields = [f"{e.get('loc', ['?'])[-1]}: {e.get('msg', '?')}" for e in errors]
+        logger.warning(f"Validation error: {request.method} {request.url.path} → {', '.join(fields)}")
+        return JSONResponse(
+            status_code=422,
+            content={"detail": errors},
+        )
+    
     # Get user store - either direct or auto-create from DB
     _user_store = user_store  # Direct user_store takes precedence
     
