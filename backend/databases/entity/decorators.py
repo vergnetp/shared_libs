@@ -12,9 +12,12 @@ The @entity decorator auto-adds:
 - get_many(cls, db, ids) - batch fetch by IDs
 - find(cls, db, where, params, ...) - query with filters (excludes soft-deleted by default)
 - save(cls, db, data) - create/update (upsert) with auto id/timestamps
+- save_many(cls, db, items) - batch create/update via executemany
 - update(cls, db, id, data) - merge update (fetch + merge + save)
 - soft_delete(cls, db, id) - set deleted_at timestamp
+- soft_delete_many(cls, db, ids) - batch soft-delete via UPDATE WHERE IN
 - hard_delete(cls, db, id) - permanently remove row
+- hard_delete_many(cls, db, ids) - batch permanent delete via DELETE WHERE IN
 - count(cls, db, where, params) - count matching entities
 
 No separate store layer needed - the entity class IS the store.
@@ -445,6 +448,39 @@ def _make_save(table_name: str, cls):
     return save
 
 
+def _make_save_many(table_name: str, cls):
+    """Create save_many classmethod for batch upsert."""
+    @classmethod
+    async def save_many(cls, db, items: List[Dict[str, Any]]):
+        """
+        Create or update multiple entities in a single batch operation.
+        
+        Uses executemany internally — much faster than looping save() for
+        large batches. Auto-generates ids and timestamps for each item.
+        
+        Args:
+            db: Database connection (optional — auto-acquires if None)
+            items: List of entity data dicts (or dataclass instances)
+            
+        Returns:
+            List of saved entities
+        """
+        if not items:
+            return []
+        
+        prepared = []
+        for item in items:
+            data = dict(item) if not isinstance(item, dict) else {**item}
+            data['id'] = data.get('id') or _generate_id()
+            data['created_at'] = data.get('created_at') or _now_iso()
+            data['updated_at'] = _now_iso()
+            prepared.append(data)
+        
+        results = await db.save_entities(table_name, prepared, _caller=_ENTITY_CALLER)
+        return [cls.from_dict(r) for r in results]
+    return save_many
+
+
 def _make_soft_delete(table_name: str):
     """Create soft_delete classmethod — sets deleted_at timestamp."""
     @classmethod
@@ -467,6 +503,78 @@ def _make_hard_delete(table_name: str):
         await db.delete_entity(table_name, id, permanent=True, _caller=_ENTITY_CALLER)
         return True
     return hard_delete
+
+
+def _make_hard_delete_many(table_name: str):
+    """Create hard_delete_many classmethod — permanently removes multiple rows."""
+    @classmethod
+    async def hard_delete_many(cls, db, ids: List[str]) -> int:
+        """
+        Permanently delete multiple entities by ID.
+        
+        Uses a single DELETE WHERE id IN(...) query per chunk.
+        Handles large ID lists by chunking to stay within DB parameter limits.
+        
+        Args:
+            db: Database connection (optional — auto-acquires if None)
+            ids: List of entity IDs to delete
+            
+        Returns:
+            Number of IDs requested for deletion
+        """
+        if not ids:
+            return 0
+        unique_ids = list(set(ids))
+        CHUNK_SIZE = 900
+        db._entity_op_depth = getattr(db, '_entity_op_depth', 0) + 1
+        try:
+            for i in range(0, len(unique_ids), CHUNK_SIZE):
+                chunk = unique_ids[i:i + CHUNK_SIZE]
+                placeholders = ','.join(['?'] * len(chunk))
+                await db.execute(
+                    f"DELETE FROM [{table_name}] WHERE [id] IN ({placeholders})",
+                    tuple(chunk),
+                )
+        finally:
+            db._entity_op_depth -= 1
+        return len(unique_ids)
+    return hard_delete_many
+
+
+def _make_soft_delete_many(table_name: str):
+    """Create soft_delete_many classmethod — sets deleted_at on multiple rows."""
+    @classmethod
+    async def soft_delete_many(cls, db, ids: List[str]) -> int:
+        """
+        Soft delete multiple entities by ID.
+        
+        Uses a single UPDATE WHERE id IN(...) query per chunk.
+        
+        Args:
+            db: Database connection (optional — auto-acquires if None)
+            ids: List of entity IDs to soft-delete
+            
+        Returns:
+            Number of IDs requested for deletion
+        """
+        if not ids:
+            return 0
+        unique_ids = list(set(ids))
+        now = _now_iso()
+        CHUNK_SIZE = 900
+        db._entity_op_depth = getattr(db, '_entity_op_depth', 0) + 1
+        try:
+            for i in range(0, len(unique_ids), CHUNK_SIZE):
+                chunk = unique_ids[i:i + CHUNK_SIZE]
+                placeholders = ','.join(['?'] * len(chunk))
+                await db.execute(
+                    f"UPDATE [{table_name}] SET [deleted_at] = ?, [updated_at] = ? WHERE [id] IN ({placeholders})",
+                    (now, now) + tuple(chunk),
+                )
+        finally:
+            db._entity_op_depth -= 1
+        return len(unique_ids)
+    return soft_delete_many
 
 
 def _make_update(table_name: str, cls):
@@ -593,13 +701,16 @@ def entity(table: str = None, history: bool = True):
         cls.get_many = _auto_db(_make_get_many(tbl, cls))
         cls.find = _auto_db(_make_find(tbl, cls))
         cls.save = _auto_db(_make_save(tbl, cls))
+        cls.save_many = _auto_db(_make_save_many(tbl, cls))
         
         # Alias create -> save for backward compatibility
         if not hasattr(cls, 'create'):
             cls.create = cls.save
         
         cls.soft_delete = _auto_db(_make_soft_delete(tbl))
+        cls.soft_delete_many = _auto_db(_make_soft_delete_many(tbl))
         cls.hard_delete = _auto_db(_make_hard_delete(tbl))
+        cls.hard_delete_many = _auto_db(_make_hard_delete_many(tbl))
         cls.update = _auto_db(_make_update(tbl, cls))
         cls.count = _auto_db(_make_count(tbl))
         

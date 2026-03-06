@@ -210,11 +210,19 @@ async def _run_embedded_admin_worker(
             "hour": event.get("hour"),
         }
     
+    def _build_trace_entity(event: dict) -> dict:
+        entity = {"id": str(uuid.uuid4())}
+        # Pass through all span fields; metadata already JSON-serialized by publisher
+        for k, v in event.items():
+            entity[k] = v
+        return entity
+    
     # Queue definitions: (redis_key, table_name, builder_func)
     queues = [
         ("admin:audit_events", "kernel_audit_logs", _build_audit_entity),
         ("admin:metering_events", "kernel_usage_events", _build_metering_entity),
         ("admin:request_metrics", "kernel_request_metrics", _build_request_metric_entity),
+        ("admin:trace_events", "kernel_traces", _build_trace_entity),
     ]
     
     try:
@@ -265,23 +273,30 @@ async def _run_embedded_admin_worker(
                 summary = ", ".join(f"{v} {k.replace('kernel_', '')}" for k, v in counts.items())
                 logger.info(f"Admin worker: processing {summary}")
                 
-                # Sub-batch writes: limit lock holding time per session.
+                # Sub-batch writes: group by table and use save_entities for efficiency.
                 # Each sub-batch gets its own short DB session with a yield
                 # between them so API requests and other writers can proceed.
                 SUB_BATCH_SIZE = 15
                 failed = []
-                for i in range(0, len(all_batches), SUB_BATCH_SIZE):
-                    chunk = all_batches[i:i + SUB_BATCH_SIZE]
-                    try:
-                        async with raw_db_context() as db:
-                            for table, entity in chunk:
-                                await db.save_entity(table, entity)
-                    except Exception as e:
-                        logger.warning(f"Admin worker DB error (sub-batch {i // SUB_BATCH_SIZE}): {e}")
-                        failed.extend(chunk)
-                    # Yield between sub-batches to let other writers acquire the lock
-                    if i + SUB_BATCH_SIZE < len(all_batches):
-                        await asyncio.sleep(0.05)
+                
+                # Group by table for batch saves
+                from collections import defaultdict
+                by_table = defaultdict(list)
+                for table, entity in all_batches:
+                    by_table[table].append(entity)
+                
+                for table, entities in by_table.items():
+                    for i in range(0, len(entities), SUB_BATCH_SIZE):
+                        chunk = entities[i:i + SUB_BATCH_SIZE]
+                        try:
+                            async with raw_db_context() as db:
+                                await db.save_entities(table, chunk)
+                        except Exception as e:
+                            logger.warning(f"Admin worker DB error ({table}, sub-batch {i // SUB_BATCH_SIZE}): {e}")
+                            failed.extend((table, ent) for ent in chunk)
+                        # Yield between sub-batches to let other writers acquire the lock
+                        if i + SUB_BATCH_SIZE < len(entities):
+                            await asyncio.sleep(0.05)
                 
                 # Push failed events to dead-letter queue
                 if failed:

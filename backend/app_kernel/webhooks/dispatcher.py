@@ -131,8 +131,8 @@ async def trigger_webhook_event(
     """
     Trigger an event for all webhooks in a workspace.
     
-    Sends to ALL enabled webhooks. Receiver decides which events to handle
-    based on the event field in the payload.
+    Sends to ALL enabled webhooks concurrently. Receiver decides which 
+    events to handle based on the event field in the payload.
     
     Args:
         db: Database connection
@@ -151,34 +151,58 @@ async def trigger_webhook_event(
     if not webhooks:
         return []
     
-    results = []
-    
-    for webhook in webhooks:
-        result = await dispatch_webhook(
+    # Dispatch all webhooks concurrently (not sequentially)
+    import asyncio
+    tasks = [
+        dispatch_webhook(
             url=webhook["url"],
             event=event,
             data=data,
             secret=webhook.get("secret"),
             webhook_id=webhook["id"],
         )
-        
-        results.append(result)
-        
-        # Log delivery
-        if log_deliveries:
-            await log_delivery(
-                db,
+        for webhook in webhooks
+    ]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    # Convert exceptions to failed deliveries and batch log
+    deliveries = []
+    log_entities = []
+    for webhook, result in zip(webhooks, results):
+        if isinstance(result, Exception):
+            result = WebhookDelivery(
                 webhook_id=webhook["id"],
                 event=event,
-                payload=data,
-                response_status=result.status_code,
-                response_body=None,  # Don't store response body by default
-                duration_ms=result.duration_ms,
-                success=result.success,
-                error=result.error,
+                success=False,
+                error=str(result),
             )
+        deliveries.append(result)
+        
+        if log_deliveries:
+            import json, uuid
+            log_entities.append({
+                "id": str(uuid.uuid4()),
+                "webhook_id": webhook["id"],
+                "event": event,
+                "payload": json.dumps(data),
+                "response_status": result.status_code,
+                "response_body": None,
+                "duration_ms": result.duration_ms,
+                "success": 1 if result.success else 0,
+                "error": result.error,
+                "created_at": _now_iso(),
+            })
     
-    return results
+    # Batch log all deliveries in one call
+    if log_entities:
+        await db.save_entities("kernel_webhook_deliveries", log_entities)
+    
+    return deliveries
+
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
 
 
 def verify_webhook_signature(

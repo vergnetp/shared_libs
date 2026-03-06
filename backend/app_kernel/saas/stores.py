@@ -125,25 +125,15 @@ class WorkspaceStore:
     
     async def delete(self, workspace_id: str) -> bool:
         """Delete workspace and all members/invites (hard delete)."""
-        # Delete members
-        members = await self.conn.find_entities(
-            "kernel_workspace_members",
-            where_clause="[workspace_id] = ?",
-            params=(workspace_id,),
+        # Batch delete by workspace_id — single query each instead of per-row loops
+        await self.conn.execute(
+            "DELETE FROM [kernel_workspace_members] WHERE [workspace_id] = ?",
+            (workspace_id,)
         )
-        for m in members:
-            await self.conn.delete_entity("kernel_workspace_members", m["id"], permanent=True)
-        
-        # Delete invites
-        invites = await self.conn.find_entities(
-            "kernel_workspace_invites",
-            where_clause="[workspace_id] = ?",
-            params=(workspace_id,),
+        await self.conn.execute(
+            "DELETE FROM [kernel_workspace_invites] WHERE [workspace_id] = ?",
+            (workspace_id,)
         )
-        for inv in invites:
-            await self.conn.delete_entity("kernel_workspace_invites", inv["id"], permanent=True)
-        
-        # Delete workspace itself
         await self.conn.delete_entity("kernel_workspaces", workspace_id, permanent=True)
         return True
     
@@ -222,13 +212,10 @@ class MemberStore:
     
     async def remove(self, workspace_id: str, user_id: str) -> bool:
         """Remove member from workspace."""
-        results = await self.conn.find_entities(
-            "kernel_workspace_members",
-            where_clause="[workspace_id] = ? AND [user_id] = ?",
-            params=(workspace_id, user_id),
+        await self.conn.execute(
+            "DELETE FROM [kernel_workspace_members] WHERE [workspace_id] = ? AND [user_id] = ?",
+            (workspace_id, user_id),
         )
-        for member in results:
-            await self.conn.delete_entity("kernel_workspace_members", member["id"], permanent=True)
         return True
     
     async def is_member(self, workspace_id: str, user_id: str) -> bool:
@@ -469,16 +456,12 @@ class ProjectStore:
         """Update project."""
         import json
         
-        project = await self.conn.find_entities(
+        project = await self.conn.get_entity(
             "kernel_projects",
-            where_clause="id = ?",
-            params=(project_id,),
-            limit=1,
+            project_id,
         )
         if not project:
             return None
-        
-        project = project[0]
         
         # Handle settings serialization
         if "settings" in updates:

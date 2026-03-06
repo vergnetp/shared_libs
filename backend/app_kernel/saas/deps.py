@@ -16,18 +16,6 @@ from ..db.session import get_db_connection
 from .stores import MemberStore, WorkspaceStore
 
 
-async def get_workspace_store():
-    """Get workspace store."""
-    async with get_db_connection() as conn:
-        yield WorkspaceStore(conn)
-
-
-async def get_member_store():
-    """Get member store."""
-    async with get_db_connection() as conn:
-        yield MemberStore(conn)
-
-
 class WorkspaceMemberChecker:
     """
     Dependency that checks workspace membership.

@@ -131,14 +131,19 @@ async def update_webhook(
     
     if url is not None:
         updates["url"] = url
+        webhook["url"] = url
     if description is not None:
         updates["description"] = description
+        webhook["description"] = description
     if enabled is not None:
         updates["enabled"] = 1 if enabled else 0
+        webhook["enabled"] = enabled
+    
+    webhook["updated_at"] = updates["updated_at"]
     
     await db.save_entity("kernel_webhooks", updates)
     
-    return await get_webhook(db, webhook_id, workspace_id)
+    return webhook
 
 
 async def delete_webhook(

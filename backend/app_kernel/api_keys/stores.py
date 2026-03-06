@@ -104,11 +104,11 @@ async def verify_api_key(db, key: str) -> Optional[Dict[str, Any]]:
         if datetime.now(timezone.utc) > expires:
             return None
     
-    # Update last_used_at
-    await db.save_entity("kernel_api_keys", {
-        "id": key_data["id"],
-        "last_used_at": _now_iso(),
-    })
+    # Update last_used_at (raw UPDATE — avoids full save_entity merge-read cycle)
+    await db.execute(
+        "UPDATE [kernel_api_keys] SET [last_used_at] = ? WHERE [id] = ?",
+        (_now_iso(), key_data["id"]),
+    )
     
     # Parse scopes
     scopes = []

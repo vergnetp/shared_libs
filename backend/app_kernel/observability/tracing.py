@@ -62,14 +62,33 @@ def teardown_tracing():
 
 async def _save_span(span_dict: dict):
     """
-    Callback: save a completed span to kernel_traces table.
+    Callback: push a completed span to Redis for batch saving by admin worker.
+    
+    Previously wrote directly to DB (one connection per span). Now uses the same
+    Redis → admin_worker pattern as audit and metering events.
 
+    Falls back to direct DB write if Redis is not available.
     Fire-and-forget — errors are logged but never propagate.
     """
     try:
-        from .db.session import raw_db_context
+        # Try Redis first (preferred — batched by admin worker)
+        try:
+            from ..redis import get_redis
+            redis_client = get_redis()
+            if redis_client is not None:
+                import json as _json
+                # Serialize metadata to JSON string
+                metadata = span_dict.get("metadata")
+                if metadata and isinstance(metadata, dict):
+                    span_dict["metadata"] = _json.dumps(metadata)
+                await redis_client.lpush("admin:trace_events", _json.dumps(span_dict))
+                return
+        except Exception:
+            pass  # Redis unavailable, fall back to direct write
+        
+        # Fallback: direct DB write (one connection per span)
+        from ..db.session import raw_db_context
 
-        # Serialize metadata to JSON string
         metadata = span_dict.pop("metadata", None)
         if metadata:
             span_dict["metadata"] = json.dumps(metadata)
