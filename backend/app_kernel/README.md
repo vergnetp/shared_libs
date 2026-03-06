@@ -214,6 +214,25 @@ async with db_context() as db:
     await Product.update(db, id=product.id, data={"stock": product.stock - 2})
 ```
 
+For bulk operations, use the batch methods — they use `executemany` internally and are much faster than looping:
+
+```python
+# Batch create/update (uses executemany — single round-trip)
+await Metric.save_many(data=[
+    {"service_id": "s1", "cpu_pct": 12.5, "mem_pct": 34.1},
+    {"service_id": "s2", "cpu_pct": 8.3, "mem_pct": 22.0},
+])
+
+# Batch fetch by IDs (chunked IN query)
+products = await Product.get_many(ids=["id1", "id2", "id3"])
+
+# Batch delete (single DELETE WHERE IN)
+await LogEntry.hard_delete_many(ids=expired_ids)
+await Container.soft_delete_many(ids=stale_ids)
+```
+
+> **Note:** `save_many` does not merge with existing rows (unlike `save` which fetches + merges for partial updates). Always pass complete entity dicts. For partial updates on multiple rows, loop `save()` instead.
+
 Operations are retried 3 times with exponential backoff, with circuit breaker protection against cascading failures.
 
 ### entity_field Options
@@ -1173,6 +1192,25 @@ async def my_provider_auth(req: MyRequest, request: Request):
 | Export | Description |
 |--------|-------------|
 | `db_context()` | Async context manager for strict DB connections (enforces entity class usage). |
+
+Every `@entity` class gets these methods auto-generated (db is optional — auto-acquires if omitted):
+
+| Method | Description |
+|--------|-------------|
+| `Entity.get(db=None, id=)` | Fetch by ID |
+| `Entity.get_many(db=None, ids=)` | Batch fetch by IDs (chunked, deduped) |
+| `Entity.save(db=None, data=, match_by=None)` | Create/update (upsert). Merges with existing for partial updates |
+| `Entity.save_many(db=None, items=)` | Batch create/update via `executemany`. Does **not** merge — pass complete dicts |
+| `Entity.update(db=None, id=, data=)` | Fetch + merge + save |
+| `Entity.soft_delete(db=None, id=)` | Set deleted_at timestamp |
+| `Entity.soft_delete_many(db=None, ids=)` | Batch soft-delete via `UPDATE WHERE IN` |
+| `Entity.hard_delete(db=None, id=)` | Permanently remove row |
+| `Entity.hard_delete_many(db=None, ids=)` | Batch permanent delete via `DELETE WHERE IN` |
+| `Entity.find(db=None, where=, params=, ...)` | Query with filters |
+| `Entity.count(db=None, where=, params=)` | Count matching |
+| `Entity.history(db=None, id=)` | All versions, newest first |
+| `Entity.get_version(db=None, id=, version=)` | Specific version |
+| `Entity.from_dict(data)` | Create instance from dict |
 
 ### Redis & Locks
 

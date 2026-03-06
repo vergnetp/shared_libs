@@ -458,6 +458,12 @@ def _make_save_many(table_name: str, cls):
         Uses executemany internally — much faster than looping save() for
         large batches. Auto-generates ids and timestamps for each item.
         
+        Note: unlike save() (singular), save_many does NOT merge with existing
+        rows. It upserts exactly the fields you pass. If you pass a partial
+        dict like {id, name}, other columns are set to NULL. Always pass
+        complete entity dicts. For partial updates on multiple rows, loop
+        save() instead.
+        
         Args:
             db: Database connection (optional — auto-acquires if None)
             items: List of entity data dicts (or dataclass instances)

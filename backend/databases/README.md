@@ -47,6 +47,15 @@ from app_kernel.db import db_context
 async with db_context() as db:
     project = await Project.get(db, id="123")
     service = await Service.get(db, id=project.service_id)
+
+# Batch operations — much faster than looping:
+await Product.save_many(data=[
+    {"name": "Widget", "price": 999, "workspace_id": "ws1"},
+    {"name": "Gadget", "price": 1499, "workspace_id": "ws1"},
+])
+await Product.soft_delete_many(ids=["id1", "id2", "id3"])
+await Product.hard_delete_many(ids=stale_ids)
+products = await Product.get_many(ids=["id1", "id2", "id3"])
 ```
 
 ### 3. Auto-Migrate on Startup
@@ -73,11 +82,15 @@ The `@entity` decorator auto-adds these methods to your dataclass.
 | Method | Description |
 |--------|-------------|
 | `Entity.get(db=None, id=)` | Fetch by ID |
+| `Entity.get_many(db=None, ids=)` | Batch fetch by IDs (chunked, deduped) |
 | `Entity.create(db=None, data=)` | Insert with auto id/timestamps |
 | `Entity.save(db=None, data=, match_by=None)` | Create/update. `match_by` for upsert by field(s) |
+| `Entity.save_many(db=None, items=)` | Batch create/update via `executemany`. **Note:** does not merge with existing rows — pass complete dicts. For partial updates on multiple rows, loop `save()` instead. |
 | `Entity.update(db=None, id=, data=)` | Merge and save |
 | `Entity.soft_delete(db=None, id=)` | Set deleted_at |
+| `Entity.soft_delete_many(db=None, ids=)` | Batch soft-delete via `UPDATE WHERE IN` (chunked) |
 | `Entity.hard_delete(db=None, id=)` | Permanently remove row |
+| `Entity.hard_delete_many(db=None, ids=)` | Batch permanent delete via `DELETE WHERE IN` (chunked) |
 | `Entity.find(db=None, where=, params=, ...)` | Query with filters |
 | `Entity.count(db=None, where=, params=)` | Count matching |
 | `Entity.history(db=None, id=)` | All versions, newest first |
@@ -254,11 +267,15 @@ Decorator to mark a dataclass as a database entity with auto-generated CRUD meth
 | Decorators | Method | Args | Returns | Description |
 |------------|--------|------|---------|-------------|
 | `@classmethod` | `get` | `db=None`, `id: str` | `Entity \| None` | Fetch entity by ID |
+| `@classmethod` | `get_many` | `db=None`, `ids: List[str]`, `include_deleted: bool=False` | `List[Entity]` | Batch fetch by IDs (chunked, deduped) |
 | `@classmethod` | `create` | `db=None`, `data: dict` | `Entity` | Insert with auto id/timestamps |
 | `@classmethod` | `save` | `db=None`, `data: dict`, `match_by=None` | `Entity` | Create/update. `match_by` for upsert by field(s) |
+| `@classmethod` | `save_many` | `db=None`, `items: List[dict]` | `List[Entity]` | Batch create/update via `executemany`. Does not merge with existing — pass complete dicts |
 | `@classmethod` | `update` | `db=None`, `id: str`, `data: dict` | `Entity \| None` | Merge with existing and save |
 | `@classmethod` | `soft_delete` | `db=None`, `id: str` | `bool` | Set deleted_at timestamp |
+| `@classmethod` | `soft_delete_many` | `db=None`, `ids: List[str]` | `int` | Batch soft-delete via `UPDATE WHERE IN` (chunked) |
 | `@classmethod` | `hard_delete` | `db=None`, `id: str` | `bool` | Permanently remove row |
+| `@classmethod` | `hard_delete_many` | `db=None`, `ids: List[str]` | `int` | Batch permanent delete via `DELETE WHERE IN` (chunked) |
 | `@classmethod` | `find` | `db=None`, `where: str=None`, `params: tuple=None`, `order_by: str=None`, `limit: int=None`, `offset: int=None`, `include_deleted: bool=False` | `List[Entity]` | Query with filters |
 | `@classmethod` | `count` | `db=None`, `where: str=None`, `params: tuple=None`, `include_deleted: bool=False` | `int` | Count matching entities |
 | `@classmethod` | `history` | `db=None`, `id: str` | `List[Entity]` | All historical versions, newest first |
