@@ -338,6 +338,10 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
                 # Prepare entity with timestamps, IDs, etc.
                 prepared_entity = self._prepare_entity(entity_name, working_entity, user_id, comment)
                 
+                # Increment version (merge brought in existing _version, _prepare_entity defaulted to 0)
+                next_version = int(prepared_entity.get('_version') or 0) + 1
+                prepared_entity['_version'] = next_version
+                
                 # Skip schema checks if migrations_on=True (use AutoMigrator) or skip_schema_check=True
                 should_skip_schema = getattr(self.config, 'migrations_on', True) or skip_schema_check
                 
@@ -362,8 +366,8 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
                 params = tuple(serialized[field] for field in fields)
                 await self.execute(sql, params)
                 
-                # Add to history
-                await self._add_to_history(entity_name, serialized, user_id, comment)
+                # Add to history (version already computed — skip SELECT MAX query)
+                await self._add_to_history(entity_name, serialized, user_id, comment, version=next_version)
                 
                 # Return the prepared entity
                 return prepared_entity        
@@ -434,33 +438,32 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
                         sql = self.sql_generator.get_meta_upsert_sql(entity_name)
                         await self.executemany(sql, meta_params)
                 
-                # Add all entities to the database with batch upsert
-                fields = list(all_fields)
-                sql = self.sql_generator.get_upsert_sql(entity_name, fields)
-                
-                # Prepare parameters for batch upsert
-                batch_params = []
-                for entity in prepared_entities:
-                    params = tuple(entity.get(field, None) for field in fields)
-                    batch_params.append(params)
-                
-                # Execute batch upsert
-                await self.executemany(sql, batch_params)
-                
-                # Get all entity IDs for history lookup
+                # Compute versions BEFORE upsert so main table gets correct _version
                 entity_ids = [entity['id'] for entity in prepared_entities]
-                
-                # Single query to get all existing versions
                 versions = {}
                 if entity_ids:
                     placeholders = ','.join(['?'] * len(entity_ids))
                     version_sql = f"SELECT [id], MAX([version]) as max_version FROM [{entity_name}_history] WHERE [id] IN ({placeholders}) GROUP BY [id]"
                     version_results = await self.execute(version_sql, tuple(entity_ids))
-                    
-                    # Create a dictionary of id -> current max version
                     versions = {row[0]: row[1] for row in version_results if row[1] is not None}
                 
-                # Prepare history entries
+                # Set correct _version on each entity before upsert
+                for entity in prepared_entities:
+                    next_version = int(versions.get(entity['id'], 0) or 0) + 1
+                    entity['_version'] = next_version
+                
+                # Add all entities to the database with batch upsert (includes correct _version)
+                fields = list(all_fields)
+                sql = self.sql_generator.get_upsert_sql(entity_name, fields)
+                
+                batch_params = []
+                for entity in prepared_entities:
+                    params = tuple(entity.get(field, None) for field in fields)
+                    batch_params.append(params)
+                
+                await self.executemany(sql, batch_params)
+                
+                # Prepare and execute batch history insert
                 now = datetime.datetime.now(datetime.timezone.utc).isoformat()
                 history_fields = list(all_fields) + ['version', 'history_timestamp', 'history_user_id', 'history_comment']
                 history_sql = f"INSERT INTO [{entity_name}_history] ({', '.join(['['+f+']' for f in history_fields])}) VALUES ({', '.join(['?'] * len(history_fields))})"
@@ -468,21 +471,14 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
                 history_params = []
                 for entity in prepared_entities:
                     history_entry = entity.copy()
-                    entity_id = entity['id']
-                    
-                    # Get next version (default to 1 if no previous versions exist)
-                    next_version = (versions.get(entity_id, 0) or 0) + 1
-                    
-                    history_entry['version'] = next_version
+                    history_entry['version'] = entity['_version']
                     history_entry['history_timestamp'] = now
                     history_entry['history_user_id'] = user_id
                     history_entry['history_comment'] = comment
                     
-                    # Create params tuple with all fields in the correct order
                     params = tuple(history_entry.get(field, None) for field in history_fields)
                     history_params.append(params)
                 
-                # Execute batch history insert
                 await self.executemany(history_sql, history_params)
                 
                 return prepared_entities
@@ -540,16 +536,24 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
             
             # Add to history if soft-deleted
             if current_entity:
+                # Increment version on main row (so save_entity after restore won't collide)
+                next_version = int(current_entity.get('_version') or 0) + 1
+                await self.execute(
+                    f"UPDATE [{entity_name}] SET [_version] = ? WHERE [id] = ?",
+                    (next_version, entity_id)
+                )
+                
                 # Update the entity with deletion info
                 current_entity['deleted_at'] = now
                 current_entity['updated_at'] = now
+                current_entity['_version'] = next_version
                 if user_id:
                     current_entity['updated_by'] = user_id
                     
                 # Serialize and add to history
                 meta = await self._get_entity_metadata(entity_name)
                 serialized = self._serialize_entity(current_entity, meta)
-                await self._add_to_history(entity_name, serialized, user_id, "Soft deleted")
+                await self._add_to_history(entity_name, serialized, user_id, "Soft deleted", version=next_version)
                     
             return True
         finally:
@@ -587,18 +591,24 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
             sql = self.sql_generator.get_restore_entity_sql(entity_name)
             result = await self.execute(sql, (now, user_id, entity_id))
             
-            # Add to history if restored
+            # Increment version on main row
+            next_version = int(current_entity.get('_version') or 0) + 1
+            await self.execute(
+                f"UPDATE [{entity_name}] SET [_version] = ? WHERE [id] = ?",
+                (next_version, entity_id)
+            )
 
             # Update the entity with restoration info
             current_entity['deleted_at'] = None
             current_entity['updated_at'] = now
+            current_entity['_version'] = next_version
             if user_id:
                 current_entity['updated_by'] = user_id
                 
             # Serialize and add to history
             meta = await self._get_entity_metadata(entity_name)
             serialized = self._serialize_entity(current_entity, meta)
-            await self._add_to_history(entity_name, serialized, user_id, "Restored")
+            await self._add_to_history(entity_name, serialized, user_id, "Restored", version=next_version)
                     
             return True
         finally:
@@ -1099,7 +1109,8 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
     @auto_transaction
     async def _add_to_history(self, entity_name: str, entity: Dict[str, Any], 
                             user_id: Optional[str] = None, 
-                            comment: Optional[str] = None) -> None:
+                            comment: Optional[str] = None,
+                            version: Optional[int] = None) -> None:
         """
         Add an entry to entity history.
         
@@ -1108,19 +1119,23 @@ class EntityAsyncMixin(EntityUtilsMixin, ConnectionInterface):
             entity: Entity dictionary to record
             user_id: Optional ID of the user making the change
             comment: Optional comment about the change
+            version: Optional version number. If provided, skips the
+                     SELECT MAX(version) query (saves 1 read per save).
         """
         # Ensure entity has required fields
         if 'id' not in entity:
             return
-            
-        # Get the current highest version
-        history_sql = f"SELECT MAX([version]) FROM [{entity_name}_history] WHERE [id] = ?"
-        version_result = await self.execute(history_sql, (entity['id'],))
         
-        # Calculate the next version number
-        next_version = 1
-        if version_result and version_result[0][0] is not None:
-            next_version = version_result[0][0] + 1
+        # Use provided version or fall back to querying history table
+        if version is not None:
+            next_version = version
+        else:
+            # Legacy path: query for current highest version
+            history_sql = f"SELECT MAX([version]) FROM [{entity_name}_history] WHERE [id] = ?"
+            version_result = await self.execute(history_sql, (entity['id'],))
+            next_version = 1
+            if version_result and version_result[0][0] is not None:
+                next_version = int(version_result[0][0]) + 1
             
         # Prepare history entry
         history_entry = entity.copy()

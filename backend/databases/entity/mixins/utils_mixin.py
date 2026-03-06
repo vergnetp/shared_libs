@@ -353,6 +353,10 @@ class EntityUtilsMixin:
         if 'id' not in result or not result['id']:
             result['id'] = str(uuid.uuid4())
         
+        # Add version tracking (used to skip SELECT MAX(version) in _add_to_history)
+        if '_version' not in result:
+            result['_version'] = 0
+        
         # Add timestamps
         if 'created_at' not in result:
             result['created_at'] = now
