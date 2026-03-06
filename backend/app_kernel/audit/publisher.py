@@ -47,10 +47,17 @@ async def push_audit_event(
     """
     Push audit event to Redis queue.
     Fire-and-forget - failures are silently ignored.
+    
+    For saves (old=None): logs action + new snapshot only.
+    For deletes (old provided): logs action + old snapshot + field-level changes.
+    
+    Full diffs for save operations are computed on demand from the entity
+    _history table when viewing audit logs (see audit/queries.py).
     """
     try:
-        # Compute changes (field: [old, new])
-        changes = _compute_changes(old, new)
+        # Only compute changes when we have both old and new (delete path)
+        # For saves, old is None — diffs come from _history table at read time
+        changes = _compute_changes(old, new) if old else None
         
         event = {
             "app": app or _current_app.get(),

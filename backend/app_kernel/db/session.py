@@ -90,7 +90,12 @@ def get_db_manager():
 
 
 class AuditWrappedConnection:
-    """Wraps a database connection to automatically log audit events to Redis."""
+    """Wraps a database connection to automatically log audit events to Redis.
+    
+    Diffs are NOT pre-computed here. The entity _history table already stores
+    every version — diffs can be computed on demand at read time (rare admin
+    operation) by comparing consecutive history versions.
+    """
     
     # Kernel internal tables - never audit these (prevents recursive audit-of-audit)
     _SKIP_AUDIT_TABLES = frozenset({
@@ -115,53 +120,40 @@ class AuditWrappedConnection:
     def __getattr__(self, name):
         return getattr(self._conn, name)
     
+    def __setattr__(self, name, value):
+        # Propagate flags like _strict_entity_access and _block_raw_execute
+        # to the underlying connection so that methods accessed via __getattr__
+        # (find_entities, execute, etc.) see them.
+        if name.startswith('_') and name in ('_strict_entity_access', '_block_raw_execute'):
+            setattr(self._conn, name, value)
+        super().__setattr__(name, value)
+    
     async def save_entity(self, table, data, match_by=None, **kwargs):
         """
         Save entity and push audit event.
         
-        Args:
-            table: Entity table name
-            data: Entity data dict
-            match_by: Field(s) to match existing entity by (for upsert without id).
-                      Passed through to underlying database save_entity.
-            **kwargs: Additional args passed to underlying save
+        No pre-read needed — the entity _history table stores every version,
+        so diffs are computed on demand when viewing audit logs.
         """
         # Remove _caller from kwargs if present (we provide our own)
         kwargs.pop('_caller', None)
         
-        # Get old value for diff (if updating by id)
-        old = None
-        entity_id = data.get("id")
-        if entity_id:
-            try:
-                old = await self._conn.get_entity(table, entity_id, _caller=self._entity_caller)
-            except Exception:
-                pass
+        # Determine action from data (id present = likely update)
+        is_update = bool(data.get("id"))
         
         # Actual save (match_by handled by databases module)
         result = await self._conn.save_entity(table, data, match_by=match_by, _caller=self._entity_caller, **kwargs)
-        
-        # For match_by without id, we need to check if it was update or create
-        if not entity_id and match_by:
-            # Result has id now - check if it existed before
-            try:
-                # If result id matches something that existed, it was an update
-                # We already have result, so this was handled by databases module
-                pass
-            except Exception:
-                pass
         
         # Push audit event (fire and forget) — skip kernel internal tables
         if self._redis and table not in self._SKIP_AUDIT_TABLES:
             try:
                 from ..audit.publisher import push_audit_event
-                action = "update" if old else "create"
                 await push_audit_event(
                     self._redis,
-                    action=action,
+                    action="update" if is_update else "create",
                     entity=table,
-                    entity_id=result.get("id", entity_id),
-                    old=old,
+                    entity_id=result.get("id"),
+                    old=None,
                     new=result,
                     app=self._app,
                 )
@@ -171,11 +163,15 @@ class AuditWrappedConnection:
         return result
     
     async def delete_entity(self, table, entity_id, **kwargs):
-        """Delete entity and push audit event."""
+        """Delete entity and push audit event.
+        
+        Pre-read IS needed here: permanent deletes remove the row entirely
+        and don't write to _history, so this is the only record of what existed.
+        """
         # Remove _caller from kwargs if present (we provide our own)
         kwargs.pop('_caller', None)
         
-        # Get snapshot before delete
+        # Get snapshot before delete (justified — permanent deletes have no history)
         old = None
         try:
             old = await self._conn.get_entity(table, entity_id, _caller=self._entity_caller)

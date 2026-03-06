@@ -112,4 +112,26 @@ def create_audit_router(
         
         return {"entity": entity, "entity_id": entity_id, "history": logs}
     
+    @router.get("/entity/{entity}/{entity_id}/diffs")
+    async def get_entity_diffs(
+        entity: str,
+        entity_id: str,
+        limit: int = Query(50, le=200),
+        user=Depends(get_current_user),
+    ):
+        """Get version-by-version diffs for a specific entity.
+        
+        Computed on demand from the entity's _history table.
+        Shows what fields changed between each consecutive version.
+        """
+        from .queries import get_entity_version_diffs
+        
+        if require_admin and not _check_admin(user):
+            raise HTTPException(403, "Admin access required")
+        
+        async with raw_db_context() as db:
+            diffs = await get_entity_version_diffs(db, entity, entity_id, limit=limit)
+        
+        return {"entity": entity, "entity_id": entity_id, "diffs": diffs}
+    
     return router

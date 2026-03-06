@@ -124,3 +124,90 @@ async def count_audit_logs(
         where_clause=where_clause,
         params=tuple(params) if params else None,
     )
+
+
+def compute_changes(
+    old: Optional[Dict[str, Any]],
+    new: Optional[Dict[str, Any]],
+) -> Dict[str, list]:
+    """
+    Compute field-level changes between two entity snapshots.
+    
+    Returns dict of {field: [old_value, new_value]} for changed fields.
+    Used at read time to compute diffs from history versions.
+    """
+    if not old and not new:
+        return {}
+    if not old:
+        return {k: [None, v] for k, v in (new or {}).items()}
+    if not new:
+        return {k: [v, None] for k, v in (old or {}).items()}
+    
+    changes = {}
+    for key in set(old.keys()) | set(new.keys()):
+        old_val = old.get(key)
+        new_val = new.get(key)
+        if old_val != new_val:
+            changes[key] = [old_val, new_val]
+    return changes
+
+
+# Fields that change on every save — not useful in diffs
+_DIFF_SKIP_FIELDS = frozenset({
+    "updated_at", "updated_by", "_version",
+    "version", "history_timestamp", "history_user_id", "history_comment",
+})
+
+
+async def get_entity_version_diffs(
+    db,
+    entity: str,
+    entity_id: str,
+    limit: int = 50,
+) -> List[Dict[str, Any]]:
+    """
+    Compute diffs between consecutive versions of an entity from its _history table.
+    
+    This is the on-demand replacement for pre-computed audit diffs.
+    Called when an admin wants to see what changed for a specific entity.
+    
+    Returns list of:
+        {version, timestamp, user_id, comment, changes: {field: [old, new]}}
+    """
+    # Get version history (ordered by version ASC for pairwise comparison)
+    history_table = f"{entity}_history"
+    
+    try:
+        versions = await db.find_entities(
+            history_table,
+            where_clause="[id] = ?",
+            params=(entity_id,),
+            order_by="[version] ASC",
+            limit=limit + 1,  # +1 to have a "before" for the first diff
+        )
+    except Exception:
+        return []  # Table doesn't exist or query failed
+    
+    if not versions:
+        return []
+    
+    diffs = []
+    for i in range(len(versions)):
+        current = versions[i]
+        previous = versions[i - 1] if i > 0 else None
+        
+        raw_changes = compute_changes(previous, current)
+        
+        # Filter out noise fields
+        meaningful = {k: v for k, v in raw_changes.items() if k not in _DIFF_SKIP_FIELDS}
+        
+        diffs.append({
+            "version": current.get("version"),
+            "timestamp": current.get("history_timestamp"),
+            "user_id": current.get("history_user_id"),
+            "comment": current.get("history_comment"),
+            "action": "create" if previous is None else "update",
+            "changes": meaningful,
+        })
+    
+    return diffs
