@@ -38,6 +38,7 @@ ENTITY_SCHEMAS: Dict[str, type] = {}
 # These are kernel infrastructure — apps shouldn't have to declare them.
 SYSTEM_FIELDS: Dict[str, Any] = {
     'id': Optional[str],
+    '_version': Optional[str],
     'created_at': Optional[str],
     'updated_at': Optional[str],
     'created_by': Optional[str],
