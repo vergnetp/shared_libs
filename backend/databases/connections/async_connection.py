@@ -7,7 +7,7 @@ from abc import abstractmethod
 
 from ...errors import try_catch
 from ...utils import async_method
-from ...resilience import profile, execute_with_timeout, circuit_breaker, track_slow_method
+from ...resilience import profile, execute_with_timeout, track_slow_method
 
 from .connection import Connection
 from ..utils.decorators import auto_transaction
@@ -57,7 +57,6 @@ class AsyncConnection(Connection):
     @async_method
     @try_catch()
     @auto_transaction
-    @circuit_breaker(name="async_execute")
     @track_slow_method
     @profile
     async def execute(self, sql: str, params: Optional[tuple] = None, timeout: Optional[float] = None, tags: Optional[Dict[str, Any]]=None) -> List[Tuple]:
@@ -101,7 +100,6 @@ class AsyncConnection(Connection):
     @async_method
     @try_catch()
     @auto_transaction
-    @circuit_breaker(name="async_executemany")
     @track_slow_method
     @profile
     async def executemany(self, sql: str, param_list: List[tuple], timeout: Optional[float] = None, tags: Optional[Dict[str, Any]] = None) -> List[Tuple]:

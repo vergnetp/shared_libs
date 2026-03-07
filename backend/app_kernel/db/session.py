@@ -124,7 +124,7 @@ class AuditWrappedConnection:
         # Propagate flags like _strict_entity_access and _block_raw_execute
         # to the underlying connection so that methods accessed via __getattr__
         # (find_entities, execute, etc.) see them.
-        if name.startswith('_') and name in ('_strict_entity_access', '_block_raw_execute'):
+        if name.startswith('_') and name in ('_strict_entity_access', '_block_raw_execute', '_entity_op_depth'):
             setattr(self._conn, name, value)
         super().__setattr__(name, value)
     
